@@ -33,15 +33,15 @@ pub type Key = [u8; KEY_LEN];
 pub type Value = Vec<u8>;
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
-pub struct BucketId(u32);
+pub struct TableId(u32);
 
-impl BucketId {
-	pub fn new(col: ColId, entry_size: u16, index_bits: u8) -> BucketId {
-		BucketId(((col as u32) << 24) | ((entry_size as u32) << 8) | index_bits as u32)
+impl TableId {
+	pub fn new(col: ColId, entry_size: u16, index_bits: u8) -> TableId {
+		TableId(((col as u32) << 24) | ((entry_size as u32) << 8) | index_bits as u32)
 	}
 
-	pub fn from_u32(id: u32) -> BucketId {
-		BucketId(id)
+	pub fn from_u32(id: u32) -> TableId {
+		TableId(id)
 	}
 
 	pub fn col(&self) -> ColId {
@@ -77,7 +77,7 @@ impl BucketId {
 	}
 }
 
-impl std::fmt::Display for BucketId {
+impl std::fmt::Display for TableId {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		write!(f, "c{:02}_{}_{}", self.col(), self.index_bits(), self.entry_size())
 	}
@@ -94,14 +94,14 @@ pub enum PlanOutcome {
 	Skipped,
 }
 
-pub struct Bucket {
-	pub id: BucketId,
+pub struct Table {
+	pub id: TableId,
 	map: memmap::MmapMut,
 	entries: std::sync::atomic::AtomicU64,
 }
 
-impl Bucket {
-	pub fn open_existing(path: &std::path::Path, id: BucketId) -> Result<Option<Bucket>> {
+impl Table {
+	pub fn open_existing(path: &std::path::Path, id: TableId) -> Result<Option<Table>> {
 		let mut path: std::path::PathBuf = path.into();
 		path.push(id.file_name());
 
@@ -113,24 +113,24 @@ impl Bucket {
 			Ok(file) => file,
 		};
 
-		log::debug!(target: "parity-db", "Opened existing bucket {}", id);
+		log::debug!(target: "parity-db", "Opened existing table {}", id);
 		Ok(Some(Self::from_file(file, id)?))
 	}
 
-	pub fn create_new(path: &std::path::Path, id: BucketId) -> Result<Bucket> {
+	pub fn create_new(path: &std::path::Path, id: TableId) -> Result<Table> {
 		let mut path: std::path::PathBuf = path.into();
 		path.push(id.file_name());
 
 		let file = std::fs::OpenOptions::new().write(true).read(true).create_new(true).open(path)?;
-		log::debug!(target: "parity-db", "Created new bucket {}", id);
+		log::debug!(target: "parity-db", "Created new table {}", id);
 		Self::from_file(file, id)
 	}
 
-	fn from_file(file: std::fs::File, id: BucketId) -> Result<Bucket> {
+	fn from_file(file: std::fs::File, id: TableId) -> Result<Table> {
 		//TODO: check for potential overflows on 32-bit platforms
 		file.set_len(id.file_size())?;
 		let map = unsafe { memmap::MmapMut::map_mut(&file)? };
-		Ok(Bucket {
+		Ok(Table {
 			id,
 			map,
 			entries: std::sync::atomic::AtomicU64::new(0),
@@ -402,7 +402,7 @@ impl Bucket {
 		Ok(())
 	}
 
-	pub fn rebalance_from(&mut self, source: &Bucket, start_index: u64, log: &mut LogWriter) -> Result<u64> {
+	pub fn rebalance_from(&mut self, source: &Table, start_index: u64, log: &mut LogWriter) -> Result<u64> {
 		let mut source_index = start_index;
 		let mut count = 0;
 		log::trace!(target: "parity-db", "{}: Starting rebalance at {}", self.id, source_index);
@@ -412,7 +412,10 @@ impl Bucket {
 				// TODO: remove allocation here
 				// Alternatively make sure record that triggered rebalance is flushed before doing rebalance
 				let v = source.planned_value(source_index, log).to_vec();
-				self.write_plan(&source_key, Some(&v), log, false)?;
+				match self.write_plan(&source_key, Some(&v), log, false)? {
+					PlanOutcome::NeedRebalance => panic!("Table requires double rebalance"),
+					_ => {},
+				}
 				count += 1;
 			}
 			source_index += 1;
@@ -430,7 +433,7 @@ impl Bucket {
 		path.push(self.id.file_name());
 		std::mem::drop(self.map);
 		std::fs::remove_file(path.as_path())?;
-		log::debug!(target: "parity-db", "{}: Dropped bucket", self.id);
+		log::debug!(target: "parity-db", "{}: Dropped table", self.id);
 		Ok(())
 	}
 }

@@ -17,7 +17,7 @@
 use std::collections::{HashMap, VecDeque};
 use crate::{
 	error::{Error, Result},
-	bucket::{BucketId, Bucket, Key, Value, PlanOutcome, RebalanceProgress},
+	table::{TableId, Table, Key, Value, PlanOutcome, RebalanceProgress},
 	log::{Log, LogReader, LogWriter},
 	display::hex,
 };
@@ -25,8 +25,8 @@ use crate::{
 pub type ColId = u8;
 
 struct Shard {
-	bucket: Bucket,
-	rebalancing: VecDeque<Bucket>,
+	table: Table,
+	rebalancing: VecDeque<Table>,
 	rebalance_progress: u64,
 }
 
@@ -42,7 +42,7 @@ pub struct Column {
 impl Column {
 	pub fn get(&self, key: &Key, log: &Log) -> Option<Value> {
 		for s in &self.shards {
-			if let Some(v) = s.bucket.get(key, log) {
+			if let Some(v) = s.table.get(key, log) {
 				return Some(v);
 			}
 			for r in &s.rebalancing {
@@ -72,22 +72,22 @@ impl Column {
 	fn open_shard(path: &std::path::Path, col: ColId, entry_size: u16) -> Result<Shard> {
 		let mut rebalancing = VecDeque::new();
 		let mut top = None;
-		for bits in (10 .. 65).rev() {
-			let id = BucketId::new(col, entry_size, bits);
-			if let Some(bucket) = Bucket::open_existing(path, id)? {
+		for bits in (12 .. 65).rev() {
+			let id = TableId::new(col, entry_size, bits);
+			if let Some(table) = Table::open_existing(path, id)? {
 				if top.is_none() {
-					top = Some(bucket);
+					top = Some(table);
 				} else {
-					rebalancing.push_front(bucket);
+					rebalancing.push_front(table);
 				}
 			}
 		}
-		let bucket = match top {
-			Some(bucket) => bucket,
-			None => Bucket::create_new(path, BucketId::new(col, entry_size,  10))?,
+		let table = match top {
+			Some(table) => table,
+			None => Table::create_new(path, TableId::new(col, entry_size,  12))?,
 		};
 		Ok(Shard {
-			bucket,
+			table,
 			rebalancing,
 			rebalance_progress: 0,
 		})
@@ -99,43 +99,43 @@ impl Column {
 				*self.histogram.entry(value.len() as u64).or_default() += 1;
 				// TODO: delete from other shards?
 				let target_shard = self.shards.iter()
-					.position(|s|value.len() <= s.bucket.id.value_size() as usize);
+					.position(|s|value.len() <= s.table.id.value_size() as usize);
 				match target_shard {
 					Some(target_shard) => {
 						for i in 0 .. self.shards.len() {
 							if i == target_shard {
 								let s = &mut self.shards[i];
-								match s.bucket.write_plan(key, Some(&value), log, true)? {
+								match s.table.write_plan(key, Some(&value), log, true)? {
 									PlanOutcome::NeedRebalance => {
 										log::info!(
 											target: "parity-db",
 											"Started rebalance {} at {}/{} full",
-											s.bucket.id,
-											s.bucket.entries(),
-											s.bucket.id.total_entries(),
+											s.table.id,
+											s.table.entries(),
+											s.table.id.total_entries(),
 										);
 										// Start rebalance
-										let new_bucket_id = BucketId::new(
-											s.bucket.id.col(),
-											s.bucket.id.entry_size(),
-											s.bucket.id.index_bits() + 1
+										let new_table_id = TableId::new(
+											s.table.id.col(),
+											s.table.id.entry_size(),
+											s.table.id.index_bits() + 1
 										);
-										let new_bucket = Bucket::create_new(self.path.as_path(), new_bucket_id)?;
-										let old_bucket = std::mem::replace(&mut s.bucket, new_bucket);
-										s.rebalancing.push_back(old_bucket);
-										s.bucket.write_plan(key, Some(&value), log, true)?;
+										let new_table = Table::create_new(self.path.as_path(), new_table_id)?;
+										let old_table = std::mem::replace(&mut s.table, new_table);
+										s.rebalancing.push_back(old_table);
+										s.table.write_plan(key, Some(&value), log, true)?;
 									}
 									_ => {
 									}
 								}
 							} else {
-								match self.shards[i].bucket.write_plan(key, None, log, true)? {
+								match self.shards[i].table.write_plan(key, None, log, true)? {
 									PlanOutcome::Written => {
 										log::debug!(
 											target: "parity-db",
 											"Replaced to a different shard {}->{}: {}",
-											self.shards[i].bucket.id,
-											self.shards[target_shard].bucket.id,
+											self.shards[i].table.id,
+											self.shards[target_shard].table.id,
 											hex(key),
 										);
 									}
@@ -166,7 +166,7 @@ impl Column {
 				}
 				// Delete from all shards
 				for s in self.shards.iter_mut() {
-					match s.bucket.write_plan(key, None, log, true)? {
+					match s.table.write_plan(key, None, log, true)? {
 						PlanOutcome::Written => {
 							break;
 						}
@@ -178,33 +178,33 @@ impl Column {
 		Ok(())
 	}
 
-	pub fn enact_plan(&mut self, id: BucketId, index: u64, log: &mut LogReader) -> Result<()> {
-		// TODO: handle the case when bucket file does not exist
-		let shard = self.shards.iter_mut().find(|s| s.bucket.id.entry_size() == id.entry_size());
+	pub fn enact_plan(&mut self, id: TableId, index: u64, log: &mut LogReader) -> Result<()> {
+		// TODO: handle the case when table file does not exist
+		let shard = self.shards.iter_mut().find(|s| s.table.id.entry_size() == id.entry_size());
 		let shard = match shard {
 			Some(s) => s,
 			None => {
 				log::warn!(
 					target: "parity-db",
-					"Missing bucket {}",
+					"Missing table {}",
 					id,
 				);
-				return Err(Error::Corruption("Missing bucket".into()));
+				return Err(Error::Corruption("Missing table".into()));
 			}
 		};
-		if shard.bucket.id == id {
-			shard.bucket.enact_plan(index, log)?;
+		if shard.table.id == id {
+			shard.table.enact_plan(index, log)?;
 		} else {
-			if let Some(bucket) = shard.rebalancing.iter_mut().find(|r|r.id == id) {
-				bucket.enact_plan(index, log)?;
+			if let Some(table) = shard.rebalancing.iter_mut().find(|r|r.id == id) {
+				table.enact_plan(index, log)?;
 			}
 			else {
 				log::warn!(
 					target: "parity-db",
-					"Missing bucket {}",
+					"Missing table {}",
 					id,
 				);
-				return Err(Error::Corruption("Missing bucket".into()));
+				return Err(Error::Corruption("Missing table".into()));
 			}
 		}
 		Ok(())
@@ -215,13 +215,13 @@ impl Column {
 			if let Some(b) = s.rebalancing.front_mut() {
 				if s.rebalance_progress != b.id.total_entries() {
 					let mut log = log.begin_record()?;
-					log::trace!(target: "parity-db", "{}: Start rebalance record {}", s.bucket.id, log.record_id());
-					s.rebalance_progress = s.bucket.rebalance_from(&b, s.rebalance_progress, &mut log)?;
+					log::trace!(target: "parity-db", "{}: Start rebalance record {}", s.table.id, log.record_id());
+					s.rebalance_progress = s.table.rebalance_from(&b, s.rebalance_progress, &mut log)?;
 					if s.rebalance_progress == b.id.total_entries() {
-						log::info!(target: "parity-db", "Completed rebalance {}", s.bucket.id);
-						log.drop_bucket(b.id)?;
+						log::info!(target: "parity-db", "Completed rebalance {}", s.table.id);
+						log.drop_table(b.id)?;
 					}
-					log::trace!(target: "parity-db", "{}: End rebalance record {}", s.bucket.id, log.record_id());
+					log::trace!(target: "parity-db", "{}: End rebalance record {}", s.table.id, log.record_id());
 					log.end_record()?;
 					return Ok(RebalanceProgress::InProgress((s.rebalance_progress, b.id.total_entries())))
 				}
@@ -230,13 +230,13 @@ impl Column {
 		Ok(RebalanceProgress::Inactive)
 	}
 
-	pub fn drop_bucket(&mut self, id: BucketId) -> Result<()> {
+	pub fn drop_table(&mut self, id: TableId) -> Result<()> {
 		log::debug!(target: "parity-db", "Dropping {}", id);
 		for s in self.shards.iter_mut() {
 			if s.rebalancing.front_mut().map_or(false, |b| b.id == id) {
-				let bucket = s.rebalancing.pop_front();
+				let table = s.rebalancing.pop_front();
 				s.rebalance_progress = 0;
-				bucket.unwrap().drop(self.path.as_path())?;
+				table.unwrap().drop(self.path.as_path())?;
 			}
 		}
 		Ok(())

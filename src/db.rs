@@ -18,7 +18,7 @@ use std::sync::Arc;
 use parking_lot::{RwLock, Mutex, Condvar};
 use kvdb::{DBOp, DBTransaction};
 use crate::{
-	bucket::{Key, RebalanceProgress},
+	table::{Key, RebalanceProgress},
 	error::{Error, Result},
 	column::{ColId, Column},
 	log::{Log, LogAction}
@@ -29,7 +29,7 @@ pub type Value = Vec<u8>;
 fn hash(key: &[u8]) -> Key {
 	let mut k = Key::default();
 	k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &[], key).as_bytes());
-	//log::trace!(target: "parity-db", "HASH {} = {}", hex(&key), hex(&k));
+	log::trace!(target: "parity-db", "HASH {} = {}", crate::display::hex(&key), crate::display::hex(&k));
 	k
 }
 
@@ -83,9 +83,14 @@ impl DbInner {
 			let mut log = log.begin_record()?;
 			log::debug!(
 				target: "parity-db",
-				"Starting commit {}, {} ops",
+				"Starting commit {}, {} ops ({}state)",
 				log.record_id(),
 				tx.ops.len(),
+				tx.ops.iter().filter(|o| match o {
+					DBOp::Insert { col, .. } if col == &1 => true,
+					DBOp::Delete { col, .. } if col == &1 => true,
+					_ => false,
+				}).count(),
 			);
 			for op in tx.ops {
 				let (c, key, value) = match op {
@@ -128,11 +133,11 @@ impl DbInner {
 						break;
 					},
 					LogAction::Insert(insertion) => {
-						columns[insertion.bucket.col() as usize].enact_plan(insertion.bucket, insertion.index, &mut reader)?;
+						columns[insertion.table.col() as usize].enact_plan(insertion.table, insertion.index, &mut reader)?;
 
 					},
-					LogAction::DropBucket(id) => {
-						columns[id.col() as usize].drop_bucket(id)?;
+					LogAction::DropTable(id) => {
+						columns[id.col() as usize].drop_table(id)?;
 
 					}
 				}

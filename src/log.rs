@@ -19,24 +19,24 @@ use std::io::{Read, Write, Seek};
 use std::convert::TryInto;
 use crate::{
 	error::{Error, Result},
-	bucket::{BucketId}
+	table::{TableId}
 };
 
 pub struct InsertAction {
-	pub bucket: BucketId,
+	pub table: TableId,
 	pub index: u64,
 }
 
 pub enum LogAction {
 	BeginRecord(u64),
 	Insert(InsertAction),
-	DropBucket(BucketId),
+	DropTable(TableId),
 	EndRecord, // TODO: crc32
 }
 
 pub struct LogReader<'a> {
 	file: &'a mut std::io::BufReader<std::fs::File>,
-	overlays: &'a mut HashMap<BucketId, LogOverlay>,
+	overlays: &'a mut HashMap<TableId, LogOverlay>,
 	record_id: u64,
 }
 
@@ -47,7 +47,7 @@ impl<'a> LogReader<'a> {
 
 	fn new(
 		file: &'a mut std::io::BufReader<std::fs::File>,
-		overlays: &'a mut HashMap<BucketId, LogOverlay>,
+		overlays: &'a mut HashMap<TableId, LogOverlay>,
 		record_id: u64,
 	) -> LogReader<'a> {
 		LogReader {
@@ -69,10 +69,10 @@ impl<'a> LogReader<'a> {
 			},
 			2 => {
 				self.file.read_exact(&mut buf[0..4])?;
-				let bucket = BucketId::from_u32(u32::from_le_bytes(buf[0..4].try_into().unwrap()));
+				let table = TableId::from_u32(u32::from_le_bytes(buf[0..4].try_into().unwrap()));
 				self.file.read_exact(&mut buf[0..8])?;
 				let index = u64::from_le_bytes(buf);
-				if let Some(ref mut overlay) = self.overlays.get_mut(&bucket) {
+				if let Some(ref mut overlay) = self.overlays.get_mut(&table) {
 					match overlay.map.entry(index) {
 						std::collections::hash_map::Entry::Occupied(e) => {
 							if e.get().0 == self.record_id {
@@ -82,15 +82,15 @@ impl<'a> LogReader<'a> {
 						_ => {},
 					}
 				}
-				Ok(LogAction::Insert(InsertAction { bucket, index }))
+				Ok(LogAction::Insert(InsertAction { table, index }))
 			},
 			3 => {
 				Ok(LogAction::EndRecord)
 			},
 			4 => {
 				self.file.read_exact(&mut buf[0..4])?;
-				let bucket = BucketId::from_u32(u32::from_le_bytes(buf[0..4].try_into().unwrap()));
-				Ok(LogAction::DropBucket(bucket))
+				let table = TableId::from_u32(u32::from_le_bytes(buf[0..4].try_into().unwrap()));
+				Ok(LogAction::DropTable(table))
 			}
 			_ => Err(Error::Corruption("Bad log entry type".into()))
 		}
@@ -103,14 +103,14 @@ impl<'a> LogReader<'a> {
 
 pub struct LogWriter<'a> {
 	file: &'a mut std::io::BufWriter<std::fs::File>,
-	overlays: &'a mut HashMap<BucketId, LogOverlay>,
+	overlays: &'a mut HashMap<TableId, LogOverlay>,
 	record_id: u64,
 }
 
 impl<'a> LogWriter<'a> {
 	fn new(
 		file: &'a mut std::io::BufWriter<std::fs::File>,
-		overlays: &'a mut HashMap<BucketId, LogOverlay>,
+		overlays: &'a mut HashMap<TableId, LogOverlay>,
 		record_id: u64,
 	) -> LogWriter<'a> {
 		LogWriter {
@@ -130,12 +130,12 @@ impl<'a> LogWriter<'a> {
 		Ok(())
 	}
 
-	pub fn insert(&mut self, bucket: BucketId, index: u64, data: Vec<u8>) -> Result<()> {
+	pub fn insert(&mut self, table: TableId, index: u64, data: Vec<u8>) -> Result<()> {
 		self.file.write(&2u8.to_le_bytes().as_ref())?;
-		self.file.write(&bucket.as_u32().to_le_bytes())?;
+		self.file.write(&table.as_u32().to_le_bytes())?;
 		self.file.write(&index.to_le_bytes())?;
 		self.file.write(&data)?;
-		self.overlays.entry(bucket).or_default().map.insert(index, (self.record_id, data));
+		self.overlays.entry(table).or_default().map.insert(index, (self.record_id, data));
 		Ok(())
 	}
 
@@ -145,14 +145,14 @@ impl<'a> LogWriter<'a> {
 		Ok(())
 	}
 
-	pub fn drop_bucket(&mut self, id: BucketId) -> Result<()> {
+	pub fn drop_table(&mut self, id: TableId) -> Result<()> {
 		self.file.write(&4u8.to_le_bytes())?;
 		self.file.write(&id.as_u32().to_le_bytes())?;
 		Ok(())
 	}
 
-	pub fn overlay_at(&self, bucket: BucketId, index: u64) -> Option<&[u8]> {
-		self.overlays.get(&bucket).and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_ref()))
+	pub fn overlay_at(&self, table: TableId, index: u64) -> Option<&[u8]> {
+		self.overlays.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_ref()))
 	}
 }
 
@@ -163,7 +163,7 @@ struct LogOverlay {
 
 pub struct Log {
 	//records: Vec<LogRecord>,
-	overlays: HashMap<BucketId, LogOverlay>,
+	overlays: HashMap<TableId, LogOverlay>,
 	appending: std::io::BufWriter<std::fs::File>,
 	flushing: std::io::BufReader<std::fs::File>,
 	record_id: u64,
@@ -277,8 +277,8 @@ impl Log {
 		};
 	}
 
-	pub fn overlay_at(&self, bucket: BucketId, index: u64) -> Option<&[u8]> {
-		self.overlays.get(&bucket).and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_ref()))
+	pub fn overlay_at(&self, table: TableId, index: u64) -> Option<&[u8]> {
+		self.overlays.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_ref()))
 	}
 }
 

@@ -10,14 +10,12 @@ description = "Parity key-value database"
 
 [dependencies]
 log = "0.4.8"
-kvdb = "0.4.0"
+kvdb = "0.5.0"
 hash-db = "0.15.2"
 parking_lot = "0.10"
 memmap = "0.7"
 blake2-rfc = "0.2.18"
-parity-util-mem = { version = "0.5.1", default-features = false, features = ["std"] }
-
-
+parity-util-mem = { version = "0.6.0", default-features = false, features = ["std"] }
 
 
 

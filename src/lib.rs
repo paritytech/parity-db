@@ -17,10 +17,10 @@
 mod db;
 mod compat;
 mod error;
-mod bucket;
+mod table;
 mod column;
 mod log;
 mod display;
 
-pub use compat::Database;
+pub use compat::{Database, DatabaseConfig};
 
