@@ -14,13 +14,17 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-mod db;
-mod compat;
-mod error;
-mod bucket;
-mod column;
-mod log;
-mod display;
+pub type Result<T> = std::result::Result<T, Error>;
 
-pub use compat::Database;
+#[derive(Debug)]
+pub enum Error {
+	Io(std::io::Error),
+	Corruption(String),
+}
+
+impl From<std::io::Error> for Error {
+	fn from(e: std::io::Error) -> Self {
+		Error::Io(e)
+	}
+}
 
