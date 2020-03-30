@@ -41,7 +41,7 @@ When retrieving data from the column, each bucket is checked in order for matchi
 
 # Collision handling
 
-If a bucket slot is occupied on insertion, an entry may be placed in one of the following slots, but no further than 16 slots ahead. The bucket maintains that the keys are always increasing, which means that up to 31 entries may be shifted right to make place for a new entry. If there's no free space in the following 32 slots, a rebalance is triggered. On deletion the following entries that are out of their designated slot are shifted left.
+If a bucket slot is occupied on insertion, an entry may be placed in one of the following slots, but no further than 32 slots ahead. The bucket maintains that the keys are always increasing, which means that up to 31 entries may be shifted right to make place for a new entry. If there's no free space in the following 32 slots, a rebalance is triggered. On deletion the following entries that are out of their designated slot are shifted left.
 Allowing up to 32 out-of-place entries for collision resolution triggers rebalance when the bucket is about 50% full. Average seek will read 2 entries when the bucket is close to the rebalance limit. And since the additional reads are sequential they are likely to be prefetched.
 
 # Rebalance
@@ -50,7 +50,8 @@ When a collision can't be resolved, a new bucket table is created with twice the
 
 # Write-ahead log.
 
-To support durability a write-ahead log is utilised. On commit all changed data is written to the log first, marking the end of each transaction with a checksum. A background process flushes the log to disk and enacts it upon the column buckets.
+To support durability a write-ahead log is utilised. On commit all changed data is written to the log first, marking the end of each transaction with a checksum. A background process flushes the log to disk and enacts it upon the column buckets. While the data is being flushed it may be retrieved from an in-memory overlay. If the overlay grows too large or the flushing queue can't keep up, insertions are blocked.
+
 On startup if the log file exists it is first checked for corruption. Transactions are enacted up to the first checksum  failure.
 
 ### Potential issues
