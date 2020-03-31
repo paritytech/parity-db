@@ -17,18 +17,15 @@ memmap = "0.7"
 blake2-rfc = "0.2.18"
 parity-util-mem = { version = "0.6.0", default-features = false, features = ["std"] }
 
+[profile.release]
+panic = 'abort'
+codegen-units = 1
+lto = "fat"
+debug = true
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+[workspace]
+members = [
+	".",
+	"bench",
+]
 

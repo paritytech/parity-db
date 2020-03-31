@@ -237,7 +237,17 @@ impl Table {
 						return Ok(PlanOutcome::Written);
 					}
 					match target_key.cmp(key) {
-						std::cmp::Ordering::Less => continue,
+						std::cmp::Ordering::Less => {
+							log::trace!(
+								target: "parity-db",
+								"{}: Moving past {} for insertion, designated {}, occupied with {}",
+								self.id,
+								index,
+								start_index,
+								hex(&target_key),
+							);
+							continue
+						},
 						std::cmp::Ordering::Greater => {
 							// Evict and insert here
 							// Scan ahead for empty space but not too far from start_index.
@@ -247,6 +257,14 @@ impl Table {
 							while relocation_end < start_index + MAX_AHEAD as u64
 								&& self.planned_key(relocation_end, log) != EMPTY
 							{
+								log::trace!(
+									target: "parity-db",
+									"{}: Moving past {} for eviction, designated {}, occupied with {}",
+									self.id,
+									relocation_end,
+									start_index,
+									hex(&self.planned_key(relocation_end, log)),
+								);
 								relocation_end += 1
 							}
 							if relocation_end == start_index + MAX_AHEAD as u64 {

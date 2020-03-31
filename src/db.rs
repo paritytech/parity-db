@@ -71,11 +71,29 @@ impl DbInner {
 	fn signal_worker(&self) {
 		let mut active = self.rebalancing.lock();
 		*active = true;
-		log::trace!("Starting rebalance");
 		self.rebalace_condvar.notify_one();
 	}
 
-	fn commit(&self, tx: DBTransaction) -> Result<()> {
+	fn commit_tx(&self, tx: DBTransaction) -> Result<()> {
+		// TODO: take read lock on columns for writing log.
+		let ops = tx.ops.into_iter().map(|op|
+			match op {
+				DBOp::Insert { col: c, key, value } => {
+					(c as u8, key, Some(value))
+				}
+				DBOp::Delete { col: c, key } => {
+					(c as u8, key, None)
+				}
+			}
+		);
+		self.commit(ops)
+	}
+
+	fn commit<I, K>(&self, tx: I) -> Result<()>
+		where
+			I: IntoIterator<Item=(ColId, K, Option<Value>)>,
+			K: AsRef<[u8]>,
+	{
 		// TODO: take read lock on columns for writing log.
 		{
 			let mut columns = self.columns.write();
@@ -83,32 +101,21 @@ impl DbInner {
 			let mut log = log.begin_record()?;
 			log::debug!(
 				target: "parity-db",
-				"Starting commit {}, {} ops ({}state)",
+				"Starting commit {})",
 				log.record_id(),
-				tx.ops.len(),
-				tx.ops.iter().filter(|o| match o {
-					DBOp::Insert { col, .. } if col == &1 => true,
-					DBOp::Delete { col, .. } if col == &1 => true,
-					_ => false,
-				}).count(),
 			);
-			for op in tx.ops {
-				let (c, key, value) = match op {
-					DBOp::Insert { col: c, key, value } => {
-						(c, hash(&key), Some(value))
-					}
-					DBOp::Delete { col: c, key } => {
-						(c, hash(&key), None)
-					}
-				};
-
+			let mut ops: u64 = 0;
+			for (c, key, value) in tx.into_iter() {
+				let key = hash(key.as_ref());
 				columns[c as usize].write_plan(&key, value, &mut log)?;
+				ops += 1;
 			}
 			log.end_record()?;
 			log::debug!(
 				target: "parity-db",
-				"Completed commit {}",
+				"Completed commit {}, {} ops",
 				log.record_id(),
+				ops,
 			);
 		}
 		self.signal_worker();
@@ -208,7 +215,15 @@ impl Db {
 		Ok(self.inner.get(col, key))
 	}
 
-	pub fn commit(&self, tx: DBTransaction) -> Result<()> {
+	pub fn commit_tx(&self, tx: DBTransaction) -> Result<()> {
+		self.inner.commit_tx(tx)
+	}
+
+	pub fn commit<I, K>(&self, tx: I) -> Result<()>
+	where
+		I: IntoIterator<Item=(ColId, K, Option<Value>)>,
+		K: AsRef<[u8]>,
+	{
 		self.inner.commit(tx)
 	}
 

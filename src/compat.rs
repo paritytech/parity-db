@@ -81,7 +81,7 @@ impl Database {
 
 	/// Commit transaction to database.
 	pub fn write(&self, tx: DBTransaction) -> io::Result<()> {
-		self.db.commit(tx).map_err(to_io_err)?;
+		self.db.commit_tx(tx).map_err(to_io_err)?;
 		Ok(())
 	}
 

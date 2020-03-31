@@ -22,6 +22,8 @@ use crate::{
 	display::hex,
 };
 
+const START_BITS: u8 = 10;
+
 pub type ColId = u8;
 
 struct Shard {
@@ -72,7 +74,7 @@ impl Column {
 	fn open_shard(path: &std::path::Path, col: ColId, entry_size: u16) -> Result<Shard> {
 		let mut rebalancing = VecDeque::new();
 		let mut top = None;
-		for bits in (12 .. 65).rev() {
+		for bits in (START_BITS .. 65).rev() {
 			let id = TableId::new(col, entry_size, bits);
 			if let Some(table) = Table::open_existing(path, id)? {
 				if top.is_none() {
@@ -84,7 +86,7 @@ impl Column {
 		}
 		let table = match top {
 			Some(table) => table,
-			None => Table::create_new(path, TableId::new(col, entry_size,  12))?,
+			None => Table::create_new(path, TableId::new(col, entry_size,  START_BITS))?,
 		};
 		Ok(Shard {
 			table,

@@ -23,4 +23,4 @@ mod log;
 mod display;
 
 pub use compat::{Database, DatabaseConfig};
-
+pub use db::Db;
