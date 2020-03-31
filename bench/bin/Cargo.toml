@@ -1,0 +1,11 @@
+[package]
+name = "stress"
+version = "0.0.1"
+authors = ["Parity Technologies <admin@parity.io>"]
+publish = false
+edition = "2018"
+
+
+[dependencies]
+parity-db = { path = "../.." }
+db-bench = { path = "../core" }

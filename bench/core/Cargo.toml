@@ -1,5 +1,5 @@
 [package]
-name = "stress"
+name = "db-bench"
 version = "0.0.1"
 authors = ["Parity Technologies <admin@parity.io>"]
 publish = false
@@ -8,9 +8,6 @@ edition = "2018"
 [dependencies]
 env_logger = { version = "0.7.1" }
 log = { version = "0.4.8" }
-
-[dependencies.parity-db]
-path = ".."
 
 [dependencies.rand]
 features = ["small_rng"]

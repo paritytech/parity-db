@@ -14,16 +14,12 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-/*
-#[cfg_attr(all(any(target_os = "linux", target_os = "macos"), feature = "jemalloc")  global_allocator)]
-#[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "jemalloc"))]
-static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
-*/
-
 mod sizes;
+mod db;
+
+pub use db::{Key, Value, Db};
 
 use std::{sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, }, thread};
-use parity_db::Db;
 use rand::{SeedableRng, RngCore};
 
 static COMMITS: AtomicUsize = AtomicUsize::new(0);
@@ -71,8 +67,8 @@ impl SizePool {
 		SizePool { distribution, total }
 	}
 
-	fn value(&self, key: u64) -> Vec<u8> {
-		let mut rng = rand::rngs::SmallRng::seed_from_u64(key);
+	fn value(&self, seed: u64) -> Vec<u8> {
+		let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
 		let sr = (rng.next_u64() % self.total as u64) as u32;
 		let mut range = self.distribution.range((std::ops::Bound::Included(sr), std::ops::Bound::Unbounded));
 		let size = *range.next().unwrap().1 as usize;
@@ -80,6 +76,13 @@ impl SizePool {
 		v.resize(size, 0);
 		rng.fill_bytes(&mut v);
 		v
+	}
+
+	fn key(&self, seed: u64) -> db::Key {
+		let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
+		let mut key = db::Key::default();
+		rng.fill_bytes(&mut key);
+		key
 	}
 }
 
@@ -121,7 +124,7 @@ fn informant(shutdown: Arc<AtomicBool>, total: usize) {
 	}
 }
 
-fn writer(db: Arc<Db>, shutdown: Arc<AtomicBool>) {
+fn writer<D: Db>(db: Arc<D>, shutdown: Arc<AtomicBool>) {
 	let mut key: u64 = 1;
 	let commit_size = 100;
 	let pool = SizePool::from_histogram(&sizes::C1);
@@ -129,11 +132,11 @@ fn writer(db: Arc<Db>, shutdown: Arc<AtomicBool>) {
 	while !shutdown.load(Ordering::Relaxed) {
 
 		for _ in 0 .. commit_size {
-			commit.push((0, key.to_le_bytes(), Some(pool.value(key))));
+			commit.push((pool.key(key), Some(pool.value(key))));
 			key += 1;
 		}
 
-		db.commit(commit.drain(..)).unwrap();
+		db.commit(commit.drain(..));
 		//thread::sleep(std::time::Duration::from_millis(5));
 
 		COMMITS.fetch_add(1, Ordering::Release);
@@ -141,18 +144,18 @@ fn writer(db: Arc<Db>, shutdown: Arc<AtomicBool>) {
 	}
 }
 
-fn reader(_db: Arc<Db>, shutdown: Arc<AtomicBool>) {
+fn reader<D: Db>(_db: Arc<D>, shutdown: Arc<AtomicBool>) {
 	while !shutdown.load(Ordering::Relaxed) {
 		thread::sleep(std::time::Duration::from_millis(500));
 	}
 }
 
-fn main() {
+pub fn run<D: Db>() {
 	env_logger::try_init().unwrap();
 	let args = Args::parse();
 	let shutdown = Arc::new(AtomicBool::new(false));
 	let path: std::path::PathBuf = "./test_db".into();
-	let db = Arc::new(Db::open(path.as_path(), 1).unwrap());
+	let db = Arc::new(Db::open(path.as_path())) as Arc<D>;
 	let start = std::time::Instant::now();
 
 	let mut threads = Vec::new();
