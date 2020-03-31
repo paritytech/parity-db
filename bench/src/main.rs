@@ -33,26 +33,26 @@ const USAGE: &str = "
 Usage: stress [--readers=<#>][--writers=<#>] [--entries=<l>]
 
 Options:
-    --readers=<#>      Number of reading threads [default: 4].
-    --writers=<#>      Number of writing threads [default: 1].
-    --entries=<n>      Total numbet of inserted entries.
+	--readers=<#>      Number of reading threads [default: 4].
+	--writers=<#>      Number of writing threads [default: 1].
+	--entries=<n>      Total numbet of inserted entries.
 ";
 
 #[derive(Clone)]
 struct Args {
-    readers: usize,
-    entries: usize,
-    writers: usize,
+	readers: usize,
+	entries: usize,
+	writers: usize,
 }
 
 impl Default for Args {
-    fn default() -> Args {
-        Args {
-            readers: 4,
+	fn default() -> Args {
+		Args {
+			readers: 4,
 			writers: 1,
-            entries: 1000000,
-        }
-    }
+			entries: 1000000,
+		}
+	}
 }
 
 struct SizePool {
@@ -85,40 +85,40 @@ impl SizePool {
 
 fn parse<'a, I, T>(mut iter: I) -> T
 where
-    I: Iterator<Item = &'a str>,
-    T: std::str::FromStr,
-    <T as std::str::FromStr>::Err: std::fmt::Debug,
+	I: Iterator<Item = &'a str>,
+	T: std::str::FromStr,
+	<T as std::str::FromStr>::Err: std::fmt::Debug,
 {
-    iter.next().expect(USAGE).parse().expect(USAGE)
+	iter.next().expect(USAGE).parse().expect(USAGE)
 }
 
 impl Args {
-    fn parse() -> Args {
-        let mut args = Args::default();
-        for raw_arg in std::env::args().skip(1) {
-            let mut splits = raw_arg[2..].split('=');
-            match splits.next().unwrap() {
-                "readers" => args.readers = parse(&mut splits),
-                "writers" => args.writers = parse(&mut splits),
+	fn parse() -> Args {
+		let mut args = Args::default();
+		for raw_arg in std::env::args().skip(1) {
+			let mut splits = raw_arg[2..].split('=');
+			match splits.next().unwrap() {
+				"readers" => args.readers = parse(&mut splits),
+				"writers" => args.writers = parse(&mut splits),
 				"entries" => args.entries = parse(&mut splits),
-                other => panic!("unknown option: {}, {}", other, USAGE),
-            }
-        }
-        args
-    }
+				other => panic!("unknown option: {}, {}", other, USAGE),
+			}
+		}
+		args
+	}
 }
 
 fn informant(shutdown: Arc<AtomicBool>, total: usize) {
-    let mut last = 0;
+	let mut last = 0;
 	let mut last_time = std::time::Instant::now();
-    while !shutdown.load(Ordering::Relaxed) {
-        thread::sleep(std::time::Duration::from_secs(1));
-        let commits = COMMITS.load(Ordering::Acquire);
+	while !shutdown.load(Ordering::Relaxed) {
+		thread::sleep(std::time::Duration::from_secs(1));
+		let commits = COMMITS.load(Ordering::Acquire);
 		let now = std::time::Instant::now();
-        println!("{}/{} commits, {} cps", commits, total,  ((commits - last) as f64) / (now - last_time).as_secs_f64());
-        last = commits;
+		println!("{}/{} commits, {} cps", commits, total,  ((commits - last) as f64) / (now - last_time).as_secs_f64());
+		last = commits;
 		last_time = now;
-    }
+	}
 }
 
 fn writer(db: Arc<Db>, shutdown: Arc<AtomicBool>) {
@@ -126,7 +126,7 @@ fn writer(db: Arc<Db>, shutdown: Arc<AtomicBool>) {
 	let commit_size = 100;
 	let pool = SizePool::from_histogram(&sizes::C1);
 	let mut commit = Vec::with_capacity(commit_size);
-    while !shutdown.load(Ordering::Relaxed) {
+	while !shutdown.load(Ordering::Relaxed) {
 
 		for _ in 0 .. commit_size {
 			commit.push((0, key.to_le_bytes(), Some(pool.value(key))));
@@ -136,9 +136,9 @@ fn writer(db: Arc<Db>, shutdown: Arc<AtomicBool>) {
 		db.commit(commit.drain(..)).unwrap();
 		//thread::sleep(std::time::Duration::from_millis(5));
 
-        COMMITS.fetch_add(1, Ordering::Release);
+		COMMITS.fetch_add(1, Ordering::Release);
 		commit.clear();
-    }
+	}
 }
 
 fn reader(_db: Arc<Db>, shutdown: Arc<AtomicBool>) {
@@ -149,11 +149,11 @@ fn reader(_db: Arc<Db>, shutdown: Arc<AtomicBool>) {
 
 fn main() {
 	env_logger::try_init().unwrap();
-    let args = Args::parse();
-    let shutdown = Arc::new(AtomicBool::new(false));
+	let args = Args::parse();
+	let shutdown = Arc::new(AtomicBool::new(false));
 	let path: std::path::PathBuf = "./test_db".into();
-    let db = Arc::new(Db::open(path.as_path(), 1).unwrap());
-    let start = std::time::Instant::now();
+	let db = Arc::new(Db::open(path.as_path(), 1).unwrap());
+	let start = std::time::Instant::now();
 
 	let mut threads = Vec::new();
 
@@ -163,16 +163,16 @@ fn main() {
 		threads.push(thread::spawn(move || informant(shutdown, entries)));
 	}
 
-    for i in 0 .. args.readers {
-        let db = db.clone();
-        let shutdown = shutdown.clone();
+	for i in 0 .. args.readers {
+		let db = db.clone();
+		let shutdown = shutdown.clone();
 
-        threads.push(
-            thread::Builder::new()
-                .name(format!("reader {}", i))
-                .spawn(move || reader(db, shutdown))
-                .unwrap()
-			);
+		threads.push(
+			thread::Builder::new()
+			.name(format!("reader {}", i))
+			.spawn(move || reader(db, shutdown))
+			.unwrap()
+		);
 	}
 
 	for i in 0 .. args.writers {
@@ -192,18 +192,18 @@ fn main() {
 	}
 	shutdown.store(true, Ordering::SeqCst);
 
-    for t in threads.into_iter() {
-        t.join().unwrap();
-    }
+	for t in threads.into_iter() {
+		t.join().unwrap();
+	}
 
-    let commits = COMMITS.load(Ordering::SeqCst);
-    let elapsed = start.elapsed().as_secs_f64();
+	let commits = COMMITS.load(Ordering::SeqCst);
+	let elapsed = start.elapsed().as_secs_f64();
 
-    println!(
-        "Completed {} commits in {} seconds. {} cps",
-        commits,
-        elapsed,
-        commits as f64  / elapsed
-    );
+	println!(
+		"Completed {} commits in {} seconds. {} cps",
+		commits,
+		elapsed,
+		commits as f64  / elapsed
+	);
 }
 
