@@ -95,9 +95,9 @@ impl Column {
 		})
 	}
 
-	pub fn write_plan(&mut self, key: &Key, value: Option<Value>, log: &mut LogWriter) -> Result<()> {
+	pub fn write_plan(&mut self, key: &Key, value: &Option<Value>, log: &mut LogWriter) -> Result<()> {
 		match value {
-			Some(value) => {
+			&Some(ref value) => {
 				*self.histogram.entry(value.len() as u64).or_default() += 1;
 				// TODO: delete from other shards?
 				let target_shard = self.shards.iter()
@@ -107,7 +107,7 @@ impl Column {
 						for i in 0 .. self.shards.len() {
 							if i == target_shard {
 								let s = &mut self.shards[i];
-								match s.table.write_plan(key, Some(&value), log, true)? {
+								match s.table.write_plan(key, Some(value), log, true)? {
 									PlanOutcome::NeedRebalance => {
 										log::info!(
 											target: "parity-db",
@@ -125,7 +125,7 @@ impl Column {
 										let new_table = Table::create_new(self.path.as_path(), new_table_id)?;
 										let old_table = std::mem::replace(&mut s.table, new_table);
 										s.rebalancing.push_back(old_table);
-										s.table.write_plan(key, Some(&value), log, true)?;
+										s.table.write_plan(key, Some(value), log, true)?;
 									}
 									_ => {
 									}
@@ -153,7 +153,7 @@ impl Column {
 							hex(key),
 							value.len(),
 						);
-						self.blobs.insert(*key, value);
+						self.blobs.insert(*key, value.clone());
 					}
 				}
 			},

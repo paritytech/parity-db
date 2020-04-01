@@ -15,12 +15,10 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 mod db;
-mod compat;
 mod error;
 mod table;
 mod column;
 mod log;
 mod display;
 
-pub use compat::{Database, DatabaseConfig};
 pub use db::Db;

@@ -15,8 +15,8 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
 use parking_lot::{RwLock, Mutex, Condvar};
-use kvdb::{DBOp, DBTransaction};
 use crate::{
 	table::{Key, RebalanceProgress},
 	error::{Error, Result},
@@ -33,7 +33,17 @@ fn hash(key: &[u8]) -> Key {
 	k
 }
 
+#[derive(Default)]
+struct Commit{
+	id: u64,
+	changeset: Vec<(ColId, Key, Option<Value>)>,
+}
 
+#[derive(Default)]
+struct CommitQueue{
+	record_id: u64,
+	commits: VecDeque<Commit>,
+}
 
 struct DbInner {
 	columns: RwLock<Vec<Column>>,
@@ -42,8 +52,9 @@ struct DbInner {
 	rebalancing: Mutex<bool>,
 	rebalace_condvar: Condvar,
 	log: RwLock<Log>,
+	commit_queue: RwLock<CommitQueue>,
+	commit_overlay: RwLock<HashMap<ColId, HashMap<Key, (u64, Option<Value>)>>>,
 }
-
 
 impl DbInner {
 	pub fn open(path: &std::path::Path, num_columns: u8) -> Result<DbInner> {
@@ -59,13 +70,20 @@ impl DbInner {
 			rebalancing: Mutex::new(false),
 			rebalace_condvar: Condvar::new(),
 			log: RwLock::new(Log::open(path)?),
+			commit_queue: RwLock::new(Default::default()),
+			commit_overlay: RwLock::new(Default::default()),
 		})
 	}
 
 	pub fn get(&self, col: ColId, key: &[u8]) -> Option<Value> {
 		let columns = self.columns.read();
 		let log = self.log.read();
-		columns[col as usize].get(&hash(key), &log)
+		let overlay = self.commit_overlay.read();
+		let key = hash(key);
+		if let Some(v) = overlay.get(&col).and_then(|o| o.get(&key).map(|(_, v)| v.clone())) {
+			return v;
+		}
+		columns[col as usize].get(&key, &log)
 	}
 
 	fn signal_worker(&self) {
@@ -74,52 +92,80 @@ impl DbInner {
 		self.rebalace_condvar.notify_one();
 	}
 
-	fn commit_tx(&self, tx: DBTransaction) -> Result<()> {
-		// TODO: take read lock on columns for writing log.
-		let ops = tx.ops.into_iter().map(|op|
-			match op {
-				DBOp::Insert { col: c, key, value } => {
-					(c as u8, key, Some(value))
-				}
-				DBOp::Delete { col: c, key } => {
-					(c as u8, key, None)
-				}
-			}
-		);
-		self.commit(ops)
-	}
-
 	fn commit<I, K>(&self, tx: I) -> Result<()>
 		where
 			I: IntoIterator<Item=(ColId, K, Option<Value>)>,
 			K: AsRef<[u8]>,
 	{
-		// TODO: take read lock on columns for writing log.
+		let commit = tx.into_iter().map(|(c, k, v)| (c, hash(k.as_ref()), v)).collect();
+
 		{
+			let mut queue = self.commit_queue.write();
+			let mut overlay = self.commit_overlay.write();
+
+			queue.record_id += 1;
+			let record_id = queue.record_id + 1;
+			let commit = Commit {
+				id: record_id,
+				changeset: commit,
+			};
+
+			for (c, k, v) in &commit.changeset {
+				overlay.entry(*c).or_default().insert(*k, (record_id, v.clone()));
+			}
+
+			queue.commits.push_back(commit);
+		}
+
+		self.signal_worker();
+		Ok(())
+	}
+
+	fn process_commits(&self) -> Result<bool> {
+		// TODO: take read lock on columns for writing log.
+		let commit = {
+			self.commit_queue.write().commits.pop_front()
+		};
+
+		if let Some(commit) = commit {
 			let mut columns = self.columns.write();
 			let mut log = self.log.write();
 			let mut log = log.begin_record()?;
 			log::debug!(
 				target: "parity-db",
-				"Starting commit {})",
+				"Starting commit {}",
 				log.record_id(),
 			);
 			let mut ops: u64 = 0;
-			for (c, key, value) in tx.into_iter() {
-				let key = hash(key.as_ref());
-				columns[c as usize].write_plan(&key, value, &mut log)?;
+			for (c, key, value) in commit.changeset.iter() {
+				columns[*c as usize].write_plan(key, value, &mut log)?;
 				ops += 1;
 			}
 			log.end_record()?;
+
+			{
+				let mut overlay = self.commit_overlay.write();
+				for (c, key, _) in commit.changeset.iter() {
+					if let Some(overlay) = overlay.get_mut(c) {
+						if let std::collections::hash_map::Entry::Occupied(e) = overlay.entry(*key) {
+							if e.get().0 == commit.id {
+								e.remove_entry();
+							}
+						}
+					}
+				}
+			}
+
 			log::debug!(
 				target: "parity-db",
-				"Completed commit {}, {} ops",
+				"Processed commit {}, {} ops",
 				log.record_id(),
 				ops,
 			);
+			Ok(true)
+		} else {
+			Ok(false)
 		}
-		self.signal_worker();
-		Ok(())
 	}
 
 	fn enact_logs(&self) -> Result<bool> {
@@ -215,10 +261,6 @@ impl Db {
 		Ok(self.inner.get(col, key))
 	}
 
-	pub fn commit_tx(&self, tx: DBTransaction) -> Result<()> {
-		self.inner.commit_tx(tx)
-	}
-
 	pub fn commit<I, K>(&self, tx: I) -> Result<()>
 	where
 		I: IntoIterator<Item=(ColId, K, Option<Value>)>,
@@ -244,7 +286,8 @@ impl Db {
 			}
 
 			// Flush log
-			more_work = db.enact_logs()?;
+			more_work = db.process_commits()?;
+			more_work = more_work || db.enact_logs()?;
 			more_work = more_work || db.process_rebalance()?;
 		}
 

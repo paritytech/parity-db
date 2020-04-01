@@ -96,7 +96,8 @@ pub enum PlanOutcome {
 
 pub struct Table {
 	pub id: TableId,
-	map: memmap::MmapMut,
+	map: Option<memmap::MmapMut>,
+	path: std::path::PathBuf,
 	entries: std::sync::atomic::AtomicU64,
 }
 
@@ -105,7 +106,7 @@ impl Table {
 		let mut path: std::path::PathBuf = path.into();
 		path.push(id.file_name());
 
-		let file = match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+		let file = match std::fs::OpenOptions::new().read(true).write(true).open(path.as_path()) {
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
 				return Ok(None);
 			}
@@ -113,44 +114,64 @@ impl Table {
 			Ok(file) => file,
 		};
 
+		file.set_len(id.file_size())?;
+		let map = unsafe { memmap::MmapMut::map_mut(&file)? };
 		log::debug!(target: "parity-db", "Opened existing table {}", id);
-		Ok(Some(Self::from_file(file, id)?))
+		Ok(Some(Table {
+			id,
+			path,
+			map: Some(map),
+			entries: std::sync::atomic::AtomicU64::new(0),
+		}))
 	}
 
 	pub fn create_new(path: &std::path::Path, id: TableId) -> Result<Table> {
 		let mut path: std::path::PathBuf = path.into();
 		path.push(id.file_name());
-
-		let file = std::fs::OpenOptions::new().write(true).read(true).create_new(true).open(path)?;
-		log::debug!(target: "parity-db", "Created new table {}", id);
-		Self::from_file(file, id)
-	}
-
-	fn from_file(file: std::fs::File, id: TableId) -> Result<Table> {
-		//TODO: check for potential overflows on 32-bit platforms
-		file.set_len(id.file_size())?;
-		let map = unsafe { memmap::MmapMut::map_mut(&file)? };
 		Ok(Table {
 			id,
-			map,
+			path,
+			map: None,
 			entries: std::sync::atomic::AtomicU64::new(0),
 		})
 	}
 
+	fn open_map(&mut self) -> Result<()> {
+		if self.map.is_some() {
+			return Ok(());
+		}
+		let file = std::fs::OpenOptions::new().write(true).read(true).create_new(true).open(self.path.as_path())?;
+		log::debug!(target: "parity-db", "Created new table {}", self.id);
+		//TODO: check for potential overflows on 32-bit platforms
+		file.set_len(self.id.file_size())?;
+		self.map = Some(unsafe { memmap::MmapMut::map_mut(&file)? });
+		Ok(())
+	}
+
 	fn key_at(&self, index: u64) -> Key {
-		let offset = META_SIZE + index as isize * self.id.entry_size() as isize;
-		let key = unsafe { *((self.map.as_ptr().offset(offset)) as *const Key) };
-		key
+		match &self.map {
+			Some(ref map) => {
+				let offset = META_SIZE + index as isize * self.id.entry_size() as isize;
+				let key = unsafe { *((map.as_ptr().offset(offset)) as *const Key) };
+				key
+			}
+			None => EMPTY,
+		}
 	}
 
 	fn value_at(&self, index: u64) -> &[u8] {
-		unsafe {
-			let mut ptr = self.map.as_ptr();
-			let offset = META_SIZE + index as isize * self.id.entry_size() as isize + KEY_LEN as isize;
-			ptr = ptr.offset(offset);
-			let len = u16::from_le(std::ptr::read(ptr as *const u16));
-			ptr = ptr.offset(2);
-			std::slice::from_raw_parts(ptr, len as usize)
+		match &self.map {
+			Some(ref map) => {
+				unsafe {
+					let mut ptr = map.as_ptr();
+					let offset = META_SIZE + index as isize * self.id.entry_size() as isize + KEY_LEN as isize;
+					ptr = ptr.offset(offset);
+					let len = u16::from_le(std::ptr::read(ptr as *const u16));
+					ptr = ptr.offset(2);
+					std::slice::from_raw_parts(ptr, len as usize)
+				}
+			},
+			None => &[],
 		}
 	}
 
@@ -401,19 +422,22 @@ impl Table {
 	}
 
 	pub fn enact_plan(&mut self, index: u64, log: &mut LogReader) -> Result<()> {
+		self.open_map()?;
 		let mut offset = META_SIZE as isize + (index * self.id.entry_size() as u64) as isize;
 		let mut key = Key::default();
 		log.read(&mut key)?;
+		let map= self.map.as_mut().unwrap();
+		let map_ptr = map.as_mut_ptr();
 		unsafe {
-			std::ptr::copy_nonoverlapping(key.as_ptr(), self.map.as_mut_ptr().offset(offset), KEY_LEN);
+			std::ptr::copy_nonoverlapping(key.as_ptr(), map_ptr.offset(offset), KEY_LEN);
 			if key != EMPTY {
 				offset += KEY_LEN as isize;
 				let mut s = [0u8; 2];
 				log.read(&mut s)?;
 				let size = u16::from_le_bytes(s);
-				std::ptr::copy_nonoverlapping(s.as_ptr(), self.map.as_mut_ptr().offset(offset), 2);
+				std::ptr::copy_nonoverlapping(s.as_ptr(), map_ptr.offset(offset), 2);
 				offset += 2;
-				log.read(&mut self.map[offset as usize..(offset as usize + size as usize)])?;
+				log.read(&mut map[offset as usize..(offset as usize + size as usize)])?;
 			}
 		}
 		log::trace!(target: "parity-db", "{}: Enacted {}", self.id, index);
