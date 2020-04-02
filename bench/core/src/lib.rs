@@ -23,7 +23,9 @@ use std::{sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, }, thread};
 use rand::{SeedableRng, RngCore};
 
 static COMMITS: AtomicUsize = AtomicUsize::new(0);
-static QUERIES: AtomicUsize = AtomicUsize::new(0);
+//static QUERIES: AtomicUsize = AtomicUsize::new(0);
+
+const COMMIT_SIZE: usize = 100;
 
 const USAGE: &str = "
 Usage: stress [--readers=<#>][--writers=<#>] [--entries=<l>]
@@ -46,7 +48,7 @@ impl Default for Args {
 		Args {
 			readers: 4,
 			writers: 1,
-			entries: 1000000,
+			entries: 100000,
 		}
 	}
 }
@@ -125,12 +127,12 @@ fn informant(shutdown: Arc<AtomicBool>, total: usize) {
 }
 
 fn writer<D: Db>(db: Arc<D>, shutdown: Arc<AtomicBool>) {
-	let mut key: u64 = 1;
-	let commit_size = 100;
+	let mut key: u64 = 0;
+	let commit_size = COMMIT_SIZE;
 	let pool = SizePool::from_histogram(&sizes::C1);
 	let mut commit = Vec::with_capacity(commit_size);
-	while !shutdown.load(Ordering::Relaxed) {
 
+	while !shutdown.load(Ordering::Relaxed) {
 		for _ in 0 .. commit_size {
 			commit.push((pool.key(key), Some(pool.value(key))));
 			key += 1;
@@ -146,15 +148,18 @@ fn writer<D: Db>(db: Arc<D>, shutdown: Arc<AtomicBool>) {
 
 fn reader<D: Db>(_db: Arc<D>, shutdown: Arc<AtomicBool>) {
 	while !shutdown.load(Ordering::Relaxed) {
-		thread::sleep(std::time::Duration::from_millis(500));
+		thread::sleep(std::time::Duration::from_millis(5));
 	}
 }
 
 pub fn run<D: Db>() {
 	env_logger::try_init().unwrap();
+	let path: std::path::PathBuf = "./test_db".into();
+	if path.exists() {
+		std::fs::remove_dir_all(path.as_path()).unwrap();
+	}
 	let args = Args::parse();
 	let shutdown = Arc::new(AtomicBool::new(false));
-	let path: std::path::PathBuf = "./test_db".into();
 	let db = Arc::new(Db::open(path.as_path())) as Arc<D>;
 	let start = std::time::Instant::now();
 
@@ -207,6 +212,28 @@ pub fn run<D: Db>() {
 		commits,
 		elapsed,
 		commits as f64  / elapsed
+	);
+
+	let start = std::time::Instant::now();
+
+	// Verify content
+	thread::sleep(std::time::Duration::from_secs(1));
+	let pool = SizePool::from_histogram(&sizes::C1);
+	for key in 0u64 .. (commits * COMMIT_SIZE) as u64 {
+		let k = pool.key(key);
+		let val = pool.value(key);
+		let db_val = db.get(&k);
+		assert_eq!(Some(val), db_val);
+	}
+
+	let queries = commits * COMMIT_SIZE;
+	let elapsed = start.elapsed().as_secs_f64();
+
+	println!(
+		"Completed {} queries in {} seconds. {} qps",
+		queries,
+		elapsed,
+		queries as f64  / elapsed
 	);
 }
 

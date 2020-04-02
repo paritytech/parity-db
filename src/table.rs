@@ -17,6 +17,7 @@
 use std::convert::TryInto;
 use std::os::unix::fs::FileExt;
 use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicU64, Ordering};
 use crate::{
 	error::Result,
 	column::ColId,
@@ -27,8 +28,8 @@ use crate::{
 pub const KEY_LEN: usize = 32;
 const MAX_ENTRY_SIZE: usize = 65534;
 
-const OFFSET_BITS: u8 = 40;
-const OFFSET_MASK: u64 = (1u64 << (OFFSET_BITS + 1)) - 1;
+const OFFSET_BITS: u8 = 32;
+const OFFSET_MASK: u64 = (1u64 << OFFSET_BITS) - 1;
 const TOMBSTONE: &[u8] = &[0xff, 0xff];
 
 pub type Key = [u8; KEY_LEN];
@@ -74,7 +75,7 @@ pub struct Address(u64);
 
 impl Address {
 	pub fn new(offset: u64, size_tier: u8) -> Address {
-		Address(((size_tier as u64) << 4) | offset)
+		Address(((size_tier as u64) << OFFSET_BITS) | offset)
 	}
 
 	pub fn from_u64(a: u64) -> Address {
@@ -86,7 +87,7 @@ impl Address {
 	}
 
 	pub fn size_tier(&self) -> u8 {
-		(self.0 & 0xff) as u8
+		((self.0 >> OFFSET_BITS) & 0xff) as u8
 	}
 
 	pub fn as_u64(&self) -> u64 {
@@ -105,8 +106,8 @@ pub struct ValueTable {
 	pub entry_size: u16,
 	file: std::fs::File,
 	capacity: u64,
-	filled: u64,
-	last_removed: u64,
+	filled: AtomicU64,
+	last_removed: AtomicU64,
 }
 
 impl ValueTable {
@@ -140,8 +141,8 @@ impl ValueTable {
 			entry_size,
 			file,
 			capacity,
-			filled,
-			last_removed,
+			filled: AtomicU64::new(filled),
+			last_removed: AtomicU64::new(last_removed),
 		})
 	}
 
@@ -158,7 +159,7 @@ impl ValueTable {
 	}
 
 	fn grow(&mut self) -> Result<()> {
-		self.capacity += 65536;
+		self.capacity += (256 * 1024) / self.entry_size as u64;
 		self.file.set_len(self.capacity * self.entry_size as u64)?;
 		Ok(())
 	}
@@ -175,7 +176,7 @@ impl ValueTable {
 				self.id,
 				index,
 				hex(&key[2..]),
-				hex(&buf[0..30]),
+				hex(&buf[2..32]),
 			);
 			return None;
 		}
@@ -187,7 +188,8 @@ impl ValueTable {
 			return Ok(self.get_from_buf(key, val, index));
 		}
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
-		self.read_at(&mut buf, index * self.entry_size as u64)?;
+		// TODO: read actual size?
+		self.read_at(&mut buf[0 .. self.entry_size as usize], index * self.entry_size as u64)?;
 		Ok(self.get_from_buf(key, &buf, index))
 	}
 
@@ -203,7 +205,7 @@ impl ValueTable {
 	pub fn partial_key_at(&self, index: u64, log: &LogWriter) -> Result<Key> {
 		let mut buf = [0u8; 32];
 		if let Some(val) = log.value_overlay_at(self.id, index) {
-			buf[2..].copy_from_slice(&val[2..]);
+			buf[2..].copy_from_slice(&val[2..32]);
 		} else {
 			self.read_at(&mut buf[2..], index * self.entry_size as u64 + 2)?;
 		}
@@ -222,12 +224,11 @@ impl ValueTable {
 	}
 
 	pub fn write_insert_plan(&self, key: &Key, value: &[u8], log: &mut LogWriter) -> Result<u64> {
-		let filled = log.filled(self.id).unwrap_or(self.filled);
-		let last_removed = log.last_removed(self.id).unwrap_or(self.last_removed);
+		let filled = self.filled.load(Ordering::Relaxed);
+		let last_removed = self.last_removed.load(Ordering::Relaxed);
 
 		let index = if last_removed != 0 {
 			let next_removed = self.read_as_empty(last_removed, log)?;
-			log.note_last_removed(self.id, next_removed);
 			log::trace!(
 				target: "parity-db",
 				"{}: Inserting into removed slot {}: {}",
@@ -235,9 +236,9 @@ impl ValueTable {
 				last_removed,
 				hex(key),
 			);
+			self.last_removed.store(next_removed, Ordering::Relaxed);
 			last_removed
 		} else {
-			log.note_filled(self.id, filled + 1);
 			log::trace!(
 				target: "parity-db",
 				"{}: Inserting into new slot {}: {}",
@@ -245,6 +246,7 @@ impl ValueTable {
 				filled + 1,
 				hex(key),
 			);
+			self.filled.store(filled + 1, Ordering::Relaxed);
 			filled + 1
 		};
 
@@ -275,8 +277,7 @@ impl ValueTable {
 	}
 
 	pub fn write_remove_plan(&self, index: u64, log: &mut LogWriter) -> Result<()> {
-		let last_removed = log.last_removed(self.id).unwrap_or(self.last_removed);
-
+		let last_removed = self.last_removed.load(Ordering::Relaxed);
 		log::trace!(
 			target: "parity-db",
 			"{}: Freeing slot {}",
@@ -288,7 +289,7 @@ impl ValueTable {
 		&buf[2..10].copy_from_slice(&last_removed.to_le_bytes());
 
 		log.insert_value(self.id, index, buf.to_vec());
-		log.note_last_removed(self.id, index);
+		self.last_removed.store(index, Ordering::Relaxed);
 		Ok(())
 	}
 
@@ -301,24 +302,23 @@ impl ValueTable {
 		log.read(&mut buf[0..2])?;
 		if &buf[0..2] == TOMBSTONE {
 			log.read(&mut buf[2..10])?;
-			self.write_at(&buf, index)?;
-			self.last_removed = index;
+			self.write_at(&buf[0..10], index * (self.entry_size as u64))?;
+			log::trace!(target: "parity-db", "{}: Enacted tombstone in slot {}", self.id, index);
 		} else {
 			let len: u16 = u16::from_le_bytes(buf[0..2].try_into().unwrap());
-			log.read(&mut buf[2..30+len as usize])?;
-			self.write_at(&buf, index)?;
-			if index > self.filled {
-				self.filled = index;
-			}
+			log.read(&mut buf[2..32+len as usize])?;
+			self.write_at(&buf[0..(32 + len as usize)], index * (self.entry_size as u64))?;
+			log::trace!(target: "parity-db", "{}: Enacted {}: {}, {} bytes", self.id, index, hex(&buf[2..32]), len);
 		}
-		log::trace!(target: "parity-db", "{}: Enacted {}", self.id, index);
 		Ok(())
 	}
 
 	pub fn complete_plan(&mut self) -> Result<()> {
 		let mut buf = [0u8; 16];
-		buf[0..8].copy_from_slice(&self.last_removed.to_le_bytes());
-		buf[8..16].copy_from_slice(&self.filled.to_le_bytes());
+		let last_removed = self.last_removed.load(Ordering::Relaxed);
+		let filled = self.filled.load(Ordering::Relaxed);
+		buf[0..8].copy_from_slice(&last_removed.to_le_bytes());
+		buf[8..16].copy_from_slice(&filled.to_le_bytes());
 		self.write_at(&buf, 0)?;
 		Ok(())
 	}

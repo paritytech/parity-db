@@ -21,13 +21,18 @@ use crate::{
 	log::{Log, LogReader, LogWriter, LogAction},
 	display::hex,
 	index::{IndexTable, TableId as IndexTableId,
-		PlanOutcome, RebalanceProgress, Entry as IndexEntry},
+		PlanOutcome, Entry as IndexEntry},
 };
 
 const START_BITS: u8 = 16;
 const MAX_REBALANCE_BATCH: u32 = 65536;
 
 pub type ColId = u8;
+
+pub enum RebalanceProgress {
+	InProgress((u64, u64)),
+	Inactive,
+}
 
 pub struct Column {
 	// Ordered by value size.
@@ -36,9 +41,7 @@ pub struct Column {
 	rebalance_progress: u64,
 	path: std::path::PathBuf,
 	value_tables: [ValueTable; 15],
-	// TODO: make these private
-	pub blobs: HashMap<Key, Value>,
-	pub histogram: std::collections::BTreeMap<u64, u64>,
+	blobs: HashMap<Key, Value>,
 }
 
 impl Column {
@@ -53,14 +56,11 @@ impl Column {
 				return self.get_entry_value(key, entry, log);
 			}
 		}
-		Ok(None)
+		Ok(self.blobs.get(key).cloned())
 	}
 
 	fn get_entry_value(&self, key: &Key, entry: IndexEntry, log: &Log) -> Result<Option<Value>> {
 		let size_tier = entry.address().size_tier();
-		if size_tier == 15 {
-			return Ok(self.blobs.get(key).cloned())
-		}
 		self.value_tables[size_tier as usize].get(key, entry.address().offset(), log)
 	}
 
@@ -89,7 +89,6 @@ impl Column {
 			],
 			blobs: HashMap::new(),
 			path: path.into(),
-			histogram: Default::default(),
 		})
 	}
 
@@ -139,11 +138,11 @@ impl Column {
 	pub fn write_plan(&mut self, key: &Key, value: &Option<Value>, log: &mut LogWriter) -> Result<()> {
 		//TODO: return sub-chunk position in index.get
 		if let &Some(ref val) = value {
-			*self.histogram.entry(val.len() as u64).or_default() += 1;
 			let target_tier = self.value_tables.iter().position(|t| val.len() <= t.value_size() as usize);
 			let target_tier = match target_tier {
 				Some(tier) => tier as usize,
 				None => {
+					log::debug!(target: "parity-db", "Inserted blob {}", hex(key));
 					self.blobs.insert(*key, val.clone());
 					return Ok(());
 				}
@@ -156,22 +155,33 @@ impl Column {
 				let replace = self.value_tables[existing_tier].has_key_at(existing_address.offset(), &key, log)?;
 				if replace {
 					if existing_tier == target_tier {
+						log::trace!(target: "parity-db", "{}: Replacing {}", self.index.id, hex(key));
 						self.value_tables[target_tier].write_replace_plan(existing_address.offset(), key, val, log)?;
 					} else {
+						log::trace!(target: "parity-db", "{}: Replacing in a new table {}", self.index.id, hex(key));
 						self.value_tables[existing_tier].write_remove_plan(existing_address.offset(), log)?;
 						let new_offset = self.value_tables[target_tier].write_insert_plan(key, val, log)?;
 						let new_address = Address::new(new_offset, target_tier as u8);
 						self.index.write_insert_plan(key, new_address, log, true)?;
 					}
 				} else {
+					log::debug!(
+						target: "parity-db",
+						"{}: Index chunk conflict {} vs {}",
+						self.index.id,
+						hex(key),
+						hex(&self.value_tables[existing_tier].partial_key_at(existing_address.offset(), log).unwrap()),
+					);
 					self.trigger_rebalance();
 					return self.write_plan(key, value, log);
 				}
 			} else {
+				log::trace!(target: "parity-db", "{}: Inserting new index {}", self.index.id, hex(key));
 				let offset = self.value_tables[target_tier].write_insert_plan(key, val, log)?;
 				let address = Address::new(offset, target_tier as u8);
 				match self.index.write_insert_plan(key, address, log, true)? {
 					PlanOutcome::NeedRebalance => {
+						log::debug!(target: "parity-db", "{}: Index chunk full {}", self.index.id, hex(key));
 						self.trigger_rebalance();
 						return self.write_plan(key, value, log);
 					}
@@ -185,6 +195,7 @@ impl Column {
 				let existing_tier = existing_entry.address().size_tier() as usize;
 				// TODO: Remove this check? Highly unlikely.
 				if self.value_tables[existing_tier].has_key_at(existing_entry.address().offset(), &key, log)? {
+					log::trace!(target: "parity-db", "{}: Deleting {}", self.index.id, hex(key));
 					self.value_tables[existing_tier].write_remove_plan(existing_entry.address().offset(), log)?;
 					self.index.write_remove_plan(key, log)?;
 				}
@@ -199,8 +210,7 @@ impl Column {
 			LogAction::InsertIndex(record) => {
 				if self.index.id == record.table {
 					self.index.enact_plan(record.index, log)?;
-				}
-				if let Some(table) = self.rebalancing.iter_mut().find(|r|r.id == record.table) {
+				} else if let Some(table) = self.rebalancing.iter_mut().find(|r|r.id == record.table) {
 					table.enact_plan(record.index, log)?;
 				}
 				else {
@@ -228,29 +238,33 @@ impl Column {
 	}
 
 	pub fn rebalance(&mut self, log: &mut Log) -> Result<RebalanceProgress> {
+		let mut progress = RebalanceProgress::Inactive;
 		if let Some(source) = self.rebalancing.front_mut() {
 			if self.rebalance_progress != source.id.total_chunks() {
 				let mut writer = log.begin_record();
 				log::trace!(target: "parity-db", "{}: Start rebalance record {}", self.index.id, writer.record_id());
 				let mut source_index = self.rebalance_progress;
 				let mut count = 0;
-				log::trace!(target: "parity-db", "{}: Continue rebalance at {}", self.index.id, source_index);
+				log::trace!(target: "parity-db", "{}: Continue rebalance at {}/{}", self.index.id, source_index, source.id.total_chunks());
+				let shift_key_bits = source.id.index_bits() - 16;
 				while source_index < source.id.total_chunks() && count < MAX_REBALANCE_BATCH {
+					log::trace!(target: "parity-db", "{}: Rebalancing {}", source.id, source_index);
 					for entry in source.planned_entries(source_index, &mut writer).iter() {
 						if entry.is_empty() {
 							continue;
 						}
 						let mut key = self.value_tables[entry.address().size_tier() as usize]
 							.partial_key_at(entry.address().offset(), &mut writer)?;
-
 						// restore 16 high bits
-						&mut key[0..2].copy_from_slice(&((source_index & 0xffff) as u16).to_be_bytes());
+						&mut key[0..2].copy_from_slice(&((source_index >> shift_key_bits) as u16).to_be_bytes());
+						log::trace!(target: "parity-db", "{}: Reinserting {}", source.id, hex(&key));
+
 						match self.index.write_insert_plan(&key, entry.address(), &mut writer, false)? {
 							PlanOutcome::NeedRebalance => panic!("Table requires double rebalance"),
 							_ => {},
 						}
-						count += 1;
 					}
+					count += 1;
 					source_index += 1;
 				}
 				log::trace!(target: "parity-db", "{}: End rebalance batch {} ({})", self.index.id, source_index, count);
@@ -259,15 +273,17 @@ impl Column {
 				if self.rebalance_progress == source.id.total_chunks() {
 					log::info!(target: "parity-db", "Completed rebalance {}", self.index.id);
 					writer.drop_table(source.id);
-					return Ok(RebalanceProgress::Inactive)
 				}
 				log::trace!(target: "parity-db", "{}: End rebalance record {}", self.index.id, writer.record_id());
 				let l = writer.drain();
 				log.end_record(l)?;
-				return Ok(RebalanceProgress::InProgress((self.rebalance_progress, source.id.total_chunks())))
+
+				if self.rebalance_progress != source.id.total_chunks() {
+					progress = RebalanceProgress::InProgress((self.rebalance_progress, source.id.total_chunks()))
+				}
 			}
 		}
-		Ok(RebalanceProgress::Inactive)
+		Ok(progress)
 	}
 
 	pub fn drop_index(&mut self, id: IndexTableId) -> Result<()> {

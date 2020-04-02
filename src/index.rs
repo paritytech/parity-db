@@ -30,11 +30,11 @@ const KEY_LEN: usize = 32;
 
 const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
 
-const PARTIAL_KEY_BITS: u8 = 20;
-const PARTIAL_KEY_MASK: u32 = (1u32 << (PARTIAL_KEY_BITS + 1)) - 1;
+const PARTIAL_KEY_BITS: u8 = 28;
+const PARTIAL_KEY_MASK: u32 = (1u32 << PARTIAL_KEY_BITS) - 1;
 
-const ADDRESS_BITS: u8 = 44;
-const ADDRESS_MASK: u64 = (1u64 << (ADDRESS_BITS + 1)) - 1;
+const ADDRESS_BITS: u8 = 36;
+const ADDRESS_MASK: u64 = (1u64 << ADDRESS_BITS) - 1;
 
 pub type Key = [u8; KEY_LEN];
 pub type Chunk = [u8; CHUNK_LEN];
@@ -50,10 +50,12 @@ impl Entry {
 		Address::from_u64(self.0 & ADDRESS_MASK) // lower 40 bits
 	}
 
+	#[inline]
 	fn key_bits(&self) -> u32 {
 		((self.0 >> ADDRESS_BITS) as u32) & PARTIAL_KEY_MASK // next 20 bits
 	}
 
+	#[inline]
 	pub fn is_empty(&self) -> bool {
 		self.0 == 0
 	}
@@ -71,11 +73,6 @@ impl Entry {
 	}
 }
 
-pub enum RebalanceProgress {
-	InProgress((u64, u64)),
-	Inactive,
-}
-
 pub enum PlanOutcome {
 	Written,
 	NeedRebalance,
@@ -90,7 +87,7 @@ pub struct IndexTable {
 }
 
 fn total_entries(index_bits: u8) -> u64 {
-	1u64 << (index_bits + 3)
+	total_chunks(index_bits) * CHUNK_ENTRIES as u64
 }
 
 fn total_chunks(index_bits: u8) -> u64 {
@@ -201,6 +198,7 @@ impl IndexTable {
 		for i in 0 .. CHUNK_ENTRIES {
 			let entry = Entry::from_u64(u64::from_le_bytes(chunk[i * 8 .. i * 8 + 8].try_into().unwrap()));
 			if !entry.is_empty() && entry.key_bits() == partial_key {
+				log::trace!(target: "parity-db", "{}: Found entry at {}, bits={}", self.id, i, entry.key_bits());
 				return entry;
 			}
 		}
@@ -208,14 +206,17 @@ impl IndexTable {
 	}
 
 	pub fn get(&self, key: &Key, log: &Log) -> Entry {
+		log::debug!(target: "parity-db", "{}: Querying {}", self.id, hex(&key));
 		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
 		let chunk_index = key >> (64 - self.id.index_bits());
 
 		if let Some(chunk) = log.index_overlay_at(self.id, chunk_index) {
+			log::trace!(target: "parity-db", "{}: Querying overlay at {}", self.id, chunk_index);
 			return self.find_entry(key, chunk);
 		}
 
 		if let Some(map) = &self.map {
+			log::trace!(target: "parity-db", "{}: Querying chunk at {}", self.id, chunk_index);
 			let chunk = Self::chunk_at(chunk_index, map);
 			return self.find_entry(key, chunk);
 
@@ -228,11 +229,13 @@ impl IndexTable {
 		let chunk_index = key >> (64 - self.id.index_bits());
 
 		if let Some(chunk) = log.index_overlay_at(self.id, chunk_index) {
+			log::trace!(target: "parity-db", "{}: Found overlay at {}", self.id, chunk_index);
 			return self.find_entry(key, chunk);
 		}
 
 		if let Some(map) = &self.map {
 			let chunk = Self::chunk_at(chunk_index, map);
+			log::trace!(target: "parity-db", "{}: Checking at {}", self.id, chunk_index);
 			return self.find_entry(key, chunk);
 
 		}
@@ -292,10 +295,12 @@ impl IndexTable {
 		if let Some(i) = first_empty {
 			let new_entry = Entry::new(address, partial_key);
 			&mut chunk[i * 8 .. i * 8 + 8].copy_from_slice(&new_entry.as_u64().to_le_bytes());
-			log::trace!(target: "parity-db", "{}: Inserted at {}.{}", self.id, chunk_index, i);
+			log::trace!(target: "parity-db", "{}: Inserted at {}.{}: {}", self.id, chunk_index, i, new_entry.address());
 			log.insert_index(self.id, chunk_index, &chunk);
+			self.entries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 			return Ok(PlanOutcome::Written);
 		} else {
+			log::trace!(target: "parity-db", "{}: Full at {}", self.id, chunk_index);
 			return Ok(PlanOutcome::NeedRebalance);
 		}
 	}
@@ -360,6 +365,7 @@ impl IndexTable {
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
 		let mut chunk = &mut map[offset .. offset + CHUNK_LEN];
 		log.read(&mut chunk)?;
+		log::trace!(target: "parity-db", "{}: Enacted chunk {}", self.id, index);
 		Ok(())
 	}
 

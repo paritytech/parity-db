@@ -20,9 +20,8 @@ use parking_lot::{RwLock, Mutex, Condvar};
 use crate::{
 	table::Key,
 	error::{Error, Result},
-	column::{ColId, Column},
+	column::{ColId, Column, RebalanceProgress},
 	log::{Log, LogAction},
-	index::RebalanceProgress,
 };
 
 pub type Value = Vec<u8>;
@@ -30,7 +29,7 @@ pub type Value = Vec<u8>;
 fn hash(key: &[u8]) -> Key {
 	let mut k = Key::default();
 	k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &[], key).as_bytes());
-	log::trace!(target: "parity-db", "HASH {} = {}", crate::display::hex(&key), crate::display::hex(&k));
+	//log::trace!(target: "parity-db", "HASH {} = {}", crate::display::hex(&key), crate::display::hex(&k));
 	k
 }
 
@@ -115,6 +114,11 @@ impl DbInner {
 				overlay.entry(*c).or_default().insert(*k, (record_id, v.clone()));
 			}
 
+			log::debug!(
+				target: "parity-db",
+				"Queued commit {}",
+				commit.id,
+			);
 			queue.commits.push_back(commit);
 		}
 
@@ -134,7 +138,8 @@ impl DbInner {
 			let mut writer = log.begin_record();
 			log::debug!(
 				target: "parity-db",
-				"Starting commit {}",
+				"Processing commit {}, record {}",
+				commit.id,
 				writer.record_id(),
 			);
 			let mut ops: u64 = 0;
@@ -199,6 +204,11 @@ impl DbInner {
 
 					},
 					LogAction::DropTable(id) => {
+						log::info!(
+							target: "parity-db",
+							"Dropping index {}",
+							id,
+						);
 						columns[id.col() as usize].drop_index(id)?;
 
 					}
@@ -260,7 +270,10 @@ impl Db {
 		let db = Arc::new(DbInner::open(path, columns)?);
 		let worker_db = db.clone();
 		let worker = std::thread::spawn(move ||
-			Self::db_worker(worker_db).map_err(|e| { log::warn!("DB ERROR: {:?}", e); e })
+			Self::db_worker(worker_db).map_err(|e| {
+				log::error!(target: "parity-db", "DB ERROR: {:?}", e);
+				panic!(e)
+			})
 		);
 		db.flush_all_logs()?;
 		Ok(Db {
@@ -298,11 +311,11 @@ impl Db {
 			}
 
 			// Flush log
-			more_work = db.process_commits()?;
-			more_work = more_work || db.enact_logs()?;
-			more_work = more_work || db.process_rebalance()?;
+			let more_commits = db.process_commits()?;
+			let more_rebalance = db.process_rebalance()?;
+			let more_logs = db.enact_logs()?;
+			more_work = more_commits || more_rebalance || more_logs;
 		}
-
 		Ok(())
 	}
 }
@@ -311,12 +324,6 @@ impl Drop for Db {
 	fn drop(&mut self) {
 		self.inner.shutdown();
 		self.balance_thread.take().map(|t| t.join());
-		for (i, c) in self.inner.columns.read().iter().enumerate() {
-			println!("HISTOGRAM Column {}, {} blobs", i, c.blobs.len());
-			for (s, count) in &c.histogram {
-				println!("{}:{}", s, count);
-			}
-		}
 	}
 }
 

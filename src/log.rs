@@ -75,6 +75,7 @@ impl<'a> LogReader<'a> {
 				self.file.read_exact(&mut buf[0..8])?;
 				let record_id = u64::from_le_bytes(buf);
 				self.record_id = record_id;
+				//log::trace!(target: "parity-db", "Read record header {}", record_id);
 				Ok(LogAction::BeginRecord(record_id))
 			},
 			2 => { // InsertIndex
@@ -92,6 +93,7 @@ impl<'a> LogReader<'a> {
 						_ => {},
 					}
 				}
+				//log::trace!(target: "parity-db", "Read log index {}:{}", table, index);
 				Ok(LogAction::InsertIndex(InsertIndexAction { table, index }))
 			},
 			3 => { // InsertValue
@@ -109,14 +111,17 @@ impl<'a> LogReader<'a> {
 						_ => {},
 					}
 				}
+				//log::trace!(target: "parity-db", "Read log value {}:{}", table, index);
 				Ok(LogAction::InsertValue(InsertValueAction { table, index }))
 			},
 			4 => {
+				log::trace!(target: "parity-db", "Read log end");
 				Ok(LogAction::EndRecord)
 			},
 			5 => {
 				self.file.read_exact(&mut buf[0..2])?;
 				let table = IndexTableId::from_u16(u16::from_le_bytes(buf[0..2].try_into().unwrap()));
+				//log::trace!(target: "parity-db", "Read drop table {}", table);
 				Ok(LogAction::DropTable(table))
 			}
 			_ => Err(Error::Corruption("Bad log entry type".into()))
@@ -155,6 +160,7 @@ impl LogChange {
 
 		for (id, overlay) in self.local_index.iter() {
 			for (index, (_, chunk)) in overlay.map.iter() {
+				//log::trace!(target: "parity-db", "Finalizing log index {}:{}", id, index);
 				file.write(&2u8.to_le_bytes().as_ref())?;
 				file.write(&id.as_u16().to_le_bytes())?;
 				file.write(&index.to_le_bytes())?;
@@ -163,6 +169,7 @@ impl LogChange {
 		}
 		for (id, overlay) in self.local_values.iter() {
 			for (index, (_, value)) in overlay.map.iter() {
+				//log::trace!(target: "parity-db", "Finalizing log value {}:{} ({} bytes)", id, index, value.len());
 				file.write(&3u8.to_le_bytes().as_ref())?;
 				file.write(&id.as_u16().to_le_bytes())?;
 				file.write(&index.to_le_bytes())?;
@@ -170,6 +177,7 @@ impl LogChange {
 			}
 		}
 		for id in self.dropped_tables.iter() {
+			log::debug!(target: "parity-db", "Finalizing drop {}", id);
 			file.write(&5u8.to_le_bytes().as_ref())?;
 			file.write(&id.as_u16().to_le_bytes())?;
 		}
@@ -225,22 +233,6 @@ impl<'a> LogWriter<'a> {
 			.or_else(|| self.value_overlays.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_ref())))
 	}
 
-	pub fn note_last_removed(&mut self, table: ValueTableId, index: u64) {
-		self.log.local_values.entry(table).or_default().last_removed = Some(index);
-	}
-
-	pub fn note_filled(&mut self, table: ValueTableId, index: u64) {
-		self.log.local_values.entry(table).or_default().filled = Some(index);
-	}
-
-	pub fn last_removed(&self, table: ValueTableId) -> Option<u64> {
-		self.log.local_values.get(&table).and_then(|o| o.last_removed.clone())
-	}
-
-	pub fn filled(&self, table: ValueTableId) -> Option<u64> {
-		self.log.local_values.get(&table).and_then(|o| o.filled.clone())
-	}
-
 	pub fn drain(self) -> LogChange {
 		self.log
 	}
@@ -252,12 +244,9 @@ pub struct IndexLogOverlay {
 }
 
 
-// TODO: use different structs for local and global overlay
 #[derive(Default)]
 pub struct ValueLogOverlay {
 	map: HashMap<u64, (u64, Vec<u8>)>, // index -> (record_id, entry)
-	last_removed: Option<u64>,
-	filled: Option<u64>,
 }
 
 pub struct Log {
@@ -323,12 +312,11 @@ impl Log {
 			self.record_id
 		);
 		self.record_id += 1;
-		self.appending_empty = false;
-		self.dirty = true;
 		writer
 	}
 
 	pub fn end_record(&mut self, log: LogChange) -> Result<()> {
+		log::trace!(target: "parity-db", "Finalizing log record {}", log.record_id);
 		assert!(log.record_id + 1 == self.record_id);
 		let (index, values) = log.to_file(&mut self.appending)?;
 		for (id, overlay) in index.into_iter() {
@@ -337,11 +325,14 @@ impl Log {
 		for (id, overlay) in values.into_iter() {
 			self.value_overlays.entry(id).or_default().map.extend(overlay.map.into_iter());
 		}
+		self.appending_empty = false;
+		self.dirty = true;
 		Ok(())
 	}
 
 	pub fn flush_one<'a>(&'a mut self) -> Result<Option<LogReader<'a>>> {
 		if !self.dirty {
+			log::trace!(target: "parity-db", "No logs to enact");
 			return Ok(None);
 		}
 		let mut reader = LogReader::new(
@@ -366,6 +357,7 @@ impl Log {
 			Ok(_) => return Err(Error::Corruption("Bad log record structure".into())),
 			Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
 				if self.appending_empty {
+					log::trace!(target: "parity-db", "End of log");
 					self.dirty = false;
 					return Ok(None);
 				}
