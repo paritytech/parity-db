@@ -16,6 +16,7 @@
 
 mod db;
 mod error;
+mod index;
 mod table;
 mod column;
 mod log;

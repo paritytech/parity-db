@@ -18,10 +18,11 @@ use std::sync::Arc;
 use std::collections::{HashMap, VecDeque};
 use parking_lot::{RwLock, Mutex, Condvar};
 use crate::{
-	table::{Key, RebalanceProgress},
+	table::Key,
 	error::{Error, Result},
 	column::{ColId, Column},
-	log::{Log, LogAction}
+	log::{Log, LogAction},
+	index::RebalanceProgress,
 };
 
 pub type Value = Vec<u8>;
@@ -75,13 +76,13 @@ impl DbInner {
 		})
 	}
 
-	pub fn get(&self, col: ColId, key: &[u8]) -> Option<Value> {
+	pub fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
 		let columns = self.columns.read();
 		let log = self.log.read();
 		let overlay = self.commit_overlay.read();
 		let key = hash(key);
 		if let Some(v) = overlay.get(&col).and_then(|o| o.get(&key).map(|(_, v)| v.clone())) {
-			return v;
+			return Ok(v);
 		}
 		columns[col as usize].get(&key, &log)
 	}
@@ -130,18 +131,20 @@ impl DbInner {
 		if let Some(commit) = commit {
 			let mut columns = self.columns.write();
 			let mut log = self.log.write();
-			let mut log = log.begin_record()?;
+			let mut writer = log.begin_record();
 			log::debug!(
 				target: "parity-db",
 				"Starting commit {}",
-				log.record_id(),
+				writer.record_id(),
 			);
 			let mut ops: u64 = 0;
 			for (c, key, value) in commit.changeset.iter() {
-				columns[*c as usize].write_plan(key, value, &mut log)?;
+				columns[*c as usize].write_plan(key, value, &mut writer)?;
 				ops += 1;
 			}
-			log.end_record()?;
+			let record_id = writer.record_id();
+			let l = writer.drain();
+			log.end_record(l)?;
 
 			{
 				let mut overlay = self.commit_overlay.write();
@@ -159,7 +162,7 @@ impl DbInner {
 			log::debug!(
 				target: "parity-db",
 				"Processed commit {}, {} ops",
-				log.record_id(),
+				record_id,
 				ops,
 			);
 			Ok(true)
@@ -185,15 +188,24 @@ impl DbInner {
 					LogAction::EndRecord => {
 						break;
 					},
-					LogAction::Insert(insertion) => {
-						columns[insertion.table.col() as usize].enact_plan(insertion.table, insertion.index, &mut reader)?;
+					LogAction::InsertIndex(insertion) => {
+						columns[insertion.table.col() as usize]
+							.enact_plan(LogAction::InsertIndex(insertion), &mut reader)?;
+
+					},
+					LogAction::InsertValue(insertion) => {
+						columns[insertion.table.col() as usize]
+							.enact_plan(LogAction::InsertValue(insertion), &mut reader)?;
 
 					},
 					LogAction::DropTable(id) => {
-						columns[id.col() as usize].drop_table(id)?;
+						columns[id.col() as usize].drop_index(id)?;
 
 					}
 				}
+			}
+			for c in columns.iter_mut() {
+				c.complete_plan()?;
 			}
 			log::debug!(
 				target: "parity-db",
@@ -258,7 +270,7 @@ impl Db {
 	}
 
 	pub fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
-		Ok(self.inner.get(col, key))
+		self.inner.get(col, key)
 	}
 
 	pub fn commit<I, K>(&self, tx: I) -> Result<()>

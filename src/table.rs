@@ -15,6 +15,8 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::convert::TryInto;
+use std::os::unix::fs::FileExt;
+use std::mem::MaybeUninit;
 use crate::{
 	error::Result,
 	column::ColId,
@@ -23,459 +25,301 @@ use crate::{
 };
 
 pub const KEY_LEN: usize = 32;
+const MAX_ENTRY_SIZE: usize = 65534;
 
-const MAX_AHEAD: usize = 32;
-const META_SIZE: isize = 8 * 1024; // typical SSD page size
-const EMPTY: Key = [0u8; KEY_LEN];
-const MAX_REBALANCE_BATCH: u32 = 65536;
+const OFFSET_BITS: u8 = 40;
+const OFFSET_MASK: u64 = (1u64 << (OFFSET_BITS + 1)) - 1;
+const TOMBSTONE: &[u8] = &[0xff, 0xff];
 
 pub type Key = [u8; KEY_LEN];
 pub type Value = Vec<u8>;
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
-pub struct TableId(u32);
+pub struct TableId(u16);
 
 impl TableId {
-	pub fn new(col: ColId, entry_size: u16, index_bits: u8) -> TableId {
-		TableId(((col as u32) << 24) | ((entry_size as u32) << 8) | index_bits as u32)
+	pub fn new(col: ColId, size_tier: u8) -> TableId {
+		TableId(((col as u16) << 8) | size_tier as u16)
 	}
 
-	pub fn from_u32(id: u32) -> TableId {
+	pub fn from_u16(id: u16) -> TableId {
 		TableId(id)
 	}
 
 	pub fn col(&self) -> ColId {
-		(self.0 >> 24) as ColId
+		(self.0 >> 8) as ColId
 	}
 
-	pub fn index_bits(&self) -> ColId {
-		(self.0 & 0xff) as ColId
-	}
-
-	pub fn entry_size(&self) -> u16 {
-		((self.0 >> 8) & 0xffff) as u16
+	pub fn size_tier(&self) -> u8 {
+		(self.0 & 0xff) as u8
 	}
 
 	pub fn file_name(&self) -> String {
-		format!("c{:02}_{}_{}", self.col(), self.index_bits(), self.entry_size())
+		format!("table_{:02}_{}", self.col(), self.size_tier())
 	}
 
-	pub fn total_entries(&self) -> u64 {
-		(1u64 << self.index_bits()) + MAX_AHEAD as u64
-	}
-
-	pub fn value_size(&self) -> u16 {
-		self.entry_size() - KEY_LEN as u16 - 2
-	}
-
-	pub fn file_size(&self) -> u64 {
-		self.total_entries() * self.entry_size() as u64 + META_SIZE as u64
-	}
-
-	pub fn as_u32(&self) -> u32 {
+	pub fn as_u16(&self) -> u16 {
 		self.0
 	}
 }
 
 impl std::fmt::Display for TableId {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "c{:02}_{}_{}", self.col(), self.index_bits(), self.entry_size())
+		write!(f, "table {:02}_{}", self.col(), self.size_tier())
 	}
 }
 
-pub enum RebalanceProgress {
-	InProgress((u64, u64)),
-	Inactive,
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+pub struct Address(u64);
+
+impl Address {
+	pub fn new(offset: u64, size_tier: u8) -> Address {
+		Address(((size_tier as u64) << 4) | offset)
+	}
+
+	pub fn from_u64(a: u64) -> Address {
+		Address(a)
+	}
+
+	pub fn offset(&self) -> u64 {
+		self.0 & OFFSET_MASK
+	}
+
+	pub fn size_tier(&self) -> u8 {
+		(self.0 & 0xff) as u8
+	}
+
+	pub fn as_u64(&self) -> u64 {
+		self.0
+	}
 }
 
-pub enum PlanOutcome {
-	Written,
-	NeedRebalance,
-	Skipped,
+impl std::fmt::Display for Address {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "addr {:02}:{}", self.size_tier(), self.offset())
+	}
 }
 
-pub struct Table {
+pub struct ValueTable {
 	pub id: TableId,
-	map: Option<memmap::MmapMut>,
-	path: std::path::PathBuf,
-	entries: std::sync::atomic::AtomicU64,
+	pub entry_size: u16,
+	file: std::fs::File,
+	capacity: u64,
+	filled: u64,
+	last_removed: u64,
 }
 
-impl Table {
-	pub fn open_existing(path: &std::path::Path, id: TableId) -> Result<Option<Table>> {
+impl ValueTable {
+	pub fn open(path: &std::path::Path, id: TableId, entry_size: u16) -> Result<ValueTable> {
+		assert!(entry_size >= 64);
+		assert!(entry_size <= MAX_ENTRY_SIZE as u16);
+		// TODO: posix_fadvise
 		let mut path: std::path::PathBuf = path.into();
 		path.push(id.file_name());
 
-		let file = match std::fs::OpenOptions::new().read(true).write(true).open(path.as_path()) {
-			Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-				return Ok(None);
-			}
-			Err(e) => return Err(e.into()),
-			Ok(file) => file,
-		};
+		let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?;
+		let mut file_len = file.metadata()?.len();
+		if file_len == 0 {
+			// Prealocate a single entry that also
+			file.set_len(entry_size as u64)?;
+			file_len = entry_size as u64;
+		}
 
-		file.set_len(id.file_size())?;
-		let map = unsafe { memmap::MmapMut::map_mut(&file)? };
-		log::debug!(target: "parity-db", "Opened existing table {}", id);
-		Ok(Some(Table {
-			id,
-			path,
-			map: Some(map),
-			entries: std::sync::atomic::AtomicU64::new(0),
-		}))
-	}
+		let capacity = file_len / entry_size as u64;
 
-	pub fn create_new(path: &std::path::Path, id: TableId) -> Result<Table> {
-		let mut path: std::path::PathBuf = path.into();
-		path.push(id.file_name());
-		Ok(Table {
+		let mut header: [u8; 16] = Default::default();
+		file.read_exact_at(&mut header, 0)?;
+		let last_removed = u64::from_le_bytes(header[0..8].try_into().unwrap());
+		let mut filled = u64::from_le_bytes(header[8..16].try_into().unwrap());
+		if filled == 0 {
+			filled = 1;
+		}
+		log::debug!(target: "parity-db", "Opened value table {} with {} entries", id, filled);
+		Ok(ValueTable {
 			id,
-			path,
-			map: None,
-			entries: std::sync::atomic::AtomicU64::new(0),
+			entry_size,
+			file,
+			capacity,
+			filled,
+			last_removed,
 		})
 	}
 
-	fn open_map(&mut self) -> Result<()> {
-		if self.map.is_some() {
-			return Ok(());
-		}
-		let file = std::fs::OpenOptions::new().write(true).read(true).create_new(true).open(self.path.as_path())?;
-		log::debug!(target: "parity-db", "Created new table {}", self.id);
-		//TODO: check for potential overflows on 32-bit platforms
-		file.set_len(self.id.file_size())?;
-		self.map = Some(unsafe { memmap::MmapMut::map_mut(&file)? });
+	pub fn value_size(&self) -> u16 {
+		self.entry_size - KEY_LEN as u16
+	}
+
+	fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
+		Ok(self.file.read_exact_at(buf, offset)?)
+	}
+
+	fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
+		Ok(self.file.write_all_at(buf, offset)?)
+	}
+
+	fn grow(&mut self) -> Result<()> {
+		self.capacity += 65536;
+		self.file.set_len(self.capacity * self.entry_size as u64)?;
 		Ok(())
 	}
 
-	fn key_at(&self, index: u64) -> Key {
-		match &self.map {
-			Some(ref map) => {
-				let offset = META_SIZE + index as isize * self.id.entry_size() as isize;
-				let key = unsafe { *((map.as_ptr().offset(offset)) as *const Key) };
-				key
-			}
-			None => EMPTY,
+	pub fn get_from_buf(&self, key: &Key, buf: &[u8], index: u64) -> Option<Value> {
+		if &buf[0..2] == TOMBSTONE {
+			return None;
 		}
-	}
-
-	fn value_at(&self, index: u64) -> &[u8] {
-		match &self.map {
-			Some(ref map) => {
-				unsafe {
-					let mut ptr = map.as_ptr();
-					let offset = META_SIZE + index as isize * self.id.entry_size() as isize + KEY_LEN as isize;
-					ptr = ptr.offset(offset);
-					let len = u16::from_le(std::ptr::read(ptr as *const u16));
-					ptr = ptr.offset(2);
-					std::slice::from_raw_parts(ptr, len as usize)
-				}
-			},
-			None => &[],
+		let size: u16 = u16::from_le_bytes(buf[0..2].try_into().unwrap());
+		if key[2..] != buf[2..32] {
+			log::warn!(
+				target: "parity-db",
+				"{}: Key mismatch at {}. Expected {}, got {}",
+				self.id,
+				index,
+				hex(&key[2..]),
+				hex(&buf[0..30]),
+			);
+			return None;
 		}
+		Some(buf[32..32 + size as usize].to_vec())
 	}
 
-	fn key_index(&self, key: &Key) -> u64 {
-		//Interpret first 64 bits of the key as LE integer
-		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
-		key >> (64 - self.id.index_bits())
-	}
-
-	pub fn get(&self, key: &Key, log: &Log) -> Option<Value> {
-		let mut index = self.key_index(key);
-		for _ in 0 .. MAX_AHEAD {
-			let target_key = self.logged_key(index, log);
-			if target_key == EMPTY {
-				return None;
-			}
-			match target_key.cmp(key) {
-				std::cmp::Ordering::Less => (),
-				std::cmp::Ordering::Greater => {
-					return None;
-				},
-				std::cmp::Ordering::Equal => return Some(self.logged_value(index, log).to_vec()),
-			}
-			index += 1;
+	pub fn get(&self, key: &Key, index: u64, log: &Log) -> Result<Option<Value>> {
+		if let Some(val) = log.value_overlay_at(self.id, index) {
+			return Ok(self.get_from_buf(key, val, index));
 		}
-		None
+		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
+		self.read_at(&mut buf, index * self.entry_size as u64)?;
+		Ok(self.get_from_buf(key, &buf, index))
 	}
 
-	fn planned_value<'a>(&'a self, index: u64, log: &'a LogWriter) -> &'a[u8] {
-		log.overlay_at(self.id, index)
-			.map(|buf| &buf[KEY_LEN+2..])
-			.unwrap_or_else(|| self.value_at(index))
-
+	pub fn has_key_at(&self, index: u64, key: &Key, log: &LogWriter) -> Result<bool> {
+		if let Some(val) = log.value_overlay_at(self.id, index) {
+			return Ok(val.len() > 32 && val[2..32] == key[2..32]);
+		}
+		let mut buf: [u8; 32] = unsafe { MaybeUninit::uninit().assume_init() };
+		self.read_at(&mut buf, index * self.entry_size as u64)?;
+		Ok(&buf[0..2] != TOMBSTONE && buf[2..32] == key[2..32])
 	}
 
-	fn planned_key(&self, index: u64, log: &LogWriter) -> Key {
-		log.overlay_at(self.id, index)
-			.map(|buf| buf[..KEY_LEN].try_into().unwrap())
-			.unwrap_or_else(|| self.key_at(index))
+	pub fn partial_key_at(&self, index: u64, log: &LogWriter) -> Result<Key> {
+		let mut buf = [0u8; 32];
+		if let Some(val) = log.value_overlay_at(self.id, index) {
+			buf[2..].copy_from_slice(&val[2..]);
+		} else {
+			self.read_at(&mut buf[2..], index * self.entry_size as u64 + 2)?;
+		}
+		Ok(buf)
 	}
 
-	fn logged_value<'a>(&'a self, index: u64, log: &'a Log) -> &'a[u8] {
-		log.overlay_at(self.id, index)
-			.map(|buf| &buf[KEY_LEN+2..])
-			.unwrap_or_else(|| self.value_at(index))
-
+	pub fn read_as_empty(&self, index: u64, log: &LogWriter) -> Result<u64> {
+		if let Some(val) = log.value_overlay_at(self.id, index) {
+			let next = u64::from_le_bytes(val[2..10].try_into().unwrap());
+			return Ok(next);
+		}
+		let mut buf: [u8; 10] = unsafe { MaybeUninit::uninit().assume_init() };
+		self.read_at(&mut buf, index * self.entry_size as u64)?;
+		let next = u64::from_le_bytes(buf[2..10].try_into().unwrap());
+		return Ok(next);
 	}
 
-	fn logged_key(&self, index: u64, log: &Log) -> Key {
-		log.overlay_at(self.id, index)
-			.map(|buf| buf[..KEY_LEN].try_into().unwrap())
-			.unwrap_or_else(|| self.key_at(index))
-	}
+	pub fn write_insert_plan(&self, key: &Key, value: &[u8], log: &mut LogWriter) -> Result<u64> {
+		let filled = log.filled(self.id).unwrap_or(self.filled);
+		let last_removed = log.last_removed(self.id).unwrap_or(self.last_removed);
 
-	pub fn write_plan(&self, key: &Key, value: Option<&[u8]>, log: &mut LogWriter, overwrite: bool) -> Result<PlanOutcome> {
-		let plan_insertion = |key: &Key, data: &[u8]| -> Vec<u8>  {
-			let mut buf =Vec::with_capacity(KEY_LEN + 2 + data.len());
-			buf.extend_from_slice(key);
-			if *key != EMPTY {
-				let size: u16 = data.len() as u16;
-				buf.extend_from_slice(&size.to_le_bytes());
-				buf.extend_from_slice(data);
-			}
-			buf
+		let index = if last_removed != 0 {
+			let next_removed = self.read_as_empty(last_removed, log)?;
+			log.note_last_removed(self.id, next_removed);
+			log::trace!(
+				target: "parity-db",
+				"{}: Inserting into removed slot {}: {}",
+				self.id,
+				last_removed,
+				hex(key),
+			);
+			last_removed
+		} else {
+			log.note_filled(self.id, filled + 1);
+			log::trace!(
+				target: "parity-db",
+				"{}: Inserting into new slot {}: {}",
+				self.id,
+				filled + 1,
+				hex(key),
+			);
+			filled + 1
 		};
 
-		match value {
-			Some(v) => {
-				// Find a slot to insert at
-				let start_index = self.key_index(key);
-				for index in start_index .. start_index + MAX_AHEAD as u64 {
-					let target_key = self.planned_key(index, log);
-					if target_key == EMPTY {
-						log::trace!(
-							target: "parity-db",
-							"{}: Inserting into empty slot {}: {}",
-							self.id,
-							index,
-							hex(key),
-						);
-						// Insert new here
-						log.insert(self.id, index, plan_insertion(key, v))?;
-						self.entries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-						return Ok(PlanOutcome::Written);
-					}
-					match target_key.cmp(key) {
-						std::cmp::Ordering::Less => {
-							log::trace!(
-								target: "parity-db",
-								"{}: Moving past {} for insertion, designated {}, occupied with {}",
-								self.id,
-								index,
-								start_index,
-								hex(&target_key),
-							);
-							continue
-						},
-						std::cmp::Ordering::Greater => {
-							// Evict and insert here
-							// Scan ahead for empty space but not too far from start_index.
-							// This guarantess each entry is no further than MAX_AHEAD from its
-							// designated location.
-							let mut relocation_end = index + 1;
-							while relocation_end < start_index + MAX_AHEAD as u64
-								&& self.planned_key(relocation_end, log) != EMPTY
-							{
-								log::trace!(
-									target: "parity-db",
-									"{}: Moving past {} for eviction, designated {}, occupied with {}",
-									self.id,
-									relocation_end,
-									start_index,
-									hex(&self.planned_key(relocation_end, log)),
-								);
-								relocation_end += 1
-							}
-							if relocation_end == start_index + MAX_AHEAD as u64 {
-								// No empty space ahead.
-								log::trace!(
-									target: "parity-db",
-									"{}: No empty spot for eviction, designated {}, inserting {}, checked up to {}: {}",
-									self.id,
-									start_index,
-									index,
-									relocation_end,
-									hex(key),
-								);
-								return Ok(PlanOutcome::NeedRebalance);
-							}
+		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
+		let len = value.len() as u16;
+		buf[0..2].copy_from_slice(&len.to_le_bytes());
+		buf[2..32].copy_from_slice(&key[2..]);
+		buf[32..32+value.len()].copy_from_slice(value);
+		log.insert_value(self.id, index, buf[0..32+value.len()].to_vec());
+		Ok(index)
+	}
 
-							log::trace!(
-								target: "parity-db",
-								"{}: Inserting into occupied slot {}, designated {}: {}",
-								self.id,
-								index,
-								start_index,
-								hex(key),
-							);
-							// Relocate following entries walking backwards
-							for i in (index..relocation_end).rev() {
-								// TODO: 0-copy here
-								let pk = self.planned_key(i, log);
-								let insertion = plan_insertion(&pk, &self.planned_value(i, log));
-								log.insert(self.id, i + 1, insertion)?;
-								log::trace!(
-									target: "parity-db",
-									"{}: Relocating occupied slot {}->{}, designated {}: {}",
-									self.id,
-									i,
-									i + 1,
-									self.key_index(&pk),
-									hex(&pk),
-								);
-							}
+	pub fn write_replace_plan(&self, index: u64, key: &Key, value: &[u8], log: &mut LogWriter) -> Result<()> {
+		log::trace!(
+			target: "parity-db",
+			"{}: Replacing slot {}: {}",
+			self.id,
+			index,
+			hex(key),
+		);
+		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
+		let len = value.len() as u16;
+		buf[0..2].copy_from_slice(&len.to_le_bytes());
+		buf[2..32].copy_from_slice(&key[2..]);
+		buf[32..32+value.len()].copy_from_slice(value);
+		log.insert_value(self.id, index, buf[0..32+value.len()].to_vec());
+		Ok(())
+	}
 
-							log.insert(self.id, index, plan_insertion(key, v))?;
-							self.entries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-							return Ok(PlanOutcome::Written);
-						}
-						std::cmp::Ordering::Equal if overwrite => {
-							// Replace here
-							log::trace!(
-								target: "parity-db",
-								"{}: Replacing {}, designated {}: {}",
-								self.id,
-								index,
-								start_index,
-								hex(key),
-							);
-							log.insert(self.id, index, plan_insertion(key, v))?;
-							return Ok(PlanOutcome::Written);
-						}
-						std::cmp::Ordering::Equal => {
-							return Ok(PlanOutcome::Skipped);
-						}
-					}
-				}
-				// No empty space
-				log::trace!(
-					target: "parity-db",
-					"{}: No empty spot for insertion, designated {}, checked up to {}: {}",
-					self.id,
-					start_index,
-					start_index + MAX_AHEAD as u64,
-					hex(key),
-				);
-				return Ok(PlanOutcome::NeedRebalance);
-			},
-			None =>  {
-				// Delete
-				let start_index = self.key_index(key);
-				for index in start_index .. start_index + MAX_AHEAD as u64 {
-					let target_key = self.planned_key(index, log);
-					if target_key == EMPTY {
-						// Does not exist
-						return Ok(PlanOutcome::Skipped);
-					}
-					match target_key.cmp(key) {
-						std::cmp::Ordering::Less => continue,
-						std::cmp::Ordering::Greater => return Ok(PlanOutcome::Skipped),
-						std::cmp::Ordering::Equal => {
-							log::trace!(
-								target: "parity-db",
-								"{}: Deleting {}, designated {}: {}",
-								self.id,
-								index,
-								start_index,
-								hex(key),
-							);
-							let max_entry = self.id.total_entries();
-							// Deleting here
-							log.insert(self.id, index, plan_insertion(&EMPTY, &[]))?;
-							let mut relocation_end = index + 1;
-							while relocation_end < max_entry {
-								let target_key = self.planned_key(relocation_end, log);
-								if target_key == EMPTY || self.key_index(&target_key) >= relocation_end {
-									break;
-								}
-								relocation_end += 1;
-							}
-							self.entries.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-							// Relocate following entries
-							for i in (index + 1)..relocation_end {
-								let insertion = {
-									let k = self.planned_key(i, log);
-									let v = self.planned_value(i, log);
-									log::trace!(
-										target: "parity-db",
-										"{}: Relocating freed slot {}->{}, designated {}: {}",
-										self.id,
-										i,
-										i - 1,
-										self.key_index(&k),
-										hex(&k),
-									);
-									plan_insertion(&k, v)
-								};
-								log.insert(self.id, i - 1, insertion)?;
-							}
-							log.insert(self.id, relocation_end - 1, plan_insertion(&EMPTY, &[]))?;
-							return Ok(PlanOutcome::Written);
-						}
-					}
-				}
-				return Ok(PlanOutcome::Skipped);
-			}
-		}
+	pub fn write_remove_plan(&self, index: u64, log: &mut LogWriter) -> Result<()> {
+		let last_removed = log.last_removed(self.id).unwrap_or(self.last_removed);
+
+		log::trace!(
+			target: "parity-db",
+			"{}: Freeing slot {}",
+			self.id,
+			index,
+		);
+		let mut buf = [0u8; 10];
+		&buf[0..2].copy_from_slice(TOMBSTONE);
+		&buf[2..10].copy_from_slice(&last_removed.to_le_bytes());
+
+		log.insert_value(self.id, index, buf.to_vec());
+		log.note_last_removed(self.id, index);
+		Ok(())
 	}
 
 	pub fn enact_plan(&mut self, index: u64, log: &mut LogReader) -> Result<()> {
-		self.open_map()?;
-		let mut offset = META_SIZE as isize + (index * self.id.entry_size() as u64) as isize;
-		let mut key = Key::default();
-		log.read(&mut key)?;
-		let map= self.map.as_mut().unwrap();
-		let map_ptr = map.as_mut_ptr();
-		unsafe {
-			std::ptr::copy_nonoverlapping(key.as_ptr(), map_ptr.offset(offset), KEY_LEN);
-			if key != EMPTY {
-				offset += KEY_LEN as isize;
-				let mut s = [0u8; 2];
-				log.read(&mut s)?;
-				let size = u16::from_le_bytes(s);
-				std::ptr::copy_nonoverlapping(s.as_ptr(), map_ptr.offset(offset), 2);
-				offset += 2;
-				log.read(&mut map[offset as usize..(offset as usize + size as usize)])?;
+		while index > self.capacity {
+			self.grow()?;
+		}
+
+		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
+		log.read(&mut buf[0..2])?;
+		if &buf[0..2] == TOMBSTONE {
+			log.read(&mut buf[2..10])?;
+			self.write_at(&buf, index)?;
+			self.last_removed = index;
+		} else {
+			let len: u16 = u16::from_le_bytes(buf[0..2].try_into().unwrap());
+			log.read(&mut buf[2..30+len as usize])?;
+			self.write_at(&buf, index)?;
+			if index > self.filled {
+				self.filled = index;
 			}
 		}
 		log::trace!(target: "parity-db", "{}: Enacted {}", self.id, index);
 		Ok(())
 	}
 
-	pub fn rebalance_from(&mut self, source: &Table, start_index: u64, log: &mut LogWriter) -> Result<u64> {
-		let mut source_index = start_index;
-		let mut count = 0;
-		log::trace!(target: "parity-db", "{}: Starting rebalance at {}", self.id, source_index);
-		while source_index < source.id.total_entries() && count < MAX_REBALANCE_BATCH {
-			let source_key = source.planned_key(source_index, log);
-			if source_key != EMPTY {
-				// TODO: remove allocation here
-				// Alternatively make sure record that triggered rebalance is flushed before doing rebalance
-				let v = source.planned_value(source_index, log).to_vec();
-				match self.write_plan(&source_key, Some(&v), log, false)? {
-					PlanOutcome::NeedRebalance => panic!("Table requires double rebalance"),
-					_ => {},
-				}
-				count += 1;
-			}
-			source_index += 1;
-		}
-		log::trace!(target: "parity-db", "{}: End rebalance batch {} ({})", self.id, source_index, count);
-		Ok(source_index)
-	}
-
-	pub fn entries(&self) -> u64 {
-		self.entries.load(std::sync::atomic::Ordering::Relaxed)
-	}
-
-	pub fn drop(self, path: &std::path::Path) -> Result<()> {
-		let mut path: std::path::PathBuf = path.into();
-		path.push(self.id.file_name());
-		std::mem::drop(self.map);
-		std::fs::remove_file(path.as_path())?;
-		log::debug!(target: "parity-db", "{}: Dropped table", self.id);
+	pub fn complete_plan(&mut self) -> Result<()> {
+		let mut buf = [0u8; 16];
+		buf[0..8].copy_from_slice(&self.last_removed.to_le_bytes());
+		buf[8..16].copy_from_slice(&self.filled.to_le_bytes());
+		self.write_at(&buf, 0)?;
 		Ok(())
 	}
 }
