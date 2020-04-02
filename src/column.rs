@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use crate::{
 	error::{Error, Result},
 	table::{TableId as ValueTableId, ValueTable, Key, Value, Address},
@@ -40,8 +40,7 @@ pub struct Column {
 	rebalancing: VecDeque<IndexTable>,
 	rebalance_progress: u64,
 	path: std::path::PathBuf,
-	value_tables: [ValueTable; 15],
-	blobs: HashMap<Key, Value>,
+	value_tables: [ValueTable; 16],
 }
 
 impl Column {
@@ -56,7 +55,7 @@ impl Column {
 				return self.get_entry_value(key, entry, log);
 			}
 		}
-		Ok(self.blobs.get(key).cloned())
+		Ok(None)
 	}
 
 	fn get_entry_value(&self, key: &Key, entry: IndexEntry, log: &Log) -> Result<Option<Value>> {
@@ -71,23 +70,23 @@ impl Column {
 			rebalancing,
 			rebalance_progress: 0,
 			value_tables: [
-				Self::open_table(path, col, 0, 64)?,
-				Self::open_table(path, col, 1, 96)?,
-				Self::open_table(path, col, 2, 128)?,
-				Self::open_table(path, col, 3, 192)?,
-				Self::open_table(path, col, 4, 256)?,
-				Self::open_table(path, col, 5, 320)?,
-				Self::open_table(path, col, 6, 512)?,
-				Self::open_table(path, col, 7, 768)?,
-				Self::open_table(path, col, 8, 1024)?,
-				Self::open_table(path, col, 9, 1536)?,
-				Self::open_table(path, col, 10, 2048)?,
-				Self::open_table(path, col, 11, 3072)?,
-				Self::open_table(path, col, 12, 4096)?,
-				Self::open_table(path, col, 13, 8192)?,
-				Self::open_table(path, col, 14, 16384)?,
+				Self::open_table(path, col, 0, Some(96))?,
+				Self::open_table(path, col, 1, Some(128))?,
+				Self::open_table(path, col, 2, Some(192))?,
+				Self::open_table(path, col, 3, Some(256))?,
+				Self::open_table(path, col, 4, Some(320))?,
+				Self::open_table(path, col, 5, Some(512))?,
+				Self::open_table(path, col, 6, Some(768))?,
+				Self::open_table(path, col, 7, Some(1024))?,
+				Self::open_table(path, col, 8, Some(1536))?,
+				Self::open_table(path, col, 9, Some(2048))?,
+				Self::open_table(path, col, 10, Some(3072))?,
+				Self::open_table(path, col, 11, Some(4096))?,
+				Self::open_table(path, col, 12, Some(8192))?,
+				Self::open_table(path, col, 13, Some(16384))?,
+				Self::open_table(path, col, 14, Some(32768))?,
+				Self::open_table(path, col, 15, None)?,
 			],
-			blobs: HashMap::new(),
 			path: path.into(),
 		})
 	}
@@ -112,7 +111,7 @@ impl Column {
 		Ok((table, rebalancing))
 	}
 
-	fn open_table(path: &std::path::Path, col: ColId, tier: u8, entry_size: u16) -> Result<ValueTable> {
+	fn open_table(path: &std::path::Path, col: ColId, tier: u8, entry_size: Option<u16>) -> Result<ValueTable> {
 		let id = ValueTableId::new(col, tier);
 		ValueTable::open(path, id, entry_size)
 	}
@@ -142,9 +141,8 @@ impl Column {
 			let target_tier = match target_tier {
 				Some(tier) => tier as usize,
 				None => {
-					log::debug!(target: "parity-db", "Inserted blob {}", hex(key));
-					self.blobs.insert(*key, val.clone());
-					return Ok(());
+					log::trace!(target: "parity-db", "Inserted blob {}", hex(key));
+					15
 				}
 			};
 
@@ -170,7 +168,7 @@ impl Column {
 						"{}: Index chunk conflict {} vs {}",
 						self.index.id,
 						hex(key),
-						hex(&self.value_tables[existing_tier].partial_key_at(existing_address.offset(), log).unwrap()),
+						hex(&self.value_tables[existing_tier].partial_key_at(existing_address.offset(), log).unwrap().unwrap()),
 					);
 					self.trigger_rebalance();
 					return self.write_plan(key, value, log);
@@ -200,7 +198,6 @@ impl Column {
 					self.index.write_remove_plan(key, log)?;
 				}
 			}
-			self.blobs.remove(key);
 		}
 		Ok(())
 	}
@@ -254,7 +251,8 @@ impl Column {
 							continue;
 						}
 						let mut key = self.value_tables[entry.address().size_tier() as usize]
-							.partial_key_at(entry.address().offset(), &mut writer)?;
+							.partial_key_at(entry.address().offset(), &mut writer)?
+							.ok_or_else(|| Error::Corruption("Bad value table key".into()))?;
 						// restore 16 high bits
 						&mut key[0..2].copy_from_slice(&((source_index >> shift_key_bits) as u16).to_be_bytes());
 						log::trace!(target: "parity-db", "{}: Reinserting {}", source.id, hex(&key));
