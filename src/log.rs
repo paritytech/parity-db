@@ -17,6 +17,8 @@
 use std::collections::HashMap;
 use std::io::{Read, Write, Seek};
 use std::convert::TryInto;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::{
 	error::{Error, Result},
 	table::TableId as ValueTableId,
@@ -41,11 +43,32 @@ pub enum LogAction {
 	EndRecord, // TODO: crc32
 }
 
+#[derive(Default)]
+pub struct LogOverlays {
+	index: HashMap<IndexTableId, IndexLogOverlay>,
+	value: HashMap<ValueTableId, ValueLogOverlay>,
+}
+
+impl LogOverlays {
+	pub fn index(&self, table: IndexTableId, index: u64) -> Option<&IndexChunk> {
+		self.index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data))
+	}
+
+	pub fn value(&self, table: ValueTableId, index: u64) -> Option<&[u8]> {
+		self.value.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_ref()))
+	}
+}
+
+#[derive(Default)]
+pub struct Cleared {
+	index: Vec<(IndexTableId, u64)>,
+	values: Vec<(ValueTableId, u64)>,
+}
+
 pub struct LogReader<'a> {
-	file: &'a mut std::io::BufReader<std::fs::File>,
-	index_overlays: &'a mut HashMap<IndexTableId, IndexLogOverlay>,
-	value_overlays: &'a mut HashMap<ValueTableId, ValueLogOverlay>,
+	file: RwLockWriteGuard<'a, std::io::BufReader<std::fs::File>>,
 	record_id: u64,
+	cleared: Cleared,
 }
 
 impl<'a> LogReader<'a> {
@@ -54,15 +77,12 @@ impl<'a> LogReader<'a> {
 	}
 
 	fn new(
-		file: &'a mut std::io::BufReader<std::fs::File>,
-		index_overlays: &'a mut HashMap<IndexTableId, IndexLogOverlay>,
-		value_overlays: &'a mut HashMap<ValueTableId, ValueLogOverlay>,
+		file: RwLockWriteGuard<'a, std::io::BufReader<std::fs::File>>,
 		record_id: u64,
 	) -> LogReader<'a> {
 		LogReader {
+			cleared: Default::default(),
 			file,
-			index_overlays,
-			value_overlays,
 			record_id,
 		}
 	}
@@ -83,17 +103,8 @@ impl<'a> LogReader<'a> {
 				let table = IndexTableId::from_u16(u16::from_le_bytes(buf[0..2].try_into().unwrap()));
 				self.file.read_exact(&mut buf[0..8])?;
 				let index = u64::from_le_bytes(buf);
-				if let Some(ref mut overlay) = self.index_overlays.get_mut(&table) {
-					match overlay.map.entry(index) {
-						std::collections::hash_map::Entry::Occupied(e) => {
-							if e.get().0 == self.record_id {
-								e.remove_entry();
-							}
-						}
-						_ => {},
-					}
-				}
 				//log::trace!(target: "parity-db", "Read log index {}:{}", table, index);
+				self.cleared.index.push((table, index));
 				Ok(LogAction::InsertIndex(InsertIndexAction { table, index }))
 			},
 			3 => { // InsertValue
@@ -101,16 +112,7 @@ impl<'a> LogReader<'a> {
 				let table = ValueTableId::from_u16(u16::from_le_bytes(buf[0..2].try_into().unwrap()));
 				self.file.read_exact(&mut buf[0..8])?;
 				let index = u64::from_le_bytes(buf);
-				if let Some(ref mut overlay) = self.value_overlays.get_mut(&table) {
-					match overlay.map.entry(index) {
-						std::collections::hash_map::Entry::Occupied(e) => {
-							if e.get().0 == self.record_id {
-								e.remove_entry();
-							}
-						}
-						_ => {},
-					}
-				}
+				self.cleared.values.push((table, index));
 				//log::trace!(target: "parity-db", "Read log value {}:{}", table, index);
 				Ok(LogAction::InsertValue(InsertValueAction { table, index }))
 			},
@@ -130,6 +132,10 @@ impl<'a> LogReader<'a> {
 
 	pub fn read(&mut self, buf: &mut [u8]) -> Result<()> {
 		Ok(self.file.read_exact(buf)?)
+	}
+
+	pub fn drain(self) -> Cleared {
+		self.cleared
 	}
 }
 
@@ -189,20 +195,17 @@ impl LogChange {
 }
 
 pub struct LogWriter<'a> {
-	index_overlays: &'a HashMap<IndexTableId, IndexLogOverlay>,
-	value_overlays: &'a HashMap<ValueTableId, ValueLogOverlay>,
+	overlays: RwLockReadGuard<'a, LogOverlays>,
 	log: LogChange,
 }
 
 impl<'a> LogWriter<'a> {
 	fn new(
-		index_overlays: &'a HashMap<IndexTableId, IndexLogOverlay>,
-		value_overlays: &'a HashMap<ValueTableId, ValueLogOverlay>,
+		overlays: RwLockReadGuard<'a, LogOverlays>,
 		record_id: u64,
 	) -> LogWriter<'a> {
 		LogWriter {
-			index_overlays,
-			value_overlays,
+			overlays,
 			log: LogChange::new(record_id),
 		}
 	}
@@ -225,12 +228,12 @@ impl<'a> LogWriter<'a> {
 
 	pub fn index_overlay_at(&self, table: IndexTableId, index: u64) -> Option<&IndexChunk> {
 		self.log.local_index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data))
-			.or_else(|| self.index_overlays.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data)))
+			.or_else(|| self.overlays.index(table, index))
 	}
 
 	pub fn value_overlay_at(&self, table: ValueTableId, index: u64) -> Option<&[u8]> {
 		self.log.local_values.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_ref()))
-			.or_else(|| self.value_overlays.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_ref())))
+			.or_else(|| self.overlays.value(table, index))
 	}
 
 	pub fn drain(self) -> LogChange {
@@ -240,23 +243,26 @@ impl<'a> LogWriter<'a> {
 
 #[derive(Default)]
 pub struct IndexLogOverlay {
-	map: HashMap<u64, (u64, IndexChunk)>, // index -> (record_id, entry)
+	pub map: HashMap<u64, (u64, IndexChunk)>, // index -> (record_id, entry)
 }
 
 
 #[derive(Default)]
 pub struct ValueLogOverlay {
-	map: HashMap<u64, (u64, Vec<u8>)>, // index -> (record_id, entry)
+	pub map: HashMap<u64, (u64, Vec<u8>)>, // index -> (record_id, entry)
+}
+
+struct Appending {
+	file: std::io::BufWriter<std::fs::File>,
+	empty: bool,
 }
 
 pub struct Log {
-	index_overlays: HashMap<IndexTableId, IndexLogOverlay>,
-	value_overlays: HashMap<ValueTableId, ValueLogOverlay>,
-	appending: std::io::BufWriter<std::fs::File>,
-	flushing: std::io::BufReader<std::fs::File>,
-	record_id: u64,
-	appending_empty: bool,
-	dirty: bool,
+	overlays: RwLock<LogOverlays>,
+	appending: RwLock<Appending>,
+	flushing: RwLock<std::io::BufReader<std::fs::File>>,
+	record_id: AtomicU64,
+	dirty: AtomicBool,
 }
 
 impl Log {
@@ -279,13 +285,14 @@ impl Log {
 		appending.seek(std::io::SeekFrom::End(0))?;
 
 		Ok(Log {
-			index_overlays: HashMap::new(),
-			value_overlays: HashMap::new(),
-			appending: std::io::BufWriter::new(appending),
-			flushing: std::io::BufReader::new(flushing),
-			record_id,
-			appending_empty: false,
-			dirty: true,
+			overlays: Default::default(),
+			appending: RwLock::new(Appending {
+				file: std::io::BufWriter::new(appending),
+				empty: false,
+			}),
+			flushing: RwLock::new(std::io::BufReader::new(flushing)),
+			record_id: AtomicU64::new(record_id),
+			dirty: AtomicBool::new(true),
 		})
 	}
 
@@ -302,77 +309,100 @@ impl Log {
 		Ok((file, Some(id)))
 	}
 
-	pub fn begin_record<'a>(&'a mut self) -> LogWriter<'a> {
-		if self.record_id == 0 {
-			panic!("Still flushing");
+	pub fn begin_record<'a>(&'a self) -> LogWriter<'a> {
+		let id = self.record_id.fetch_add(1, Ordering::AcqRel);
+		if id == 0 {
+			panic!("Not initalized.");
 		}
 		let writer = LogWriter::new(
-			&self.index_overlays,
-			&self.value_overlays,
-			self.record_id
+			self.overlays.read(),
+			id
 		);
-		self.record_id += 1;
 		writer
 	}
 
-	pub fn end_record(&mut self, log: LogChange) -> Result<()> {
+	pub fn end_record(&self, log: LogChange) -> Result<()> {
 		log::trace!(target: "parity-db", "Finalizing log record {}", log.record_id);
-		assert!(log.record_id + 1 == self.record_id);
-		let (index, values) = log.to_file(&mut self.appending)?;
+		assert!(log.record_id + 1 == self.record_id.load(Ordering::Acquire));
+		let mut appending = self.appending.write();
+		let (index, values) = log.to_file(&mut appending.file)?;
+		let mut overlays = self.overlays.write();
 		for (id, overlay) in index.into_iter() {
-			self.index_overlays.entry(id).or_default().map.extend(overlay.map.into_iter());
+			overlays.index.entry(id).or_default().map.extend(overlay.map.into_iter());
 		}
 		for (id, overlay) in values.into_iter() {
-			self.value_overlays.entry(id).or_default().map.extend(overlay.map.into_iter());
+			overlays.value.entry(id).or_default().map.extend(overlay.map.into_iter());
 		}
-		self.appending_empty = false;
-		self.dirty = true;
+		appending.empty = false;
+		self.dirty.store(true, Ordering::Relaxed);
 		Ok(())
 	}
 
-	pub fn flush_one<'a>(&'a mut self) -> Result<Option<LogReader<'a>>> {
-		if !self.dirty {
+	pub fn end_read(&self, cleared: Cleared, record_id: u64) {
+		let mut overlays = self.overlays.write();
+		for (table, index) in cleared.index.into_iter() {
+			if let Some(ref mut overlay) = overlays.index.get_mut(&table) {
+				match overlay.map.entry(index) {
+					std::collections::hash_map::Entry::Occupied(e) => {
+						if e.get().0 == record_id {
+							e.remove_entry();
+						}
+					}
+					_ => {},
+				}
+			}
+		}
+		for (table, index) in cleared.values.into_iter() {
+			if let Some(ref mut overlay) = overlays.value.get_mut(&table) {
+				match overlay.map.entry(index) {
+					std::collections::hash_map::Entry::Occupied(e) => {
+						if e.get().0 == record_id {
+							e.remove_entry();
+						}
+					}
+					_ => {},
+				}
+			}
+		}
+	}
+
+	pub fn flush_one<'a>(&'a self) -> Result<Option<LogReader<'a>>> {
+		if !self.dirty.load(Ordering::Relaxed) {
 			log::trace!(target: "parity-db", "No logs to enact");
 			return Ok(None);
 		}
+
+		let flushing = self.flushing.write();
 		let mut reader = LogReader::new(
-			&mut self.flushing,
-			&mut self.index_overlays,
-			&mut self.value_overlays,
+			flushing,
 			0
 		);
 		match reader.next() {
-			Ok(LogAction::BeginRecord(id)) => {
-				if self.record_id <= id {
-					self.record_id = id + 1;
-				}
-				let reader = LogReader::new(
-					&mut self.flushing,
-					&mut self.index_overlays,
-					&mut self.value_overlays,
-					id
-				);
+			Ok(LogAction::BeginRecord(_)) => {
 				return Ok(Some(reader));
 			}
 			Ok(_) => return Err(Error::Corruption("Bad log record structure".into())),
 			Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-				if self.appending_empty {
-					log::trace!(target: "parity-db", "End of log");
-					self.dirty = false;
-					return Ok(None);
+				{
+					let mut appending = self.appending.write();
+					if appending.empty {
+						log::trace!(target: "parity-db", "End of log");
+						self.dirty.store(false, Ordering::Relaxed);
+						return Ok(None);
+					}
+					log::debug!(
+						target: "parity-db",
+						"Switching log files",
+					);
+					appending.empty = true;
+					let mut flushing = reader.file;
+					// Switch files
+					appending.file.flush()?;
+					std::mem::swap(appending.file.get_mut(), flushing.get_mut());
+					appending.file.get_mut().set_len(0)?;
+					appending.file.seek(std::io::SeekFrom::Start(0))?;
+					flushing.seek(std::io::SeekFrom::Start(0))?;
 				}
-				log::debug!(
-					target: "parity-db",
-					"Switching log files",
-				);
-				self.appending_empty = true;
-				std::mem::drop(reader);
-				// Switch files
-				self.appending.flush()?;
-				std::mem::swap(self.appending.get_mut(), self.flushing.get_mut());
-				self.appending.get_mut().set_len(0)?;
-				self.appending.seek(std::io::SeekFrom::Start(0))?;
-				self.flushing.seek(std::io::SeekFrom::Start(0))?;
 				//self.flushing.get_mut().sync_data()?;
 				return self.flush_one();
 			}
@@ -380,12 +410,8 @@ impl Log {
 		};
 	}
 
-	pub fn index_overlay_at(&self, table: IndexTableId, index: u64) -> Option<&IndexChunk> {
-		self.index_overlays.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data))
-	}
-
-	pub fn value_overlay_at(&self, table: ValueTableId, index: u64) -> Option<&[u8]> {
-		self.value_overlays.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_ref()))
+	pub fn overlays<'a>(&'a self) -> RwLockReadGuard<'a, LogOverlays> {
+		self.overlays.read()
 	}
 }
 

@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::{
 	error::Result,
 	column::ColId,
-	log::{Log, LogReader, LogWriter},
+	log::{LogOverlays, LogReader, LogWriter},
 	display::hex,
 };
 
@@ -171,13 +171,13 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn get(&self, key: &Key, mut index: u64, log: &Log) -> Result<Option<Value>> {
+	pub fn get(&self, key: &Key, mut index: u64, log: &LogOverlays) -> Result<Option<Value>> {
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 		let mut result = Vec::new();
 
 		let mut part = 0;
 		loop {
-			let buf = if let Some(overlay) = log.value_overlay_at(self.id, index) {
+			let buf = if let Some(overlay) = log.value(self.id, index) {
 				overlay
 			} else {
 				self.read_at(&mut buf[0 .. self.entry_size as usize], index * self.entry_size as u64)?;

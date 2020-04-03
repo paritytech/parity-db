@@ -51,7 +51,7 @@ struct DbInner {
 	shutdown: std::sync::atomic::AtomicBool,
 	rebalancing: Mutex<bool>,
 	rebalace_condvar: Condvar,
-	log: RwLock<Log>,
+	log: Log,
 	commit_queue: RwLock<CommitQueue>,
 	commit_overlay: RwLock<HashMap<ColId, HashMap<Key, (u64, Option<Value>)>>>,
 }
@@ -69,7 +69,7 @@ impl DbInner {
 			shutdown: std::sync::atomic::AtomicBool::new(false),
 			rebalancing: Mutex::new(false),
 			rebalace_condvar: Condvar::new(),
-			log: RwLock::new(Log::open(path)?),
+			log: Log::open(path)?,
 			commit_queue: RwLock::new(Default::default()),
 			commit_overlay: RwLock::new(Default::default()),
 		})
@@ -77,12 +77,12 @@ impl DbInner {
 
 	pub fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
 		let columns = self.columns.read();
-		let log = self.log.read();
 		let overlay = self.commit_overlay.read();
 		let key = hash(key);
 		if let Some(v) = overlay.get(&col).and_then(|o| o.get(&key).map(|(_, v)| v.clone())) {
 			return Ok(v);
 		}
+		let log = self.log.overlays();
 		columns[col as usize].get(&key, &log)
 	}
 
@@ -134,8 +134,7 @@ impl DbInner {
 
 		if let Some(commit) = commit {
 			let mut columns = self.columns.write();
-			let mut log = self.log.write();
-			let mut writer = log.begin_record();
+			let mut writer = self.log.begin_record();
 			log::debug!(
 				target: "parity-db",
 				"Processing commit {}, record {}",
@@ -149,7 +148,7 @@ impl DbInner {
 			}
 			let record_id = writer.record_id();
 			let l = writer.drain();
-			log.end_record(l)?;
+			self.log.end_record(l)?;
 
 			{
 				let mut overlay = self.commit_overlay.write();
@@ -178,50 +177,62 @@ impl DbInner {
 
 	fn enact_logs(&self) -> Result<bool> {
 		let mut columns = self.columns.write();
-		let mut log = self.log.write();
-		if let Some(mut reader) = log.flush_one()? {
-			log::debug!(
-				target: "parity-db",
-				"Enacting log {}",
-				reader.record_id(),
-			);
-			loop {
-				match reader.next()? {
-					LogAction::BeginRecord(_) => {
-						return Err(Error::Corruption("Bad log record".into()));
-					},
-					LogAction::EndRecord => {
-						break;
-					},
-					LogAction::InsertIndex(insertion) => {
-						columns[insertion.table.col() as usize]
-							.enact_plan(LogAction::InsertIndex(insertion), &mut reader)?;
 
-					},
-					LogAction::InsertValue(insertion) => {
-						columns[insertion.table.col() as usize]
-							.enact_plan(LogAction::InsertValue(insertion), &mut reader)?;
+		let cleared = {
+			let reader = self.log.flush_one()?;
+			if let Some(mut reader) = reader {
+				log::debug!(
+					target: "parity-db",
+					"Enacting log {}",
+					reader.record_id(),
+				);
+				loop {
+					match reader.next()? {
+						LogAction::BeginRecord(_) => {
+							return Err(Error::Corruption("Bad log record".into()));
+						},
+						LogAction::EndRecord => {
+							break;
+						},
+						LogAction::InsertIndex(insertion) => {
+							columns[insertion.table.col() as usize]
+								.enact_plan(LogAction::InsertIndex(insertion), &mut reader)?;
 
-					},
-					LogAction::DropTable(id) => {
-						log::info!(
-							target: "parity-db",
-							"Dropping index {}",
-							id,
-						);
-						columns[id.col() as usize].drop_index(id)?;
+						},
+						LogAction::InsertValue(insertion) => {
+							columns[insertion.table.col() as usize]
+								.enact_plan(LogAction::InsertValue(insertion), &mut reader)?;
 
+						},
+						LogAction::DropTable(id) => {
+							log::info!(
+								target: "parity-db",
+								"Dropping index {}",
+								id,
+							);
+							columns[id.col() as usize].drop_index(id)?;
+
+						}
 					}
 				}
+				for c in columns.iter_mut() {
+					c.complete_plan()?;
+				}
+				log::debug!(
+					target: "parity-db",
+					"Finished log {}",
+					reader.record_id(),
+				);
+				let record_id = reader.record_id();
+				let cleared = reader.drain();
+				Some((record_id, cleared))
+			} else {
+				None
 			}
-			for c in columns.iter_mut() {
-				c.complete_plan()?;
-			}
-			log::debug!(
-				target: "parity-db",
-				"Finished log {}",
-				reader.record_id(),
-			);
+		};
+
+		if let Some((record_id, cleared)) = cleared {
+			self.log.end_read(cleared, record_id);
 			Ok(true)
 		} else {
 			Ok(false)
@@ -236,9 +247,8 @@ impl DbInner {
 	fn process_rebalance(&self) -> Result<bool> {
 		// Process any pending rebalances
 		let mut columns = self.columns.write();
-		let mut log = self.log.write();
 		for c in columns.iter_mut() {
-			match c.rebalance(&mut log)? {
+			match c.rebalance(&self.log)? {
 				RebalanceProgress::InProgress((p, t)) => {
 					log::debug!(
 						target: "parity-db",
@@ -310,11 +320,16 @@ impl Db {
 				*active = false;
 			}
 
+			more_work = db.process_commits()?;
+			more_work = more_work || db.enact_logs()?;
+			more_work = more_work || db.process_rebalance()?;
 			// Flush log
+			/*
 			let more_commits = db.process_commits()?;
-			let more_rebalance = db.process_rebalance()?;
 			let more_logs = db.enact_logs()?;
+			let more_rebalance = db.process_rebalance()?;
 			more_work = more_commits || more_rebalance || more_logs;
+			*/
 		}
 		Ok(())
 	}

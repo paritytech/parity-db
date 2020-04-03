@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 use crate::{
 	error::{Error, Result},
 	table::{TableId as ValueTableId, ValueTable, Key, Value, Address},
-	log::{Log, LogReader, LogWriter, LogAction},
+	log::{Log, LogOverlays, LogReader, LogWriter, LogAction},
 	display::hex,
 	index::{IndexTable, TableId as IndexTableId,
 		PlanOutcome, Entry as IndexEntry},
@@ -44,7 +44,7 @@ pub struct Column {
 }
 
 impl Column {
-	pub fn get(&self, key: &Key, log: &Log) -> Result<Option<Value>> {
+	pub fn get(&self, key: &Key, log: &LogOverlays) -> Result<Option<Value>> {
 		let entry = self.index.get(key, log);
 		if !entry.is_empty() {
 			return self.get_entry_value(key, entry, log);
@@ -58,7 +58,7 @@ impl Column {
 		Ok(None)
 	}
 
-	fn get_entry_value(&self, key: &Key, entry: IndexEntry, log: &Log) -> Result<Option<Value>> {
+	fn get_entry_value(&self, key: &Key, entry: IndexEntry, log: &LogOverlays) -> Result<Option<Value>> {
 		let size_tier = entry.address().size_tier();
 		self.value_tables[size_tier as usize].get(key, entry.address().offset(), log)
 	}
@@ -234,7 +234,7 @@ impl Column {
 		Ok(())
 	}
 
-	pub fn rebalance(&mut self, log: &mut Log) -> Result<RebalanceProgress> {
+	pub fn rebalance(&mut self, log: &Log) -> Result<RebalanceProgress> {
 		let mut progress = RebalanceProgress::Inactive;
 		if let Some(source) = self.rebalancing.front_mut() {
 			if self.rebalance_progress != source.id.total_chunks() {
@@ -242,7 +242,7 @@ impl Column {
 				log::trace!(target: "parity-db", "{}: Start rebalance record {}", self.index.id, writer.record_id());
 				let mut source_index = self.rebalance_progress;
 				let mut count = 0;
-				log::trace!(target: "parity-db", "{}: Continue rebalance at {}/{}", self.index.id, source_index, source.id.total_chunks());
+				log::debug!(target: "parity-db", "{}: Continue rebalance at {}/{}", self.index.id, source_index, source.id.total_chunks());
 				let shift_key_bits = source.id.index_bits() - 16;
 				while source_index < source.id.total_chunks() && count < MAX_REBALANCE_BATCH {
 					log::trace!(target: "parity-db", "{}: Rebalancing {}", source.id, source_index);

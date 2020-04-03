@@ -18,7 +18,7 @@ use std::convert::TryInto;
 use crate::{
 	error::Result,
 	column::ColId,
-	log::{Log, LogReader, LogWriter},
+	log::{LogOverlays, LogReader, LogWriter},
 	table::Address,
 	display::hex,
 };
@@ -205,12 +205,12 @@ impl IndexTable {
 		return Entry::empty()
 	}
 
-	pub fn get(&self, key: &Key, log: &Log) -> Entry {
-		log::debug!(target: "parity-db", "{}: Querying {}", self.id, hex(&key));
+	pub fn get(&self, key: &Key, log: &LogOverlays) -> Entry {
+		log::trace!(target: "parity-db", "{}: Querying {}", self.id, hex(&key));
 		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
 		let chunk_index = key >> (64 - self.id.index_bits());
 
-		if let Some(chunk) = log.index_overlay_at(self.id, chunk_index) {
+		if let Some(chunk) = log.index(self.id, chunk_index) {
 			log::trace!(target: "parity-db", "{}: Querying overlay at {}", self.id, chunk_index);
 			return self.find_entry(key, chunk);
 		}
