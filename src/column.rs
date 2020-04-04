@@ -26,7 +26,7 @@ use crate::{
 };
 
 const START_BITS: u8 = 16;
-const MAX_REBALANCE_BATCH: u32 = 65536;
+const MAX_REBALANCE_BATCH: u32 = 1024;
 
 pub type ColId = u8;
 
@@ -49,21 +49,32 @@ pub struct Column {
 impl Column {
 	pub fn get(&self, key: &Key, log: &LogOverlays) -> Result<Option<Value>> {
 		let tables = self.tables.read();
-		let entry = self.tables.read().index.get(key, log);
-		if !entry.is_empty() {
-			let size_tier = entry.address().size_tier() as usize;
-			return tables.value[size_tier].get(key, entry.address().offset(), log);
+		if let Some(value) = Self::get_in_index(key, &tables.index, &*tables, log)? {
+			return Ok(Some(value));
 		}
 		for r in &self.rebalance.read().queue {
-			let entry = r.get(key, log);
-			if !entry.is_empty() {
-				let size_tier = entry.address().size_tier() as usize;
-				return tables.value[size_tier].get(key, entry.address().offset(), log);
+			if let Some(value) = Self::get_in_index(key, &r, &*tables, log)? {
+				return Ok(Some(value));
 			}
 		}
 		Ok(None)
 	}
 
+	fn get_in_index(key: &Key, index: &IndexTable, tables: &Tables, log: &LogOverlays) -> Result<Option<Value>> {
+		let (mut entry, mut sub_index) = index.get(key, 0, log);
+		while !entry.is_empty() {
+			let size_tier = entry.address().size_tier() as usize;
+			match tables.value[size_tier].get(key, entry.address().offset(), log)? {
+				Some(value) => return Ok(Some(value)),
+				None =>  {
+					let (next_entry, next_index) = index.get(key, sub_index + 1, log);
+					entry = next_entry;
+					sub_index = next_index;
+				}
+			}
+		}
+		Ok(None)
+	}
 	pub fn open(col: ColId, path: &std::path::Path) -> Result<Column> {
 		let (index, rebalancing) = Self::open_index(path, col)?;
 		let tables = Tables {
@@ -148,7 +159,7 @@ impl Column {
 
 	pub fn write_index_plan(&self, key: &Key, address: Address, log: &mut LogWriter) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
-		match tables.index.write_insert_plan(key, address, log, false)? {
+		match tables.index.write_insert_plan(key, address, None, log)? {
 			PlanOutcome::NeedRebalance => {
 				log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
 				Self::trigger_rebalance(tables, &self.rebalance, self.path.as_path());
@@ -174,8 +185,8 @@ impl Column {
 				}
 			};
 
-			let existing_entry = tables.index.get(key, log);
-			if !existing_entry.is_empty() {
+			let (mut existing_entry, mut sub_index) = tables.index.get(key, 0, log);
+			while !existing_entry.is_empty() {
 				let existing_address = existing_entry.address();
 				let existing_tier = existing_address.size_tier() as usize;
 				let replace = tables.value[existing_tier].has_key_at(existing_address.offset(), &key, log)?;
@@ -189,48 +200,52 @@ impl Column {
 						tables.value[existing_tier].write_remove_plan(existing_address.offset(), log)?;
 						let new_offset = tables.value[target_tier].write_insert_plan(key, val, log)?;
 						let new_address = Address::new(new_offset, target_tier as u8);
-						return tables.index.write_insert_plan(key, new_address, log, true);
+						return tables.index.write_insert_plan(key, new_address, Some(sub_index), log);
 					}
 				} else {
-					log::debug!(
+					// Fall thorough to insertion
+					log::warn!(
 						target: "parity-db",
 						"{}: Index chunk conflict {} vs {}",
 						tables.index.id,
 						hex(key),
 						hex(&tables.value[existing_tier].partial_key_at(existing_address.offset(), log).unwrap().unwrap()),
 					);
+				}
+				let (next_entry, next_index) = tables.index.get(key, sub_index + 1, log);
+				existing_entry = next_entry;
+				sub_index = next_index;
+			}
+
+			log::trace!(target: "parity-db", "{}: Inserting new index {}", tables.index.id, hex(key));
+			let offset = tables.value[target_tier].write_insert_plan(key, val, log)?;
+			let address = Address::new(offset, target_tier as u8);
+			match tables.index.write_insert_plan(key, address, None, log)? {
+				PlanOutcome::NeedRebalance => {
+					log::info!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
 					Self::trigger_rebalance(tables, &self.rebalance, self.path.as_path());
 					self.write_plan(key, value, log)?;
 					return Ok(PlanOutcome::NeedRebalance);
 				}
-			} else {
-				log::trace!(target: "parity-db", "{}: Inserting new index {}", tables.index.id, hex(key));
-				let offset = tables.value[target_tier].write_insert_plan(key, val, log)?;
-				let address = Address::new(offset, target_tier as u8);
-				match tables.index.write_insert_plan(key, address, log, true)? {
-					PlanOutcome::NeedRebalance => {
-						log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
-						Self::trigger_rebalance(tables, &self.rebalance, self.path.as_path());
-						self.write_plan(key, value, log)?;
-						return Ok(PlanOutcome::NeedRebalance);
-					}
-					_ => {
-						return Ok(PlanOutcome::Written);
-					}
+				_ => {
+					return Ok(PlanOutcome::Written);
 				}
 			}
 		} else {
 			// Deletion
-			let existing_entry = tables.index.get(key, log);
-			if !existing_entry.is_empty() {
+			let (mut existing_entry, mut sub_index) = tables.index.get(key, 0, log);
+			while existing_entry.is_empty() {
 				let existing_tier = existing_entry.address().size_tier() as usize;
 				// TODO: Remove this check? Highly unlikely.
 				if tables.value[existing_tier].has_key_at(existing_entry.address().offset(), &key, log)? {
 					log::trace!(target: "parity-db", "{}: Deleting {}", tables.index.id, hex(key));
 					tables.value[existing_tier].write_remove_plan(existing_entry.address().offset(), log)?;
-					tables.index.write_remove_plan(key, log)?;
+					tables.index.write_remove_plan(key, sub_index, log)?;
 					return Ok(PlanOutcome::Written);
 				}
+				let (next_entry, next_index) = tables.index.get(key, sub_index + 1, log);
+				existing_entry = next_entry;
+				sub_index = next_index;
 			}
 		}
 		Ok(PlanOutcome::Skipped)
@@ -281,6 +296,9 @@ impl Column {
 			if progress != source.id.total_chunks() {
 				let mut source_index = progress;
 				let mut count = 0;
+				if source_index % 50 == 0 {
+					log::info!(target: "parity-db", "{}: Continue rebalance at {}/{}", tables.index.id, source_index, source.id.total_chunks());
+				}
 				log::debug!(target: "parity-db", "{}: Continue rebalance at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				let shift_key_bits = source.id.index_bits() - 16;
 				while source_index < source.id.total_chunks() && count < MAX_REBALANCE_BATCH {

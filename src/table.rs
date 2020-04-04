@@ -112,6 +112,21 @@ pub struct ValueTable {
 	multipart: bool,
 }
 
+#[cfg(target_os = "macos")]
+fn disable_read_ahead(file: &std::fs::File) -> Result<()> {
+	use std::os::unix::io::AsRawFd;
+	if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_RDAHEAD, 0) } != 0 {
+		Err(std::io::Error::last_os_error())?
+	} else {
+		Ok(())
+	}
+}
+
+#[cfg(not(target_os = "macos"))]
+fn disable_read_ahead(file: &File) -> Result<()> {
+	Ok(())
+}
+
 impl ValueTable {
 	pub fn open(path: &std::path::Path, id: TableId, entry_size: Option<u16>) -> Result<ValueTable> {
 		let (multipart, entry_size) = match entry_size {
@@ -125,12 +140,15 @@ impl ValueTable {
 		path.push(id.file_name());
 
 		let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?;
+		disable_read_ahead(&file)?;
 		let mut file_len = file.metadata()?.len();
 		if file_len == 0 {
 			// Prealocate a single entry that also
 			file.set_len(entry_size as u64)?;
 			file_len = entry_size as u64;
 		}
+
+
 
 		let capacity = file_len / entry_size as u64;
 

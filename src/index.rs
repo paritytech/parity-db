@@ -182,35 +182,35 @@ impl IndexTable {
 		&map[offset .. offset + CHUNK_LEN]
 	}
 
-	fn find_entry(&self, key: u64, chunk: &[u8]) -> Entry {
+	fn find_entry(&self, key: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
 		let partial_key = ((key >> (64 - PARTIAL_KEY_BITS - self.id.index_bits())) as u32) & PARTIAL_KEY_MASK;
-		for i in 0 .. CHUNK_ENTRIES {
+		for i in sub_index .. CHUNK_ENTRIES {
 			let entry = Entry::from_u64(u64::from_le_bytes(chunk[i * 8 .. i * 8 + 8].try_into().unwrap()));
 			if !entry.is_empty() && entry.key_bits() == partial_key {
 				log::trace!(target: "parity-db", "{}: Found entry at {}, bits={}", self.id, i, entry.key_bits());
-				return entry;
+				return (entry, i);
 			}
 		}
-		return Entry::empty()
+		return (Entry::empty(), 0)
 	}
 
-	pub fn get<Q: LogQuery>(&self, key: &Key, log: &Q) -> Entry {
+	pub fn get<Q: LogQuery>(&self, key: &Key, sub_index: usize, log: &Q) -> (Entry, usize) {
 		log::trace!(target: "parity-db", "{}: Querying {}", self.id, hex(&key));
 		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
 		let chunk_index = key >> (64 - self.id.index_bits());
 
 		if let Some(chunk) = log.index(self.id, chunk_index) {
 			log::trace!(target: "parity-db", "{}: Querying overlay at {}", self.id, chunk_index);
-			return self.find_entry(key, chunk);
+			return self.find_entry(key, sub_index, chunk);
 		}
 
 		if let Some(map) = &*self.map.read() {
 			log::trace!(target: "parity-db", "{}: Querying chunk at {}", self.id, chunk_index);
 			let chunk = Self::chunk_at(chunk_index, map);
-			return self.find_entry(key, chunk);
+			return self.find_entry(key, sub_index, chunk);
 
 		}
-		return Entry::empty()
+		return (Entry::empty(), 0)
 	}
 
 	pub fn entries(&self, chunk_index: u64) -> [Entry; 64] {
@@ -228,98 +228,84 @@ impl IndexTable {
 		key: u64,
 		address: Address,
 		source: &[u8],
+		sub_index: Option<usize>,
 		log: &mut LogWriter,
-		overwrite: bool
 	) -> Result<PlanOutcome> {
 		let mut chunk = [0; CHUNK_LEN];
 		chunk.copy_from_slice(source);
 		let chunk_index = key >> (64 - self.id.index_bits());
 		let partial_key = ((key >> (64 - PARTIAL_KEY_BITS - self.id.index_bits())) as u32) & PARTIAL_KEY_MASK;
-		let mut first_empty = None;
-
+		let new_entry = Entry::new(address, partial_key);
+		if let Some(i) = sub_index {
+			let entry = Entry::from_u64(u64::from_le_bytes(chunk[i * 8 .. i * 8 + 8].try_into().unwrap()));
+			assert!(entry.key_bits() == new_entry.key_bits());
+			&mut chunk[i * 8 .. i * 8 + 8].copy_from_slice(&new_entry.as_u64().to_le_bytes());
+			log::trace!(target: "parity-db", "{}: Replaced at {}.{}: {}", self.id, chunk_index, i, new_entry.address());
+			log.insert_index(self.id, chunk_index, &chunk);
+			return Ok(PlanOutcome::Written);
+		}
 		for i in 0 .. CHUNK_ENTRIES {
 			let entry = Entry::from_u64(u64::from_le_bytes(chunk[i * 8 .. i * 8 + 8].try_into().unwrap()));
 			if entry.is_empty() {
-				if first_empty.is_none() {
-					first_empty = Some(i);
-				}
-			} else {
-				if entry.key_bits() == partial_key {
-					// Replace here
-					if overwrite {
-						let new_entry = Entry::new(address, partial_key);
-						&mut chunk[i * 8 .. i * 8 + 8].copy_from_slice(&new_entry.as_u64().to_le_bytes());
-						log.insert_index(self.id, chunk_index, &chunk);
-						log::trace!(target: "parity-db", "{}: Replaced at {}.{}", self.id, chunk_index, i);
-						return Ok(PlanOutcome::Written);
-					} else {
-						return Ok(PlanOutcome::Skipped);
-					}
-				}
+				&mut chunk[i * 8 .. i * 8 + 8].copy_from_slice(&new_entry.as_u64().to_le_bytes());
+				log::trace!(target: "parity-db", "{}: Inserted at {}.{}: {}", self.id, chunk_index, i, new_entry.address());
+				log.insert_index(self.id, chunk_index, &chunk);
+				self.entries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+				return Ok(PlanOutcome::Written);
 			}
 		}
-		if let Some(i) = first_empty {
-			let new_entry = Entry::new(address, partial_key);
-			&mut chunk[i * 8 .. i * 8 + 8].copy_from_slice(&new_entry.as_u64().to_le_bytes());
-			log::trace!(target: "parity-db", "{}: Inserted at {}.{}: {}", self.id, chunk_index, i, new_entry.address());
-			log.insert_index(self.id, chunk_index, &chunk);
-			self.entries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-			return Ok(PlanOutcome::Written);
-		} else {
-			log::trace!(target: "parity-db", "{}: Full at {}", self.id, chunk_index);
-			return Ok(PlanOutcome::NeedRebalance);
-		}
+		log::trace!(target: "parity-db", "{}: Full at {}", self.id, chunk_index);
+		return Ok(PlanOutcome::NeedRebalance);
 	}
 
-	pub fn write_insert_plan(&self, key: &Key, address: Address, log: &mut LogWriter, overwrite: bool) -> Result<PlanOutcome> {
+	pub fn write_insert_plan(&self, key: &Key, address: Address, sub_index: Option<usize>, log: &mut LogWriter) -> Result<PlanOutcome> {
 		log::trace!(target: "parity-db", "{}: Inserting {} -> {}", self.id, hex(&key), address);
 		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
 		let chunk_index = key >> (64 - self.id.index_bits());
 
 		if let Some(chunk) = log.index(self.id, chunk_index).cloned() {
-			return self.plan_insert_chunk(key, address, &chunk, log, overwrite);
+			return self.plan_insert_chunk(key, address, &chunk, sub_index, log);
 		}
 
 		if let Some(map) = &*self.map.read() {
 			let chunk = Self::chunk_at(chunk_index, map);
-			return self.plan_insert_chunk(key, address, chunk, log, overwrite);
+			return self.plan_insert_chunk(key, address, chunk, sub_index, log);
 		}
 
 		let chunk = &EMPTY_CHUNK;
-		self.plan_insert_chunk(key, address, chunk, log, overwrite)
+		self.plan_insert_chunk(key, address, chunk, sub_index, log)
 	}
 
-	fn plan_remove_chunk(&self, key: u64, source: &[u8], log: &mut LogWriter) -> Result<PlanOutcome> {
+	fn plan_remove_chunk(&self, key: u64, source: &[u8], sub_index: usize, log: &mut LogWriter) -> Result<PlanOutcome> {
 		let mut chunk = [0; CHUNK_LEN];
 		chunk.copy_from_slice(source);
 		let chunk_index = key >> (64 - self.id.index_bits());
 		let partial_key = ((key >> (64 - PARTIAL_KEY_BITS - self.id.index_bits())) as u32) & PARTIAL_KEY_MASK;
 
-		for i in 0 .. CHUNK_ENTRIES {
-			let entry = Entry::from_u64(u64::from_le_bytes(chunk[i * 8 .. i * 8 + 8].try_into().unwrap()));
-			if !entry.is_empty() && entry.key_bits() == partial_key {
-				let new_entry = Entry::empty();
-				&mut chunk[i * 8 .. i * 8 + 8].copy_from_slice(&new_entry.as_u64().to_le_bytes());
-				log.insert_index(self.id, chunk_index, &chunk);
-				log::trace!(target: "parity-db", "{}: Removed at {}.{}", self.id, chunk_index, i);
-				return Ok(PlanOutcome::Written);
-			}
+		let i = sub_index;
+		let entry = Entry::from_u64(u64::from_le_bytes(chunk[i * 8 .. i * 8 + 8].try_into().unwrap()));
+		if !entry.is_empty() && entry.key_bits() == partial_key {
+			let new_entry = Entry::empty();
+			&mut chunk[i * 8 .. i * 8 + 8].copy_from_slice(&new_entry.as_u64().to_le_bytes());
+			log.insert_index(self.id, chunk_index, &chunk);
+			log::trace!(target: "parity-db", "{}: Removed at {}.{}", self.id, chunk_index, i);
+			return Ok(PlanOutcome::Written);
 		}
 		Ok(PlanOutcome::Skipped)
 	}
 
-	pub fn write_remove_plan(&self, key: &Key, log: &mut LogWriter) -> Result<PlanOutcome> {
+	pub fn write_remove_plan(&self, key: &Key, sub_index: usize, log: &mut LogWriter) -> Result<PlanOutcome> {
 		log::trace!(target: "parity-db", "{}: Removing {}", self.id, hex(&key));
 		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
 		let chunk_index = key >> (64 - self.id.index_bits());
 
 		if let Some(chunk) = log.index(self.id, chunk_index).cloned() {
-			return self.plan_remove_chunk(key, &chunk, log);
+			return self.plan_remove_chunk(key, &chunk, sub_index, log);
 		}
 
 		if let Some(map) = &*self.map.read() {
 			let chunk = Self::chunk_at(chunk_index, map);
-			return self.plan_remove_chunk(key, chunk, log);
+			return self.plan_remove_chunk(key, chunk, sub_index, log);
 		}
 
 		Ok(PlanOutcome::Skipped)

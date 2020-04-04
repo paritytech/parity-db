@@ -139,8 +139,6 @@ fn writer<D: Db>(db: Arc<D>, shutdown: Arc<AtomicBool>) {
 		}
 
 		db.commit(commit.drain(..));
-		thread::sleep(std::time::Duration::from_millis(1));
-
 		COMMITS.fetch_add(1, Ordering::Release);
 		commit.clear();
 	}
