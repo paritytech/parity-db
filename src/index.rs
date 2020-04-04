@@ -15,10 +15,11 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::convert::TryInto;
+use parking_lot::RwLock;
 use crate::{
 	error::Result,
 	column::ColId,
-	log::{LogOverlays, LogReader, LogWriter},
+	log::{LogReader, LogWriter, LogQuery},
 	table::Address,
 	display::hex,
 };
@@ -81,7 +82,7 @@ pub enum PlanOutcome {
 
 pub struct IndexTable {
 	pub id: TableId,
-	map: Option<memmap::MmapMut>,
+	map: RwLock<Option<memmap::MmapMut>>,
 	path: std::path::PathBuf,
 	entries: std::sync::atomic::AtomicU64,
 }
@@ -160,7 +161,7 @@ impl IndexTable {
 		Ok(Some(IndexTable {
 			id,
 			path,
-			map: Some(map),
+			map: RwLock::new(Some(map)),
 			entries: std::sync::atomic::AtomicU64::new(0),
 		}))
 	}
@@ -171,21 +172,9 @@ impl IndexTable {
 		IndexTable {
 			id,
 			path,
-			map: None,
+			map: RwLock::new(None),
 			entries: std::sync::atomic::AtomicU64::new(0),
 		}
-	}
-
-	fn open_map(&mut self) -> Result<()> {
-		if self.map.is_some() {
-			return Ok(());
-		}
-		let file = std::fs::OpenOptions::new().write(true).read(true).create_new(true).open(self.path.as_path())?;
-		log::debug!(target: "parity-db", "Created new index {}", self.id);
-		//TODO: check for potential overflows on 32-bit platforms
-		file.set_len(file_size(self.id.index_bits()))?;
-		self.map = Some(unsafe { memmap::MmapMut::map_mut(&file)? });
-		Ok(())
 	}
 
 	fn chunk_at(index: u64, map: &memmap::MmapMut) -> &[u8] {
@@ -205,7 +194,7 @@ impl IndexTable {
 		return Entry::empty()
 	}
 
-	pub fn get(&self, key: &Key, log: &LogOverlays) -> Entry {
+	pub fn get<Q: LogQuery>(&self, key: &Key, log: &Q) -> Entry {
 		log::trace!(target: "parity-db", "{}: Querying {}", self.id, hex(&key));
 		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
 		let chunk_index = key >> (64 - self.id.index_bits());
@@ -215,7 +204,7 @@ impl IndexTable {
 			return self.find_entry(key, chunk);
 		}
 
-		if let Some(map) = &self.map {
+		if let Some(map) = &*self.map.read() {
 			log::trace!(target: "parity-db", "{}: Querying chunk at {}", self.id, chunk_index);
 			let chunk = Self::chunk_at(chunk_index, map);
 			return self.find_entry(key, chunk);
@@ -224,32 +213,9 @@ impl IndexTable {
 		return Entry::empty()
 	}
 
-	pub fn get_planned(&self, key: &Key, log: &LogWriter) -> Entry {
-		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
-		let chunk_index = key >> (64 - self.id.index_bits());
-
-		if let Some(chunk) = log.index_overlay_at(self.id, chunk_index) {
-			log::trace!(target: "parity-db", "{}: Found overlay at {}", self.id, chunk_index);
-			return self.find_entry(key, chunk);
-		}
-
-		if let Some(map) = &self.map {
-			let chunk = Self::chunk_at(chunk_index, map);
-			log::trace!(target: "parity-db", "{}: Checking at {}", self.id, chunk_index);
-			return self.find_entry(key, chunk);
-
-		}
-		return Entry::empty()
-	}
-
-	pub fn planned_entries(&self, chunk_index: u64, log: &LogWriter) -> [Entry; 64] {
+	pub fn entries(&self, chunk_index: u64) -> [Entry; 64] {
 		let mut chunk = [0; CHUNK_LEN];
-		if let Some(source) = log.index_overlay_at(self.id, chunk_index) {
-			chunk.copy_from_slice(source);
-			return unsafe { std::mem::transmute(chunk) };
-		}
-
-		if let Some(map) = &self.map {
+		if let Some(map) = &*self.map.read() {
 			let source = Self::chunk_at(chunk_index, map);
 			chunk.copy_from_slice(source);
 			return unsafe { std::mem::transmute(chunk) };
@@ -310,11 +276,11 @@ impl IndexTable {
 		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
 		let chunk_index = key >> (64 - self.id.index_bits());
 
-		if let Some(chunk) = log.index_overlay_at(self.id, chunk_index).cloned() {
+		if let Some(chunk) = log.index(self.id, chunk_index).cloned() {
 			return self.plan_insert_chunk(key, address, &chunk, log, overwrite);
 		}
 
-		if let Some(map) = &self.map {
+		if let Some(map) = &*self.map.read() {
 			let chunk = Self::chunk_at(chunk_index, map);
 			return self.plan_insert_chunk(key, address, chunk, log, overwrite);
 		}
@@ -347,11 +313,11 @@ impl IndexTable {
 		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
 		let chunk_index = key >> (64 - self.id.index_bits());
 
-		if let Some(chunk) = log.index_overlay_at(self.id, chunk_index).cloned() {
+		if let Some(chunk) = log.index(self.id, chunk_index).cloned() {
 			return self.plan_remove_chunk(key, &chunk, log);
 		}
 
-		if let Some(map) = &self.map {
+		if let Some(map) = &*self.map.read() {
 			let chunk = Self::chunk_at(chunk_index, map);
 			return self.plan_remove_chunk(key, chunk, log);
 		}
@@ -359,9 +325,17 @@ impl IndexTable {
 		Ok(PlanOutcome::Skipped)
 	}
 
-	pub fn enact_plan(&mut self, index: u64, log: &mut LogReader) -> Result<()> {
-		self.open_map()?;
-		let map = self.map.as_mut().unwrap();
+	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
+		let mut map = self.map.write();
+		if map.is_none() {
+			let file = std::fs::OpenOptions::new().write(true).read(true).create_new(true).open(self.path.as_path())?;
+			log::debug!(target: "parity-db", "Created new index {}", self.id);
+			//TODO: check for potential overflows on 32-bit platforms
+			file.set_len(file_size(self.id.index_bits()))?;
+			*map = Some(unsafe { memmap::MmapMut::map_mut(&file)? });
+		}
+
+		let map = map.as_mut().unwrap();
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
 		let mut chunk = &mut map[offset .. offset + CHUNK_LEN];
 		log.read(&mut chunk)?;
@@ -369,7 +343,7 @@ impl IndexTable {
 		Ok(())
 	}
 
-	pub fn entries(&self) -> u64 {
+	pub fn num_entries(&self) -> u64 {
 		self.entries.load(std::sync::atomic::Ordering::Relaxed)
 	}
 

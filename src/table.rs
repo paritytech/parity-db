@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::{
 	error::Result,
 	column::ColId,
-	log::{LogOverlays, LogReader, LogWriter},
+	log::{LogOverlays, LogReader, LogWriter, LogQuery},
 	display::hex,
 };
 
@@ -106,7 +106,7 @@ pub struct ValueTable {
 	pub id: TableId,
 	pub entry_size: u16,
 	file: std::fs::File,
-	capacity: u64,
+	capacity: AtomicU64,
 	filled: AtomicU64,
 	last_removed: AtomicU64,
 	multipart: bool,
@@ -146,7 +146,7 @@ impl ValueTable {
 			id,
 			entry_size,
 			file,
-			capacity,
+			capacity: AtomicU64::new(capacity),
 			filled: AtomicU64::new(filled),
 			last_removed: AtomicU64::new(last_removed),
 			multipart,
@@ -165,9 +165,11 @@ impl ValueTable {
 		Ok(self.file.write_all_at(buf, offset)?)
 	}
 
-	fn grow(&mut self) -> Result<()> {
-		self.capacity += (256 * 1024) / self.entry_size as u64;
-		self.file.set_len(self.capacity * self.entry_size as u64)?;
+	fn grow(&self) -> Result<()> {
+		let mut capacity = self.capacity.load(Ordering::Relaxed);
+		capacity += (256 * 1024) / self.entry_size as u64;
+		self.capacity.store(capacity, Ordering::Relaxed);
+		self.file.set_len(capacity * self.entry_size as u64)?;
 		Ok(())
 	}
 
@@ -180,6 +182,12 @@ impl ValueTable {
 			let buf = if let Some(overlay) = log.value(self.id, index) {
 				overlay
 			} else {
+				log::trace!(
+					target: "parity-db",
+					"{}: Query slot {}",
+					self.id,
+					index,
+				);
 				self.read_at(&mut buf[0 .. self.entry_size as usize], index * self.entry_size as u64)?;
 				&buf[0 .. self.entry_size as usize]
 			};
@@ -228,10 +236,10 @@ impl ValueTable {
 		})
 	}
 
-	pub fn partial_key_at(&self, index: u64, log: &LogWriter) -> Result<Option<Key>> {
+	pub fn partial_key_at<Q: LogQuery>(&self, index: u64, log: &Q) -> Result<Option<Key>> {
 		let mut buf = [0u8; 40];
 		let mut result = Key::default();
-		let buf = if let Some(overlay) = log.value_overlay_at(self.id, index) {
+		let buf = if let Some(overlay) = log.value(self.id, index) {
 			overlay
 		} else {
 			self.read_at(&mut buf[0 .. 40], index * self.entry_size as u64)?;
@@ -249,7 +257,7 @@ impl ValueTable {
 	}
 
 	pub fn read_next_free(&self, index: u64, log: &LogWriter) -> Result<u64> {
-		if let Some(val) = log.value_overlay_at(self.id, index) {
+		if let Some(val) = log.value(self.id, index) {
 			let next = u64::from_le_bytes(val[2..10].try_into().unwrap());
 			return Ok(next);
 		}
@@ -260,7 +268,7 @@ impl ValueTable {
 	}
 
 	pub fn read_next_part(&self, index: u64, log: &LogWriter) -> Result<Option<u64>> {
-		if let Some(val) = log.value_overlay_at(self.id, index) {
+		if let Some(val) = log.value(self.id, index) {
 			if &val[0..2] == MULTIPART {
 				let next = u64::from_le_bytes(val[2..10].try_into().unwrap());
 				return Ok(Some(next));
@@ -294,10 +302,10 @@ impl ValueTable {
 				target: "parity-db",
 				"{}: Inserting into new slot {}",
 				self.id,
-				filled + 1,
+				filled,
 			);
 			self.filled.store(filled + 1, Ordering::Relaxed);
-			filled + 1
+			filled
 		};
 		Ok(index)
 	}
@@ -356,14 +364,6 @@ impl ValueTable {
 				buf[target_offset..target_offset+value_len].copy_from_slice(&value[offset..offset+value_len]);
 				offset += value_len;
 			}
-			/*
-			log::trace!(
-				target: "parity-db",
-				"SLOT {} val bytes, slot {} bytes: {}",
-				value.len(),
-				target_offset + value_len,
-				hex(&buf[0..target_offset + value_len]),
-			);*/
 			log.insert_value(self.id, index, buf[0..target_offset+value_len].to_vec());
 			remainder -= value_len;
 			index = next_index;
@@ -429,8 +429,8 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn enact_plan(&mut self, index: u64, log: &mut LogReader) -> Result<()> {
-		while index > self.capacity {
+	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
+		while index >= self.capacity.load(Ordering::Relaxed) {
 			self.grow()?;
 		}
 
@@ -455,7 +455,7 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn complete_plan(&mut self) -> Result<()> {
+	pub fn complete_plan(&self) -> Result<()> {
 		let mut buf = [0u8; 16];
 		let last_removed = self.last_removed.load(Ordering::Relaxed);
 		let filled = self.filled.load(Ordering::Relaxed);

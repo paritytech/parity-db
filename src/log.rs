@@ -43,18 +43,23 @@ pub enum LogAction {
 	EndRecord, // TODO: crc32
 }
 
+pub trait LogQuery {
+	fn index(&self, table: IndexTableId, index: u64) -> Option<&IndexChunk>;
+	fn value(&self, table: ValueTableId, index: u64) -> Option<&[u8]>;
+}
+
 #[derive(Default)]
 pub struct LogOverlays {
 	index: HashMap<IndexTableId, IndexLogOverlay>,
 	value: HashMap<ValueTableId, ValueLogOverlay>,
 }
 
-impl LogOverlays {
-	pub fn index(&self, table: IndexTableId, index: u64) -> Option<&IndexChunk> {
+impl LogQuery for LogOverlays {
+	fn index(&self, table: IndexTableId, index: u64) -> Option<&IndexChunk> {
 		self.index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data))
 	}
 
-	pub fn value(&self, table: ValueTableId, index: u64) -> Option<&[u8]> {
+	fn value(&self, table: ValueTableId, index: u64) -> Option<&[u8]> {
 		self.value.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_ref()))
 	}
 }
@@ -226,18 +231,20 @@ impl<'a> LogWriter<'a> {
 		self.log.dropped_tables.push(id);
 	}
 
-	pub fn index_overlay_at(&self, table: IndexTableId, index: u64) -> Option<&IndexChunk> {
+	pub fn drain(self) -> LogChange {
+		self.log
+	}
+}
+
+impl<'a> LogQuery for LogWriter<'a> {
+	fn index(&self, table: IndexTableId, index: u64) -> Option<&IndexChunk> {
 		self.log.local_index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data))
 			.or_else(|| self.overlays.index(table, index))
 	}
 
-	pub fn value_overlay_at(&self, table: ValueTableId, index: u64) -> Option<&[u8]> {
+	fn value(&self, table: ValueTableId, index: u64) -> Option<&[u8]> {
 		self.log.local_values.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_ref()))
 			.or_else(|| self.overlays.value(table, index))
-	}
-
-	pub fn drain(self) -> LogChange {
-		self.log
 	}
 }
 
