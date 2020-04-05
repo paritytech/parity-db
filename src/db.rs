@@ -25,8 +25,8 @@ use crate::{
 	index::{PlanOutcome, TableId as IndexTableId},
 };
 
-const MAX_COMMIT_QUEUE_SIZE: usize = 200;
-const MAX_LOG_QUEUE_SIZE: usize = 200;
+const MAX_COMMIT_QUEUE_SIZE: usize = 64;
+const MAX_LOG_QUEUE_SIZE: usize = 64;
 
 pub type Value = Vec<u8>;
 
@@ -66,11 +66,14 @@ struct DbInner {
 	log: Log,
 	commit_queue: Mutex<CommitQueue>,
 	commit_queue_full_cv: Condvar,
-	worker_cv: Condvar,
-	work: Mutex<()>,
+	log_worker_cv: Condvar,
+	log_work: Mutex<()>,
+	commit_worker_cv: Condvar,
+	commit_work: Mutex<()>,
 	commit_overlay: RwLock<HashMap<ColId, HashMap<Key, (u64, Option<Value>)>>>,
 	log_cv: Condvar,
 	log_queue: Mutex<usize>,
+	enact_mutex: Mutex<()>,
 }
 
 impl DbInner {
@@ -90,16 +93,23 @@ impl DbInner {
 			log: Log::open(path)?,
 			commit_queue: Mutex::new(Default::default()),
 			commit_queue_full_cv: Condvar::new(),
-			worker_cv: Condvar::new(),
-			work: Mutex::new(()),
+			log_worker_cv: Condvar::new(),
+			log_work: Mutex::new(()),
+			commit_worker_cv: Condvar::new(),
+			commit_work: Mutex::new(()),
 			commit_overlay: RwLock::new(Default::default()),
 			log_queue: Mutex::new(0),
 			log_cv: Condvar::new(),
+			enact_mutex: Mutex::new(()),
 		})
 	}
 
-	fn signal_worker(&self) {
-		self.worker_cv.notify_one();
+	fn signal_log_worker(&self) {
+		self.log_worker_cv.notify_one();
+	}
+
+	fn signal_commit_worker(&self) {
+		self.commit_worker_cv.notify_one();
 	}
 
 	fn signal_rebalance(&self) {
@@ -147,7 +157,7 @@ impl DbInner {
 				commit.id,
 			);
 			queue.commits.push_back(commit);
-			self.signal_worker();
+			self.signal_log_worker();
 		}
 		Ok(())
 	}
@@ -204,7 +214,7 @@ impl DbInner {
 			}
 
 			if rebalance {
-				self.signal_rebalance();
+				self.start_rebalance()?;
 			}
 
 			log::debug!(
@@ -215,10 +225,17 @@ impl DbInner {
 			);
 			let mut queue = self.log_queue.lock();
 			*queue += 1;
+			self.signal_commit_worker();
 			Ok(true)
 		} else {
 			Ok(false)
 		}
+	}
+
+	fn start_rebalance(&self) -> Result<()> {
+		self.flush_all_logs()?;
+		self.signal_rebalance();
+		Ok(())
 	}
 
 	fn process_rebalance(&self) -> Result<bool> {
@@ -260,9 +277,12 @@ impl DbInner {
 				"Created rebalance record {}",
 				record_id,
 			);
+			let mut queue = self.log_queue.lock();
+			*queue += 1;
 			if next_rebalance {
-				self.signal_rebalance();
+				self.start_rebalance()?;
 			}
+			self.signal_commit_worker();
 			Ok(true)
 		} else {
 			Ok(false)
@@ -271,6 +291,7 @@ impl DbInner {
 
 	fn enact_logs(&self) -> Result<bool> {
 		let cleared = {
+			let _lock = self.enact_mutex.lock();
 			let reader = self.log.flush_one()?;
 			if let Some(mut reader) = reader {
 				log::debug!(
@@ -360,7 +381,7 @@ impl DbInner {
 					batch,
 					column: i as u8,
 				});
-				self.signal_worker();
+				self.signal_log_worker();
 				return Ok(true);
 			}
 		}
@@ -369,7 +390,8 @@ impl DbInner {
 
 	fn shutdown(&self) {
 		self.shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
-		self.signal_worker();
+		self.signal_log_worker();
+		self.signal_commit_worker();
 		self.signal_rebalance();
 	}
 }
@@ -377,7 +399,8 @@ impl DbInner {
 pub struct Db {
 	inner: Arc<DbInner>,
 	rebalance_thread: Option<std::thread::JoinHandle<Result<()>>>,
-	worker_thread: Option<std::thread::JoinHandle<Result<()>>>,
+	commit_thread: Option<std::thread::JoinHandle<Result<()>>>,
+	log_thread: Option<std::thread::JoinHandle<Result<()>>>,
 }
 
 impl Db {
@@ -391,16 +414,24 @@ impl Db {
 				panic!(e)
 			})
 		);
-		let worker_db = db.clone();
-		let worker_thread = std::thread::spawn(move ||
-			Self::db_worker(worker_db).map_err(|e| {
+		let commit_worker_db = db.clone();
+		let commit_thread = std::thread::spawn(move ||
+			Self::commit_worker(commit_worker_db).map_err(|e| {
+				log::error!(target: "parity-db", "DB ERROR: {:?}", e);
+				panic!(e)
+			})
+		);
+		let log_worker_db = db.clone();
+		let log_thread = std::thread::spawn(move ||
+			Self::log_worker(log_worker_db).map_err(|e| {
 				log::error!(target: "parity-db", "DB ERROR: {:?}", e);
 				panic!(e)
 			})
 		);
 		Ok(Db {
 			inner: db,
-			worker_thread: Some(worker_thread),
+			commit_thread: Some(commit_thread),
+			log_thread: Some(log_thread),
 			rebalance_thread: Some(rebalance_thread),
 		})
 	}
@@ -421,22 +452,32 @@ impl Db {
 		self.inner.columns.len() as u8
 	}
 
-	fn db_worker(db: Arc<DbInner>) -> Result<()> {
+	fn commit_worker(db: Arc<DbInner>) -> Result<()> {
 		let mut more_work = false;
 		while !db.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
 			// Wait for a task
 			if !more_work {
-				let mut work = db.work.lock();
-				db.worker_cv.wait(&mut work);
+				let mut work = db.commit_work.lock();
+				db.commit_worker_cv.wait(&mut work);
 			}
 
 			more_work = db.enact_logs()?;
+		}
+		Ok(())
+	}
+
+	fn log_worker(db: Arc<DbInner>) -> Result<()> {
+		let mut more_work = false;
+		while !db.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+			// Wait for a task
 			if !more_work {
-				let more_commits = db.process_commits()?;
-				let more_rebalance = db.process_rebalance()?;
-				more_work = more_commits || more_rebalance;
+				let mut work = db.log_work.lock();
+				db.log_worker_cv.wait(&mut work);
 			}
-			more_work = more_work || db.process_rebalance()?;
+
+			let more_commits = db.process_commits()?;
+			let more_rebalance = db.process_rebalance()?;
+			more_work = more_commits || more_rebalance;
 		}
 		Ok(())
 	}
@@ -460,7 +501,8 @@ impl Drop for Db {
 	fn drop(&mut self) {
 		self.inner.shutdown();
 		self.rebalance_thread.take().map(|t| t.join());
-		self.worker_thread.take().map(|t| t.join());
+		self.log_thread.take().map(|t| t.join());
+		self.commit_thread.take().map(|t| t.join());
 	}
 }
 

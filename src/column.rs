@@ -204,7 +204,7 @@ impl Column {
 					}
 				} else {
 					// Fall thorough to insertion
-					log::warn!(
+					log::debug!(
 						target: "parity-db",
 						"{}: Index chunk conflict {} vs {}",
 						tables.index.id,
@@ -234,7 +234,7 @@ impl Column {
 		} else {
 			// Deletion
 			let (mut existing_entry, mut sub_index) = tables.index.get(key, 0, log);
-			while existing_entry.is_empty() {
+			while !existing_entry.is_empty() {
 				let existing_tier = existing_entry.address().size_tier() as usize;
 				// TODO: Remove this check? Highly unlikely.
 				if tables.value[existing_tier].has_key_at(existing_entry.address().offset(), &key, log)? {
@@ -286,7 +286,8 @@ impl Column {
 		Ok(())
 	}
 
-	pub fn rebalance(&self, log: &Log) -> Result<(Option<IndexTableId>, Vec<(Key, Address)>)> {
+	pub fn rebalance(&self, _log: &Log) -> Result<(Option<IndexTableId>, Vec<(Key, Address)>)> {
+		// TODO: handle overlay
 		let tables = self.tables.read();
 		let rebalance = self.rebalance.read();
 		let mut plan = Vec::new();
@@ -303,13 +304,16 @@ impl Column {
 				let shift_key_bits = source.id.index_bits() - 16;
 				while source_index < source.id.total_chunks() && count < MAX_REBALANCE_BATCH {
 					log::trace!(target: "parity-db", "{}: Rebalancing {}", source.id, source_index);
-					for entry in source.entries(source_index).iter() {
+					let entries = source.raw_entries(source_index);
+					for entry in entries.iter() {
 						if entry.is_empty() {
 							continue;
 						}
-						let mut key = tables.value[entry.address().size_tier() as usize]
-							.partial_key_at(entry.address().offset(), &*log.overlays())?
-							.ok_or_else(|| Error::Corruption("Bad value table key".into()))?;
+						let mut key = {
+							tables.value[entry.address().size_tier() as usize]
+							.raw_partial_key_at(entry.address().offset())?
+							.ok_or_else(|| Error::Corruption("Bad value table key".into()))?
+						};
 						// restore 16 high bits
 						&mut key[0..2].copy_from_slice(&((source_index >> shift_key_bits) as u16).to_be_bytes());
 						log::trace!(target: "parity-db", "{}: Reinserting {}", source.id, hex(&key));

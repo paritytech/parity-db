@@ -26,21 +26,29 @@ static COMMITS: AtomicUsize = AtomicUsize::new(0);
 //static QUERIES: AtomicUsize = AtomicUsize::new(0);
 
 const COMMIT_SIZE: usize = 100;
+const COMMIT_PRUNE_SIZE: usize = 90;
+const COMMIT_PRUNE_WINDOW: usize = 2000;
 
 const USAGE: &str = "
-Usage: stress [--readers=<#>][--writers=<#>] [--entries=<l>]
+Usage: stress [--readers=<#>][--writers=<#>] [--commits=<l>]
 
 Options:
 	--readers=<#>      Number of reading threads [default: 4].
 	--writers=<#>      Number of writing threads [default: 1].
-	--entries=<n>      Total numbet of inserted entries.
+	--commits=<n>      Total numbet of inserted commits.
+	--seed=<n>         Random seed used for key generation.
+	--archive=<n>      Do not perform deletions.
+	--append=<n>       Open an existing database.
 ";
 
 #[derive(Clone)]
 struct Args {
 	readers: usize,
-	entries: usize,
+	commits: usize,
 	writers: usize,
+	seed: Option<u64>,
+	archive: bool,
+	append: bool,
 }
 
 impl Default for Args {
@@ -48,7 +56,10 @@ impl Default for Args {
 		Args {
 			readers: 4,
 			writers: 1,
-			entries: 100000,
+			commits: 100000,
+			append: false,
+			seed: None,
+			archive: false,
 		}
 	}
 }
@@ -105,7 +116,10 @@ impl Args {
 			match splits.next().unwrap() {
 				"readers" => args.readers = parse(&mut splits),
 				"writers" => args.writers = parse(&mut splits),
-				"entries" => args.entries = parse(&mut splits),
+				"commits" => args.commits = parse(&mut splits),
+				"seed" => args.seed = Some(parse(&mut splits)),
+				"archive" => args.archive = true,
+				"append" => args.append = true,
 				other => panic!("unknown option: {}, {}", other, USAGE),
 			}
 		}
@@ -126,16 +140,22 @@ fn informant(shutdown: Arc<AtomicBool>, total: usize) {
 	}
 }
 
-fn writer<D: Db>(db: Arc<D>, shutdown: Arc<AtomicBool>) {
+fn writer<D: Db>(db: Arc<D>, args: Arc<Args>, pool: Arc<SizePool>, shutdown: Arc<AtomicBool>) {
 	let mut key: u64 = 0;
 	let commit_size = COMMIT_SIZE;
-	let pool = SizePool::from_histogram(&sizes::C1);
 	let mut commit = Vec::with_capacity(commit_size);
 
-	while !shutdown.load(Ordering::Relaxed) {
+	for n in 0 .. args.commits {
+		if shutdown.load(Ordering::Relaxed) { break; }
 		for _ in 0 .. commit_size {
 			commit.push((pool.key(key), Some(pool.value(key))));
 			key += 1;
+		}
+		if !args.archive && n >= COMMIT_PRUNE_WINDOW {
+			let prune_start = (n - COMMIT_PRUNE_WINDOW) * COMMIT_SIZE;
+			for p in prune_start .. prune_start + COMMIT_PRUNE_SIZE {
+				commit.push((pool.key(p as u64), None));
+			}
 		}
 
 		db.commit(commit.drain(..));
@@ -146,27 +166,28 @@ fn writer<D: Db>(db: Arc<D>, shutdown: Arc<AtomicBool>) {
 
 fn reader<D: Db>(_db: Arc<D>, shutdown: Arc<AtomicBool>) {
 	while !shutdown.load(Ordering::Relaxed) {
-		thread::sleep(std::time::Duration::from_millis(5));
+		thread::sleep(std::time::Duration::from_millis(500));
 	}
 }
 
 pub fn run<D: Db>() {
 	env_logger::try_init().unwrap();
 	let path: std::path::PathBuf = "./test_db".into();
-	if path.exists() {
+	let args = Arc::new(Args::parse());
+	let shutdown = Arc::new(AtomicBool::new(false));
+	let pool = Arc::new(SizePool::from_histogram(&sizes::KUSAMA_STATE_DISTRIBUTION));
+	if path.exists() && !args.append {
 		std::fs::remove_dir_all(path.as_path()).unwrap();
 	}
-	let args = Args::parse();
-	let shutdown = Arc::new(AtomicBool::new(false));
 	let db = Arc::new(Db::open(path.as_path())) as Arc<D>;
 	let start = std::time::Instant::now();
 
 	let mut threads = Vec::new();
 
 	{
-		let entries = args.entries;
+		let commits = args.commits;
 		let shutdown = shutdown.clone();
-		threads.push(thread::spawn(move || informant(shutdown, entries)));
+		threads.push(thread::spawn(move || informant(shutdown, commits)));
 	}
 
 	for i in 0 .. args.readers {
@@ -184,16 +205,18 @@ pub fn run<D: Db>() {
 	for i in 0 .. args.writers {
 		let db = db.clone();
 		let shutdown = shutdown.clone();
+		let pool = pool.clone();
+		let args = args.clone();
 
 		threads.push(
 			thread::Builder::new()
 			.name(format!("writer {}", i))
-			.spawn(move || writer(db, shutdown))
+			.spawn(move || writer(db, args, pool, shutdown))
 			.unwrap()
 		);
 	}
 
-	while COMMITS.load(Ordering::Relaxed) < args.entries {
+	while COMMITS.load(Ordering::Relaxed) < args.commits {
 		thread::sleep(std::time::Duration::from_millis(50));
 	}
 	shutdown.store(true, Ordering::SeqCst);
@@ -212,21 +235,23 @@ pub fn run<D: Db>() {
 		commits as f64  / elapsed
 	);
 
-	let start = std::time::Instant::now();
+	thread::sleep(std::time::Duration::from_secs(1));
 
 	// Verify content
-	thread::sleep(std::time::Duration::from_secs(1));
-	let pool = SizePool::from_histogram(&sizes::C1);
-	for key in 0u64 .. (commits * COMMIT_SIZE) as u64 {
-		let k = pool.key(key);
-		let val = pool.value(key);
-		let db_val = db.get(&k);
-		assert_eq!(Some(val), db_val);
+	let start = std::time::Instant::now();
+	let pruned_per_commit = if args.archive { 0u64 } else { COMMIT_PRUNE_SIZE as u64 };
+	let mut queries = 0;
+	for nc in 0u64 .. commits as u64 {
+		for key in (nc * COMMIT_SIZE as u64 + pruned_per_commit) .. (nc + 1) * (COMMIT_SIZE as u64) {
+			let k = pool.key(key);
+			let val = pool.value(key);
+			let db_val = db.get(&k);
+			queries += 1;
+			assert_eq!(Some(val), db_val);
+		}
 	}
 
-	let queries = commits * COMMIT_SIZE;
 	let elapsed = start.elapsed().as_secs_f64();
-
 	println!(
 		"Completed {} queries in {} seconds. {} qps",
 		queries,

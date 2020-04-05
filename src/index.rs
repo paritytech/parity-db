@@ -15,7 +15,7 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::convert::TryInto;
-use parking_lot::RwLock;
+use parking_lot::{RwLockUpgradableReadGuard, RwLock};
 use crate::{
 	error::Result,
 	column::ColId,
@@ -213,7 +213,7 @@ impl IndexTable {
 		return (Entry::empty(), 0)
 	}
 
-	pub fn entries(&self, chunk_index: u64) -> [Entry; 64] {
+	pub fn raw_entries(&self, chunk_index: u64) -> [Entry; 64] {
 		let mut chunk = [0; CHUNK_LEN];
 		if let Some(map) = &*self.map.read() {
 			let source = Self::chunk_at(chunk_index, map);
@@ -312,18 +312,26 @@ impl IndexTable {
 	}
 
 	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
-		let mut map = self.map.write();
+		let mut map = self.map.upgradable_read();
 		if map.is_none() {
+			let mut wmap = RwLockUpgradableReadGuard::upgrade(map);
 			let file = std::fs::OpenOptions::new().write(true).read(true).create_new(true).open(self.path.as_path())?;
 			log::debug!(target: "parity-db", "Created new index {}", self.id);
 			//TODO: check for potential overflows on 32-bit platforms
 			file.set_len(file_size(self.id.index_bits()))?;
-			*map = Some(unsafe { memmap::MmapMut::map_mut(&file)? });
+			*wmap = Some(unsafe { memmap::MmapMut::map_mut(&file)? });
+			map = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wmap);
 		}
 
-		let map = map.as_mut().unwrap();
+		let map = map.as_ref().unwrap();
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
-		let mut chunk = &mut map[offset .. offset + CHUNK_LEN];
+		// Nasty mutable pointer cast. We do ensure that all chunks that are being written are access
+		// through the overlay in other threads.
+		let ptr: *mut u8 = map.as_ptr() as *mut u8;
+		let mut chunk: &mut[u8] = unsafe {
+			let ptr = ptr.offset(offset as isize);
+			std::slice::from_raw_parts_mut(ptr, CHUNK_LEN)
+		};
 		log.read(&mut chunk)?;
 		log::trace!(target: "parity-db", "{}: Enacted chunk {}", self.id, index);
 		Ok(())

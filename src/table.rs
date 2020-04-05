@@ -224,7 +224,7 @@ impl ValueTable {
 
 			if part == 0 {
 				if key[2..] != buf[content_offset..content_offset + 30] {
-					log::warn!(
+					log::debug!(
 						target: "parity-db",
 						"{}: Key mismatch at {}. Expected {}, got {}",
 						self.id,
@@ -260,6 +260,24 @@ impl ValueTable {
 		let buf = if let Some(overlay) = log.value(self.id, index) {
 			overlay
 		} else {
+			self.read_at(&mut buf[0 .. 40], index * self.entry_size as u64)?;
+			&buf[0 .. 40]
+		};
+		if &buf[0..2] == TOMBSTONE {
+			return Ok(None);
+		}
+		if &buf[0..2] == MULTIPART {
+			result[2..].copy_from_slice(&buf[10..40]);
+		} else {
+			result[2..].copy_from_slice(&buf[2..32]);
+		}
+		Ok(Some(result))
+	}
+
+	pub fn raw_partial_key_at(&self, index: u64) -> Result<Option<Key>> {
+		let mut buf = [0u8; 40];
+		let mut result = Key::default();
+		let buf = {
 			self.read_at(&mut buf[0 .. 40], index * self.entry_size as u64)?;
 			&buf[0 .. 40]
 		};
