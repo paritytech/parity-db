@@ -17,7 +17,7 @@
 use std::convert::TryInto;
 use parking_lot::{RwLockUpgradableReadGuard, RwLock};
 use crate::{
-	error::Result,
+	error::{Error, Result},
 	column::ColId,
 	log::{LogReader, LogWriter, LogQuery},
 	table::Address,
@@ -334,6 +334,16 @@ impl IndexTable {
 		};
 		log.read(&mut chunk)?;
 		log::trace!(target: "parity-db", "{}: Enacted chunk {}", self.id, index);
+		Ok(())
+	}
+
+	pub fn validate_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
+		if index >= self.id.total_entries() {
+			return Err(Error::Corruption("Bad index".into()));
+		}
+		let mut chunk = [0; CHUNK_LEN];
+		log.read(&mut chunk)?;
+		log::trace!(target: "parity-db", "{}: Validated chunk {}", self.id, index);
 		Ok(())
 	}
 

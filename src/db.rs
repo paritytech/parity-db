@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::collections::{HashMap, VecDeque};
 use parking_lot::{RwLock, Mutex, Condvar};
 use crate::{
@@ -25,8 +25,11 @@ use crate::{
 	index::{PlanOutcome, TableId as IndexTableId},
 };
 
-const MAX_COMMIT_QUEUE_SIZE: usize = 64;
-const MAX_LOG_QUEUE_SIZE: usize = 64;
+
+// These are in memory, so we use usize
+const MAX_COMMIT_QUEUE_BYTES: usize = 16 * 1024 * 1024;
+// These are disk-backed, so we use u64
+const MAX_LOG_QUEUE_BYTES: u64 = 32 * 1024 * 1024;
 
 pub type Value = Vec<u8>;
 
@@ -40,12 +43,14 @@ fn hash(key: &[u8]) -> Key {
 #[derive(Default)]
 struct Commit{
 	id: u64,
+	bytes: usize,
 	changeset: Vec<(ColId, Key, Option<Value>)>,
 }
 
 #[derive(Default)]
 struct CommitQueue{
 	record_id: u64,
+	bytes: usize,
 	commits: VecDeque<Commit>,
 }
 
@@ -59,7 +64,7 @@ struct PendingRebalance {
 struct DbInner {
 	columns: Vec<Column>,
 	_path: std::path::PathBuf,
-	shutdown: std::sync::atomic::AtomicBool,
+	shutdown: AtomicBool,
 	rebalance_queue: Mutex<VecDeque<PendingRebalance>>,
 	need_rebalance_cv: Condvar,
 	rebalance_work: Mutex<()>,
@@ -72,8 +77,12 @@ struct DbInner {
 	commit_work: Mutex<()>,
 	commit_overlay: RwLock<HashMap<ColId, HashMap<Key, (u64, Option<Value>)>>>,
 	log_cv: Condvar,
-	log_queue: Mutex<usize>,
+	log_queue_bytes: Mutex<u64>,
+	flush_worker_cv: Condvar,
+	flush_work: Mutex<()>,
 	enact_mutex: Mutex<()>,
+	last_enacted: AtomicU64,
+	next_rebalance: AtomicU64,
 }
 
 impl DbInner {
@@ -98,9 +107,13 @@ impl DbInner {
 			commit_worker_cv: Condvar::new(),
 			commit_work: Mutex::new(()),
 			commit_overlay: RwLock::new(Default::default()),
-			log_queue: Mutex::new(0),
+			log_queue_bytes: Mutex::new(0),
 			log_cv: Condvar::new(),
+			flush_worker_cv: Condvar::new(),
+			flush_work: Mutex::new(()),
 			enact_mutex: Mutex::new(()),
+			next_rebalance: AtomicU64::new(0),
+			last_enacted: AtomicU64::new(0),
 		})
 	}
 
@@ -112,8 +125,12 @@ impl DbInner {
 		self.commit_worker_cv.notify_one();
 	}
 
-	fn signal_rebalance(&self) {
+	fn signal_rebalance_worker(&self) {
 		self.need_rebalance_cv.notify_one();
+	}
+
+	fn signal_flush_worker(&self) {
+		self.flush_worker_cv.notify_one();
 	}
 
 	pub fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
@@ -131,32 +148,39 @@ impl DbInner {
 			I: IntoIterator<Item=(ColId, K, Option<Value>)>,
 			K: AsRef<[u8]>,
 	{
-		let commit = tx.into_iter().map(|(c, k, v)| (c, hash(k.as_ref()), v)).collect();
+		let commit: Vec<_> = tx.into_iter().map(|(c, k, v)| (c, hash(k.as_ref()), v)).collect();
 
 		{
 			let mut queue = self.commit_queue.lock();
-			if queue.commits.len() >= MAX_COMMIT_QUEUE_SIZE {
+			if queue.bytes > MAX_COMMIT_QUEUE_BYTES {
 				self.commit_queue_full_cv.wait(&mut queue);
 			}
 			let mut overlay = self.commit_overlay.write();
 
 			queue.record_id += 1;
 			let record_id = queue.record_id + 1;
-			let commit = Commit {
-				id: record_id,
-				changeset: commit,
-			};
 
-			for (c, k, v) in &commit.changeset {
+			let mut bytes = 0;
+			for (c, k, v) in &commit {
+				bytes += k.len();
+				bytes += v.as_ref().map_or(0, |v|v.len());
 				overlay.entry(*c).or_default().insert(*k, (record_id, v.clone()));
 			}
 
+			let commit = Commit {
+				id: record_id,
+				changeset: commit,
+				bytes,
+			};
+
 			log::debug!(
 				target: "parity-db",
-				"Queued commit {}",
+				"Queued commit {}, {} bytes",
 				commit.id,
+				bytes,
 			);
 			queue.commits.push_back(commit);
+			queue.bytes += bytes;
 			self.signal_log_worker();
 		}
 		Ok(())
@@ -164,17 +188,23 @@ impl DbInner {
 
 	fn process_commits(&self) -> Result<bool> {
 		{
-			let mut queue = self.log_queue.lock();
-			if *queue >= MAX_LOG_QUEUE_SIZE {
+			let mut queue = self.log_queue_bytes.lock();
+			if *queue > MAX_LOG_QUEUE_BYTES {
 				self.log_cv.wait(&mut queue);
 			}
 		}
 		let commit = {
 			let mut queue = self.commit_queue.lock();
-			if queue.commits.len() == MAX_COMMIT_QUEUE_SIZE {
-				self.commit_queue_full_cv.notify_one();
+			if let Some(commit) = queue.commits.pop_front() {
+				queue.bytes -= commit.bytes;
+				if queue.bytes <= MAX_COMMIT_QUEUE_BYTES && (queue.bytes + commit.bytes) > MAX_COMMIT_QUEUE_BYTES {
+					// Past the waiting threshold.
+					self.commit_queue_full_cv.notify_one();
+				}
+				Some(commit)
+			} else {
+				None
 			}
-			queue.commits.pop_front()
 		};
 
 		if let Some(commit) = commit {
@@ -182,9 +212,10 @@ impl DbInner {
 			let mut writer = self.log.begin_record();
 			log::debug!(
 				target: "parity-db",
-				"Processing commit {}, record {}",
+				"Processing commit {}, record {}, {} bytes",
 				commit.id,
 				writer.record_id(),
+				commit.bytes,
 			);
 			let mut ops: u64 = 0;
 			for (c, key, value) in commit.changeset.iter() {
@@ -198,7 +229,7 @@ impl DbInner {
 			}
 			let record_id = writer.record_id();
 			let l = writer.drain();
-			self.log.end_record(l)?;
+			let bytes = self.log.end_record(l)?;
 
 			{
 				let mut overlay = self.commit_overlay.write();
@@ -214,38 +245,44 @@ impl DbInner {
 			}
 
 			if rebalance {
-				self.start_rebalance()?;
+				self.start_rebalance(record_id);
 			}
 
 			log::debug!(
 				target: "parity-db",
-				"Processed commit {}, {} ops",
+				"Processed commit {} (record {}), {} ops, {} bytes written",
+				commit.id,
 				record_id,
 				ops,
+				bytes,
 			);
-			let mut queue = self.log_queue.lock();
-			*queue += 1;
-			self.signal_commit_worker();
+			let mut logged_bytes = self.log_queue_bytes.lock();
+			*logged_bytes += bytes;
+			self.signal_flush_worker();
 			Ok(true)
 		} else {
 			Ok(false)
 		}
 	}
 
-	fn start_rebalance(&self) -> Result<()> {
-		self.flush_all_logs()?;
-		self.signal_rebalance();
-		Ok(())
+	fn start_rebalance(&self, record_id: u64) {
+		self.next_rebalance.store(record_id, Ordering::SeqCst);
 	}
 
 	fn process_rebalance(&self) -> Result<bool> {
+		{
+			let mut queue = self.log_queue_bytes.lock();
+			if *queue > MAX_LOG_QUEUE_BYTES {
+				self.log_cv.wait(&mut queue);
+			}
+		}
 		let rebalance =  {
-			log::debug!(
-				target: "parity-db",
-				"Checking pending rebalance",
-			);
 			let mut queue = self.rebalance_queue.lock();
-			queue.pop_front()
+			let r = queue.pop_front();
+			if queue.is_empty() {
+				queue.shrink_to_fit();
+			}
+			r
 		};
 
 		if let Some(rebalance) = rebalance {
@@ -270,35 +307,83 @@ impl DbInner {
 			}
 			let record_id = writer.record_id();
 			let l = writer.drain();
-			self.log.end_record(l)?;
+			let bytes = self.log.end_record(l)?;
 
 			log::debug!(
 				target: "parity-db",
-				"Created rebalance record {}",
+				"Created rebalance record {}, {} bytes",
 				record_id,
+				bytes,
 			);
-			let mut queue = self.log_queue.lock();
-			*queue += 1;
+			let mut logged_bytes = self.log_queue_bytes.lock();
+			*logged_bytes += bytes;
 			if next_rebalance {
-				self.start_rebalance()?;
+				self.start_rebalance(record_id);
 			}
-			self.signal_commit_worker();
+			self.signal_flush_worker();
 			Ok(true)
 		} else {
 			Ok(false)
 		}
 	}
 
-	fn enact_logs(&self) -> Result<bool> {
+	fn enact_logs(&self, validation_mode: bool) -> Result<bool> {
 		let cleared = {
 			let _lock = self.enact_mutex.lock();
-			let reader = self.log.flush_one()?;
+			let reader = match self.log.read_next() {
+				Ok(reader) => reader,
+				Err(Error::Corruption(_)) if validation_mode => {
+					log::info!(target: "parity-db", "Bad log header");
+					self.log.clear_logs()?;
+					return Ok(false);
+				}
+				Err(e) => return Err(e),
+			};
 			if let Some(mut reader) = reader {
 				log::debug!(
 					target: "parity-db",
 					"Enacting log {}",
 					reader.record_id(),
 				);
+				if validation_mode {
+					// Validate all records before applying anything
+					loop {
+						match reader.next()? {
+							LogAction::BeginRecord(_) => {
+								log::debug!(target: "parity-db", "Unexpected log header");
+								std::mem::drop(reader);
+								self.log.clear_logs()?;
+								return Ok(false);
+							},
+							LogAction::EndRecord => {
+								break;
+							},
+							LogAction::InsertIndex(insertion) => {
+								let col = insertion.table.col() as usize;
+								if let Err(e) = self.columns[col].validate_plan(LogAction::InsertIndex(insertion), &mut reader) {
+									log::warn!(target: "parity-db", "Eror replaying log: {:?}. Reverting", e);
+									std::mem::drop(reader);
+									self.log.clear_logs()?;
+									return Ok(false);
+								}
+							},
+							LogAction::InsertValue(insertion) => {
+								let col = insertion.table.col() as usize;
+								if let Err(e) = self.columns[col].validate_plan(LogAction::InsertValue(insertion), &mut reader) {
+									log::warn!(target: "parity-db", "Eror replaying log: {:?}. Reverting", e);
+									std::mem::drop(reader);
+									self.log.clear_logs()?;
+									return Ok(false);
+								}
+							},
+							LogAction::DropTable(_) => {
+								continue;
+							}
+						}
+					}
+					reader.reset()?;
+					reader.next()?;
+				}
 				loop {
 					match reader.next()? {
 						LogAction::BeginRecord(_) => {
@@ -333,26 +418,32 @@ impl DbInner {
 				}
 				log::debug!(
 					target: "parity-db",
-					"Finished log {}",
+					"Enacted log record {}, {} bytes",
 					reader.record_id(),
+					reader.read_bytes(),
 				);
 				let record_id = reader.record_id();
+				let bytes = reader.read_bytes();
 				let cleared = reader.drain();
-				Some((record_id, cleared))
+				self.last_enacted.store(record_id, Ordering::SeqCst);
+				if record_id == self.next_rebalance.load(Ordering::SeqCst) {
+					self.signal_rebalance_worker();
+				}
+				Some((record_id, cleared, bytes))
 			} else {
 				None
 			}
 		};
 
-		if let Some((record_id, cleared)) = cleared {
+		if let Some((record_id, cleared, bytes)) = cleared {
 			self.log.end_read(cleared, record_id);
 			{
-				let mut queue = self.log_queue.lock();
-				if *queue == MAX_LOG_QUEUE_SIZE {
-					self.log_cv.notify_all();
-				}
-				if *queue > 0 {
-					*queue -= 1;
+				if !validation_mode {
+					let mut queue = self.log_queue_bytes.lock();
+					*queue -= bytes;
+					if *queue <= MAX_LOG_QUEUE_BYTES && (*queue + bytes) > MAX_LOG_QUEUE_BYTES {
+						self.log_cv.notify_all();
+					}
 				}
 			}
 			Ok(true)
@@ -361,8 +452,22 @@ impl DbInner {
 		}
 	}
 
-	fn flush_all_logs(&self) -> Result<()> {
-		while self.enact_logs()? { };
+	fn flush_logs(&self) -> Result<bool> {
+		let (flush_next, read_next) = self.log.flush_one()?;
+		if read_next {
+			self.signal_commit_worker();
+		}
+		Ok(flush_next)
+	}
+
+	fn replay_all_logs(&self) -> Result<()> {
+		log::info!(target: "parity-db", "Replaying database log...");
+		while self.flush_logs()? {
+			while self.enact_logs(true)? { }
+		}
+		// Need one more pass to enact the last log.
+		while self.enact_logs(true)? { }
+		log::info!(target: "parity-db", "Done.");
 		Ok(())
 	}
 
@@ -389,10 +494,11 @@ impl DbInner {
 	}
 
 	fn shutdown(&self) {
-		self.shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+		self.shutdown.store(true, Ordering::SeqCst);
+		self.signal_flush_worker();
 		self.signal_log_worker();
 		self.signal_commit_worker();
-		self.signal_rebalance();
+		self.signal_rebalance_worker();
 	}
 }
 
@@ -400,13 +506,14 @@ pub struct Db {
 	inner: Arc<DbInner>,
 	rebalance_thread: Option<std::thread::JoinHandle<Result<()>>>,
 	commit_thread: Option<std::thread::JoinHandle<Result<()>>>,
+	flush_thread: Option<std::thread::JoinHandle<Result<()>>>,
 	log_thread: Option<std::thread::JoinHandle<Result<()>>>,
 }
 
 impl Db {
 	pub fn open(path: &std::path::Path, columns: u8) -> Result<Db> {
 		let db = Arc::new(DbInner::open(path, columns)?);
-		db.flush_all_logs()?;
+		db.replay_all_logs()?;
 		let rebalance_db = db.clone();
 		let rebalance_thread = std::thread::spawn(move ||
 			Self::rebalance_worker(rebalance_db).map_err(|e| {
@@ -421,6 +528,13 @@ impl Db {
 				panic!(e)
 			})
 		);
+		let flush_worker_db = db.clone();
+		let flush_thread = std::thread::spawn(move ||
+			Self::flush_worker(flush_worker_db).map_err(|e| {
+				log::error!(target: "parity-db", "DB ERROR: {:?}", e);
+				panic!(e)
+			})
+		);
 		let log_worker_db = db.clone();
 		let log_thread = std::thread::spawn(move ||
 			Self::log_worker(log_worker_db).map_err(|e| {
@@ -431,6 +545,7 @@ impl Db {
 		Ok(Db {
 			inner: db,
 			commit_thread: Some(commit_thread),
+			flush_thread: Some(flush_thread),
 			log_thread: Some(log_thread),
 			rebalance_thread: Some(rebalance_thread),
 		})
@@ -454,21 +569,22 @@ impl Db {
 
 	fn commit_worker(db: Arc<DbInner>) -> Result<()> {
 		let mut more_work = false;
-		while !db.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+		while !db.shutdown.load(Ordering::SeqCst) {
 			// Wait for a task
 			if !more_work {
 				let mut work = db.commit_work.lock();
 				db.commit_worker_cv.wait(&mut work);
 			}
 
-			more_work = db.enact_logs()?;
+			more_work = db.enact_logs(false)?;
 		}
+		log::debug!(target: "parity-db", "Commit worker shutdown");
 		Ok(())
 	}
 
 	fn log_worker(db: Arc<DbInner>) -> Result<()> {
 		let mut more_work = false;
-		while !db.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+		while !db.shutdown.load(Ordering::SeqCst) {
 			// Wait for a task
 			if !more_work {
 				let mut work = db.log_work.lock();
@@ -479,12 +595,13 @@ impl Db {
 			let more_rebalance = db.process_rebalance()?;
 			more_work = more_commits || more_rebalance;
 		}
+		log::debug!(target: "parity-db", "Log worker shutdown");
 		Ok(())
 	}
 
 	fn rebalance_worker(db: Arc<DbInner>) -> Result<()> {
 		let mut more_work = false;
-		while !db.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+		while !db.shutdown.load(Ordering::SeqCst) {
 			// Wait for a task
 			if !more_work {
 				let mut work = db.rebalance_work.lock();
@@ -493,6 +610,21 @@ impl Db {
 
 			more_work = db.collect_rebalance()?;
 		}
+		log::debug!(target: "parity-db", "Rebalance worker shutdown");
+		Ok(())
+	}
+
+	fn flush_worker(db: Arc<DbInner>) -> Result<()> {
+		let mut more_work = false;
+		while !db.shutdown.load(Ordering::SeqCst) {
+			// Wait for a task
+			if !more_work {
+				let mut work = db.flush_work.lock();
+				db.flush_worker_cv.wait(&mut work);
+			}
+			more_work = db.flush_logs()?;
+		}
+		log::debug!(target: "parity-db", "Flush worker shutdown");
 		Ok(())
 	}
 }
@@ -502,6 +634,7 @@ impl Drop for Db {
 		self.inner.shutdown();
 		self.rebalance_thread.take().map(|t| t.join());
 		self.log_thread.take().map(|t| t.join());
+		self.flush_thread.take().map(|t| t.join());
 		self.commit_thread.take().map(|t| t.join());
 	}
 }

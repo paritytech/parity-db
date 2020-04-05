@@ -142,7 +142,7 @@ impl Column {
 		let mut rebalance = rebalance.write();
 		log::info!(
 			target: "parity-db",
-			"Started index rebalance {} at {}/{} full",
+			"Started reindex for {} at {}/{} full",
 			tables.index.id,
 			tables.index.num_entries(),
 			tables.index.id.total_entries(),
@@ -222,7 +222,7 @@ impl Column {
 			let address = Address::new(offset, target_tier as u8);
 			match tables.index.write_insert_plan(key, address, None, log)? {
 				PlanOutcome::NeedRebalance => {
-					log::info!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
+					log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
 					Self::trigger_rebalance(tables, &self.rebalance, self.path.as_path());
 					self.write_plan(key, value, log)?;
 					return Ok(PlanOutcome::NeedRebalance);
@@ -278,6 +278,28 @@ impl Column {
 		Ok(())
 	}
 
+	pub fn validate_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
+		let tables = self.tables.read();
+		let rebalance = self.rebalance.read();
+		match action {
+			LogAction::InsertIndex(record) => {
+				if tables.index.id == record.table {
+					tables.index.validate_plan(record.index, log)?;
+				} else if let Some(table) = rebalance.queue.iter().find(|r|r.id == record.table) {
+					table.validate_plan(record.index, log)?;
+				}
+				else {
+					return Err(Error::Corruption("Missing table".into()));
+				}
+			},
+			LogAction::InsertValue(record) => {
+				tables.value[record.table.size_tier() as usize].validate_plan(record.index, log)?;
+			}
+			_ => panic!("Unexpected log action"),
+		}
+		Ok(())
+	}
+
 	pub fn complete_plan(&self) -> Result<()> {
 		let tables = self.tables.read();
 		for t in tables.value.iter() {
@@ -298,7 +320,7 @@ impl Column {
 				let mut source_index = progress;
 				let mut count = 0;
 				if source_index % 50 == 0 {
-					log::info!(target: "parity-db", "{}: Continue rebalance at {}/{}", tables.index.id, source_index, source.id.total_chunks());
+					log::info!(target: "parity-db", "{}: Reindexing at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				}
 				log::debug!(target: "parity-db", "{}: Continue rebalance at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				let shift_key_bits = source.id.index_bits() - 16;
@@ -341,7 +363,8 @@ impl Column {
 			rebalance.progress.store(0, Ordering::Relaxed);
 			table.unwrap().drop_file()?;
 		} else {
-			return Err(Error::Corruption("Dropping invalid index".into()));
+			log::warn!(target: "parity-db", "Dropping invalid index {}", id);
+			return Ok(());
 		}
 		log::debug!(target: "parity-db", "Dropped {}", id);
 		Ok(())

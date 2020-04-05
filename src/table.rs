@@ -491,6 +491,26 @@ impl ValueTable {
 		Ok(())
 	}
 
+	pub fn validate_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
+		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
+		log.read(&mut buf[0..2])?;
+		if &buf[0..2] == TOMBSTONE {
+			log.read(&mut buf[2..10])?;
+			log::trace!(target: "parity-db", "{}: Validated tombstone in slot {}", self.id, index);
+		}
+		else if &buf[0..2] == MULTIPART {
+			let entry_size = self.entry_size as usize;
+			log.read(&mut buf[2..entry_size])?;
+			log::trace!(target: "parity-db", "{}: Validated multipart in slot {}", self.id, index);
+		} else {
+			// TODO: check len
+			let len: u16 = u16::from_le_bytes(buf[0..2].try_into().unwrap());
+			log.read(&mut buf[2..2+len as usize])?;
+			log::trace!(target: "parity-db", "{}: Validated {}: {}, {} bytes", self.id, index, hex(&buf[2..32]), len);
+		}
+		Ok(())
+	}
+
 	pub fn complete_plan(&self) -> Result<()> {
 		let mut buf = [0u8; 16];
 		let last_removed = self.last_removed.load(Ordering::Relaxed);
