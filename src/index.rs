@@ -76,7 +76,7 @@ impl Entry {
 
 pub enum PlanOutcome {
 	Written,
-	NeedRebalance,
+	NeedReindex,
 	Skipped,
 }
 
@@ -255,7 +255,7 @@ impl IndexTable {
 			}
 		}
 		log::trace!(target: "parity-db", "{}: Full at {}", self.id, chunk_index);
-		return Ok(PlanOutcome::NeedRebalance);
+		return Ok(PlanOutcome::NeedReindex);
 	}
 
 	pub fn write_insert_plan(&self, key: &Key, address: Address, sub_index: Option<usize>, log: &mut LogWriter) -> Result<PlanOutcome> {

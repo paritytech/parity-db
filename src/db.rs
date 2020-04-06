@@ -55,7 +55,7 @@ struct CommitQueue{
 }
 
 #[derive(Default)]
-struct PendingRebalance {
+struct PendingReindex {
 	column: ColId,
 	batch: Vec<(Key, Address)>,
 	drop_index: Option<IndexTableId>,
@@ -65,9 +65,9 @@ struct DbInner {
 	columns: Vec<Column>,
 	_path: std::path::PathBuf,
 	shutdown: AtomicBool,
-	rebalance_queue: Mutex<VecDeque<PendingRebalance>>,
-	need_rebalance_cv: Condvar,
-	rebalance_work: Mutex<()>,
+	reindex_queue: Mutex<VecDeque<PendingReindex>>,
+	need_reindex_cv: Condvar,
+	reindex_work: Mutex<()>,
 	log: Log,
 	commit_queue: Mutex<CommitQueue>,
 	commit_queue_full_cv: Condvar,
@@ -82,7 +82,7 @@ struct DbInner {
 	flush_work: Mutex<()>,
 	enact_mutex: Mutex<()>,
 	last_enacted: AtomicU64,
-	next_rebalance: AtomicU64,
+	next_reindex: AtomicU64,
 }
 
 impl DbInner {
@@ -96,9 +96,9 @@ impl DbInner {
 			columns,
 			_path: path.into(),
 			shutdown: std::sync::atomic::AtomicBool::new(false),
-			rebalance_queue: Mutex::new(Default::default()),
-			need_rebalance_cv: Condvar::new(),
-			rebalance_work: Mutex::new(()),
+			reindex_queue: Mutex::new(Default::default()),
+			need_reindex_cv: Condvar::new(),
+			reindex_work: Mutex::new(()),
 			log: Log::open(path)?,
 			commit_queue: Mutex::new(Default::default()),
 			commit_queue_full_cv: Condvar::new(),
@@ -112,7 +112,7 @@ impl DbInner {
 			flush_worker_cv: Condvar::new(),
 			flush_work: Mutex::new(()),
 			enact_mutex: Mutex::new(()),
-			next_rebalance: AtomicU64::new(0),
+			next_reindex: AtomicU64::new(0),
 			last_enacted: AtomicU64::new(0),
 		})
 	}
@@ -125,8 +125,8 @@ impl DbInner {
 		self.commit_worker_cv.notify_one();
 	}
 
-	fn signal_rebalance_worker(&self) {
-		self.need_rebalance_cv.notify_one();
+	fn signal_reindex_worker(&self) {
+		self.need_reindex_cv.notify_one();
 	}
 
 	fn signal_flush_worker(&self) {
@@ -218,7 +218,7 @@ impl DbInner {
 		};
 
 		if let Some(commit) = commit {
-			let mut rebalance = false;
+			let mut reindex = false;
 			let mut writer = self.log.begin_record();
 			log::debug!(
 				target: "parity-db",
@@ -230,8 +230,8 @@ impl DbInner {
 			let mut ops: u64 = 0;
 			for (c, key, value) in commit.changeset.iter() {
 				match self.columns[*c as usize].write_plan(key, value, &mut writer)? {
-					PlanOutcome::NeedRebalance => {
-						rebalance = true;
+					PlanOutcome::NeedReindex => {
+						reindex = true;
 					},
 					_ => {},
 				}
@@ -265,8 +265,8 @@ impl DbInner {
 				}
 			}
 
-			if rebalance {
-				self.start_rebalance(record_id);
+			if reindex {
+				self.start_reindex(record_id);
 			}
 
 			log::debug!(
@@ -283,19 +283,19 @@ impl DbInner {
 		}
 	}
 
-	fn start_rebalance(&self, record_id: u64) {
-		self.next_rebalance.store(record_id, Ordering::SeqCst);
+	fn start_reindex(&self, record_id: u64) {
+		self.next_reindex.store(record_id, Ordering::SeqCst);
 	}
 
-	fn process_rebalance(&self) -> Result<bool> {
+	fn process_reindex(&self) -> Result<bool> {
 		{
 			let mut queue = self.log_queue_bytes.lock();
 			if *queue > MAX_LOG_QUEUE_BYTES {
 				self.log_cv.wait(&mut queue);
 			}
 		}
-		let rebalance =  {
-			let mut queue = self.rebalance_queue.lock();
+		let reindex =  {
+			let mut queue = self.reindex_queue.lock();
 			let r = queue.pop_front();
 			if queue.is_empty() {
 				queue.shrink_to_fit();
@@ -303,24 +303,24 @@ impl DbInner {
 			r
 		};
 
-		if let Some(rebalance) = rebalance {
-			let mut next_rebalance = false;
+		if let Some(reindex) = reindex {
+			let mut next_reindex = false;
 			let mut writer = self.log.begin_record();
 			log::debug!(
 				target: "parity-db",
-				"Creating rebalance record {}",
+				"Creating reindex record {}",
 				writer.record_id(),
 			);
-			let column = &self.columns[rebalance.column as usize];
-			for (key, address) in rebalance.batch.into_iter() {
+			let column = &self.columns[reindex.column as usize];
+			for (key, address) in reindex.batch.into_iter() {
 				match column.write_index_plan(&key, address, &mut writer)? {
-					PlanOutcome::NeedRebalance => {
-						next_rebalance = true
+					PlanOutcome::NeedReindex => {
+						next_reindex = true
 					},
 					_ => {},
 				}
 			}
-			if let Some(table) = rebalance.drop_index {
+			if let Some(table) = reindex.drop_index {
 				writer.drop_table(table);
 			}
 			let record_id = writer.record_id();
@@ -329,14 +329,14 @@ impl DbInner {
 
 			log::debug!(
 				target: "parity-db",
-				"Created rebalance record {}, {} bytes",
+				"Created reindex record {}, {} bytes",
 				record_id,
 				bytes,
 			);
 			let mut logged_bytes = self.log_queue_bytes.lock();
 			*logged_bytes += bytes;
-			if next_rebalance {
-				self.start_rebalance(record_id);
+			if next_reindex {
+				self.start_reindex(record_id);
 			}
 			self.signal_flush_worker();
 			Ok(true)
@@ -441,8 +441,8 @@ impl DbInner {
 				let bytes = reader.read_bytes();
 				let cleared = reader.drain();
 				self.last_enacted.store(record_id, Ordering::SeqCst);
-				if record_id == self.next_rebalance.load(Ordering::SeqCst) {
-					self.signal_rebalance_worker();
+				if record_id == self.next_reindex.load(Ordering::SeqCst) {
+					self.signal_reindex_worker();
 				}
 				Some((record_id, cleared, bytes))
 			} else {
@@ -492,17 +492,17 @@ impl DbInner {
 		Ok(())
 	}
 
-	fn collect_rebalance(&self) -> Result<bool> {
-		// Process any pending rebalances
+	fn collect_reindex(&self) -> Result<bool> {
+		// Process any pending reindexs
 		for (i, c) in self.columns.iter().enumerate() {
-			let (drop_index, batch) = c.rebalance(&self.log)?;
+			let (drop_index, batch) = c.reindex(&self.log)?;
 			if !batch.is_empty() {
 				log::debug!(
 					target: "parity-db",
-					"Added pending rebalance",
+					"Added pending reindex",
 				);
-				let mut queue = self.rebalance_queue.lock();
-				queue.push_back(PendingRebalance {
+				let mut queue = self.reindex_queue.lock();
+				queue.push_back(PendingReindex {
 					drop_index,
 					batch,
 					column: i as u8,
@@ -519,14 +519,14 @@ impl DbInner {
 		self.signal_flush_worker();
 		self.signal_log_worker();
 		self.signal_commit_worker();
-		self.signal_rebalance_worker();
+		self.signal_reindex_worker();
 		self.log.shutdown();
 	}
 }
 
 pub struct Db {
 	inner: Arc<DbInner>,
-	rebalance_thread: Option<std::thread::JoinHandle<Result<()>>>,
+	reindex_thread: Option<std::thread::JoinHandle<Result<()>>>,
 	commit_thread: Option<std::thread::JoinHandle<Result<()>>>,
 	flush_thread: Option<std::thread::JoinHandle<Result<()>>>,
 	log_thread: Option<std::thread::JoinHandle<Result<()>>>,
@@ -536,9 +536,9 @@ impl Db {
 	pub fn open(path: &std::path::Path, columns: u8) -> Result<Db> {
 		let db = Arc::new(DbInner::open(path, columns)?);
 		db.replay_all_logs()?;
-		let rebalance_db = db.clone();
-		let rebalance_thread = std::thread::spawn(move ||
-			Self::rebalance_worker(rebalance_db).map_err(|e| {
+		let reindex_db = db.clone();
+		let reindex_thread = std::thread::spawn(move ||
+			Self::reindex_worker(reindex_db).map_err(|e| {
 				log::error!(target: "parity-db", "DB ERROR: {:?}", e);
 				panic!(e)
 			})
@@ -569,7 +569,7 @@ impl Db {
 			commit_thread: Some(commit_thread),
 			flush_thread: Some(flush_thread),
 			log_thread: Some(log_thread),
-			rebalance_thread: Some(rebalance_thread),
+			reindex_thread: Some(reindex_thread),
 		})
 	}
 
@@ -614,25 +614,25 @@ impl Db {
 			}
 
 			let more_commits = db.process_commits()?;
-			let more_rebalance = db.process_rebalance()?;
-			more_work = more_commits || more_rebalance;
+			let more_reindex = db.process_reindex()?;
+			more_work = more_commits || more_reindex;
 		}
 		log::debug!(target: "parity-db", "Log worker shutdown");
 		Ok(())
 	}
 
-	fn rebalance_worker(db: Arc<DbInner>) -> Result<()> {
+	fn reindex_worker(db: Arc<DbInner>) -> Result<()> {
 		let mut more_work = false;
 		while !db.shutdown.load(Ordering::SeqCst) {
 			// Wait for a task
 			if !more_work {
-				let mut work = db.rebalance_work.lock();
-				db.need_rebalance_cv.wait(&mut work);
+				let mut work = db.reindex_work.lock();
+				db.need_reindex_cv.wait(&mut work);
 			}
 
-			more_work = db.collect_rebalance()?;
+			more_work = db.collect_reindex()?;
 		}
-		log::debug!(target: "parity-db", "Rebalance worker shutdown");
+		log::debug!(target: "parity-db", "Reindex worker shutdown");
 		Ok(())
 	}
 
@@ -654,7 +654,7 @@ impl Db {
 impl Drop for Db {
 	fn drop(&mut self) {
 		self.inner.shutdown();
-		self.rebalance_thread.take().map(|t| t.join());
+		self.reindex_thread.take().map(|t| t.join());
 		self.log_thread.take().map(|t| t.join());
 		self.flush_thread.take().map(|t| t.join());
 		self.commit_thread.take().map(|t| t.join());

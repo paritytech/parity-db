@@ -35,14 +35,14 @@ struct Tables {
 	value: [ValueTable; 16],
 }
 
-struct Rebalance {
+struct Reindex {
 	queue: VecDeque<IndexTable>,
 	progress: AtomicU64,
 }
 
 pub struct Column {
 	tables: RwLock<Tables>,
-	rebalance: RwLock<Rebalance>,
+	reindex: RwLock<Reindex>,
 	path: std::path::PathBuf,
 }
 
@@ -52,7 +52,7 @@ impl Column {
 		if let Some(value) = Self::get_in_index(key, &tables.index, &*tables, log)? {
 			return Ok(Some(value));
 		}
-		for r in &self.rebalance.read().queue {
+		for r in &self.reindex.read().queue {
 			if let Some(value) = Self::get_in_index(key, &r, &*tables, log)? {
 				return Ok(Some(value));
 			}
@@ -76,7 +76,7 @@ impl Column {
 		Ok(None)
 	}
 	pub fn open(col: ColId, path: &std::path::Path) -> Result<Column> {
-		let (index, rebalancing) = Self::open_index(path, col)?;
+		let (index, reindexing) = Self::open_index(path, col)?;
 		let tables = Tables {
 			index,
 			value: [
@@ -100,8 +100,8 @@ impl Column {
 		};
 		Ok(Column {
 			tables: RwLock::new(tables),
-			rebalance: RwLock::new(Rebalance {
-				queue: rebalancing,
+			reindex: RwLock::new(Reindex {
+				queue: reindexing,
 				progress: AtomicU64::new(0),
 			}),
 			path: path.into(),
@@ -109,7 +109,7 @@ impl Column {
 	}
 
 	fn open_index(path: &std::path::Path, col: ColId) -> Result<(IndexTable, VecDeque<IndexTable>)> {
-		let mut rebalancing = VecDeque::new();
+		let mut reindexing = VecDeque::new();
 		let mut top = None;
 		for bits in (START_BITS .. 65).rev() {
 			let id = IndexTableId::new(col, bits);
@@ -117,7 +117,7 @@ impl Column {
 				if top.is_none() {
 					top = Some(table);
 				} else {
-					rebalancing.push_front(table);
+					reindexing.push_front(table);
 				}
 			}
 		}
@@ -125,7 +125,7 @@ impl Column {
 			Some(table) => table,
 			None => IndexTable::create_new(path, IndexTableId::new(col, START_BITS)),
 		};
-		Ok((table, rebalancing))
+		Ok((table, reindexing))
 	}
 
 	fn open_table(path: &std::path::Path, col: ColId, tier: u8, entry_size: Option<u16>) -> Result<ValueTable> {
@@ -133,13 +133,13 @@ impl Column {
 		ValueTable::open(path, id, entry_size)
 	}
 
-	fn trigger_rebalance(
+	fn trigger_reindex(
 		tables: parking_lot::RwLockUpgradableReadGuard<Tables>,
-		rebalance: &RwLock<Rebalance>,
+		reindex: &RwLock<Reindex>,
 		path: &std::path::Path,
 	) {
 		let mut tables = parking_lot::RwLockUpgradableReadGuard::upgrade(tables);
-		let mut rebalance = rebalance.write();
+		let mut reindex = reindex.write();
 		log::info!(
 			target: "parity-db",
 			"Started reindex for {} at {}/{} full",
@@ -147,24 +147,24 @@ impl Column {
 			tables.index.num_entries(),
 			tables.index.id.total_entries(),
 		);
-		// Start rebalance
+		// Start reindex
 		let new_index_id = IndexTableId::new(
 			tables.index.id.col(),
 			tables.index.id.index_bits() + 1
 		);
 		let new_table = IndexTable::create_new(path, new_index_id);
 		let old_table = std::mem::replace(&mut tables.index, new_table);
-		rebalance.queue.push_back(old_table);
+		reindex.queue.push_back(old_table);
 	}
 
 	pub fn write_index_plan(&self, key: &Key, address: Address, log: &mut LogWriter) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
 		match tables.index.write_insert_plan(key, address, None, log)? {
-			PlanOutcome::NeedRebalance => {
+			PlanOutcome::NeedReindex => {
 				log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
-				Self::trigger_rebalance(tables, &self.rebalance, self.path.as_path());
+				Self::trigger_reindex(tables, &self.reindex, self.path.as_path());
 				self.write_index_plan(key, address, log)?;
-				return Ok(PlanOutcome::NeedRebalance);
+				return Ok(PlanOutcome::NeedReindex);
 			}
 			_ => {
 				return Ok(PlanOutcome::Written);
@@ -221,11 +221,11 @@ impl Column {
 			let offset = tables.value[target_tier].write_insert_plan(key, val, log)?;
 			let address = Address::new(offset, target_tier as u8);
 			match tables.index.write_insert_plan(key, address, None, log)? {
-				PlanOutcome::NeedRebalance => {
+				PlanOutcome::NeedReindex => {
 					log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
-					Self::trigger_rebalance(tables, &self.rebalance, self.path.as_path());
+					Self::trigger_reindex(tables, &self.reindex, self.path.as_path());
 					self.write_plan(key, value, log)?;
-					return Ok(PlanOutcome::NeedRebalance);
+					return Ok(PlanOutcome::NeedReindex);
 				}
 				_ => {
 					return Ok(PlanOutcome::Written);
@@ -253,12 +253,12 @@ impl Column {
 
 	pub fn enact_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
 		let tables = self.tables.read();
-		let rebalance = self.rebalance.read();
+		let reindex = self.reindex.read();
 		match action {
 			LogAction::InsertIndex(record) => {
 				if tables.index.id == record.table {
 					tables.index.enact_plan(record.index, log)?;
-				} else if let Some(table) = rebalance.queue.iter().find(|r|r.id == record.table) {
+				} else if let Some(table) = reindex.queue.iter().find(|r|r.id == record.table) {
 					table.enact_plan(record.index, log)?;
 				}
 				else {
@@ -280,12 +280,12 @@ impl Column {
 
 	pub fn validate_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
 		let tables = self.tables.read();
-		let rebalance = self.rebalance.read();
+		let reindex = self.reindex.read();
 		match action {
 			LogAction::InsertIndex(record) => {
 				if tables.index.id == record.table {
 					tables.index.validate_plan(record.index, log)?;
-				} else if let Some(table) = rebalance.queue.iter().find(|r|r.id == record.table) {
+				} else if let Some(table) = reindex.queue.iter().find(|r|r.id == record.table) {
 					table.validate_plan(record.index, log)?;
 				}
 				else {
@@ -316,24 +316,24 @@ impl Column {
 		Ok(())
 	}
 
-	pub fn rebalance(&self, _log: &Log) -> Result<(Option<IndexTableId>, Vec<(Key, Address)>)> {
+	pub fn reindex(&self, _log: &Log) -> Result<(Option<IndexTableId>, Vec<(Key, Address)>)> {
 		// TODO: handle overlay
 		let tables = self.tables.read();
-		let rebalance = self.rebalance.read();
+		let reindex = self.reindex.read();
 		let mut plan = Vec::new();
 		let mut drop_index = None;
-		if let Some(source) = rebalance.queue.front() {
-			let progress = rebalance.progress.load(Ordering::Relaxed);
+		if let Some(source) = reindex.queue.front() {
+			let progress = reindex.progress.load(Ordering::Relaxed);
 			if progress != source.id.total_chunks() {
 				let mut source_index = progress;
 				let mut count = 0;
 				if source_index % 50 == 0 {
 					log::info!(target: "parity-db", "{}: Reindexing at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				}
-				log::debug!(target: "parity-db", "{}: Continue rebalance at {}/{}", tables.index.id, source_index, source.id.total_chunks());
+				log::debug!(target: "parity-db", "{}: Continue reindex at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				let shift_key_bits = source.id.index_bits() - 16;
 				while source_index < source.id.total_chunks() && count < MAX_REBALANCE_BATCH {
-					log::trace!(target: "parity-db", "{}: Rebalancing {}", source.id, source_index);
+					log::trace!(target: "parity-db", "{}: Reindexing {}", source.id, source_index);
 					let entries = source.raw_entries(source_index);
 					for entry in entries.iter() {
 						if entry.is_empty() {
@@ -352,10 +352,10 @@ impl Column {
 					count += 1;
 					source_index += 1;
 				}
-				log::trace!(target: "parity-db", "{}: End rebalance batch {} ({})", tables.index.id, source_index, count);
-				rebalance.progress.store(source_index, Ordering::Relaxed);
+				log::trace!(target: "parity-db", "{}: End reindex batch {} ({})", tables.index.id, source_index, count);
+				reindex.progress.store(source_index, Ordering::Relaxed);
 				if source_index == source.id.total_chunks() {
-					log::info!(target: "parity-db", "Completed rebalance into {}", tables.index.id);
+					log::info!(target: "parity-db", "Completed reindex into {}", tables.index.id);
 					drop_index = Some(source.id);
 				}
 			}
@@ -365,10 +365,10 @@ impl Column {
 
 	pub fn drop_index(&self, id: IndexTableId) -> Result<()> {
 		log::debug!(target: "parity-db", "Dropping {}", id);
-		let mut rebalance = self.rebalance.write();
-		if rebalance.queue.front_mut().map_or(false, |index| index.id == id) {
-			let table = rebalance.queue.pop_front();
-			rebalance.progress.store(0, Ordering::Relaxed);
+		let mut reindex = self.reindex.write();
+		if reindex.queue.front_mut().map_or(false, |index| index.id == id) {
+			let table = reindex.queue.pop_front();
+			reindex.progress.store(0, Ordering::Relaxed);
 			table.unwrap().drop_file()?;
 		} else {
 			log::warn!(target: "parity-db", "Dropping invalid index {}", id);
