@@ -206,7 +206,7 @@ impl Column {
 					// Fall thorough to insertion
 					log::debug!(
 						target: "parity-db",
-						"{}: Index chunk conflict {} vs {}",
+						"{}: Index chunk conflict {} vs {:?}",
 						tables.index.id,
 						hex(key),
 						hex(&tables.value[existing_tier].partial_key_at(existing_address.offset(), log).unwrap().unwrap()),
@@ -300,10 +300,18 @@ impl Column {
 		Ok(())
 	}
 
-	pub fn complete_plan(&self) -> Result<()> {
+	pub fn complete_plan(&self, log: &mut LogWriter) -> Result<()> {
 		let tables = self.tables.read();
 		for t in tables.value.iter() {
-			t.complete_plan()?;
+			t.complete_plan(log)?;
+		}
+		Ok(())
+	}
+
+	pub fn refresh_metadata(&self) -> Result<()> {
+		let tables = self.tables.read();
+		for t in tables.value.iter() {
+			t.refresh_metadata()?;
 		}
 		Ok(())
 	}

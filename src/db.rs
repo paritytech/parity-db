@@ -197,8 +197,18 @@ impl DbInner {
 			let mut queue = self.commit_queue.lock();
 			if let Some(commit) = queue.commits.pop_front() {
 				queue.bytes -= commit.bytes;
+				log::debug!(
+					target: "parity-db",
+					"Removed {}. Still queued commits {} bytes",
+					commit.bytes,
+					queue.bytes,
+				);
 				if queue.bytes <= MAX_COMMIT_QUEUE_BYTES && (queue.bytes + commit.bytes) > MAX_COMMIT_QUEUE_BYTES {
 					// Past the waiting threshold.
+					log::debug!(
+						target: "parity-db",
+						"Waking up commit queue worker",
+					);
 					self.commit_queue_full_cv.notify_one();
 				}
 				Some(commit)
@@ -227,9 +237,20 @@ impl DbInner {
 				}
 				ops += 1;
 			}
+			// Collect final changes to value tables
+			for c in self.columns.iter() {
+				c.complete_plan(&mut writer)?;
+			}
 			let record_id = writer.record_id();
 			let l = writer.drain();
-			let bytes = self.log.end_record(l)?;
+
+			let bytes = {
+				let mut logged_bytes = self.log_queue_bytes.lock();
+				let bytes = self.log.end_record(l)?;
+				*logged_bytes += bytes;
+				self.signal_flush_worker();
+				bytes
+			};
 
 			{
 				let mut overlay = self.commit_overlay.write();
@@ -256,9 +277,6 @@ impl DbInner {
 				ops,
 				bytes,
 			);
-			let mut logged_bytes = self.log_queue_bytes.lock();
-			*logged_bytes += bytes;
-			self.signal_flush_worker();
 			Ok(true)
 		} else {
 			Ok(false)
@@ -413,9 +431,6 @@ impl DbInner {
 						}
 					}
 				}
-				for c in self.columns.iter() {
-					c.complete_plan()?;
-				}
 				log::debug!(
 					target: "parity-db",
 					"Enacted log record {}, {} bytes",
@@ -444,6 +459,7 @@ impl DbInner {
 					if *queue <= MAX_LOG_QUEUE_BYTES && (*queue + bytes) > MAX_LOG_QUEUE_BYTES {
 						self.log_cv.notify_all();
 					}
+					log::debug!(target: "parity-db", "Log queue size: {} bytes", *queue);
 				}
 			}
 			Ok(true)
@@ -462,11 +478,16 @@ impl DbInner {
 
 	fn replay_all_logs(&self) -> Result<()> {
 		log::info!(target: "parity-db", "Replaying database log...");
+		while self.enact_logs(true)? { }
 		while self.flush_logs()? {
 			while self.enact_logs(true)? { }
 		}
 		// Need one more pass to enact the last log.
 		while self.enact_logs(true)? { }
+		// Re-read any cached metadata
+		for c in self.columns.iter() {
+			c.refresh_metadata()?;
+		}
 		log::info!(target: "parity-db", "Done.");
 		Ok(())
 	}
@@ -499,6 +520,7 @@ impl DbInner {
 		self.signal_log_worker();
 		self.signal_commit_worker();
 		self.signal_rebalance_worker();
+		self.log.shutdown();
 	}
 }
 

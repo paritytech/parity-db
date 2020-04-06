@@ -296,11 +296,18 @@ struct Flushing {
 	empty: bool,
 }
 
+#[derive(Eq, PartialEq)]
+enum ReadingState {
+	Reading,
+	Idle,
+	Shutdown,
+}
+
 pub struct Log {
 	overlays: RwLock<LogOverlays>,
 	appending: RwLock<Appending>,
 	reading: RwLock<std::io::BufReader<std::fs::File>>,
-	done_reading: Mutex<bool>,
+	reading_state: Mutex<ReadingState>,
 	done_reading_cv: Condvar,
 	flushing: Mutex<Flushing>,
 	next_record_id: AtomicU64,
@@ -334,7 +341,7 @@ impl Log {
 				empty: false,
 			}),
 			reading: RwLock::new(std::io::BufReader::new(reading)),
-			done_reading: Mutex::new(true),
+			reading_state: Mutex::new(ReadingState::Reading),
 			done_reading_cv: Condvar::new(),
 			flushing: Mutex::new(Flushing {
 				file: flushing,
@@ -381,7 +388,7 @@ impl Log {
 			reading.get_mut().set_len(0)?;
 			reading.seek(std::io::SeekFrom::Start(0))?;
 		}
-		*self.done_reading.lock() = true;
+		*self.reading_state.lock() = ReadingState::Reading;
 		self.dirty.store(true, Ordering::Relaxed);
 		Ok(())
 	}
@@ -461,10 +468,14 @@ impl Log {
 		let mut flushing = self.flushing.lock();
 		let mut read_next = false;
 		if !flushing.empty {
-			let mut done_reading = self.done_reading.lock();
-			while !*done_reading {
+			let mut reading_state = self.reading_state.lock();
+
+			while *reading_state == ReadingState::Reading  {
 				log::debug!(target: "parity-db", "Flush: Awaiting log reader");
-				self.done_reading_cv.wait(&mut done_reading)
+				self.done_reading_cv.wait(&mut reading_state)
+			}
+			if *reading_state == ReadingState::Shutdown {
+				return Ok((false, false))
 			}
 
 			{
@@ -472,7 +483,7 @@ impl Log {
 				let mut reading = self.reading.write();
 				std::mem::swap(reading.get_mut(), &mut flushing.file);
 				reading.seek(std::io::SeekFrom::Start(0))?;
-				*done_reading = false;
+				*reading_state = ReadingState::Reading;
 				read_next = true;
 			}
 
@@ -505,8 +516,8 @@ impl Log {
 	}
 
 	pub fn read_next<'a>(&'a self) -> Result<Option<LogReader<'a>>> {
-		let mut done_reading = self.done_reading.lock();
-		if *done_reading {
+		let mut reading_state = self.reading_state.lock();
+		if *reading_state != ReadingState::Reading {
 			log::trace!(target: "parity-db", "No logs to enact");
 			return Ok(None);
 		}
@@ -519,7 +530,7 @@ impl Log {
 			}
 			Ok(_) => return Err(Error::Corruption("Bad log record structure".into())),
 			Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-				*done_reading = true;
+				*reading_state = ReadingState::Idle;
 				self.done_reading_cv.notify_one();
 				log::debug!(target: "parity-db", "Read: End of log");
 				return Ok(None);
@@ -531,5 +542,10 @@ impl Log {
 	pub fn overlays<'a>(&'a self) -> RwLockReadGuard<'a, LogOverlays> {
 		self.overlays.read()
 	}
-}
 
+	pub fn shutdown(&self) {
+		let mut reading_state = self.reading_state.lock();
+		*reading_state = ReadingState::Shutdown;
+		self.done_reading_cv.notify_one();
+	}
+}

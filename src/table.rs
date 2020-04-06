@@ -17,7 +17,7 @@
 use std::convert::TryInto;
 use std::os::unix::fs::FileExt;
 use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::{
 	error::Result,
 	column::ColId,
@@ -109,6 +109,7 @@ pub struct ValueTable {
 	capacity: AtomicU64,
 	filled: AtomicU64,
 	last_removed: AtomicU64,
+	dirty_header: AtomicBool,
 	multipart: bool,
 }
 
@@ -167,6 +168,7 @@ impl ValueTable {
 			capacity: AtomicU64::new(capacity),
 			filled: AtomicU64::new(filled),
 			last_removed: AtomicU64::new(last_removed),
+			dirty_header: AtomicBool::new(false),
 			multipart,
 		})
 	}
@@ -343,6 +345,7 @@ impl ValueTable {
 			self.filled.store(filled + 1, Ordering::Relaxed);
 			filled
 		};
+		self.dirty_header.store(true, Ordering::Relaxed);
 		Ok(index)
 	}
 
@@ -444,6 +447,7 @@ impl ValueTable {
 
 		log.insert_value(self.id, index, buf.to_vec());
 		self.last_removed.store(index, Ordering::Relaxed);
+		self.dirty_header.store(true, Ordering::Relaxed);
 		Ok(())
 	}
 
@@ -469,6 +473,12 @@ impl ValueTable {
 		while index >= self.capacity.load(Ordering::Relaxed) {
 			self.grow()?;
 		}
+		if index == 0 {
+			let mut header = [0u8; 16];
+			log.read(&mut header)?;
+			self.write_at(&header, 0)?;
+			return Ok(());
+		}
 
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 		log.read(&mut buf[0..2])?;
@@ -492,6 +502,12 @@ impl ValueTable {
 	}
 
 	pub fn validate_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
+		if index == 0 {
+			let mut header = [0u8; 16];
+			log.read(&mut header)?;
+			// TODO: sanity check last_removed and filled
+			return Ok(());
+		}
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 		log.read(&mut buf[0..2])?;
 		if &buf[0..2] == TOMBSTONE {
@@ -511,13 +527,29 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn complete_plan(&self) -> Result<()> {
-		let mut buf = [0u8; 16];
-		let last_removed = self.last_removed.load(Ordering::Relaxed);
-		let filled = self.filled.load(Ordering::Relaxed);
-		buf[0..8].copy_from_slice(&last_removed.to_le_bytes());
-		buf[8..16].copy_from_slice(&filled.to_le_bytes());
-		self.write_at(&buf, 0)?;
+	pub fn refresh_metadata(&self) -> Result<()> {
+		let mut header: [u8; 16] = Default::default();
+		self.read_at(&mut header, 0)?;
+		let last_removed = u64::from_le_bytes(header[0..8].try_into().unwrap());
+		let mut filled = u64::from_le_bytes(header[8..16].try_into().unwrap());
+		if filled == 0 {
+			filled = 1;
+		}
+		self.last_removed.store(last_removed, Ordering::Relaxed);
+		self.filled.store(filled, Ordering::Relaxed);
+		Ok(())
+	}
+
+	pub fn complete_plan(&self, log: &mut LogWriter) -> Result<()> {
+		if self.dirty_header.compare_and_swap(true, false, Ordering::Relaxed) {
+			// last_removed or filled pointers were modified. Add them to the log
+			let mut buf = [0u8; 16];
+			let last_removed = self.last_removed.load(Ordering::Relaxed);
+			let filled = self.filled.load(Ordering::Relaxed);
+			buf[0..8].copy_from_slice(&last_removed.to_le_bytes());
+			buf[8..16].copy_from_slice(&filled.to_le_bytes());
+			log.insert_value(self.id, 0, buf.to_vec());
+		}
 		Ok(())
 	}
 }
