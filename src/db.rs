@@ -67,19 +67,19 @@ struct DbInner {
 	shutdown: AtomicBool,
 	reindex_queue: Mutex<VecDeque<PendingReindex>>,
 	need_reindex_cv: Condvar,
-	reindex_work: Mutex<()>,
+	reindex_work: Mutex<bool>,
 	log: Log,
 	commit_queue: Mutex<CommitQueue>,
 	commit_queue_full_cv: Condvar,
 	log_worker_cv: Condvar,
-	log_work: Mutex<()>,
+	log_work: Mutex<bool>,
 	commit_worker_cv: Condvar,
-	commit_work: Mutex<()>,
+	commit_work: Mutex<bool>,
 	commit_overlay: RwLock<HashMap<ColId, HashMap<Key, (u64, Option<Value>)>>>,
 	log_cv: Condvar,
 	log_queue_bytes: Mutex<u64>,
 	flush_worker_cv: Condvar,
-	flush_work: Mutex<()>,
+	flush_work: Mutex<bool>,
 	enact_mutex: Mutex<()>,
 	last_enacted: AtomicU64,
 	next_reindex: AtomicU64,
@@ -98,19 +98,19 @@ impl DbInner {
 			shutdown: std::sync::atomic::AtomicBool::new(false),
 			reindex_queue: Mutex::new(Default::default()),
 			need_reindex_cv: Condvar::new(),
-			reindex_work: Mutex::new(()),
+			reindex_work: Mutex::new(false),
 			log: Log::open(path)?,
 			commit_queue: Mutex::new(Default::default()),
 			commit_queue_full_cv: Condvar::new(),
 			log_worker_cv: Condvar::new(),
-			log_work: Mutex::new(()),
+			log_work: Mutex::new(false),
 			commit_worker_cv: Condvar::new(),
-			commit_work: Mutex::new(()),
+			commit_work: Mutex::new(false),
 			commit_overlay: RwLock::new(Default::default()),
 			log_queue_bytes: Mutex::new(0),
 			log_cv: Condvar::new(),
 			flush_worker_cv: Condvar::new(),
-			flush_work: Mutex::new(()),
+			flush_work: Mutex::new(false),
 			enact_mutex: Mutex::new(()),
 			next_reindex: AtomicU64::new(0),
 			last_enacted: AtomicU64::new(0),
@@ -118,18 +118,26 @@ impl DbInner {
 	}
 
 	fn signal_log_worker(&self) {
+		let mut work = self.log_work.lock();
+		*work = true;
 		self.log_worker_cv.notify_one();
 	}
 
 	fn signal_commit_worker(&self) {
+		let mut work = self.commit_work.lock();
+		*work = true;
 		self.commit_worker_cv.notify_one();
 	}
 
 	fn signal_reindex_worker(&self) {
+		let mut work = self.reindex_work.lock();
+		*work = true;
 		self.need_reindex_cv.notify_one();
 	}
 
 	fn signal_flush_worker(&self) {
+		let mut work = self.flush_work.lock();
+		*work = true;
 		self.flush_worker_cv.notify_one();
 	}
 
@@ -595,7 +603,10 @@ impl Db {
 			// Wait for a task
 			if !more_work {
 				let mut work = db.commit_work.lock();
-				db.commit_worker_cv.wait(&mut work);
+				while !*work {
+					db.commit_worker_cv.wait(&mut work)
+				};
+				*work = false;
 			}
 
 			more_work = db.enact_logs(false)?;
@@ -610,7 +621,10 @@ impl Db {
 			// Wait for a task
 			if !more_work {
 				let mut work = db.log_work.lock();
-				db.log_worker_cv.wait(&mut work);
+				while !*work {
+					db.log_worker_cv.wait(&mut work)
+				};
+				*work = false;
 			}
 
 			let more_commits = db.process_commits()?;
@@ -627,7 +641,10 @@ impl Db {
 			// Wait for a task
 			if !more_work {
 				let mut work = db.reindex_work.lock();
-				db.need_reindex_cv.wait(&mut work);
+				while !*work {
+					db.need_reindex_cv.wait(&mut work)
+				};
+				*work = false;
 			}
 
 			more_work = db.collect_reindex()?;
@@ -642,7 +659,10 @@ impl Db {
 			// Wait for a task
 			if !more_work {
 				let mut work = db.flush_work.lock();
-				db.flush_worker_cv.wait(&mut work);
+				while !*work {
+					db.flush_worker_cv.wait(&mut work)
+				};
+				*work = false;
 			}
 			more_work = db.flush_logs()?;
 		}
