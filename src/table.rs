@@ -124,7 +124,7 @@ fn disable_read_ahead(file: &std::fs::File) -> Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn disable_read_ahead(file: &File) -> Result<()> {
+fn disable_read_ahead(_file: &std::fs::File) -> Result<()> {
 	Ok(())
 }
 
