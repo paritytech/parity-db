@@ -23,3 +23,4 @@ mod log;
 mod display;
 
 pub use db::Db;
+pub use error::{Error, Result};
