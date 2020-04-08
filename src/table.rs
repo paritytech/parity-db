@@ -28,8 +28,6 @@ use crate::{
 pub const KEY_LEN: usize = 32;
 const MAX_ENTRY_SIZE: usize = 65534;
 
-const OFFSET_BITS: u8 = 32;
-const OFFSET_MASK: u64 = (1u64 << OFFSET_BITS) - 1;
 const TOMBSTONE: &[u8] = &[0xff, 0xff];
 const MULTIPART: &[u8] = &[0xff, 0xfe];
 
@@ -68,37 +66,6 @@ impl TableId {
 impl std::fmt::Display for TableId {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		write!(f, "table {:02}_{}", self.col(), self.size_tier())
-	}
-}
-
-#[derive(Clone, Copy, Eq, PartialEq, Hash)]
-pub struct Address(u64);
-
-impl Address {
-	pub fn new(offset: u64, size_tier: u8) -> Address {
-		Address(((size_tier as u64) << OFFSET_BITS) | offset)
-	}
-
-	pub fn from_u64(a: u64) -> Address {
-		Address(a)
-	}
-
-	pub fn offset(&self) -> u64 {
-		self.0 & OFFSET_MASK
-	}
-
-	pub fn size_tier(&self) -> u8 {
-		((self.0 >> OFFSET_BITS) & 0xff) as u8
-	}
-
-	pub fn as_u64(&self) -> u64 {
-		self.0
-	}
-}
-
-impl std::fmt::Display for Address {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "addr {:02}:{}", self.size_tier(), self.offset())
 	}
 }
 
@@ -262,24 +229,6 @@ impl ValueTable {
 		let buf = if let Some(overlay) = log.value(self.id, index) {
 			overlay
 		} else {
-			self.read_at(&mut buf[0 .. 40], index * self.entry_size as u64)?;
-			&buf[0 .. 40]
-		};
-		if &buf[0..2] == TOMBSTONE {
-			return Ok(None);
-		}
-		if &buf[0..2] == MULTIPART {
-			result[2..].copy_from_slice(&buf[10..40]);
-		} else {
-			result[2..].copy_from_slice(&buf[2..32]);
-		}
-		Ok(Some(result))
-	}
-
-	pub fn raw_partial_key_at(&self, index: u64) -> Result<Option<Key>> {
-		let mut buf = [0u8; 40];
-		let mut result = Key::default();
-		let buf = {
 			self.read_at(&mut buf[0 .. 40], index * self.entry_size as u64)?;
 			&buf[0 .. 40]
 		};

@@ -18,13 +18,12 @@ use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::collections::{HashMap, VecDeque};
 use parking_lot::{RwLock, Mutex, Condvar};
 use crate::{
-	table::{Key, Address},
+	table::Key,
 	error::{Error, Result},
 	column::{ColId, Column},
 	log::{Log, LogAction},
-	index::{PlanOutcome, TableId as IndexTableId},
+	index::PlanOutcome,
 };
-
 
 // These are in memory, so we use usize
 const MAX_COMMIT_QUEUE_BYTES: usize = 16 * 1024 * 1024;
@@ -54,20 +53,10 @@ struct CommitQueue{
 	commits: VecDeque<Commit>,
 }
 
-#[derive(Default)]
-struct PendingReindex {
-	column: ColId,
-	batch: Vec<(Key, Address)>,
-	drop_index: Option<IndexTableId>,
-}
-
 struct DbInner {
 	columns: Vec<Column>,
 	_path: std::path::PathBuf,
 	shutdown: AtomicBool,
-	reindex_queue: Mutex<VecDeque<PendingReindex>>,
-	need_reindex_cv: Condvar,
-	reindex_work: Mutex<bool>,
 	log: Log,
 	commit_queue: Mutex<CommitQueue>,
 	commit_queue_full_cv: Condvar,
@@ -96,9 +85,6 @@ impl DbInner {
 			columns,
 			_path: path.into(),
 			shutdown: std::sync::atomic::AtomicBool::new(false),
-			reindex_queue: Mutex::new(Default::default()),
-			need_reindex_cv: Condvar::new(),
-			reindex_work: Mutex::new(false),
 			log: Log::open(path)?,
 			commit_queue: Mutex::new(Default::default()),
 			commit_queue_full_cv: Condvar::new(),
@@ -127,12 +113,6 @@ impl DbInner {
 		let mut work = self.commit_work.lock();
 		*work = true;
 		self.commit_worker_cv.notify_one();
-	}
-
-	fn signal_reindex_worker(&self) {
-		let mut work = self.reindex_work.lock();
-		*work = true;
-		self.need_reindex_cv.notify_one();
 	}
 
 	fn signal_flush_worker(&self) {
@@ -296,61 +276,57 @@ impl DbInner {
 	}
 
 	fn process_reindex(&self) -> Result<bool> {
+		if self.next_reindex.load(Ordering::SeqCst) > self.last_enacted.load(Ordering::SeqCst) {
+			return Ok(false)
+		}
 		{
 			let mut queue = self.log_queue_bytes.lock();
 			if *queue > MAX_LOG_QUEUE_BYTES {
 				self.log_cv.wait(&mut queue);
 			}
 		}
-		let reindex =  {
-			let mut queue = self.reindex_queue.lock();
-			let r = queue.pop_front();
-			if queue.is_empty() {
-				queue.shrink_to_fit();
-			}
-			r
-		};
-
-		if let Some(reindex) = reindex {
-			let mut next_reindex = false;
-			let mut writer = self.log.begin_record();
-			log::debug!(
-				target: "parity-db",
-				"Creating reindex record {}",
-				writer.record_id(),
-			);
-			let column = &self.columns[reindex.column as usize];
-			for (key, address) in reindex.batch.into_iter() {
-				match column.write_index_plan(&key, address, &mut writer)? {
-					PlanOutcome::NeedReindex => {
-						next_reindex = true
-					},
-					_ => {},
+		// Process any pending reindexs
+		for column in self.columns.iter() {
+			let (drop_index, batch) = column.reindex(&self.log)?;
+			if !batch.is_empty() {
+				let mut next_reindex = false;
+				let mut writer = self.log.begin_record();
+				log::debug!(
+					target: "parity-db",
+					"Creating reindex record {}",
+					writer.record_id(),
+				);
+				for (key, address) in batch.into_iter() {
+					match column.write_index_plan(&key, address, &mut writer)? {
+						PlanOutcome::NeedReindex => {
+							next_reindex = true
+						},
+						_ => {},
+					}
 				}
-			}
-			if let Some(table) = reindex.drop_index {
-				writer.drop_table(table);
-			}
-			let record_id = writer.record_id();
-			let l = writer.drain();
-			let bytes = self.log.end_record(l)?;
+				if let Some(table) = drop_index {
+					writer.drop_table(table);
+				}
+				let record_id = writer.record_id();
+				let l = writer.drain();
+				let bytes = self.log.end_record(l)?;
 
-			log::debug!(
-				target: "parity-db",
-				"Created reindex record {}, {} bytes",
-				record_id,
-				bytes,
-			);
-			let mut logged_bytes = self.log_queue_bytes.lock();
-			*logged_bytes += bytes;
-			if next_reindex {
-				self.start_reindex(record_id);
+				log::debug!(
+					target: "parity-db",
+					"Created reindex record {}, {} bytes",
+					record_id,
+					bytes,
+				);
+				let mut logged_bytes = self.log_queue_bytes.lock();
+				*logged_bytes += bytes;
+				if next_reindex {
+					self.start_reindex(record_id);
+				}
+				self.signal_flush_worker();
 			}
-			self.signal_flush_worker();
-			Ok(true)
-		} else {
-			Ok(false)
+			return Ok(true)
 		}
+		Ok(false)
 	}
 
 	fn enact_logs(&self, validation_mode: bool) -> Result<bool> {
@@ -449,9 +425,6 @@ impl DbInner {
 				let bytes = reader.read_bytes();
 				let cleared = reader.drain();
 				self.last_enacted.store(record_id, Ordering::SeqCst);
-				if record_id == self.next_reindex.load(Ordering::SeqCst) {
-					self.signal_reindex_worker();
-				}
 				Some((record_id, cleared, bytes))
 			} else {
 				None
@@ -500,41 +473,17 @@ impl DbInner {
 		Ok(())
 	}
 
-	fn collect_reindex(&self) -> Result<bool> {
-		// Process any pending reindexs
-		for (i, c) in self.columns.iter().enumerate() {
-			let (drop_index, batch) = c.reindex(&self.log)?;
-			if !batch.is_empty() {
-				log::debug!(
-					target: "parity-db",
-					"Added pending reindex",
-				);
-				let mut queue = self.reindex_queue.lock();
-				queue.push_back(PendingReindex {
-					drop_index,
-					batch,
-					column: i as u8,
-				});
-				self.signal_log_worker();
-				return Ok(true);
-			}
-		}
-		return Ok(false);
-	}
-
 	fn shutdown(&self) {
 		self.shutdown.store(true, Ordering::SeqCst);
 		self.signal_flush_worker();
 		self.signal_log_worker();
 		self.signal_commit_worker();
-		self.signal_reindex_worker();
 		self.log.shutdown();
 	}
 }
 
 pub struct Db {
 	inner: Arc<DbInner>,
-	reindex_thread: Option<std::thread::JoinHandle<Result<()>>>,
 	commit_thread: Option<std::thread::JoinHandle<Result<()>>>,
 	flush_thread: Option<std::thread::JoinHandle<Result<()>>>,
 	log_thread: Option<std::thread::JoinHandle<Result<()>>>,
@@ -544,13 +493,6 @@ impl Db {
 	pub fn open(path: &std::path::Path, columns: u8) -> Result<Db> {
 		let db = Arc::new(DbInner::open(path, columns)?);
 		db.replay_all_logs()?;
-		let reindex_db = db.clone();
-		let reindex_thread = std::thread::spawn(move ||
-			Self::reindex_worker(reindex_db).map_err(|e| {
-				log::error!(target: "parity-db", "DB ERROR: {:?}", e);
-				panic!(e)
-			})
-		);
 		let commit_worker_db = db.clone();
 		let commit_thread = std::thread::spawn(move ||
 			Self::commit_worker(commit_worker_db).map_err(|e| {
@@ -577,7 +519,6 @@ impl Db {
 			commit_thread: Some(commit_thread),
 			flush_thread: Some(flush_thread),
 			log_thread: Some(log_thread),
-			reindex_thread: Some(reindex_thread),
 		})
 	}
 
@@ -635,24 +576,6 @@ impl Db {
 		Ok(())
 	}
 
-	fn reindex_worker(db: Arc<DbInner>) -> Result<()> {
-		let mut more_work = false;
-		while !db.shutdown.load(Ordering::SeqCst) {
-			// Wait for a task
-			if !more_work {
-				let mut work = db.reindex_work.lock();
-				while !*work {
-					db.need_reindex_cv.wait(&mut work)
-				};
-				*work = false;
-			}
-
-			more_work = db.collect_reindex()?;
-		}
-		log::debug!(target: "parity-db", "Reindex worker shutdown");
-		Ok(())
-	}
-
 	fn flush_worker(db: Arc<DbInner>) -> Result<()> {
 		let mut more_work = false;
 		while !db.shutdown.load(Ordering::SeqCst) {
@@ -674,7 +597,6 @@ impl Db {
 impl Drop for Db {
 	fn drop(&mut self) {
 		self.inner.shutdown();
-		self.reindex_thread.take().map(|t| t.join());
 		self.log_thread.take().map(|t| t.join());
 		self.flush_thread.take().map(|t| t.join());
 		self.commit_thread.take().map(|t| t.join());

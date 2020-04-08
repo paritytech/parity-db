@@ -20,7 +20,6 @@ use crate::{
 	error::{Error, Result},
 	column::ColId,
 	log::{LogReader, LogWriter, LogQuery},
-	table::Address,
 	display::hex,
 };
 
@@ -31,30 +30,33 @@ const KEY_LEN: usize = 32;
 
 const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
 
-const PARTIAL_KEY_BITS: u8 = 28;
-const PARTIAL_KEY_MASK: u32 = (1u32 << PARTIAL_KEY_BITS) - 1;
-
-const ADDRESS_BITS: u8 = 36;
-const ADDRESS_MASK: u64 = (1u64 << ADDRESS_BITS) - 1;
-
 pub type Key = [u8; KEY_LEN];
 pub type Chunk = [u8; CHUNK_LEN];
 
 pub struct Entry(u64);
 
 impl Entry {
-	fn new(address: Address, key_bits: u32) -> Entry {
-		Entry(((key_bits as u64) << ADDRESS_BITS) | address.as_u64())
+	fn new(address: Address, key_material: u64, index_bits: u8) -> Entry {
+		Entry(((key_material as u64) << Self::address_bits(index_bits)) | address.as_u64())
 	}
 
-	pub fn address(&self) -> Address {
-		Address::from_u64(self.0 & ADDRESS_MASK) // lower 40 bits
+	pub fn address_bits(index_bits: u8) -> u8 {
+		index_bits + 10 // with n index bits there are n * 64 possible entries and 16 size tiers
+	}
+
+	pub fn address(&self, index_bits: u8) -> Address {
+		Address::from_u64(self.0 & ((1u64 << Self::address_bits(index_bits)) - 1))
 	}
 
 	#[inline]
-	fn key_bits(&self) -> u32 {
-		((self.0 >> ADDRESS_BITS) as u32) & PARTIAL_KEY_MASK // next 20 bits
+	pub fn key_material(&self, index_bits: u8) -> u64 {
+		self.0 >> Self::address_bits(index_bits)
 	}
+
+	fn extract_key(key: u64, index_bits: u8) -> u64 {
+		(key << index_bits) >> Self::address_bits(index_bits)
+	}
+
 
 	#[inline]
 	pub fn is_empty(&self) -> bool {
@@ -71,6 +73,37 @@ impl Entry {
 
 	fn from_u64(e: u64) -> Self {
 		Entry(e)
+	}
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+pub struct Address(u64);
+
+impl Address {
+	pub fn new(offset: u64, size_tier: u8) -> Address {
+		Address((offset << 4) | size_tier as u64)
+	}
+
+	pub fn from_u64(a: u64) -> Address {
+		Address(a)
+	}
+
+	pub fn offset(&self) -> u64 {
+		self.0 >> 4
+	}
+
+	pub fn size_tier(&self) -> u8 {
+		(self.0 & 0x0f) as u8
+	}
+
+	pub fn as_u64(&self) -> u64 {
+		self.0
+	}
+}
+
+impl std::fmt::Display for Address {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "addr {:02}:{}", self.size_tier(), self.offset())
 	}
 }
 
@@ -183,11 +216,10 @@ impl IndexTable {
 	}
 
 	fn find_entry(&self, key: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
-		let partial_key = ((key >> (64 - PARTIAL_KEY_BITS - self.id.index_bits())) as u32) & PARTIAL_KEY_MASK;
+		let partial_key = Entry::extract_key(key, self.id.index_bits());
 		for i in sub_index .. CHUNK_ENTRIES {
 			let entry = Entry::from_u64(u64::from_le_bytes(chunk[i * 8 .. i * 8 + 8].try_into().unwrap()));
-			if !entry.is_empty() && entry.key_bits() == partial_key {
-				log::trace!(target: "parity-db", "{}: Found entry at {}, bits={}", self.id, i, entry.key_bits());
+			if !entry.is_empty() && entry.key_material(self.id.index_bits()) == partial_key {
 				return (entry, i);
 			}
 		}
@@ -231,16 +263,21 @@ impl IndexTable {
 		sub_index: Option<usize>,
 		log: &mut LogWriter,
 	) -> Result<PlanOutcome> {
+		let chunk_index = key >> (64 - self.id.index_bits());
+		if address.as_u64() >= (1 << Entry::address_bits(self.id.index_bits())) {
+			// Address overflow
+			log::warn!(target: "parity-db", "{}: Address space overflow at {}: {}", self.id, chunk_index, address);
+			return Ok(PlanOutcome::NeedReindex);
+		}
 		let mut chunk = [0; CHUNK_LEN];
 		chunk.copy_from_slice(source);
-		let chunk_index = key >> (64 - self.id.index_bits());
-		let partial_key = ((key >> (64 - PARTIAL_KEY_BITS - self.id.index_bits())) as u32) & PARTIAL_KEY_MASK;
-		let new_entry = Entry::new(address, partial_key);
+		let partial_key = Entry::extract_key(key, self.id.index_bits());
+		let new_entry = Entry::new(address, partial_key, self.id.index_bits());
 		if let Some(i) = sub_index {
 			let entry = Entry::from_u64(u64::from_le_bytes(chunk[i * 8 .. i * 8 + 8].try_into().unwrap()));
-			assert!(entry.key_bits() == new_entry.key_bits());
+			assert!(entry.key_material(self.id.index_bits()) == new_entry.key_material(self.id.index_bits()));
 			&mut chunk[i * 8 .. i * 8 + 8].copy_from_slice(&new_entry.as_u64().to_le_bytes());
-			log::trace!(target: "parity-db", "{}: Replaced at {}.{}: {}", self.id, chunk_index, i, new_entry.address());
+			log::trace!(target: "parity-db", "{}: Replaced at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
 			log.insert_index(self.id, chunk_index, &chunk);
 			return Ok(PlanOutcome::Written);
 		}
@@ -248,7 +285,7 @@ impl IndexTable {
 			let entry = Entry::from_u64(u64::from_le_bytes(chunk[i * 8 .. i * 8 + 8].try_into().unwrap()));
 			if entry.is_empty() {
 				&mut chunk[i * 8 .. i * 8 + 8].copy_from_slice(&new_entry.as_u64().to_le_bytes());
-				log::trace!(target: "parity-db", "{}: Inserted at {}.{}: {}", self.id, chunk_index, i, new_entry.address());
+				log::trace!(target: "parity-db", "{}: Inserted at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
 				log.insert_index(self.id, chunk_index, &chunk);
 				self.entries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				return Ok(PlanOutcome::Written);
@@ -280,11 +317,11 @@ impl IndexTable {
 		let mut chunk = [0; CHUNK_LEN];
 		chunk.copy_from_slice(source);
 		let chunk_index = key >> (64 - self.id.index_bits());
-		let partial_key = ((key >> (64 - PARTIAL_KEY_BITS - self.id.index_bits())) as u32) & PARTIAL_KEY_MASK;
+		let partial_key = Entry::extract_key(key, self.id.index_bits());
 
 		let i = sub_index;
 		let entry = Entry::from_u64(u64::from_le_bytes(chunk[i * 8 .. i * 8 + 8].try_into().unwrap()));
-		if !entry.is_empty() && entry.key_bits() == partial_key {
+		if !entry.is_empty() && entry.key_material(self.id.index_bits()) == partial_key {
 			let new_entry = Entry::empty();
 			&mut chunk[i * 8 .. i * 8 + 8].copy_from_slice(&new_entry.as_u64().to_le_bytes());
 			log.insert_index(self.id, chunk_index, &chunk);

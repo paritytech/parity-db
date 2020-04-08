@@ -19,10 +19,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::RwLock;
 use crate::{
 	error::{Error, Result},
-	table::{TableId as ValueTableId, ValueTable, Key, Value, Address},
+	table::{TableId as ValueTableId, ValueTable, Key, Value},
 	log::{Log, LogOverlays, LogReader, LogWriter, LogAction},
 	display::hex,
-	index::{IndexTable, TableId as IndexTableId, PlanOutcome},
+	index::{IndexTable, TableId as IndexTableId, PlanOutcome, Address},
 };
 
 const START_BITS: u8 = 16;
@@ -63,8 +63,8 @@ impl Column {
 	fn get_in_index(key: &Key, index: &IndexTable, tables: &Tables, log: &LogOverlays) -> Result<Option<Value>> {
 		let (mut entry, mut sub_index) = index.get(key, 0, log);
 		while !entry.is_empty() {
-			let size_tier = entry.address().size_tier() as usize;
-			match tables.value[size_tier].get(key, entry.address().offset(), log)? {
+			let size_tier = entry.address(index.id.index_bits()).size_tier() as usize;
+			match tables.value[size_tier].get(key, entry.address(index.id.index_bits()).offset(), log)? {
 				Some(value) => return Ok(Some(value)),
 				None =>  {
 					let (next_entry, next_index) = index.get(key, sub_index + 1, log);
@@ -187,7 +187,7 @@ impl Column {
 
 			let (mut existing_entry, mut sub_index) = tables.index.get(key, 0, log);
 			while !existing_entry.is_empty() {
-				let existing_address = existing_entry.address();
+				let existing_address = existing_entry.address(tables.index.id.index_bits());
 				let existing_tier = existing_address.size_tier() as usize;
 				let replace = tables.value[existing_tier].has_key_at(existing_address.offset(), &key, log)?;
 				if replace {
@@ -204,7 +204,7 @@ impl Column {
 					}
 				} else {
 					// Fall thorough to insertion
-					log::debug!(
+					log::warn!(
 						target: "parity-db",
 						"{}: Index chunk conflict {} vs {:?}",
 						tables.index.id,
@@ -235,11 +235,12 @@ impl Column {
 			// Deletion
 			let (mut existing_entry, mut sub_index) = tables.index.get(key, 0, log);
 			while !existing_entry.is_empty() {
-				let existing_tier = existing_entry.address().size_tier() as usize;
+				let existing_address = existing_entry.address(tables.index.id.index_bits());
+				let existing_tier = existing_address.size_tier() as usize;
 				// TODO: Remove this check? Highly unlikely.
-				if tables.value[existing_tier].has_key_at(existing_entry.address().offset(), &key, log)? {
+				if tables.value[existing_tier].has_key_at(existing_address.offset(), &key, log)? {
 					log::trace!(target: "parity-db", "{}: Deleting {}", tables.index.id, hex(key));
-					tables.value[existing_tier].write_remove_plan(existing_entry.address().offset(), log)?;
+					tables.value[existing_tier].write_remove_plan(existing_address.offset(), log)?;
 					tables.index.write_remove_plan(key, sub_index, log)?;
 					return Ok(PlanOutcome::Written);
 				}
@@ -331,7 +332,6 @@ impl Column {
 					log::info!(target: "parity-db", "{}: Reindexing at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				}
 				log::debug!(target: "parity-db", "{}: Continue reindex at {}/{}", tables.index.id, source_index, source.id.total_chunks());
-				let shift_key_bits = source.id.index_bits() - 16;
 				while source_index < source.id.total_chunks() && count < MAX_REBALANCE_BATCH {
 					log::trace!(target: "parity-db", "{}: Reindexing {}", source.id, source_index);
 					let entries = source.raw_entries(source_index);
@@ -339,15 +339,16 @@ impl Column {
 						if entry.is_empty() {
 							continue;
 						}
-						let mut key = {
-							tables.value[entry.address().size_tier() as usize]
-							.raw_partial_key_at(entry.address().offset())?
-							.ok_or_else(|| Error::Corruption("Bad value table key".into()))?
-						};
+						// Reconstruct as much of the original key as possible.
+						let partial_key = entry.key_material(source.id.index_bits());
+						let k = 64 - crate::index::Entry::address_bits(source.id.index_bits());
+						let index_key = (source_index << 64 - source.id.index_bits()) |
+							(partial_key << (64 - k - source.id.index_bits()));
+						let mut key = Key::default();
 						// restore 16 high bits
-						&mut key[0..2].copy_from_slice(&((source_index >> shift_key_bits) as u16).to_be_bytes());
+						&mut key[0..8].copy_from_slice(&index_key.to_be_bytes());
 						log::trace!(target: "parity-db", "{}: Reinserting {}", source.id, hex(&key));
-						plan.push((key, entry.address()))
+						plan.push((key, entry.address(source.id.index_bits())))
 					}
 					count += 1;
 					source_index += 1;
