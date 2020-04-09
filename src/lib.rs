@@ -21,6 +21,7 @@ mod table;
 mod column;
 mod log;
 mod display;
+mod options;
 
 pub use db::Db;
 pub use error::{Error, Result};

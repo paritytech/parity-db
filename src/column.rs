@@ -23,6 +23,7 @@ use crate::{
 	log::{Log, LogOverlays, LogReader, LogWriter, LogAction},
 	display::hex,
 	index::{IndexTable, TableId as IndexTableId, PlanOutcome, Address},
+	options::ColumnOptions,
 };
 
 const START_BITS: u8 = 16;
@@ -44,6 +45,8 @@ pub struct Column {
 	tables: RwLock<Tables>,
 	reindex: RwLock<Reindex>,
 	path: std::path::PathBuf,
+	preimage: bool,
+	uniform_keys: bool,
 }
 
 impl Column {
@@ -75,26 +78,26 @@ impl Column {
 		}
 		Ok(None)
 	}
-	pub fn open(col: ColId, path: &std::path::Path) -> Result<Column> {
+	pub fn open(col: ColId, options: &ColumnOptions, path: &std::path::Path) -> Result<Column> {
 		let (index, reindexing) = Self::open_index(path, col)?;
 		let tables = Tables {
 			index,
 			value: [
-				Self::open_table(path, col, 0, Some(96))?,
-				Self::open_table(path, col, 1, Some(128))?,
-				Self::open_table(path, col, 2, Some(192))?,
-				Self::open_table(path, col, 3, Some(256))?,
-				Self::open_table(path, col, 4, Some(320))?,
-				Self::open_table(path, col, 5, Some(512))?,
-				Self::open_table(path, col, 6, Some(768))?,
-				Self::open_table(path, col, 7, Some(1024))?,
-				Self::open_table(path, col, 8, Some(1536))?,
-				Self::open_table(path, col, 9, Some(2048))?,
-				Self::open_table(path, col, 10, Some(3072))?,
-				Self::open_table(path, col, 11, Some(4096))?,
-				Self::open_table(path, col, 12, Some(8192))?,
-				Self::open_table(path, col, 13, Some(16384))?,
-				Self::open_table(path, col, 14, Some(32768))?,
+				Self::open_table(path, col, 0, Some(options.sizes[0]))?,
+				Self::open_table(path, col, 1, Some(options.sizes[1]))?,
+				Self::open_table(path, col, 2, Some(options.sizes[2]))?,
+				Self::open_table(path, col, 3, Some(options.sizes[3]))?,
+				Self::open_table(path, col, 4, Some(options.sizes[4]))?,
+				Self::open_table(path, col, 5, Some(options.sizes[5]))?,
+				Self::open_table(path, col, 6, Some(options.sizes[6]))?,
+				Self::open_table(path, col, 7, Some(options.sizes[7]))?,
+				Self::open_table(path, col, 8, Some(options.sizes[8]))?,
+				Self::open_table(path, col, 9, Some(options.sizes[9]))?,
+				Self::open_table(path, col, 10, Some(options.sizes[10]))?,
+				Self::open_table(path, col, 11, Some(options.sizes[11]))?,
+				Self::open_table(path, col, 12, Some(options.sizes[12]))?,
+				Self::open_table(path, col, 13, Some(options.sizes[13]))?,
+				Self::open_table(path, col, 14, Some(options.sizes[14]))?,
 				Self::open_table(path, col, 15, None)?,
 			],
 		};
@@ -105,7 +108,19 @@ impl Column {
 				progress: AtomicU64::new(0),
 			}),
 			path: path.into(),
+			preimage: options.preimage,
+			uniform_keys: options.uniform,
 		})
+	}
+
+	pub fn hash(&self, key: &[u8]) -> Key {
+		let mut k = Key::default();
+		if self.uniform_keys {
+			k.copy_from_slice(&key[0..32]);
+		} else {
+			k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &[], key).as_bytes());
+		}
+		k
 	}
 
 	fn open_index(path: &std::path::Path, col: ColId) -> Result<(IndexTable, VecDeque<IndexTable>)> {
@@ -191,6 +206,10 @@ impl Column {
 				let existing_tier = existing_address.size_tier() as usize;
 				let replace = tables.value[existing_tier].has_key_at(existing_address.offset(), &key, log)?;
 				if replace {
+					if self.preimage {
+						// Replace is not supported
+						return Ok(PlanOutcome::Skipped);
+					}
 					if existing_tier == target_tier {
 						log::trace!(target: "parity-db", "{}: Replacing {}", tables.index.id, hex(key));
 						tables.value[target_tier].write_replace_plan(existing_address.offset(), key, val, log)?;

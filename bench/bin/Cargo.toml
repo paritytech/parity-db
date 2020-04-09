@@ -7,5 +7,6 @@ edition = "2018"
 
 
 [dependencies]
+jemallocator = "0.3"
 parity-db = { path = "../.." }
 db-bench = { path = "../core" }

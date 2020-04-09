@@ -14,12 +14,25 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::fmt;
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
 pub enum Error {
 	Io(std::io::Error),
 	Corruption(String),
+	InvalidConfiguration(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Error::Io(e) => write!(f, "IO Error: {}", e),
+			Error::Corruption(e) => write!(f, "Corruption: {}", e),
+			Error::InvalidConfiguration(e) => write!(f, "Invalid configuration: {}", e),
+		}
+    }
 }
 
 impl From<std::io::Error> for Error {
@@ -27,4 +40,3 @@ impl From<std::io::Error> for Error {
 		Error::Io(e)
 	}
 }
-

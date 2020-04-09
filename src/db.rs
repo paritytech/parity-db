@@ -23,6 +23,7 @@ use crate::{
 	column::{ColId, Column},
 	log::{Log, LogAction},
 	index::PlanOutcome,
+	options::Options,
 };
 
 // These are in memory, so we use usize
@@ -31,13 +32,6 @@ const MAX_COMMIT_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LOG_QUEUE_BYTES: u64 = 32 * 1024 * 1024;
 
 pub type Value = Vec<u8>;
-
-fn hash(key: &[u8]) -> Key {
-	let mut k = Key::default();
-	k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &[], key).as_bytes());
-	//log::trace!(target: "parity-db", "HASH {} = {}", crate::display::hex(&key), crate::display::hex(&k));
-	k
-}
 
 #[derive(Default)]
 struct Commit{
@@ -75,17 +69,17 @@ struct DbInner {
 }
 
 impl DbInner {
-	pub fn open(path: &std::path::Path, num_columns: u8) -> Result<DbInner> {
-		std::fs::create_dir_all(path)?;
-		let mut columns = Vec::with_capacity(num_columns as usize);
-		for c in 0 .. num_columns {
-			columns.push(Column::open(c, path)?);
+	pub fn open(options: &Options) -> Result<DbInner> {
+		std::fs::create_dir_all(&options.path)?;
+		let mut columns = Vec::with_capacity(options.columns.len());
+		for (c, col) in options.columns.iter().enumerate() {
+			columns.push(Column::open(c as ColId, col, &options.path)?);
 		}
 		Ok(DbInner {
 			columns,
-			_path: path.into(),
+			_path: options.path.clone(),
 			shutdown: std::sync::atomic::AtomicBool::new(false),
-			log: Log::open(path)?,
+			log: Log::open(&options.path)?,
 			commit_queue: Mutex::new(Default::default()),
 			commit_queue_full_cv: Condvar::new(),
 			log_worker_cv: Condvar::new(),
@@ -122,8 +116,8 @@ impl DbInner {
 	}
 
 	pub fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
+		let key = self.columns[col as usize].hash(key);
 		let overlay = self.commit_overlay.read();
-		let key = hash(key);
 		if let Some(v) = overlay.get(&col).and_then(|o| o.get(&key).map(|(_, v)| v.clone())) {
 			return Ok(v);
 		}
@@ -136,7 +130,9 @@ impl DbInner {
 			I: IntoIterator<Item=(ColId, K, Option<Value>)>,
 			K: AsRef<[u8]>,
 	{
-		let commit: Vec<_> = tx.into_iter().map(|(c, k, v)| (c, hash(k.as_ref()), v)).collect();
+		let commit: Vec<_> = tx.into_iter().map(
+			|(c, k, v)| (c, self.columns[c as usize].hash(k.as_ref()), v)
+		).collect();
 
 		{
 			let mut queue = self.commit_queue.lock();
@@ -487,8 +483,13 @@ pub struct Db {
 }
 
 impl Db {
-	pub fn open(path: &std::path::Path, columns: u8) -> Result<Db> {
-		let db = Arc::new(DbInner::open(path, columns)?);
+	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Result<Db> {
+		let options = Options::with_columns(path, num_columns);
+		Self::open(&options)
+	}
+
+	pub fn open(options: &Options) -> Result<Db> {
+		let db = Arc::new(DbInner::open(options)?);
 		db.replay_all_logs()?;
 		let commit_worker_db = db.clone();
 		let commit_thread = std::thread::spawn(move ||

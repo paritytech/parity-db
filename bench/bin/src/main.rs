@@ -14,17 +14,15 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-/*
-#[cfg_attr(all(any(target_os = "linux", target_os = "macos"), feature = "jemalloc")  global_allocator)]
-#[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "jemalloc"))]
+#[cfg_attr(any(target_os = "linux", target_os = "macos"),  global_allocator)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
-*/
 
 struct BenchAdapter(parity_db::Db);
 
 impl db_bench::Db for BenchAdapter {
 	fn open(path: &std::path::Path) -> Self {
-		BenchAdapter(parity_db::Db::open(path, 1).unwrap())
+		BenchAdapter(parity_db::Db::with_columns(path, 1).unwrap())
 	}
 
 	fn get(&self, key: &db_bench::Key) -> Option<db_bench::Value> {
