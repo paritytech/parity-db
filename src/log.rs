@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write, Seek};
 use std::convert::TryInto;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::{Condvar, Mutex, RwLock, RwLockWriteGuard};
 use crate::{
 	error::{Error, Result},
 	table::TableId as ValueTableId,
@@ -44,8 +44,8 @@ pub enum LogAction {
 }
 
 pub trait LogQuery {
-	fn index(&self, table: IndexTableId, index: u64) -> Option<&IndexChunk>;
-	fn value(&self, table: ValueTableId, index: u64) -> Option<&[u8]>;
+	fn with_index<R, F: FnOnce(&IndexChunk) -> R> (&self, table: IndexTableId, index: u64, f: F) -> Option<R>;
+	fn value(&self, table: ValueTableId, index: u64, dest: &mut[u8]) -> bool;
 }
 
 #[derive(Default)]
@@ -54,13 +54,21 @@ pub struct LogOverlays {
 	value: HashMap<ValueTableId, ValueLogOverlay>,
 }
 
-impl LogQuery for LogOverlays {
-	fn index(&self, table: IndexTableId, index: u64) -> Option<&IndexChunk> {
-		self.index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data))
+impl LogQuery for RwLock<LogOverlays> {
+	fn with_index<R, F: FnOnce(&IndexChunk) -> R> (&self, table: IndexTableId, index: u64, f: F) -> Option<R> {
+		self.read().index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| f(data)))
 	}
 
-	fn value(&self, table: ValueTableId, index: u64) -> Option<&[u8]> {
-		self.value.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_ref()))
+	fn value(&self, table: ValueTableId, index: u64, dest: &mut[u8]) -> bool {
+		let s = self.read();
+		if let Some(d) = s.value.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data)) {
+			let len = dest.len().min(d.len());
+			dest[0..len].copy_from_slice(&d[0..len]);
+			true
+		} else {
+			false
+		}
+
 	}
 }
 
@@ -227,13 +235,13 @@ impl LogChange {
 }
 
 pub struct LogWriter<'a> {
-	overlays: RwLockReadGuard<'a, LogOverlays>,
+	overlays: &'a RwLock<LogOverlays>,
 	log: LogChange,
 }
 
 impl<'a> LogWriter<'a> {
 	fn new(
-		overlays: RwLockReadGuard<'a, LogOverlays>,
+		overlays: &'a RwLock<LogOverlays>,
 		record_id: u64,
 	) -> LogWriter<'a> {
 		LogWriter {
@@ -264,14 +272,22 @@ impl<'a> LogWriter<'a> {
 }
 
 impl<'a> LogQuery for LogWriter<'a> {
-	fn index(&self, table: IndexTableId, index: u64) -> Option<&IndexChunk> {
-		self.log.local_index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data))
-			.or_else(|| self.overlays.index(table, index))
+	fn with_index<R, F: FnOnce(&IndexChunk) -> R> (&self, table: IndexTableId, index: u64, f: F) -> Option<R> {
+		match self.log.local_index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data)) {
+			Some(data) => Some(f(data)),
+			None => self.overlays.with_index(table, index, f),
+		}
 	}
 
-	fn value(&self, table: ValueTableId, index: u64) -> Option<&[u8]> {
-		self.log.local_values.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_ref()))
-			.or_else(|| self.overlays.value(table, index))
+	fn value(&self, table: ValueTableId, index: u64, dest: &mut[u8]) -> bool {
+		if let Some(d) = self.log.local_values.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data)) {
+			let len = dest.len().min(d.len());
+			dest[0..len].copy_from_slice(&d[0..len]);
+			true
+		} else {
+			self.overlays.value(table, index, dest)
+		}
+
 	}
 }
 
@@ -396,7 +412,7 @@ impl Log {
 	pub fn begin_record<'a>(&'a self) -> LogWriter<'a> {
 		let id = self.next_record_id.fetch_add(1, Ordering::Relaxed);
 		let writer = LogWriter::new(
-			self.overlays.read(),
+			&self.overlays,
 			id
 		);
 		writer
@@ -507,7 +523,7 @@ impl Log {
 		if flush {
 			// Flush to disk
 			log::debug!(target: "parity-db", "Flush: Flushing to disk");
-			flushing.file.sync_data()?;
+			//flushing.file.sync_data()?;
 			log::debug!(target: "parity-db", "Flush: Flushing completed");
 			flushing.empty = false;
 		}
@@ -539,8 +555,8 @@ impl Log {
 		};
 	}
 
-	pub fn overlays<'a>(&'a self) -> RwLockReadGuard<'a, LogOverlays> {
-		self.overlays.read()
+	pub fn overlays(&self) -> &RwLock<LogOverlays> {
+		&self.overlays
 	}
 
 	pub fn shutdown(&self) {

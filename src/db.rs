@@ -128,7 +128,7 @@ impl DbInner {
 			return Ok(v);
 		}
 		let log = self.log.overlays();
-		self.columns[col as usize].get(&key, &log)
+		self.columns[col as usize].get(&key, log)
 	}
 
 	fn commit<I, K>(&self, tx: I) -> Result<()>
@@ -276,14 +276,9 @@ impl DbInner {
 	}
 
 	fn process_reindex(&self) -> Result<bool> {
-		if self.next_reindex.load(Ordering::SeqCst) > self.last_enacted.load(Ordering::SeqCst) {
+		let next_reindex = self.next_reindex.load(Ordering::SeqCst);
+		if next_reindex == 0 || next_reindex > self.last_enacted.load(Ordering::SeqCst) {
 			return Ok(false)
-		}
-		{
-			let mut queue = self.log_queue_bytes.lock();
-			if *queue > MAX_LOG_QUEUE_BYTES {
-				self.log_cv.wait(&mut queue);
-			}
 		}
 		// Process any pending reindexs
 		for column in self.columns.iter() {
@@ -323,9 +318,10 @@ impl DbInner {
 					self.start_reindex(record_id);
 				}
 				self.signal_flush_worker();
+				return Ok(true)
 			}
-			return Ok(true)
 		}
+		self.next_reindex.store(0, Ordering::SeqCst);
 		Ok(false)
 	}
 
@@ -411,7 +407,8 @@ impl DbInner {
 								id,
 							);
 							self.columns[id.col() as usize].drop_index(id)?;
-
+							// Check if there's another reindex on the next iteration
+							self.start_reindex(reader.record_id());
 						}
 					}
 				}

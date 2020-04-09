@@ -47,7 +47,7 @@ pub struct Column {
 }
 
 impl Column {
-	pub fn get(&self, key: &Key, log: &LogOverlays) -> Result<Option<Value>> {
+	pub fn get(&self, key: &Key, log: &RwLock<LogOverlays>) -> Result<Option<Value>> {
 		let tables = self.tables.read();
 		if let Some(value) = Self::get_in_index(key, &tables.index, &*tables, log)? {
 			return Ok(Some(value));
@@ -60,7 +60,7 @@ impl Column {
 		Ok(None)
 	}
 
-	fn get_in_index(key: &Key, index: &IndexTable, tables: &Tables, log: &LogOverlays) -> Result<Option<Value>> {
+	fn get_in_index(key: &Key, index: &IndexTable, tables: &Tables, log: &RwLock<LogOverlays>) -> Result<Option<Value>> {
 		let (mut entry, mut sub_index) = index.get(key, 0, log);
 		while !entry.is_empty() {
 			let size_tier = entry.address(index.id.index_bits()).size_tier() as usize;

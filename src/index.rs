@@ -36,14 +36,17 @@ pub type Chunk = [u8; CHUNK_LEN];
 pub struct Entry(u64);
 
 impl Entry {
+	#[inline]
 	fn new(address: Address, key_material: u64, index_bits: u8) -> Entry {
 		Entry(((key_material as u64) << Self::address_bits(index_bits)) | address.as_u64())
 	}
 
+	#[inline]
 	pub fn address_bits(index_bits: u8) -> u8 {
 		index_bits + 10 // with n index bits there are n * 64 possible entries and 16 size tiers
 	}
 
+	#[inline]
 	pub fn address(&self, index_bits: u8) -> Address {
 		Address::from_u64(self.0 & ((1u64 << Self::address_bits(index_bits)) - 1))
 	}
@@ -53,6 +56,7 @@ impl Entry {
 		self.0 >> Self::address_bits(index_bits)
 	}
 
+	#[inline]
 	fn extract_key(key: u64, index_bits: u8) -> u64 {
 		(key << index_bits) >> Self::address_bits(index_bits)
 	}
@@ -231,9 +235,11 @@ impl IndexTable {
 		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
 		let chunk_index = key >> (64 - self.id.index_bits());
 
-		if let Some(chunk) = log.index(self.id, chunk_index) {
-			log::trace!(target: "parity-db", "{}: Querying overlay at {}", self.id, chunk_index);
-			return self.find_entry(key, sub_index, chunk);
+		if let Some(entry) = log.with_index(self.id, chunk_index, |chunk| {
+				log::trace!(target: "parity-db", "{}: Querying overlay at {}", self.id, chunk_index);
+				self.find_entry(key, sub_index, chunk)
+			}) {
+			return entry;
 		}
 
 		if let Some(map) = &*self.map.read() {
@@ -300,8 +306,8 @@ impl IndexTable {
 		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
 		let chunk_index = key >> (64 - self.id.index_bits());
 
-		if let Some(chunk) = log.index(self.id, chunk_index).cloned() {
-			return self.plan_insert_chunk(key, address, &chunk, sub_index, log);
+		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| chunk.clone()) {
+			return self.plan_insert_chunk(key, address, &chunk, sub_index, log)
 		}
 
 		if let Some(map) = &*self.map.read() {
@@ -336,7 +342,7 @@ impl IndexTable {
 		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
 		let chunk_index = key >> (64 - self.id.index_bits());
 
-		if let Some(chunk) = log.index(self.id, chunk_index).cloned() {
+		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| chunk.clone()) {
 			return self.plan_remove_chunk(key, &chunk, sub_index, log);
 		}
 

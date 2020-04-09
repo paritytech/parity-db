@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::{
 	error::Result,
 	column::ColId,
-	log::{LogOverlays, LogReader, LogWriter, LogQuery},
+	log::{LogQuery, LogReader, LogWriter},
 	display::hex,
 };
 
@@ -160,14 +160,14 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn get(&self, key: &Key, mut index: u64, log: &LogOverlays) -> Result<Option<Value>> {
+	pub fn get<Q: LogQuery>(&self, key: &Key, mut index: u64, log: &Q) -> Result<Option<Value>> {
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 		let mut result = Vec::new();
 
 		let mut part = 0;
 		loop {
-			let buf = if let Some(overlay) = log.value(self.id, index) {
-				overlay
+			let buf = if log.value(self.id, index, &mut buf) {
+				&buf
 			} else {
 				log::trace!(
 					target: "parity-db",
@@ -226,11 +226,11 @@ impl ValueTable {
 	pub fn partial_key_at<Q: LogQuery>(&self, index: u64, log: &Q) -> Result<Option<Key>> {
 		let mut buf = [0u8; 40];
 		let mut result = Key::default();
-		let buf = if let Some(overlay) = log.value(self.id, index) {
-			overlay
+		let buf = if log.value(self.id, index, &mut buf) {
+			&buf
 		} else {
 			self.read_at(&mut buf[0 .. 40], index * self.entry_size as u64)?;
-			&buf[0 .. 40]
+			&buf
 		};
 		if &buf[0..2] == TOMBSTONE {
 			return Ok(None);
@@ -244,25 +244,25 @@ impl ValueTable {
 	}
 
 	pub fn read_next_free(&self, index: u64, log: &LogWriter) -> Result<u64> {
-		if let Some(val) = log.value(self.id, index) {
-			let next = u64::from_le_bytes(val[2..10].try_into().unwrap());
+		let mut buf: [u8; 10] = unsafe { MaybeUninit::uninit().assume_init() };
+		if log.value(self.id, index, &mut buf) {
+			let next = u64::from_le_bytes(buf[2..10].try_into().unwrap());
 			return Ok(next);
 		}
-		let mut buf: [u8; 10] = unsafe { MaybeUninit::uninit().assume_init() };
 		self.read_at(&mut buf, index * self.entry_size as u64)?;
 		let next = u64::from_le_bytes(buf[2..10].try_into().unwrap());
 		return Ok(next);
 	}
 
 	pub fn read_next_part(&self, index: u64, log: &LogWriter) -> Result<Option<u64>> {
-		if let Some(val) = log.value(self.id, index) {
-			if &val[0..2] == MULTIPART {
-				let next = u64::from_le_bytes(val[2..10].try_into().unwrap());
+		let mut buf: [u8; 10] = unsafe { MaybeUninit::uninit().assume_init() };
+		if log.value(self.id, index, &mut buf) {
+			if &buf[0..2] == MULTIPART {
+				let next = u64::from_le_bytes(buf[2..10].try_into().unwrap());
 				return Ok(Some(next));
 			}
 			return Ok(None);
 		}
-		let mut buf: [u8; 10] = unsafe { MaybeUninit::uninit().assume_init() };
 		self.read_at(&mut buf, index * self.entry_size as u64)?;
 		if &buf[0..2] == MULTIPART {
 			let next = u64::from_le_bytes(buf[2..10].try_into().unwrap());
