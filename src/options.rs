@@ -23,6 +23,8 @@ pub struct Options {
 	/// fsync WAL to disk before commiting any changes. Provides extra consistency
 	/// guarantees. Off by default.
 	pub sync: bool,
+	/// Collect database statistics. May have effect on performance.
+	pub stats: bool,
 }
 
 pub struct ColumnOptions {
@@ -53,6 +55,7 @@ impl Options {
 		Options {
 			path: path.into(),
 			sync: false,
+			stats: true,
 			columns: (0 .. num_columns).map(|_| Default::default()).collect(),
 		}
 	}

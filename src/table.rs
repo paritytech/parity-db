@@ -160,9 +160,8 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn get<Q: LogQuery>(&self, key: &Key, mut index: u64, log: &Q) -> Result<Option<Value>> {
+	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8])>(&self, key: &Key, mut index: u64, log: &Q, mut f: F) -> Result<bool> {
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
-		let mut result = Vec::new();
 
 		let mut part = 0;
 		loop {
@@ -180,7 +179,7 @@ impl ValueTable {
 			};
 
 			if &buf[0..2] == TOMBSTONE {
-				return Ok(None);
+				return Ok(false);
 			}
 
 			let (content_offset, content_len, next) = if &buf[0..2] == MULTIPART {
@@ -201,11 +200,11 @@ impl ValueTable {
 						hex(&key[2..]),
 						hex(&buf[content_offset..content_offset + 30]),
 					);
-					return Ok(None);
+					return Ok(false);
 				}
-				result.extend_from_slice(&buf[content_offset + 30 .. content_offset + content_len]);
+				f(&buf[content_offset + 30 .. content_offset + content_len]);
 			} else {
-				result.extend_from_slice(&buf[content_offset .. content_offset + content_len]);
+				f(&buf[content_offset .. content_offset + content_len]);
 			}
 			if next == 0 {
 				break;
@@ -213,7 +212,23 @@ impl ValueTable {
 			part += 1;
 			index = next;
 		}
-		Ok(Some(result))
+		Ok(true)
+	}
+
+	pub fn get<Q: LogQuery>(&self, key: &Key, index: u64, log: &Q) -> Result<Option<Value>> {
+		let mut result = Vec::new();
+		if self.for_parts(key, index, log, |buf| result.extend_from_slice(buf))? {
+			return Ok(Some(result));
+		}
+		Ok(None)
+	}
+
+	pub fn size<Q: LogQuery>(&self, key: &Key, index: u64, log: &Q) -> Result<Option<u32>> {
+		let mut result = 0;
+		if self.for_parts(key, index, log, |buf| result += buf.len() as u32)? {
+			return Ok(Some(result));
+		}
+		Ok(None)
 	}
 
 	pub fn has_key_at(&self, index: u64, key: &Key, log: &LogWriter) -> Result<bool> {

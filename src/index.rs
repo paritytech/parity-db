@@ -21,11 +21,13 @@ use crate::{
 	column::ColId,
 	log::{LogReader, LogWriter, LogQuery},
 	display::hex,
+	stats::{self, ColumnStats},
 };
 
 const CHUNK_LEN: usize = 512; // bytes
 const CHUNK_ENTRIES: usize = 64;
-const META_SIZE: usize = 8 * 1024; // typical SSD page size
+const HEADER_SIZE: usize = 512;
+const META_SIZE: usize = 16 * 1024; // Contains header and column stats
 const KEY_LEN: usize = 32;
 
 const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
@@ -211,6 +213,25 @@ impl IndexTable {
 			path,
 			map: RwLock::new(None),
 			entries: std::sync::atomic::AtomicU64::new(0),
+		}
+	}
+
+	pub fn load_stats(&self) -> ColumnStats {
+		if let Some(map) = &*self.map.read() {
+			ColumnStats::from_slice(&map[HEADER_SIZE .. HEADER_SIZE + stats::TOTAL_SIZE])
+		} else {
+			ColumnStats::empty()
+		}
+	}
+
+	pub fn write_stats(&self, stats: &ColumnStats) {
+		if let Some(map) = &*self.map.write() {
+			let ptr: *mut u8 = map.as_ptr() as *mut u8;
+			unsafe {
+				let ptr = ptr.offset(HEADER_SIZE as isize);
+				let mut slice = std::slice::from_raw_parts_mut(ptr, stats::TOTAL_SIZE);
+				stats.to_slice(&mut slice);
+			};
 		}
 	}
 

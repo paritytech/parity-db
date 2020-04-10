@@ -22,6 +22,7 @@ mod column;
 mod log;
 mod display;
 mod options;
+mod stats;
 
 pub use db::Db;
 pub use error::{Error, Result};

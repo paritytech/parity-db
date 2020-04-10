@@ -23,7 +23,8 @@ use crate::{
 	log::{Log, LogOverlays, LogReader, LogWriter, LogAction},
 	display::hex,
 	index::{IndexTable, TableId as IndexTableId, PlanOutcome, Address},
-	options::ColumnOptions,
+	options::Options,
+	stats::ColumnStats,
 };
 
 const START_BITS: u8 = 16;
@@ -47,28 +48,41 @@ pub struct Column {
 	path: std::path::PathBuf,
 	preimage: bool,
 	uniform_keys: bool,
+	collect_stats: bool,
+	stats: ColumnStats,
 }
 
 impl Column {
 	pub fn get(&self, key: &Key, log: &RwLock<LogOverlays>) -> Result<Option<Value>> {
 		let tables = self.tables.read();
-		if let Some(value) = Self::get_in_index(key, &tables.index, &*tables, log)? {
+		if let Some((tier, value)) = Self::get_in_index(key, &tables.index, &*tables, log)? {
+			if self.collect_stats {
+				self.stats.query_hit(tier);
+			}
 			return Ok(Some(value));
 		}
 		for r in &self.reindex.read().queue {
-			if let Some(value) = Self::get_in_index(key, &r, &*tables, log)? {
+			if let Some((tier, value)) = Self::get_in_index(key, &r, &*tables, log)? {
+				if self.collect_stats {
+					self.stats.query_hit(tier);
+				}
 				return Ok(Some(value));
 			}
+		}
+		if self.collect_stats {
+			self.stats.query_miss();
 		}
 		Ok(None)
 	}
 
-	fn get_in_index(key: &Key, index: &IndexTable, tables: &Tables, log: &RwLock<LogOverlays>) -> Result<Option<Value>> {
+	fn get_in_index(key: &Key, index: &IndexTable, tables: &Tables, log: &RwLock<LogOverlays>) -> Result<Option<(u8, Value)>> {
 		let (mut entry, mut sub_index) = index.get(key, 0, log);
 		while !entry.is_empty() {
 			let size_tier = entry.address(index.id.index_bits()).size_tier() as usize;
 			match tables.value[size_tier].get(key, entry.address(index.id.index_bits()).offset(), log)? {
-				Some(value) => return Ok(Some(value)),
+				Some(value) => {
+					return Ok(Some((size_tier as u8, value)));
+				}
 				None =>  {
 					let (next_entry, next_index) = index.get(key, sub_index + 1, log);
 					entry = next_entry;
@@ -78,8 +92,12 @@ impl Column {
 		}
 		Ok(None)
 	}
-	pub fn open(col: ColId, options: &ColumnOptions, path: &std::path::Path) -> Result<Column> {
-		let (index, reindexing) = Self::open_index(path, col)?;
+
+	pub fn open(col: ColId, options: &Options) -> Result<Column> {
+		let (index, reindexing, stats) = Self::open_index(&options.path, col)?;
+		let collect_stats = options.stats;
+		let path = &options.path;
+		let options = &options.columns[col as usize];
 		let tables = Tables {
 			index,
 			value: [
@@ -101,6 +119,7 @@ impl Column {
 				Self::open_table(path, col, 15, None)?,
 			],
 		};
+
 		Ok(Column {
 			tables: RwLock::new(tables),
 			reindex: RwLock::new(Reindex {
@@ -110,6 +129,8 @@ impl Column {
 			path: path.into(),
 			preimage: options.preimage,
 			uniform_keys: options.uniform,
+			collect_stats,
+			stats,
 		})
 	}
 
@@ -123,13 +144,15 @@ impl Column {
 		k
 	}
 
-	fn open_index(path: &std::path::Path, col: ColId) -> Result<(IndexTable, VecDeque<IndexTable>)> {
+	fn open_index(path: &std::path::Path, col: ColId) -> Result<(IndexTable, VecDeque<IndexTable>, ColumnStats)> {
 		let mut reindexing = VecDeque::new();
 		let mut top = None;
+		let mut stats = ColumnStats::empty();
 		for bits in (START_BITS .. 65).rev() {
 			let id = IndexTableId::new(col, bits);
 			if let Some(table) = IndexTable::open_existing(path, id)? {
 				if top.is_none() {
+					stats = table.load_stats();
 					top = Some(table);
 				} else {
 					reindexing.push_front(table);
@@ -140,7 +163,7 @@ impl Column {
 			Some(table) => table,
 			None => IndexTable::create_new(path, IndexTableId::new(col, START_BITS)),
 		};
-		Ok((table, reindexing))
+		Ok((table, reindexing, stats))
 	}
 
 	fn open_table(path: &std::path::Path, col: ColId, tier: u8, entry_size: Option<u16>) -> Result<ValueTable> {
@@ -206,6 +229,10 @@ impl Column {
 				let existing_tier = existing_address.size_tier() as usize;
 				let replace = tables.value[existing_tier].has_key_at(existing_address.offset(), &key, log)?;
 				if replace {
+					if self.collect_stats {
+						let cur_size = tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0);
+						self.stats.replace_val(cur_size, val.len() as u32);
+					}
 					if self.preimage {
 						// Replace is not supported
 						return Ok(PlanOutcome::Skipped);
@@ -247,6 +274,9 @@ impl Column {
 					return Ok(PlanOutcome::NeedReindex);
 				}
 				_ => {
+					if self.collect_stats {
+						self.stats.insert_val(val.len() as u32);
+					}
 					return Ok(PlanOutcome::Written);
 				}
 			}
@@ -259,6 +289,10 @@ impl Column {
 				// TODO: Remove this check? Highly unlikely.
 				if tables.value[existing_tier].has_key_at(existing_address.offset(), &key, log)? {
 					log::trace!(target: "parity-db", "{}: Deleting {}", tables.index.id, hex(key));
+					if self.collect_stats {
+						let cur_size = tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0);
+						self.stats.remove_val(cur_size);
+					}
 					tables.value[existing_tier].write_remove_plan(existing_address.offset(), log)?;
 					tables.index.write_remove_plan(key, sub_index, log)?;
 					return Ok(PlanOutcome::Written);
@@ -266,6 +300,9 @@ impl Column {
 				let (next_entry, next_index) = tables.index.get(key, sub_index + 1, log);
 				existing_entry = next_entry;
 				sub_index = next_index;
+			}
+			if self.collect_stats {
+				self.stats.remove_miss();
 			}
 		}
 		Ok(PlanOutcome::Skipped)
@@ -325,6 +362,9 @@ impl Column {
 		for t in tables.value.iter() {
 			t.complete_plan(log)?;
 		}
+		if self.collect_stats {
+			self.stats.commit()
+		}
 		Ok(())
 	}
 
@@ -334,6 +374,12 @@ impl Column {
 			t.refresh_metadata()?;
 		}
 		Ok(())
+	}
+
+	pub fn write_stats(&self, file: &std::fs::File) {
+		let tables = self.tables.read();
+		tables.index.write_stats(&self.stats);
+		self.stats.write_summary(file, tables.index.id.col());
 	}
 
 	pub fn reindex(&self, _log: &Log) -> Result<(Option<IndexTableId>, Vec<(Key, Address)>)> {

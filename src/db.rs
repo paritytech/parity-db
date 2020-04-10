@@ -49,7 +49,7 @@ struct CommitQueue{
 
 struct DbInner {
 	columns: Vec<Column>,
-	_path: std::path::PathBuf,
+	path: std::path::PathBuf,
 	shutdown: AtomicBool,
 	log: Log,
 	commit_queue: Mutex<CommitQueue>,
@@ -66,18 +66,19 @@ struct DbInner {
 	enact_mutex: Mutex<()>,
 	last_enacted: AtomicU64,
 	next_reindex: AtomicU64,
+	collect_stats: bool,
 }
 
 impl DbInner {
 	pub fn open(options: &Options) -> Result<DbInner> {
 		std::fs::create_dir_all(&options.path)?;
 		let mut columns = Vec::with_capacity(options.columns.len());
-		for (c, col) in options.columns.iter().enumerate() {
-			columns.push(Column::open(c as ColId, col, &options.path)?);
+		for c in 0 .. options.columns.len() {
+			columns.push(Column::open(c as ColId, &options)?);
 		}
 		Ok(DbInner {
 			columns,
-			_path: options.path.clone(),
+			path: options.path.clone(),
 			shutdown: std::sync::atomic::AtomicBool::new(false),
 			log: Log::open(&options)?,
 			commit_queue: Mutex::new(Default::default()),
@@ -94,6 +95,7 @@ impl DbInner {
 			enact_mutex: Mutex::new(()),
 			next_reindex: AtomicU64::new(0),
 			last_enacted: AtomicU64::new(0),
+			collect_stats: options.stats,
 		})
 	}
 
@@ -472,6 +474,18 @@ impl DbInner {
 		self.signal_log_worker();
 		self.signal_commit_worker();
 		self.log.shutdown();
+		if self.collect_stats {
+			let mut path = self.path.clone();
+			path.push("stats.txt");
+			match std::fs::File::create(path) {
+				Ok(file) => {
+					for c in self.columns.iter() {
+						c.write_stats(&file);
+					}
+				}
+				Err(e) => log::warn!(target: "parity-db", "Error creating stats file: {:?}", e),
+			}
+		}
 	}
 }
 
