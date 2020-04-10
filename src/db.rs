@@ -79,7 +79,7 @@ impl DbInner {
 			columns,
 			_path: options.path.clone(),
 			shutdown: std::sync::atomic::AtomicBool::new(false),
-			log: Log::open(&options.path)?,
+			log: Log::open(&options)?,
 			commit_queue: Mutex::new(Default::default()),
 			commit_queue_full_cv: Condvar::new(),
 			log_worker_cv: Condvar::new(),

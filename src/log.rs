@@ -23,6 +23,7 @@ use crate::{
 	error::{Error, Result},
 	table::TableId as ValueTableId,
 	index::{TableId as IndexTableId, Chunk as IndexChunk},
+	options::Options,
 };
 
 pub struct InsertIndexAction {
@@ -328,11 +329,12 @@ pub struct Log {
 	flushing: Mutex<Flushing>,
 	next_record_id: AtomicU64,
 	dirty: AtomicBool,
+	sync: bool,
 }
 
 impl Log {
-	pub fn open(path: &std::path::Path) -> Result<Log> {
-		let mut path = std::path::PathBuf::from(path);
+	pub fn open(options: &Options) -> Result<Log> {
+		let mut path = options.path.clone();
 		path.push("log0");
 		let (file0, id0) = Self::open_or_create_log_file(path.as_path())?;
 		path.pop();
@@ -365,6 +367,7 @@ impl Log {
 			}),
 			next_record_id: AtomicU64::new(1),
 			dirty: AtomicBool::new(true),
+			sync: options.sync,
 		})
 	}
 
@@ -523,7 +526,9 @@ impl Log {
 		if flush {
 			// Flush to disk
 			log::debug!(target: "parity-db", "Flush: Flushing to disk");
-			//flushing.file.sync_data()?;
+			if self.sync {
+				flushing.file.sync_data()?;
+			}
 			log::debug!(target: "parity-db", "Flush: Flushing completed");
 			flushing.empty = false;
 		}
