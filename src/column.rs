@@ -140,6 +140,7 @@ impl Column {
 			k.copy_from_slice(&key[0..32]);
 		} else {
 			k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &[], key).as_bytes());
+			log::trace!(target: "parity-db", "HASH({})={}", hex(key), hex(&k));
 		}
 		k
 	}
@@ -286,7 +287,6 @@ impl Column {
 			while !existing_entry.is_empty() {
 				let existing_address = existing_entry.address(tables.index.id.index_bits());
 				let existing_tier = existing_address.size_tier() as usize;
-				// TODO: Remove this check? Highly unlikely.
 				if tables.value[existing_tier].has_key_at(existing_address.offset(), &key, log)? {
 					log::trace!(target: "parity-db", "{}: Deleting {}", tables.index.id, hex(key));
 					if self.collect_stats {
@@ -301,6 +301,7 @@ impl Column {
 				existing_entry = next_entry;
 				sub_index = next_index;
 			}
+			log::trace!(target: "parity-db", "{}: Deletion missed {}", tables.index.id, hex(key));
 			if self.collect_stats {
 				self.stats.remove_miss();
 			}

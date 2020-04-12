@@ -142,8 +142,8 @@ impl ColumnStats {
 		writeln!(writer, "Column {}", col)?;
 		writeln!(writer, "Total values: {}", self.total_values.load(Ordering::Relaxed))?;
 		writeln!(writer, "Total bytes: {}", self.total_bytes.load(Ordering::Relaxed))?;
-		writeln!(writer, "Total oversized_values: {}", self.oversized.load(Ordering::Relaxed))?;
-		writeln!(writer, "Total oversized_bytes: {}", self.oversized_bytes.load(Ordering::Relaxed))?;
+		writeln!(writer, "Total oversized values: {}", self.oversized.load(Ordering::Relaxed))?;
+		writeln!(writer, "Total oversized bytes: {}", self.oversized_bytes.load(Ordering::Relaxed))?;
 		writeln!(writer, "Total commits: {}", self.commits.load(Ordering::Relaxed))?;
 		writeln!(writer, "New value insertions: {}", self.inserted_new.load(Ordering::Relaxed))?;
 		writeln!(writer, "Existing value insertions: {}", self.inserted_overwrite.load(Ordering::Relaxed))?;

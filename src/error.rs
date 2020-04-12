@@ -15,6 +15,7 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::fmt;
+use std::sync::Arc;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -23,6 +24,8 @@ pub enum Error {
 	Io(std::io::Error),
 	Corruption(String),
 	InvalidConfiguration(String),
+	InvalidInput(String),
+	Background(Arc<Error>),
 }
 
 impl fmt::Display for Error {
@@ -31,6 +34,8 @@ impl fmt::Display for Error {
 			Error::Io(e) => write!(f, "IO Error: {}", e),
 			Error::Corruption(e) => write!(f, "Corruption: {}", e),
 			Error::InvalidConfiguration(e) => write!(f, "Invalid configuration: {}", e),
+			Error::InvalidInput(e) => write!(f, "Invalid input: {}", e),
+			Error::Background(e) => write!(f, "Background worker error: {}", e),
 		}
     }
 }

@@ -14,6 +14,22 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
+/// The database objects is split into `Db` and `DbInner`.
+/// `Db` creates shared `DbInner` instance and manages background
+/// worker threads that all use the inner object.
+///
+/// There are 3 worker threads:
+/// log_worker: Processes commit queue and reindexing. For each commit
+/// in the queue, log worker creates a write-ahead record using `Log`.
+/// Additionally, if there are active reindexing, it creates log records
+/// for batches of relocated index entries.
+/// flush_worker: Flushes log records to disk by calling `fsync` on the
+/// log files.
+/// commit_worker: Reads flushed log records and applies operations to the
+/// index and value tables.
+/// Each background worker is signalled with a conditional variable once
+/// there is some work to be done.
+
 use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::collections::{HashMap, VecDeque};
 use parking_lot::{RwLock, Mutex, Condvar};
@@ -31,19 +47,31 @@ const MAX_COMMIT_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 // These are disk-backed, so we use u64
 const MAX_LOG_QUEUE_BYTES: u64 = 32 * 1024 * 1024;
 
+/// Value is just a vector of bytes. Value sizes up to 4Gb are allowed.
 pub type Value = Vec<u8>;
 
+
+// Commit data passed to `commit`
 #[derive(Default)]
-struct Commit{
+struct Commit {
+	// Commit ID. This is not the same as log record id, as some records
+	// are originated within the DB. E.g. reindex.
 	id: u64,
+	// Size of user data pending insertion (keys + values) or
+	// removal (keys)
 	bytes: usize,
+	// Operations.
 	changeset: Vec<(ColId, Key, Option<Value>)>,
 }
 
+// Pending commits. This may not grow beyond `MAX_COMMIT_QUEUE_BYTES` bytes.
 #[derive(Default)]
-struct CommitQueue{
+struct CommitQueue {
+	// Log record.
 	record_id: u64,
+	// Total size of all commits in the queue.
 	bytes: usize,
+	// FIFO queue.
 	commits: VecDeque<Commit>,
 }
 
@@ -58,6 +86,7 @@ struct DbInner {
 	log_work: Mutex<bool>,
 	commit_worker_cv: Condvar,
 	commit_work: Mutex<bool>,
+	// Overlay of most recent values int the commit queue. ColumnId -> (Key -> (RecordId, Value)).
 	commit_overlay: RwLock<HashMap<ColId, HashMap<Key, (u64, Option<Value>)>>>,
 	log_cv: Condvar,
 	log_queue_bytes: Mutex<u64>,
@@ -67,10 +96,11 @@ struct DbInner {
 	last_enacted: AtomicU64,
 	next_reindex: AtomicU64,
 	collect_stats: bool,
+	bg_err: Mutex<Option<Arc<Error>>>,
 }
 
 impl DbInner {
-	pub fn open(options: &Options) -> Result<DbInner> {
+	fn open(options: &Options) -> Result<DbInner> {
 		std::fs::create_dir_all(&options.path)?;
 		let mut columns = Vec::with_capacity(options.columns.len());
 		for c in 0 .. options.columns.len() {
@@ -96,6 +126,7 @@ impl DbInner {
 			next_reindex: AtomicU64::new(0),
 			last_enacted: AtomicU64::new(0),
 			collect_stats: options.stats,
+			bg_err: Mutex::new(None),
 		})
 	}
 
@@ -117,21 +148,32 @@ impl DbInner {
 		self.flush_worker_cv.notify_one();
 	}
 
-	pub fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
+	fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
 		let key = self.columns[col as usize].hash(key);
 		let overlay = self.commit_overlay.read();
+		// Check commit overlay first
 		if let Some(v) = overlay.get(&col).and_then(|o| o.get(&key).map(|(_, v)| v.clone())) {
 			return Ok(v);
 		}
+		// Go into tables and log overlay.
 		let log = self.log.overlays();
 		self.columns[col as usize].get(&key, log)
 	}
 
+	// Commit is simply adds the the data to the queue and to the overlay and
+	// exits as early as possible.
 	fn commit<I, K>(&self, tx: I) -> Result<()>
 		where
 			I: IntoIterator<Item=(ColId, K, Option<Value>)>,
 			K: AsRef<[u8]>,
 	{
+		{
+			let bg_err = self.bg_err.lock();
+			if let Some(err) = &*bg_err {
+				return Err(Error::Background(err.clone()));
+			}
+		}
+
 		let commit: Vec<_> = tx.into_iter().map(
 			|(c, k, v)| (c, self.columns[c as usize].hash(k.as_ref()), v)
 		).collect();
@@ -174,6 +216,7 @@ impl DbInner {
 
 	fn process_commits(&self) -> Result<bool> {
 		{
+			// Wait if the queue is too big.
 			let mut queue = self.log_queue_bytes.lock();
 			if *queue > MAX_LOG_QUEUE_BYTES {
 				self.log_cv.wait(&mut queue);
@@ -216,6 +259,7 @@ impl DbInner {
 			let mut ops: u64 = 0;
 			for (c, key, value) in commit.changeset.iter() {
 				match self.columns[*c as usize].write_plan(key, value, &mut writer)? {
+					// Reindex has triggered another reindex.
 					PlanOutcome::NeedReindex => {
 						reindex = true;
 					},
@@ -239,6 +283,7 @@ impl DbInner {
 			};
 
 			{
+				// Cleanup the commit overlay.
 				let mut overlay = self.commit_overlay.write();
 				for (c, key, _) in commit.changeset.iter() {
 					if let Some(overlay) = overlay.get_mut(c) {
@@ -278,7 +323,7 @@ impl DbInner {
 		if next_reindex == 0 || next_reindex > self.last_enacted.load(Ordering::SeqCst) {
 			return Ok(false)
 		}
-		// Process any pending reindexs
+		// Process any pending reindexes
 		for column in self.columns.iter() {
 			let (drop_index, batch) = column.reindex(&self.log)?;
 			if !batch.is_empty() {
@@ -453,8 +498,10 @@ impl DbInner {
 	}
 
 	fn replay_all_logs(&self) -> Result<()> {
-		log::info!(target: "parity-db", "Replaying database log...");
+		log::debug!(target: "parity-db", "Replaying database log...");
+		// Process the oldest log first
 		while self.enact_logs(true)? { }
+		// Process intermediate logs
 		while self.flush_logs()? {
 			while self.enact_logs(true)? { }
 		}
@@ -464,7 +511,7 @@ impl DbInner {
 		for c in self.columns.iter() {
 			c.refresh_metadata()?;
 		}
-		log::info!(target: "parity-db", "Done.");
+		log::debug!(target: "parity-db", "Done.");
 		Ok(())
 	}
 
@@ -487,13 +534,24 @@ impl DbInner {
 			}
 		}
 	}
+
+	fn store_err(&self, result: Result<()>) {
+		if let Err(e) = result {
+			log::warn!(target: "parity-db", "Background worker error: {}", e);
+			let mut err =  self.bg_err.lock();
+			if err.is_none() {
+				*err = Some(Arc::new(e));
+				self.shutdown();
+			}
+		}
+	}
 }
 
 pub struct Db {
 	inner: Arc<DbInner>,
-	commit_thread: Option<std::thread::JoinHandle<Result<()>>>,
-	flush_thread: Option<std::thread::JoinHandle<Result<()>>>,
-	log_thread: Option<std::thread::JoinHandle<Result<()>>>,
+	commit_thread: Option<std::thread::JoinHandle<()>>,
+	flush_thread: Option<std::thread::JoinHandle<()>>,
+	log_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Db {
@@ -502,29 +560,21 @@ impl Db {
 		Self::open(&options)
 	}
 
+	/// Open the database with given
 	pub fn open(options: &Options) -> Result<Db> {
 		let db = Arc::new(DbInner::open(options)?);
 		db.replay_all_logs()?;
 		let commit_worker_db = db.clone();
 		let commit_thread = std::thread::spawn(move ||
-			Self::commit_worker(commit_worker_db).map_err(|e| {
-				log::error!(target: "parity-db", "DB ERROR: {:?}", e);
-				panic!(e)
-			})
+			commit_worker_db.store_err(Self::commit_worker(commit_worker_db.clone()))
 		);
 		let flush_worker_db = db.clone();
 		let flush_thread = std::thread::spawn(move ||
-			Self::flush_worker(flush_worker_db).map_err(|e| {
-				log::error!(target: "parity-db", "DB ERROR: {:?}", e);
-				panic!(e)
-			})
+			flush_worker_db.store_err(Self::flush_worker(flush_worker_db.clone()))
 		);
 		let log_worker_db = db.clone();
 		let log_thread = std::thread::spawn(move ||
-			Self::log_worker(log_worker_db).map_err(|e| {
-				log::error!(target: "parity-db", "DB ERROR: {:?}", e);
-				panic!(e)
-			})
+			log_worker_db.store_err(Self::log_worker(log_worker_db.clone()))
 		);
 		Ok(Db {
 			inner: db,
@@ -553,7 +603,6 @@ impl Db {
 	fn commit_worker(db: Arc<DbInner>) -> Result<()> {
 		let mut more_work = false;
 		while !db.shutdown.load(Ordering::SeqCst) {
-			// Wait for a task
 			if !more_work {
 				let mut work = db.commit_work.lock();
 				while !*work {
@@ -571,7 +620,6 @@ impl Db {
 	fn log_worker(db: Arc<DbInner>) -> Result<()> {
 		let mut more_work = false;
 		while !db.shutdown.load(Ordering::SeqCst) {
-			// Wait for a task
 			if !more_work {
 				let mut work = db.log_work.lock();
 				while !*work {
@@ -591,7 +639,6 @@ impl Db {
 	fn flush_worker(db: Arc<DbInner>) -> Result<()> {
 		let mut more_work = false;
 		while !db.shutdown.load(Ordering::SeqCst) {
-			// Wait for a task
 			if !more_work {
 				let mut work = db.flush_work.lock();
 				while !*work {
