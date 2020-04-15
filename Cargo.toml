@@ -1,12 +1,12 @@
 [package]
 name = "parity-db"
-version = "0.0.1"
+version = "0.1.0"
 authors = ["Parity Technologies <admin@parity.io>"]
 edition = "2018"
-license = "GPL-3.0"
+license = "MIT OR Apache-2.0"
 homepage = "https://substrate.dev"
-repository = "https://github.com/paritytech/substrate/"
-description = "Parity key-value database"
+repository = "https://github.com/paritytech/parity-db/"
+description = "Key-value database for the blockchain"
 
 [dependencies]
 log = "0.4.8"
