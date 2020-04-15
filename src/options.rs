@@ -14,6 +14,11 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::io::Write;
+use crate::error::{Error, Result};
+
+const CURRENT_VERSION: u32 = 1;
+
 /// Database configuration.
 pub struct Options {
 	/// Database path.
@@ -40,6 +45,21 @@ pub struct ColumnOptions {
 	pub sizes: [u16; 15],
 }
 
+impl ColumnOptions {
+	fn as_string(&self) -> String {
+		format!("preimage: {}, uniform: {}, sizes: [{}]",
+			self.preimage,
+			self.uniform,
+			self.sizes.iter().fold(String::new(), |mut r, s| {
+				if !r.is_empty() {
+					r.push_str(", ");
+				}
+				r.push_str(&s.to_string()); r
+			})
+		)
+	}
+}
+
 impl Default for ColumnOptions {
 	fn default() -> ColumnOptions {
 		ColumnOptions {
@@ -59,4 +79,51 @@ impl Options {
 			columns: (0 .. num_columns).map(|_| Default::default()).collect(),
 		}
 	}
+
+	pub fn write_metadata(&self, path: &std::path::Path) -> Result<()> {
+		let mut file = std::fs::File::create(path)?;
+		writeln!(file, "version={}", CURRENT_VERSION)?;
+		for i in 0 .. self.columns.len() {
+			writeln!(file, "col{}={}", i, self.columns[i].as_string())?;
+		}
+		Ok(())
+	}
+
+	pub fn validate_metadata(&self) -> Result<()> {
+		use std::io::BufRead;
+		use std::str::FromStr;
+
+		let mut path = self.path.clone();
+		path.push("metadata");
+		if !path.exists() {
+			return self.write_metadata(&path)
+		}
+		let file = std::io::BufReader::new(std::fs::File::open(path)?);
+		for l in file.lines() {
+			let l = l?;
+			let mut vals = l.split("=");
+			let k = vals.next().ok_or(Error::Corruption("Bad metadata".into()))?;
+			let v = vals.next().ok_or(Error::Corruption("Bad metadata".into()))?;
+			if k == "version" {
+				let version = u32::from_str(v).map_err(|_| Error::Corruption("Bad version string".into()))?;
+				if version != CURRENT_VERSION {
+					return Err(Error::Corruption(format!(
+						"Unsupported database version {}. Expected {}", version, CURRENT_VERSION)));
+				}
+			} else if k.starts_with("col") {
+				let col_index = u8::from_str(&k[3..]).map_err(|_| Error::Corruption("Bad metadata column index".into()))?;
+				if col_index as usize > self.columns.len() {
+					return Err(Error::InvalidInput(format!("Column config mismatch. Bad metadata column index: {}", col_index)));
+				}
+				let column_meta = self.columns[col_index as usize].as_string();
+				if column_meta != v {
+					return Err(Error::InvalidInput(format!(
+						"Column config mismatch for column {}. Expected \"{}\", got \"{}\"",
+						col_index, v, column_meta)));
+				}
+			}
+		}
+		Ok(())
+	}
 }
+

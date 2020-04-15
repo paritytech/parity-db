@@ -102,6 +102,7 @@ struct DbInner {
 impl DbInner {
 	fn open(options: &Options) -> Result<DbInner> {
 		std::fs::create_dir_all(&options.path)?;
+		options.validate_metadata()?;
 		let mut columns = Vec::with_capacity(options.columns.len());
 		for c in 0 .. options.columns.len() {
 			columns.push(Column::open(c as ColId, &options)?);
