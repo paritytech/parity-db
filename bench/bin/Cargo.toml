@@ -5,8 +5,9 @@ authors = ["Parity Technologies <admin@parity.io>"]
 publish = false
 edition = "2018"
 
-
 [dependencies]
-jemallocator = "0.3"
 parity-db = { path = "../.." }
 db-bench = { path = "../core" }
+
+[target.'cfg(all(not(windows), not(target_env = "musl")))'.dependencies]
+jemallocator = "0.3.0"
