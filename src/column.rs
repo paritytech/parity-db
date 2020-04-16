@@ -140,7 +140,7 @@ impl Column {
 			k.copy_from_slice(&key[0..32]);
 		} else {
 			k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &[], key).as_bytes());
-			log::trace!(target: "parity-db", "HASH({})={}", hex(key), hex(&k));
+			//log::trace!(target: "parity-db", "HASH({})={}", hex(key), hex(&k));
 		}
 		k
 	}
@@ -174,17 +174,15 @@ impl Column {
 
 	fn trigger_reindex(
 		tables: parking_lot::RwLockUpgradableReadGuard<Tables>,
-		reindex: &RwLock<Reindex>,
+		reindex: parking_lot::RwLockUpgradableReadGuard<Reindex>,
 		path: &std::path::Path,
 	) {
 		let mut tables = parking_lot::RwLockUpgradableReadGuard::upgrade(tables);
-		let mut reindex = reindex.write();
+		let mut reindex = parking_lot::RwLockUpgradableReadGuard::upgrade(reindex);
 		log::info!(
 			target: "parity-db",
-			"Started reindex for {} at {}/{} full",
+			"Started reindex for {}",
 			tables.index.id,
-			tables.index.num_entries(),
-			tables.index.id.total_entries(),
 		);
 		// Start reindex
 		let new_index_id = IndexTableId::new(
@@ -198,10 +196,14 @@ impl Column {
 
 	pub fn write_index_plan(&self, key: &Key, address: Address, log: &mut LogWriter) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
+		let reindex = self.reindex.upgradable_read();
+		if Self::search_index(key, &tables.index, &*tables, log)?.is_some() {
+			return Ok(PlanOutcome::Skipped);
+		}
 		match tables.index.write_insert_plan(key, address, None, log)? {
 			PlanOutcome::NeedReindex => {
 				log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
-				Self::trigger_reindex(tables, &self.reindex, self.path.as_path());
+				Self::trigger_reindex(tables, reindex, self.path.as_path());
 				self.write_index_plan(key, address, log)?;
 				return Ok(PlanOutcome::NeedReindex);
 			}
@@ -211,9 +213,51 @@ impl Column {
 		}
 	}
 
+	fn search_index<'a>(
+		key: &Key,
+		index: &'a IndexTable,
+		tables: &'a Tables,
+		log: &LogWriter
+	) -> Result<Option<(&'a IndexTable, usize, u8, Address)>> {
+		let (mut existing_entry, mut sub_index) = index.get(key, 0, log);
+		while !existing_entry.is_empty() {
+			let existing_address = existing_entry.address(index.id.index_bits());
+			let existing_tier = existing_address.size_tier();
+			if tables.value[existing_tier as usize].has_key_at(existing_address.offset(), &key, log)? {
+				return Ok(Some((&index, sub_index, existing_tier, existing_address)));
+			}
+
+			let (next_entry, next_index) = index.get(key, sub_index + 1, log);
+			existing_entry = next_entry;
+			sub_index = next_index;
+		};
+		Ok(None)
+	}
+
+	fn search_all_indexes<'a>(
+		key: &Key,
+		tables: &'a Tables,
+		reindex: &'a Reindex,
+		log: &LogWriter
+	) -> Result<Option<(&'a IndexTable, usize, u8, Address)>> {
+			if let Some(r) = Self::search_index(key, &tables.index, tables, log)? {
+				return Ok(Some(r));
+			}
+			// Check old indexes
+			// TODO: don't search if index precedes reindex progress
+			for index in &reindex.queue {
+				if let Some(r) = Self::search_index(key, index, tables, log)? {
+					return Ok(Some(r));
+				}
+			}
+			Ok(None)
+	}
+
 	pub fn write_plan(&self, key: &Key, value: &Option<Value>, log: &mut LogWriter) -> Result<PlanOutcome> {
 		//TODO: return sub-chunk position in index.get
 		let tables = self.tables.upgradable_read();
+		let reindex = self.reindex.upgradable_read();
+		let existing = Self::search_all_indexes(key, &*tables, &*reindex, log)?;
 		if let &Some(ref val) = value {
 			let target_tier = tables.value.iter().position(|t| val.len() <= t.value_size() as usize);
 			let target_tier = match target_tier {
@@ -224,82 +268,60 @@ impl Column {
 				}
 			};
 
-			let (mut existing_entry, mut sub_index) = tables.index.get(key, 0, log);
-			while !existing_entry.is_empty() {
-				let existing_address = existing_entry.address(tables.index.id.index_bits());
-				let existing_tier = existing_address.size_tier() as usize;
-				let replace = tables.value[existing_tier].has_key_at(existing_address.offset(), &key, log)?;
-				if replace {
-					if self.collect_stats {
-						let cur_size = tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0);
-						self.stats.replace_val(cur_size, val.len() as u32);
-					}
-					if self.preimage {
-						// Replace is not supported
-						return Ok(PlanOutcome::Skipped);
-					}
-					if existing_tier == target_tier {
-						log::trace!(target: "parity-db", "{}: Replacing {}", tables.index.id, hex(key));
-						tables.value[target_tier].write_replace_plan(existing_address.offset(), key, val, log)?;
-						return Ok(PlanOutcome::Written);
-					} else {
-						log::trace!(target: "parity-db", "{}: Replacing in a new table {}", tables.index.id, hex(key));
-						tables.value[existing_tier].write_remove_plan(existing_address.offset(), log)?;
-						let new_offset = tables.value[target_tier].write_insert_plan(key, val, log)?;
-						let new_address = Address::new(new_offset, target_tier as u8);
-						return tables.index.write_insert_plan(key, new_address, Some(sub_index), log);
-					}
-				} else {
-					// Fall thorough to insertion
-					log::warn!(
-						target: "parity-db",
-						"{}: Index chunk conflict {} vs {:?}",
-						tables.index.id,
-						hex(key),
-						hex(&tables.value[existing_tier].partial_key_at(existing_address.offset(), log).unwrap().unwrap()),
-					);
+			if let Some((table, sub_index, existing_tier, existing_address)) = existing {
+				let existing_tier = existing_tier as usize;
+				if self.collect_stats {
+					let cur_size = tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0);
+					self.stats.replace_val(cur_size, val.len() as u32);
 				}
-				let (next_entry, next_index) = tables.index.get(key, sub_index + 1, log);
-				existing_entry = next_entry;
-				sub_index = next_index;
-			}
-
-			log::trace!(target: "parity-db", "{}: Inserting new index {}", tables.index.id, hex(key));
-			let offset = tables.value[target_tier].write_insert_plan(key, val, log)?;
-			let address = Address::new(offset, target_tier as u8);
-			match tables.index.write_insert_plan(key, address, None, log)? {
-				PlanOutcome::NeedReindex => {
-					log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
-					Self::trigger_reindex(tables, &self.reindex, self.path.as_path());
-					self.write_plan(key, value, log)?;
-					return Ok(PlanOutcome::NeedReindex);
+				if self.preimage {
+					// Replace is not supported
+					return Ok(PlanOutcome::Skipped);
 				}
-				_ => {
-					if self.collect_stats {
-						self.stats.insert_val(val.len() as u32);
-					}
+				if existing_tier == target_tier {
+					log::trace!(target: "parity-db", "{}: Replacing {}", tables.index.id, hex(key));
+					tables.value[target_tier].write_replace_plan(existing_address.offset(), key, val, log)?;
 					return Ok(PlanOutcome::Written);
+				} else {
+					log::trace!(target: "parity-db", "{}: Replacing in a new table {}", tables.index.id, hex(key));
+					tables.value[existing_tier].write_remove_plan(existing_address.offset(), log)?;
+					let new_offset = tables.value[target_tier].write_insert_plan(key, val, log)?;
+					let new_address = Address::new(new_offset, target_tier as u8);
+					// If it was found in an older index we just insert a new entry. Reindex won't overwrite it.
+					let sub_index = if table.id == tables.index.id { Some(sub_index) } else { None };
+					return tables.index.write_insert_plan(key, new_address, sub_index, log);
+				}
+			} else {
+				log::trace!(target: "parity-db", "{}: Inserting new index {}", tables.index.id, hex(key));
+				let offset = tables.value[target_tier].write_insert_plan(key, val, log)?;
+				let address = Address::new(offset, target_tier as u8);
+				match tables.index.write_insert_plan(key, address, None, log)? {
+					PlanOutcome::NeedReindex => {
+						log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
+						Self::trigger_reindex(tables, reindex, self.path.as_path());
+						self.write_plan(key, value, log)?;
+						return Ok(PlanOutcome::NeedReindex);
+					}
+					_ => {
+						if self.collect_stats {
+							self.stats.insert_val(val.len() as u32);
+						}
+						return Ok(PlanOutcome::Written);
+					}
 				}
 			}
 		} else {
-			// Deletion
-			let (mut existing_entry, mut sub_index) = tables.index.get(key, 0, log);
-			while !existing_entry.is_empty() {
-				let existing_address = existing_entry.address(tables.index.id.index_bits());
-				let existing_tier = existing_address.size_tier() as usize;
-				if tables.value[existing_tier].has_key_at(existing_address.offset(), &key, log)? {
-					log::trace!(target: "parity-db", "{}: Deleting {}", tables.index.id, hex(key));
-					if self.collect_stats {
-						let cur_size = tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0);
-						self.stats.remove_val(cur_size);
-					}
-					tables.value[existing_tier].write_remove_plan(existing_address.offset(), log)?;
-					tables.index.write_remove_plan(key, sub_index, log)?;
-					return Ok(PlanOutcome::Written);
+			if let Some((table, sub_index, existing_tier, existing_address)) = existing {
+				// Deletion
+				log::trace!(target: "parity-db", "{}: Deleting {}", table.id, hex(key));
+				let existing_tier = existing_tier as usize;
+				if self.collect_stats {
+					let cur_size = tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0);
+					self.stats.remove_val(cur_size);
 				}
-				let (next_entry, next_index) = tables.index.get(key, sub_index + 1, log);
-				existing_entry = next_entry;
-				sub_index = next_index;
+				tables.value[existing_tier].write_remove_plan(existing_address.offset(), log)?;
+				table.write_remove_plan(key, sub_index, log)?;
+				return Ok(PlanOutcome::Written);
 			}
 			log::trace!(target: "parity-db", "{}: Deletion missed {}", tables.index.id, hex(key));
 			if self.collect_stats {
@@ -383,7 +405,7 @@ impl Column {
 		self.stats.write_summary(file, tables.index.id.col());
 	}
 
-	pub fn reindex(&self, _log: &Log) -> Result<(Option<IndexTableId>, Vec<(Key, Address)>)> {
+	pub fn reindex(&self, log: &Log) -> Result<(Option<IndexTableId>, Vec<(Key, Address)>)> {
 		// TODO: handle overlay
 		let tables = self.tables.read();
 		let reindex = self.reindex.read();
@@ -400,7 +422,7 @@ impl Column {
 				log::debug!(target: "parity-db", "{}: Continue reindex at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				while source_index < source.id.total_chunks() && count < MAX_REBALANCE_BATCH {
 					log::trace!(target: "parity-db", "{}: Reindexing {}", source.id, source_index);
-					let entries = source.raw_entries(source_index);
+					let entries = source.entries(source_index, &*log.overlays());
 					for entry in entries.iter() {
 						if entry.is_empty() {
 							continue;

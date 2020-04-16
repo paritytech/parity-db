@@ -123,7 +123,6 @@ pub struct IndexTable {
 	pub id: TableId,
 	map: RwLock<Option<memmap::MmapMut>>,
 	path: std::path::PathBuf,
-	entries: std::sync::atomic::AtomicU64,
 }
 
 fn total_entries(index_bits: u8) -> u64 {
@@ -201,7 +200,6 @@ impl IndexTable {
 			id,
 			path,
 			map: RwLock::new(Some(map)),
-			entries: std::sync::atomic::AtomicU64::new(0),
 		}))
 	}
 
@@ -212,7 +210,6 @@ impl IndexTable {
 			id,
 			path,
 			map: RwLock::new(None),
-			entries: std::sync::atomic::AtomicU64::new(0),
 		}
 	}
 
@@ -272,8 +269,12 @@ impl IndexTable {
 		return (Entry::empty(), 0)
 	}
 
-	pub fn raw_entries(&self, chunk_index: u64) -> [Entry; 64] {
+	pub fn entries<Q: LogQuery>(&self, chunk_index: u64, log: &Q) -> [Entry; 64] {
 		let mut chunk = [0; CHUNK_LEN];
+		if let Some(entry) = log.with_index(self.id, chunk_index, |chunk|
+			unsafe { std::mem::transmute(*chunk) }) {
+			return entry;
+		}
 		if let Some(map) = &*self.map.read() {
 			let source = Self::chunk_at(chunk_index, map);
 			chunk.copy_from_slice(source);
@@ -314,7 +315,6 @@ impl IndexTable {
 				&mut chunk[i * 8 .. i * 8 + 8].copy_from_slice(&new_entry.as_u64().to_le_bytes());
 				log::trace!(target: "parity-db", "{}: Inserted at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
 				log.insert_index(self.id, chunk_index, &chunk);
-				self.entries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				return Ok(PlanOutcome::Written);
 			}
 		}
@@ -409,10 +409,6 @@ impl IndexTable {
 		log.read(&mut chunk)?;
 		log::trace!(target: "parity-db", "{}: Validated chunk {}", self.id, index);
 		Ok(())
-	}
-
-	pub fn num_entries(&self) -> u64 {
-		self.entries.load(std::sync::atomic::Ordering::Relaxed)
 	}
 
 	pub fn drop_file(self) -> Result<()> {

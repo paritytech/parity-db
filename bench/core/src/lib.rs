@@ -165,6 +165,7 @@ fn writer<D: Db>(db: Arc<D>, args: Arc<Args>, pool: Arc<SizePool>, shutdown: Arc
 }
 
 fn reader<D: Db>(_db: Arc<D>, shutdown: Arc<AtomicBool>) {
+	// Query a random  key
 	while !shutdown.load(Ordering::Relaxed) {
 		thread::sleep(std::time::Duration::from_millis(500));
 	}
@@ -242,6 +243,21 @@ pub fn run<D: Db>() {
 	let pruned_per_commit = if args.archive { 0u64 } else { COMMIT_PRUNE_SIZE as u64 };
 	let mut queries = 0;
 	for nc in 0u64 .. commits as u64 {
+		if nc % 1000 == 0 {
+			println!(
+				"Query {}/{}",
+				nc,
+				commits,
+			);
+		}
+		if commits > COMMIT_PRUNE_WINDOW && nc < (commits - COMMIT_PRUNE_WINDOW) as u64 {
+			for key in (nc * COMMIT_SIZE as u64) .. (nc * COMMIT_SIZE as u64 + pruned_per_commit) {
+				let k = pool.key(key);
+				let db_val = db.get(&k);
+				queries += 1;
+				assert_eq!(None, db_val);
+			}
+		}
 		for key in (nc * COMMIT_SIZE as u64 + pruned_per_commit) .. (nc + 1) * (COMMIT_SIZE as u64) {
 			let k = pool.key(key);
 			let val = pool.value(key);
