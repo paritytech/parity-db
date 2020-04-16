@@ -15,8 +15,8 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::convert::TryInto;
-use std::os::unix::fs::FileExt;
 use std::mem::MaybeUninit;
+use std::io::Read;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::{
 	error::Result,
@@ -107,7 +107,7 @@ impl ValueTable {
 		let mut path: std::path::PathBuf = path.into();
 		path.push(id.file_name());
 
-		let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?;
+		let mut file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?;
 		disable_read_ahead(&file)?;
 		let mut file_len = file.metadata()?.len();
 		if file_len == 0 {
@@ -121,7 +121,7 @@ impl ValueTable {
 		let capacity = file_len / entry_size as u64;
 
 		let mut header: [u8; 16] = Default::default();
-		file.read_exact_at(&mut header, 0)?;
+		file.read_exact(&mut header)?;
 		let last_removed = u64::from_le_bytes(header[0..8].try_into().unwrap());
 		let mut filled = u64::from_le_bytes(header[8..16].try_into().unwrap());
 		if filled == 0 {
@@ -144,12 +144,30 @@ impl ValueTable {
 		self.entry_size - KEY_LEN as u16
 	}
 
+	#[cfg(unix)]
 	fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
+		use std::os::unix::fs::FileExt;
 		Ok(self.file.read_exact_at(buf, offset)?)
 	}
 
+	#[cfg(unix)]
 	fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
+		use std::os::unix::fs::FileExt;
 		Ok(self.file.write_all_at(buf, offset)?)
+	}
+
+	#[cfg(windows)]
+	fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
+		use std::os::windows::fs::FileExt;
+		self.file.seek_read(buf, offset)?;
+		Ok(())
+	}
+
+	#[cfg(windows)]
+	fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
+		use std::os::windows::fs::FileExt;
+		self.file.seek_write(buf, offset)?;
+		Ok(())
 	}
 
 	fn grow(&self) -> Result<()> {
