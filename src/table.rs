@@ -14,6 +14,46 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
+// On disk data layout for value tables.
+//
+// Entry 0 (metadata)
+// [LAST_REMOVED: 8][FILLED: 8]
+// LAST_REMOVED - 64-bit index of removed entries linked list head
+// FILLED - highest index filled with live data
+//
+// Complete entry:
+// [SIZE: 2][REFS: 4][KEY: 26][VALUE: SIZE]
+// SIZE: 16-bit value size. Sizes up to 0xfffd are allowed.
+// REF: 32-bit reference counter.
+// KEY: lower 26 bytes of the key.
+// VALUE: SIZE payload bytes.
+//
+// Partial entry (first part):
+// [MULTIPART: 2][NEXT: 8][REFS: 4][KEY: 26][VALUE]
+// MULTIPART - Split entry marker. 0xfffe.
+// NEXT - 64-bit index of the entry that holds the next part.
+// take all available space in this entry.
+// REF: 32-bit reference counter.
+// KEY: lower 26 bytes of the key.
+// VALUE: The rest of the entry is filled with payload bytes.
+//
+// Partial entry (continuation):
+// [MULTIPART: 2][NEXT: 8][VALUE]
+// MULTIPART - Split entry marker. 0xfffe.
+// NEXT - 64-bit index of the entry that holds the next part.
+// VALUE: The rest of the entry is filled with payload bytes.
+//
+// Partial entry (last part):
+// [SIZE: 2][VALUE: SIZE]
+// SIZE: 16-bit size of the remaining payload.
+// VALUE: SIZE payload bytes.
+//
+// Deleted entry
+// [TOMBSTONE: 2][NEXT: 8]
+// TOMBSTONE - Deleted entry marker. 0xffff
+// NEXT - 64-bit index of the next deleted entry.
+
+
 use std::convert::TryInto;
 use std::mem::MaybeUninit;
 use std::io::Read;
@@ -26,7 +66,7 @@ use crate::{
 };
 
 pub const KEY_LEN: usize = 32;
-const MAX_ENTRY_SIZE: usize = 65534;
+const MAX_ENTRY_SIZE: usize = 65533;
 
 const TOMBSTONE: &[u8] = &[0xff, 0xff];
 const MULTIPART: &[u8] = &[0xff, 0xfe];
@@ -116,10 +156,7 @@ impl ValueTable {
 			file_len = entry_size as u64;
 		}
 
-
-
 		let capacity = file_len / entry_size as u64;
-
 		let mut header: [u8; 16] = Default::default();
 		file.read_exact(&mut header)?;
 		let last_removed = u64::from_le_bytes(header[0..8].try_into().unwrap());
@@ -192,8 +229,8 @@ impl ValueTable {
 					self.id,
 					index,
 				);
-				self.read_at(&mut buf[0 .. self.entry_size as usize], index * self.entry_size as u64)?;
-				&buf[0 .. self.entry_size as usize]
+				self.read_at(&mut buf[0..self.entry_size as usize], index * self.entry_size as u64)?;
+				&buf[0..self.entry_size as usize]
 			};
 
 			if &buf[0..2] == TOMBSTONE {
@@ -209,20 +246,20 @@ impl ValueTable {
 			};
 
 			if part == 0 {
-				if key[2..] != buf[content_offset..content_offset + 30] {
+				if key[6..] != buf[content_offset + 4..content_offset + 30] {
 					log::debug!(
 						target: "parity-db",
 						"{}: Key mismatch at {}. Expected {}, got {}",
 						self.id,
 						index,
-						hex(&key[2..]),
-						hex(&buf[content_offset..content_offset + 30]),
+						hex(&key[6..]),
+						hex(&buf[content_offset + 4..content_offset + 30]),
 					);
 					return Ok(false);
 				}
-				f(&buf[content_offset + 30 .. content_offset + content_len]);
+				f(&buf[content_offset + 30..content_offset + content_len]);
 			} else {
-				f(&buf[content_offset .. content_offset + content_len]);
+				f(&buf[content_offset..content_offset + content_len]);
 			}
 			if next == 0 {
 				break;
@@ -251,7 +288,7 @@ impl ValueTable {
 
 	pub fn has_key_at(&self, index: u64, key: &Key, log: &LogWriter) -> Result<bool> {
 		Ok(match self.partial_key_at(index, log)? {
-			Some(existing_key) => &existing_key[2..] == &key [2..],
+			Some(existing_key) => &existing_key[6..] == &key [6..],
 			None => false,
 		})
 	}
@@ -262,16 +299,16 @@ impl ValueTable {
 		let buf = if log.value(self.id, index, &mut buf) {
 			&buf
 		} else {
-			self.read_at(&mut buf[0 .. 40], index * self.entry_size as u64)?;
+			self.read_at(&mut buf[0..40], index * self.entry_size as u64)?;
 			&buf
 		};
 		if &buf[0..2] == TOMBSTONE {
 			return Ok(None);
 		}
 		if &buf[0..2] == MULTIPART {
-			result[2..].copy_from_slice(&buf[10..40]);
+			result[6..].copy_from_slice(&buf[14..40]);
 		} else {
-			result[2..].copy_from_slice(&buf[2..32]);
+			result[6..].copy_from_slice(&buf[6..32]);
 		}
 		Ok(Some(result))
 	}
@@ -332,7 +369,7 @@ impl ValueTable {
 	}
 
 	fn overwrite_chain(&self, key: &Key, value: &[u8], log: &mut LogWriter, at: Option<u64>) -> Result<u64> {
-		let mut remainder = value.len() + 30; // Prefix with key
+		let mut remainder = value.len() + 30; // Prefix with key and ref counter
 		let mut offset = 0;
 		let mut start = 0;
 		assert!(self.multipart || value.len() <= self.value_size() as usize);
@@ -378,8 +415,10 @@ impl ValueTable {
 				(2, remainder)
 			};
 			if offset == 0 {
-				buf[target_offset..target_offset + 30].copy_from_slice(&key[2..]);
-				buf[target_offset + 30.. target_offset + value_len].copy_from_slice(&value[offset..offset+value_len-30]);
+				buf[target_offset..target_offset + 4].copy_from_slice(&1u32.to_le_bytes());
+				buf[target_offset + 4..target_offset + 30].copy_from_slice(&key[6..]);
+				buf[target_offset + 30..target_offset + value_len]
+					.copy_from_slice(&value[offset..offset + value_len - 30]);
 				offset += value_len - 30;
 			} else {
 				buf[target_offset..target_offset+value_len].copy_from_slice(&value[offset..offset+value_len]);
@@ -451,6 +490,50 @@ impl ValueTable {
 		Ok(())
 	}
 
+	pub fn write_inc_ref(&self, index: u64, log: &mut LogWriter) -> Result<()> {
+		self.change_ref(index, 1, log)?;
+		Ok(())
+	}
+
+	pub fn write_dec_ref(&self, index: u64, log: &mut LogWriter) -> Result<bool> {
+		if self.change_ref(index, -1, log)? {
+			return Ok(true);
+		}
+		self.write_remove_plan(index, log)?;
+		Ok(false)
+	}
+
+	pub fn change_ref(&self, index: u64, delta: i32, log: &mut LogWriter) -> Result<bool> {
+		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
+		let buf = if log.value(self.id, index, &mut buf) {
+			&mut buf
+		} else {
+			self.read_at(&mut buf[0..self.entry_size as usize], index * self.entry_size as u64)?;
+			&mut buf[0..self.entry_size as usize]
+		};
+
+		if &buf[0..2] == TOMBSTONE {
+			return Ok(false);
+		}
+
+		let (counter_offset, size) = if &buf[0..2] == MULTIPART {
+			(10, self.entry_size as usize)
+		} else {
+			let size: u16 = u16::from_le_bytes(buf[0..2].try_into().unwrap());
+			(2, (size + 2) as usize)
+		};
+
+		let mut counter: u32 = u32::from_le_bytes(buf[counter_offset..counter_offset + 4].try_into().unwrap());
+		counter = counter.wrapping_add(delta as u32);
+		if counter == 0 {
+			return Ok(false);
+		}
+		buf[counter_offset..counter_offset + 4].copy_from_slice(&counter.to_le_bytes());
+		// TODO: optimize actual buf size
+		log.insert_value(self.id, index, buf[0..size].to_vec());
+		return Ok(true);
+	}
+
 	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
 		while index >= self.capacity.load(Ordering::Relaxed) {
 			self.grow()?;
@@ -478,7 +561,7 @@ impl ValueTable {
 			let len: u16 = u16::from_le_bytes(buf[0..2].try_into().unwrap());
 			log.read(&mut buf[2..2+len as usize])?;
 			self.write_at(&buf[0..(2 + len as usize)], index * (self.entry_size as u64))?;
-			log::trace!(target: "parity-db", "{}: Enacted {}: {}, {} bytes", self.id, index, hex(&buf[2..32]), len);
+			log::trace!(target: "parity-db", "{}: Enacted {}: {}, {} bytes", self.id, index, hex(&buf[6..32]), len);
 		}
 		Ok(())
 	}
@@ -536,3 +619,251 @@ impl ValueTable {
 	}
 }
 
+#[cfg(test)]
+mod test {
+	const ENTRY_SIZE: u16 = 64;
+	use super::{ValueTable, TableId, Key, Value};
+	use crate::{log::{Log, LogWriter, LogAction}, options::Options};
+
+	struct TempDir(std::path::PathBuf);
+
+	impl TempDir {
+		fn new(name: &'static str) -> TempDir {
+			env_logger::try_init().ok();
+			let mut path = std::env::temp_dir();
+			path.push("parity-db-test");
+			path.push("value-table");
+			path.push(name);
+
+			if path.exists() {
+				std::fs::remove_dir_all(&path).unwrap();
+			}
+			std::fs::create_dir_all(&path).unwrap();
+			TempDir(path)
+		}
+
+		fn table(&self, size: Option<u16>) -> ValueTable {
+			let id = TableId::new(0, 0);
+			ValueTable::open(&self.0, id, size).unwrap()
+		}
+
+		fn log(&self) -> Log {
+			let options = Options::with_columns(&self.0, 1);
+			Log::open(&options).unwrap()
+		}
+	}
+
+	impl Drop for TempDir {
+		fn drop(&mut self) {
+			if self.0.exists() {
+				std::fs::remove_dir_all(&self.0).unwrap();
+			}
+		}
+	}
+
+	fn write_ops<F: FnOnce(&mut LogWriter)>(table: &ValueTable, log: &Log, f: F) {
+		let mut writer = log.begin_record();
+		f(&mut writer);
+		log.end_record(writer.drain()).unwrap();
+		// Cycle through 2 log files
+		let _ = log.read_next();
+		log.flush_one().unwrap();
+		let _ = log.read_next();
+		log.flush_one().unwrap();
+		let mut reader = log.read_next().unwrap().unwrap();
+		loop {
+			match reader.next().unwrap() {
+				LogAction::BeginRecord(_) | LogAction::InsertIndex { .. } | LogAction::DropTable { .. } => {
+					panic!("Unexpected log entry");
+				},
+				LogAction::EndRecord => {
+					break;
+				},
+				LogAction::InsertValue(insertion) => {
+					table.enact_plan(insertion.index, &mut reader).unwrap();
+				},
+			}
+		}
+	}
+
+	fn key(k: u32) -> Key {
+		let mut key = Key::default();
+		key.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &[], &k.to_le_bytes()).as_bytes());
+		key
+	}
+
+	fn value(size: usize) -> Value {
+		use rand::RngCore;
+		let mut result = Vec::with_capacity(size);
+		result.resize(size, 0);
+		rand::thread_rng().fill_bytes(&mut result);
+		result
+	}
+
+	#[test]
+	fn insert_simple() {
+		let dir = TempDir::new("insert_simple");
+		let table = dir.table(Some(ENTRY_SIZE));
+		let log = dir.log();
+
+		let key = key(1);
+		let val = value(19);
+
+		write_ops(&table, &log, |writer| {
+			table.write_insert_plan(&key, &val, writer).unwrap();
+			assert_eq!(table.get(&key, 1, writer).unwrap(), Some(val.clone()));
+		});
+
+		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some(val));
+		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 2);
+	}
+
+	#[test]
+	#[should_panic(expected = "assertion failed: entry_size <= MAX_ENTRY_SIZE as u16")]
+	fn oversized_into_fixed_panics() {
+		let dir = TempDir::new("oversized_into_fixed_panics");
+		let _table = dir.table(Some(65534));
+	}
+
+	#[test]
+	fn remove_simple() {
+		let dir = TempDir::new("remove_simple");
+		let table = dir.table(Some(ENTRY_SIZE));
+		let log = dir.log();
+
+		let key1 = key(1);
+		let key2 = key(2);
+		let val1 = value(11);
+		let val2 = value(21);
+
+		write_ops(&table, &log, |writer| {
+			table.write_insert_plan(&key1, &val1, writer).unwrap();
+			table.write_insert_plan(&key2, &val2, writer).unwrap();
+		});
+
+		write_ops(&table, &log, |writer| {
+			table.write_remove_plan(1, writer).unwrap();
+		});
+
+		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), None);
+		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+		write_ops(&table, &log, |writer| {
+			table.write_insert_plan(&key1, &val1, writer).unwrap();
+		});
+		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), Some(val1));
+		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
+	}
+
+	#[test]
+	fn replace_simple() {
+		let dir = TempDir::new("replace_simple");
+		let table = dir.table(Some(ENTRY_SIZE));
+		let log = dir.log();
+
+		let key1 = key(1);
+		let key2 = key(2);
+		let key3 = key(2);
+		let val1 = value(11);
+		let val2 = value(21);
+		let val3 = value(31);
+
+		write_ops(&table, &log, |writer| {
+			table.write_insert_plan(&key1, &val1, writer).unwrap();
+			table.write_insert_plan(&key2, &val2, writer).unwrap();
+		});
+
+		write_ops(&table, &log, |writer| {
+			table.write_replace_plan(1, &key3, &val3, writer).unwrap();
+		});
+
+		assert_eq!(table.get(&key3, 1, log.overlays()).unwrap(), Some(val3));
+		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
+	}
+
+	#[test]
+	fn replace_multipart_shorter() {
+		let dir = TempDir::new("replace_multipart_shorter");
+		let table = dir.table(None);
+		let log = dir.log();
+
+		let key1 = key(1);
+		let key2 = key(2);
+		let val1 = value(20000);
+		let val2 = value(30);
+		let val1s = value(5000);
+
+		write_ops(&table, &log, |writer| {
+			table.write_insert_plan(&key1, &val1, writer).unwrap();
+			table.write_insert_plan(&key2, &val2, writer).unwrap();
+		});
+
+		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), Some(val1));
+		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
+		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 7);
+
+		write_ops(&table, &log, |writer| {
+			table.write_replace_plan(1, &key1, &val1s, writer).unwrap();
+		});
+		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), Some(val1s));
+		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 5);
+		write_ops(&table, &log, |writer| {
+			assert_eq!(table.read_next_free(5, writer).unwrap(), 4);
+			assert_eq!(table.read_next_free(4, writer).unwrap(), 3);
+			assert_eq!(table.read_next_free(3, writer).unwrap(), 0);
+		});
+	}
+
+	#[test]
+	fn replace_multipart_longer() {
+		let dir = TempDir::new("replace_multipart_longer");
+		let table = dir.table(None);
+		let log = dir.log();
+
+		let key1 = key(1);
+		let key2 = key(2);
+		let val1 = value(5000);
+		let val2 = value(30);
+		let val1l = value(20000);
+
+		write_ops(&table, &log, |writer| {
+			table.write_insert_plan(&key1, &val1, writer).unwrap();
+			table.write_insert_plan(&key2, &val2, writer).unwrap();
+		});
+
+		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), Some(val1));
+		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
+		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 4);
+
+		write_ops(&table, &log, |writer| {
+			table.write_replace_plan(1, &key1, &val1l, writer).unwrap();
+		});
+		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), Some(val1l));
+		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
+		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 7);
+	}
+
+	#[test]
+	fn ref_counting() {
+		let dir = TempDir::new("ref_counting");
+		let table = dir.table(None);
+		let log = dir.log();
+
+		let key = key(1);
+		let val = value(5000);
+
+		write_ops(&table, &log, |writer| {
+			table.write_insert_plan(&key, &val, writer).unwrap();
+			table.write_inc_ref(1, writer).unwrap();
+		});
+		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some(val.clone()));
+		write_ops(&table, &log, |writer| {
+			table.write_dec_ref(1, writer).unwrap();
+		});
+		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some(val));
+		write_ops(&table, &log, |writer| {
+			table.write_dec_ref(1, writer).unwrap();
+		});
+		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), None);
+	}
+}

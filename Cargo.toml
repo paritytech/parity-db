@@ -15,8 +15,12 @@ memmap = "0.7"
 blake2-rfc = "0.2.18"
 libc = "0.2"
 
+[dev-dependencies]
+env_logger = "0.7.1"
+rand = "0.7.3"
+
 [profile.release]
-panic = 'abort'
+panic = "abort"
 codegen-units = 1
 lto = "fat"
 debug = true

@@ -17,7 +17,7 @@
 use std::io::Write;
 use crate::error::{Error, Result};
 
-const CURRENT_VERSION: u32 = 1;
+const CURRENT_VERSION: u32 = 2;
 
 /// Database configuration.
 pub struct Options {
@@ -43,13 +43,16 @@ pub struct ColumnOptions {
 	pub uniform: bool,
 	/// Value size tiers.
 	pub sizes: [u16; 15],
+	/// Use referece counting for values.
+	pub ref_counted: bool,
 }
 
 impl ColumnOptions {
 	fn as_string(&self) -> String {
-		format!("preimage: {}, uniform: {}, sizes: [{}]",
+		format!("preimage: {}, uniform: {}, refc: {}, sizes: [{}]",
 			self.preimage,
 			self.uniform,
+			self.ref_counted,
 			self.sizes.iter().fold(String::new(), |mut r, s| {
 				if !r.is_empty() {
 					r.push_str(", ");
@@ -65,6 +68,7 @@ impl Default for ColumnOptions {
 		ColumnOptions {
 			preimage: false,
 			uniform: false,
+			ref_counted: false,
 			sizes: [96, 128, 192, 256, 320, 512, 768, 1024, 1536, 2048, 3072, 4096, 8192, 16384, 32768],
 		}
 	}
@@ -76,14 +80,14 @@ impl Options {
 			path: path.into(),
 			sync: false,
 			stats: true,
-			columns: (0 .. num_columns).map(|_| Default::default()).collect(),
+			columns: (0..num_columns).map(|_| Default::default()).collect(),
 		}
 	}
 
 	pub fn write_metadata(&self, path: &std::path::Path) -> Result<()> {
 		let mut file = std::fs::File::create(path)?;
 		writeln!(file, "version={}", CURRENT_VERSION)?;
-		for i in 0 .. self.columns.len() {
+		for i in 0..self.columns.len() {
 			writeln!(file, "col{}={}", i, self.columns[i].as_string())?;
 		}
 		Ok(())
@@ -107,17 +111,17 @@ impl Options {
 			if k == "version" {
 				let version = u32::from_str(v).map_err(|_| Error::Corruption("Bad version string".into()))?;
 				if version != CURRENT_VERSION {
-					return Err(Error::Corruption(format!(
+					return Err(Error::InvalidConfiguration(format!(
 						"Unsupported database version {}. Expected {}", version, CURRENT_VERSION)));
 				}
 			} else if k.starts_with("col") {
 				let col_index = u8::from_str(&k[3..]).map_err(|_| Error::Corruption("Bad metadata column index".into()))?;
 				if col_index as usize > self.columns.len() {
-					return Err(Error::InvalidInput(format!("Column config mismatch. Bad metadata column index: {}", col_index)));
+					return Err(Error::InvalidConfiguration(format!("Column config mismatch. Bad metadata column index: {}", col_index)));
 				}
 				let column_meta = self.columns[col_index as usize].as_string();
 				if column_meta != v {
-					return Err(Error::InvalidInput(format!(
+					return Err(Error::InvalidConfiguration(format!(
 						"Column config mismatch for column {}. Expected \"{}\", got \"{}\"",
 						col_index, v, column_meta)));
 				}

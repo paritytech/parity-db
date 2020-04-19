@@ -346,7 +346,7 @@ impl Log {
 
 		let mut ids = [(id0.unwrap_or(0), Some(file0)), (id1.unwrap_or(0), Some(file1)), (id2.unwrap_or(0), Some(file2))];
 		ids.sort_by_key(|(id, _)|*id);
-		log::info!(target: "parity-db", "Opened logs ({} {} {})", ids[0].0, ids[1].0, ids[2].0);
+		log::debug!(target: "parity-db", "Opened logs ({} {} {})", ids[0].0, ids[1].0, ids[2].0);
 		let reading = ids[0].1.take().unwrap();
 		let flushing = ids[1].1.take().unwrap();
 		let mut appending = ids[2].1.take().unwrap();

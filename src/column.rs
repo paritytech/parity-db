@@ -49,6 +49,7 @@ pub struct Column {
 	preimage: bool,
 	uniform_keys: bool,
 	collect_stats: bool,
+	ref_counted: bool,
 	stats: ColumnStats,
 }
 
@@ -129,6 +130,7 @@ impl Column {
 			path: path.into(),
 			preimage: options.preimage,
 			uniform_keys: options.uniform,
+			ref_counted: options.ref_counted,
 			collect_stats,
 			stats,
 		})
@@ -274,6 +276,10 @@ impl Column {
 					let cur_size = tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0);
 					self.stats.replace_val(cur_size, val.len() as u32);
 				}
+				if self.ref_counted {
+					tables.value[target_tier].write_inc_ref(existing_address.offset(), log)?;
+					return Ok(PlanOutcome::Written);
+				}
 				if self.preimage {
 					// Replace is not supported
 					return Ok(PlanOutcome::Skipped);
@@ -315,12 +321,23 @@ impl Column {
 				// Deletion
 				log::trace!(target: "parity-db", "{}: Deleting {}", table.id, hex(key));
 				let existing_tier = existing_tier as usize;
-				if self.collect_stats {
-					let cur_size = tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0);
-					self.stats.remove_val(cur_size);
+				let cur_size = if self.collect_stats {
+					Some(tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0))
+				} else {
+					None
+				};
+				let remove = if self.ref_counted {
+					!tables.value[existing_tier].write_dec_ref(existing_address.offset(), log)?
+				} else {
+					tables.value[existing_tier].write_remove_plan(existing_address.offset(), log)?;
+					true
+				};
+				if remove {
+					if let Some(cur_size) = cur_size {
+						self.stats.remove_val(cur_size);
+					}
+					table.write_remove_plan(key, sub_index, log)?;
 				}
-				tables.value[existing_tier].write_remove_plan(existing_address.offset(), log)?;
-				table.write_remove_plan(key, sub_index, log)?;
 				return Ok(PlanOutcome::Written);
 			}
 			log::trace!(target: "parity-db", "{}: Deletion missed {}", tables.index.id, hex(key));
