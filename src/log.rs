@@ -144,7 +144,10 @@ impl<'a> LogReader<'a> {
 				Ok(LogAction::InsertValue(InsertValueAction { table, index }))
 			},
 			4 => {
-				log::trace!(target: "parity-db", "Read end of record");
+				self.file.read_exact(&mut buf[0..4])?;
+				self.read_bytes += 4;
+				let checksum = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+				log::trace!(target: "parity-db", "Read end of record, checksum={:#x}", checksum);
 				Ok(LogAction::EndRecord)
 			},
 			5 => {
@@ -194,42 +197,45 @@ impl LogChange {
 	pub fn to_file(self, file: &mut std::io::BufWriter<std::fs::File>)
 		-> Result<(HashMap<IndexTableId, IndexLogOverlay>, HashMap<ValueTableId, ValueLogOverlay>, u64)>
 	{
-		let mut bytes = 0; // TODO: use `stream_position`
-		file.write(&1u8.to_le_bytes())?; // Begin record
-		file.write(&self.record_id.to_le_bytes())?;
-		bytes += 9;
+		let mut crc32 = crc32fast::Hasher::new();
+		let mut bytes: u64 = 0;
+
+		let mut write = |buf: &[u8]| -> Result<()> {
+			file.write(buf)?;
+			crc32.update(buf);
+			bytes += buf.len() as u64;
+			Ok(())
+		};
+
+		write(&1u8.to_le_bytes())?; // Begin record
+		write(&self.record_id.to_le_bytes())?;
 
 		for (id, overlay) in self.local_index.iter() {
 			for (index, (_, chunk)) in overlay.map.iter() {
-				//log::trace!(target: "parity-db", "Finalizing log index {}:{}", id, index);
-				file.write(&2u8.to_le_bytes().as_ref())?;
-				file.write(&id.as_u16().to_le_bytes())?;
-				file.write(&index.to_le_bytes())?;
-				bytes += 11;
-				file.write(chunk)?;
-				bytes += chunk.len() as u64;
+				write(&2u8.to_le_bytes().as_ref())?;
+				write(&id.as_u16().to_le_bytes())?;
+				write(&index.to_le_bytes())?;
+				write(chunk)?;
 			}
 		}
 		for (id, overlay) in self.local_values.iter() {
 			for (index, (_, value)) in overlay.map.iter() {
-				//log::trace!(target: "parity-db", "Finalizing log value {}:{} ({} bytes)", id, index, value.len());
-				file.write(&3u8.to_le_bytes().as_ref())?;
-				file.write(&id.as_u16().to_le_bytes())?;
-				file.write(&index.to_le_bytes())?;
-				bytes += 11;
-				file.write(value)?;
-				bytes += value.len() as u64;
+				write(&3u8.to_le_bytes().as_ref())?;
+				write(&id.as_u16().to_le_bytes())?;
+				write(&index.to_le_bytes())?;
+				write(value)?;
 			}
 		}
 		for id in self.dropped_tables.iter() {
 			log::debug!(target: "parity-db", "Finalizing drop {}", id);
-			file.write(&5u8.to_le_bytes().as_ref())?;
-			file.write(&id.as_u16().to_le_bytes())?;
-			bytes += 3;
+			write(&5u8.to_le_bytes().as_ref())?;
+			write(&id.as_u16().to_le_bytes())?;
 		}
 
-		file.write(&4u8.to_le_bytes())?; // End record
-		bytes += 1;
+		write(&4u8.to_le_bytes())?; // End record
+		let checksum: u32 = crc32.finalize();
+		file.write(&checksum.to_le_bytes())?;
+		bytes += 4;
 		file.flush()?;
 		Ok((self.local_index, self.local_values, bytes))
 	}

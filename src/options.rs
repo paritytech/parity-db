@@ -20,6 +20,7 @@ use crate::error::{Error, Result};
 const CURRENT_VERSION: u32 = 2;
 
 /// Database configuration.
+#[derive(Clone)]
 pub struct Options {
 	/// Database path.
 	pub path: std::path::PathBuf,
@@ -32,6 +33,7 @@ pub struct Options {
 	pub stats: bool,
 }
 
+#[derive(Clone)]
 pub struct ColumnOptions {
 	/// Indicates that the column value is the preimage of the key.
 	/// This implies that a given value always has the same key.

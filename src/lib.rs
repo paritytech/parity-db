@@ -26,3 +26,4 @@ mod stats;
 
 pub use db::Db;
 pub use error::{Error, Result};
+pub use options::Options;

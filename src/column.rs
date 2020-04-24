@@ -277,6 +277,7 @@ impl Column {
 					self.stats.replace_val(cur_size, val.len() as u32);
 				}
 				if self.ref_counted {
+					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.index.id, hex(key));
 					tables.value[target_tier].write_inc_ref(existing_address.offset(), log)?;
 					return Ok(PlanOutcome::Written);
 				}
@@ -319,7 +320,6 @@ impl Column {
 		} else {
 			if let Some((table, sub_index, existing_tier, existing_address)) = existing {
 				// Deletion
-				log::trace!(target: "parity-db", "{}: Deleting {}", table.id, hex(key));
 				let existing_tier = existing_tier as usize;
 				let cur_size = if self.collect_stats {
 					Some(tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0))
@@ -327,8 +327,11 @@ impl Column {
 					None
 				};
 				let remove = if self.ref_counted {
-					!tables.value[existing_tier].write_dec_ref(existing_address.offset(), log)?
+					let removed = !tables.value[existing_tier].write_dec_ref(existing_address.offset(), log)?;
+					log::trace!(target: "parity-db", "{}: Dereference {}, deleted={}", table.id, hex(key), removed);
+					removed
 				} else {
+					log::trace!(target: "parity-db", "{}: Deleting {}", table.id, hex(key));
 					tables.value[existing_tier].write_remove_plan(existing_address.offset(), log)?;
 					true
 				};

@@ -77,7 +77,7 @@ struct CommitQueue {
 
 struct DbInner {
 	columns: Vec<Column>,
-	path: std::path::PathBuf,
+	options: Options,
 	shutdown: AtomicBool,
 	log: Log,
 	commit_queue: Mutex<CommitQueue>,
@@ -109,7 +109,7 @@ impl DbInner {
 		}
 		Ok(DbInner {
 			columns,
-			path: options.path.clone(),
+			options: options.clone(),
 			shutdown: std::sync::atomic::AtomicBool::new(false),
 			log: Log::open(&options)?,
 			commit_queue: Mutex::new(Default::default()),
@@ -193,7 +193,10 @@ impl DbInner {
 			for (c, k, v) in &commit {
 				bytes += k.len();
 				bytes += v.as_ref().map_or(0, |v|v.len());
-				overlay.entry(*c).or_default().insert(*k, (record_id, v.clone()));
+				// Don't add removed ref-counted values to overlay.
+				if !self.options.columns[*c as usize].ref_counted || v.is_some() {
+					overlay.entry(*c).or_default().insert(*k, (record_id, v.clone()));
+				}
 			}
 
 			let commit = Commit {
@@ -522,7 +525,7 @@ impl DbInner {
 		self.signal_commit_worker();
 		self.log.shutdown();
 		if self.collect_stats {
-			let mut path = self.path.clone();
+			let mut path = self.options.path.clone();
 			path.push("stats.txt");
 			match std::fs::File::create(path) {
 				Ok(file) => {
