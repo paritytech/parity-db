@@ -151,7 +151,7 @@ impl ValueTable {
 		disable_read_ahead(&file)?;
 		let mut file_len = file.metadata()?.len();
 		if file_len == 0 {
-			// Prealocate a single entry that also
+			// Prealocate a single entry that contains metadata
 			file.set_len(entry_size as u64)?;
 			file_len = entry_size as u64;
 		}

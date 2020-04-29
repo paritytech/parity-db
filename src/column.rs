@@ -379,8 +379,8 @@ impl Column {
 	}
 
 	pub fn validate_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
-		let tables = self.tables.read();
-		let reindex = self.reindex.read();
+		let tables = self.tables.upgradable_read();
+		let reindex = self.reindex.upgradable_read();
 		match action {
 			LogAction::InsertIndex(record) => {
 				if tables.index.id == record.table {
@@ -389,7 +389,15 @@ impl Column {
 					table.validate_plan(record.index, log)?;
 				}
 				else {
-					return Err(Error::Corruption("Missing table".into()));
+					// Re-launch previously started reindex
+					// TODO: add explicit log records for reindexing events.
+					log::warn!(
+						target: "parity-db",
+						"Missing table {}, starting reindex",
+						record.table,
+					);
+					Self::trigger_reindex(tables, reindex, self.path.as_path());
+					return self.validate_plan(LogAction::InsertIndex(record), log);
 				}
 			},
 			LogAction::InsertValue(record) => {

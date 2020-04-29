@@ -405,7 +405,7 @@ impl DbInner {
 							LogAction::InsertIndex(insertion) => {
 								let col = insertion.table.col() as usize;
 								if let Err(e) = self.columns[col].validate_plan(LogAction::InsertIndex(insertion), &mut reader) {
-									log::warn!(target: "parity-db", "Eror replaying log: {:?}. Reverting", e);
+									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
 									std::mem::drop(reader);
 									self.log.clear_logs()?;
 									return Ok(false);
@@ -414,7 +414,7 @@ impl DbInner {
 							LogAction::InsertValue(insertion) => {
 								let col = insertion.table.col() as usize;
 								if let Err(e) = self.columns[col].validate_plan(LogAction::InsertValue(insertion), &mut reader) {
-									log::warn!(target: "parity-db", "Eror replaying log: {:?}. Reverting", e);
+									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
 									std::mem::drop(reader);
 									self.log.clear_logs()?;
 									return Ok(false);
