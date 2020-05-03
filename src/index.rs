@@ -180,13 +180,6 @@ impl std::fmt::Display for TableId {
 	}
 }
 
-fn madvise_random(map: &mut memmap::MmapMut) {
-	unsafe {
-		let r = libc::madvise(map.as_mut_ptr() as *mut libc::c_void, map.len(), libc::MADV_RANDOM);
-		println!("R={}", r);
-	}
-}
-
 impl IndexTable {
 	pub fn open_existing(path: &std::path::Path, id: TableId) -> Result<Option<IndexTable>> {
 		let mut path: std::path::PathBuf = path.into();
@@ -390,9 +383,7 @@ impl IndexTable {
 			log::debug!(target: "parity-db", "Created new index {}", self.id);
 			//TODO: check for potential overflows on 32-bit platforms
 			file.set_len(file_size(self.id.index_bits()))?;
-			let mut m = unsafe { memmap::MmapMut::map_mut(&file)? };
-			//madvise_random(&mut m);
-			*wmap = Some(m);
+			*wmap = Some(unsafe { memmap::MmapMut::map_mut(&file)? });
 			map = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wmap);
 		}
 
