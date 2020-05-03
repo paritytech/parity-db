@@ -31,6 +31,7 @@
 /// there is some work to be done.
 
 use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
+use std::convert::TryInto;
 use std::collections::{HashMap, VecDeque};
 use parking_lot::{RwLock, Mutex, Condvar};
 use crate::{
@@ -75,6 +76,20 @@ struct CommitQueue {
 	commits: VecDeque<Commit>,
 }
 
+#[derive(Default)]
+struct IdentityKeyHash(u64);
+type IdentityBuildHasher = std::hash::BuildHasherDefault<IdentityKeyHash>;
+
+impl std::hash::Hasher for IdentityKeyHash {
+	fn write(&mut self, bytes: &[u8]) {
+		self.0 = u64::from_le_bytes((&bytes[0..8]).try_into().unwrap())
+	}
+
+	fn finish(&self) -> u64 {
+		self.0
+	}
+}
+
 struct DbInner {
 	columns: Vec<Column>,
 	options: Options,
@@ -87,7 +102,7 @@ struct DbInner {
 	commit_worker_cv: Condvar,
 	commit_work: Mutex<bool>,
 	// Overlay of most recent values int the commit queue. ColumnId -> (Key -> (RecordId, Value)).
-	commit_overlay: RwLock<HashMap<ColId, HashMap<Key, (u64, Option<Value>)>>>,
+	commit_overlay: RwLock<Vec<HashMap<Key, (u64, Option<Value>), IdentityBuildHasher>>>,
 	log_cv: Condvar,
 	log_queue_bytes: Mutex<u64>,
 	flush_worker_cv: Condvar,
@@ -104,8 +119,12 @@ impl DbInner {
 		std::fs::create_dir_all(&options.path)?;
 		options.validate_metadata()?;
 		let mut columns = Vec::with_capacity(options.columns.len());
+		let mut commit_overlay = Vec::with_capacity(options.columns.len());
 		for c in 0 .. options.columns.len() {
 			columns.push(Column::open(c as ColId, &options)?);
+			commit_overlay.push(
+				HashMap::with_hasher(std::hash::BuildHasherDefault::<IdentityKeyHash>::default())
+			);
 		}
 		Ok(DbInner {
 			columns,
@@ -118,7 +137,7 @@ impl DbInner {
 			log_work: Mutex::new(false),
 			commit_worker_cv: Condvar::new(),
 			commit_work: Mutex::new(false),
-			commit_overlay: RwLock::new(Default::default()),
+			commit_overlay: RwLock::new(commit_overlay),
 			log_queue_bytes: Mutex::new(0),
 			log_cv: Condvar::new(),
 			flush_worker_cv: Condvar::new(),
@@ -153,7 +172,7 @@ impl DbInner {
 		let key = self.columns[col as usize].hash(key);
 		let overlay = self.commit_overlay.read();
 		// Check commit overlay first
-		if let Some(v) = overlay.get(&col).and_then(|o| o.get(&key).map(|(_, v)| v.clone())) {
+		if let Some(v) = overlay.get(col as usize).and_then(|o| o.get(&key).map(|(_, v)| v.clone())) {
 			return Ok(v);
 		}
 		// Go into tables and log overlay.
@@ -195,7 +214,7 @@ impl DbInner {
 				bytes += v.as_ref().map_or(0, |v|v.len());
 				// Don't add removed ref-counted values to overlay.
 				if !self.options.columns[*c as usize].ref_counted || v.is_some() {
-					overlay.entry(*c).or_default().insert(*k, (record_id, v.clone()));
+					overlay[*c as usize].insert(*k, (record_id, v.clone()));
 				}
 			}
 
@@ -289,11 +308,10 @@ impl DbInner {
 				// Cleanup the commit overlay.
 				let mut overlay = self.commit_overlay.write();
 				for (c, key, _) in commit.changeset.iter() {
-					if let Some(overlay) = overlay.get_mut(c) {
-						if let std::collections::hash_map::Entry::Occupied(e) = overlay.entry(*key) {
-							if e.get().0 == commit.id {
-								e.remove_entry();
-							}
+					let overlay = &mut overlay[*c as usize];
+					if let std::collections::hash_map::Entry::Occupied(e) = overlay.entry(*key) {
+						if e.get().0 == commit.id {
+							e.remove_entry();
 						}
 					}
 				}
