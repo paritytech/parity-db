@@ -374,7 +374,7 @@ impl DbInner {
 	fn enact_logs(&self, validation_mode: bool) -> Result<bool> {
 		let cleared = {
 			let _lock = self.enact_mutex.lock();
-			let reader = match self.log.read_next() {
+			let reader = match self.log.read_next(validation_mode) {
 				Ok(reader) => reader,
 				Err(Error::Corruption(_)) if validation_mode => {
 					log::info!(target: "parity-db", "Bad log header");

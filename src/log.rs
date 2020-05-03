@@ -83,6 +83,8 @@ pub struct LogReader<'a> {
 	file: RwLockWriteGuard<'a, std::io::BufReader<std::fs::File>>,
 	record_id: u64,
 	read_bytes: u64,
+	crc32: crc32fast::Hasher,
+	validate: bool,
 	cleared: Cleared,
 }
 
@@ -93,12 +95,15 @@ impl<'a> LogReader<'a> {
 
 	fn new(
 		file: RwLockWriteGuard<'a, std::io::BufReader<std::fs::File>>,
+		validate: bool,
 	) -> LogReader<'a> {
 		LogReader {
 			cleared: Default::default(),
 			file,
 			record_id: 0,
 			read_bytes: 0,
+			crc32: crc32fast::Hasher::new(),
+			validate,
 		}
 	}
 
@@ -107,54 +112,67 @@ impl<'a> LogReader<'a> {
 		self.file.seek(std::io::SeekFrom::Current(-(self.read_bytes as i64)))?;
 		self.read_bytes = 0;
 		self.record_id = 0;
+		self.crc32 = crc32fast::Hasher::new();
 		Ok(())
 	}
 
 	pub fn next(&mut self) -> Result<LogAction> {
+		let mut read_buf = |size, buf: &mut [u8; 8]| -> Result<()> {
+			self.file.read_exact(&mut buf[0..size])?;
+			self.read_bytes += size as u64;
+			if self.validate {
+				self.crc32.update(&buf[0..size]);
+			}
+			Ok(())
+		};
+
 		let mut buf = [0u8; 8];
-		self.file.read_exact(&mut buf[0..1])?;
-		self.read_bytes += 1;
+		read_buf(1, &mut buf)?;
 		match buf[0] {
 			1 =>  { // BeginRecord
-				self.file.read_exact(&mut buf[0..8])?;
+				read_buf(8, &mut buf)?;
 				let record_id = u64::from_le_bytes(buf);
 				self.record_id = record_id;
-				self.read_bytes += 8;
-				//log::trace!(target: "parity-db", "Read record header {}", record_id);
 				Ok(LogAction::BeginRecord(record_id))
 			},
 			2 => { // InsertIndex
-				self.file.read_exact(&mut buf[0..2])?;
+				read_buf(2, &mut buf)?;
 				let table = IndexTableId::from_u16(u16::from_le_bytes(buf[0..2].try_into().unwrap()));
-				self.file.read_exact(&mut buf[0..8])?;
+				read_buf(8, &mut buf)?;
 				let index = u64::from_le_bytes(buf);
-				//log::trace!(target: "parity-db", "Read log index {}:{}", table, index);
 				self.cleared.index.push((table, index));
-				self.read_bytes += 10;
 				Ok(LogAction::InsertIndex(InsertIndexAction { table, index }))
 			},
 			3 => { // InsertValue
-				self.file.read_exact(&mut buf[0..2])?;
+				read_buf(2, &mut buf)?;
 				let table = ValueTableId::from_u16(u16::from_le_bytes(buf[0..2].try_into().unwrap()));
-				self.file.read_exact(&mut buf[0..8])?;
+				read_buf(8, &mut buf)?;
 				let index = u64::from_le_bytes(buf);
 				self.cleared.values.push((table, index));
-				self.read_bytes += 10;
-				//log::trace!(target: "parity-db", "Read log value {}:{}", table, index);
 				Ok(LogAction::InsertValue(InsertValueAction { table, index }))
 			},
-			4 => {
+			4 => {  // EndRecord
 				self.file.read_exact(&mut buf[0..4])?;
 				self.read_bytes += 4;
-				let checksum = u32::from_le_bytes(buf[0..4].try_into().unwrap());
-				log::trace!(target: "parity-db", "Read end of record, checksum={:#x}", checksum);
+				if self.validate {
+					let checksum = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+					let expected = std::mem::take(&mut self.crc32).finalize();
+					log::trace!(target: "parity-db",
+						"Read end of record, checksum={:#x}, expected={:#x}",
+						checksum,
+						expected,
+					);
+					if checksum != expected {
+						return Err(Error::Corruption("Log record CRC-32 mismatch".into()))
+					}
+				} else {
+					log::trace!(target: "parity-db", "Read end of record");
+				}
 				Ok(LogAction::EndRecord)
 			},
-			5 => {
-				self.file.read_exact(&mut buf[0..2])?;
+			5 => { // DropTable
+				read_buf(2, &mut buf)?;
 				let table = IndexTableId::from_u16(u16::from_le_bytes(buf[0..2].try_into().unwrap()));
-				self.read_bytes += 2;
-				//log::trace!(target: "parity-db", "Read drop table {}", table);
 				Ok(LogAction::DropTable(table))
 			}
 			_ => Err(Error::Corruption("Bad log entry type".into()))
@@ -162,8 +180,12 @@ impl<'a> LogReader<'a> {
 	}
 
 	pub fn read(&mut self, buf: &mut [u8]) -> Result<()> {
+		self.file.read_exact(buf)?;
 		self.read_bytes += buf.len() as u64;
-		Ok(self.file.read_exact(buf)?)
+		if self.validate {
+			self.crc32.update(buf);
+		}
+		Ok(())
 	}
 
 	pub fn drain(self) -> Cleared {
@@ -542,7 +564,7 @@ impl Log {
 		Ok((!flushing.empty, read_next))
 	}
 
-	pub fn read_next<'a>(&'a self) -> Result<Option<LogReader<'a>>> {
+	pub fn read_next<'a>(&'a self, validate: bool) -> Result<Option<LogReader<'a>>> {
 		let mut reading_state = self.reading_state.lock();
 		if *reading_state != ReadingState::Reading {
 			log::trace!(target: "parity-db", "No logs to enact");
@@ -550,7 +572,7 @@ impl Log {
 		}
 
 		let reading = self.reading.write();
-		let mut reader = LogReader::new(reading);
+		let mut reader = LogReader::new(reading, validate);
 		match reader.next() {
 			Ok(LogAction::BeginRecord(_)) => {
 				return Ok(Some(reader));
