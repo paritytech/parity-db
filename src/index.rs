@@ -222,13 +222,9 @@ impl IndexTable {
 	}
 
 	pub fn write_stats(&self, stats: &ColumnStats) {
-		if let Some(map) = &*self.map.write() {
-			let ptr: *mut u8 = map.as_ptr() as *mut u8;
-			unsafe {
-				let ptr = ptr.offset(HEADER_SIZE as isize);
-				let mut slice = std::slice::from_raw_parts_mut(ptr, stats::TOTAL_SIZE);
-				stats.to_slice(&mut slice);
-			};
+		if let Some(map) = &mut *self.map.write() {
+			let mut slice = &mut map[HEADER_SIZE .. HEADER_SIZE + stats::TOTAL_SIZE];
+			stats.to_slice(&mut slice);
 		}
 	}
 
@@ -250,7 +246,7 @@ impl IndexTable {
 
 	pub fn get<Q: LogQuery>(&self, key: &Key, sub_index: usize, log: &Q) -> (Entry, usize) {
 		log::trace!(target: "parity-db", "{}: Querying {}", self.id, hex(&key));
-		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
+		let key = u64::from_be_bytes((key[0..8]).try_into().unwrap());
 		let chunk_index = key >> (64 - self.id.index_bits());
 
 		if let Some(entry) = log.with_index(self.id, chunk_index, |chunk| {
@@ -324,7 +320,7 @@ impl IndexTable {
 
 	pub fn write_insert_plan(&self, key: &Key, address: Address, sub_index: Option<usize>, log: &mut LogWriter) -> Result<PlanOutcome> {
 		log::trace!(target: "parity-db", "{}: Inserting {} -> {}", self.id, hex(&key), address);
-		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
+		let key = u64::from_be_bytes((key[0..8]).try_into().unwrap());
 		let chunk_index = key >> (64 - self.id.index_bits());
 
 		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| chunk.clone()) {
@@ -360,7 +356,7 @@ impl IndexTable {
 
 	pub fn write_remove_plan(&self, key: &Key, sub_index: usize, log: &mut LogWriter) -> Result<PlanOutcome> {
 		log::trace!(target: "parity-db", "{}: Removing {}", self.id, hex(&key));
-		let key = unsafe { u64::from_be(std::ptr::read_unaligned(key.as_ptr() as *const u64)) };
+		let key = u64::from_be_bytes((key[0..8]).try_into().unwrap());
 		let chunk_index = key >> (64 - self.id.index_bits());
 
 		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| chunk.clone()) {
@@ -389,7 +385,7 @@ impl IndexTable {
 
 		let map = map.as_ref().unwrap();
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
-		// Nasty mutable pointer cast. We do ensure that all chunks that are being written are access
+		// Nasty mutable pointer cast. We do ensure that all chunks that are being written are accessed
 		// through the overlay in other threads.
 		let ptr: *mut u8 = map.as_ptr() as *mut u8;
 		let mut chunk: &mut[u8] = unsafe {
