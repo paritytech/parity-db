@@ -452,9 +452,9 @@ impl Log {
 	pub fn end_record(&self, log: LogChange) -> Result<u64> {
 		assert!(log.record_id + 1 == self.next_record_id.load(Ordering::Relaxed));
 		let record_id = log.record_id;
+		let mut overlays = self.overlays.write();
 		let mut appending = self.appending.write();
 		let (index, values, bytes) = log.to_file(&mut appending.file)?;
-		let mut overlays = self.overlays.write();
 		let mut total_index = 0;
 		for (id, overlay) in index.into_iter() {
 			total_index += overlay.map.len();
