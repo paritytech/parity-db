@@ -415,9 +415,6 @@ impl Log {
 	}
 
 	pub fn clear_logs(&self) -> Result<()> {
-		let mut overlays = self.overlays.write();
-		overlays.index.clear();
-		overlays.value.clear();
 		{
 			let mut appending = self.appending.write();
 			appending.empty = true;
@@ -435,6 +432,9 @@ impl Log {
 			reading.get_mut().set_len(0)?;
 			reading.seek(std::io::SeekFrom::Start(0))?;
 		}
+		let mut overlays = self.overlays.write();
+		overlays.index.clear();
+		overlays.value.clear();
 		*self.reading_state.lock() = ReadingState::Reading;
 		self.dirty.store(true, Ordering::Relaxed);
 		Ok(())
