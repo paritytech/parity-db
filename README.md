@@ -45,6 +45,10 @@ Compute `k`, find index page using first `n` bits. Search for a matching entry t
 If an insertion is attempted into a full index page a reindex is triggered. 
 Page size of 64 index entries trigger a reindex once load factor reaches about 50%. 
 
+### Iterate 
+Iteration on a whole collection value is possible but inefficient. Mainly for maintenance purpose.
+Current implementation do not work on Multipart values. // TODO change the Key of multipart not at start?
+
 ### Reindex
 When a collision can't be resolved, a new table is created with twice the capacity. Insertion is immediately continued to the new table. A background process is started that moves entries from the old table to the new. All queries during that process check both tables.
 

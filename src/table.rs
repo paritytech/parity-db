@@ -40,11 +40,13 @@
 // Partial entry (continuation):
 // [MULTIPART: 2][NEXT: 8][VALUE]
 // MULTIPART - Split entry marker. 0xfffe.
+// TODO ? MULTIPART_SPLIT - Split entry marker. 0xfffd.
 // NEXT - 64-bit index of the entry that holds the next part.
 // VALUE: The rest of the entry is filled with payload bytes.
 //
 // Partial entry (last part):
 // [SIZE: 2][VALUE: SIZE]
+// TODO ? MULTIPART_END - Split entry marker. 0xfffc.
 // SIZE: 16-bit size of the remaining payload.
 // VALUE: SIZE payload bytes.
 //
@@ -70,6 +72,7 @@ const MAX_ENTRY_SIZE: usize = 65533;
 
 const TOMBSTONE: &[u8] = &[0xff, 0xff];
 const MULTIPART: &[u8] = &[0xff, 0xfe];
+const INIT: &[u8] = &[0x0, 0x0];
 
 pub type Key = [u8; KEY_LEN];
 pub type Value = Vec<u8>;
@@ -118,6 +121,33 @@ pub struct ValueTable {
 	last_removed: AtomicU64,
 	dirty_header: AtomicBool,
 	multipart: bool,
+}
+
+pub struct TableIter<'a, Q> {
+	index: u64,
+	log: &'a Q,
+}
+
+impl<'a, Q: LogQuery> TableIter<'a, Q> {
+	pub fn new(log: &'a Q) -> Self {
+		TableIter {
+			index: 1, // 0 is meta
+			log,
+		}
+	}
+
+	pub fn next<K: Fn(&[u8]) -> bool>(&mut self, value_table: &ValueTable, key_filter: &K) -> Option<Result<Vec<u8>>> {
+		while self.index < value_table.capacity.load(Ordering::Relaxed) {
+			let result = value_table.get_at(self.index, self.log, key_filter);
+			self.index += 1;
+			match result {
+				Ok(Some(value)) => return Some(Ok(value)),
+				Ok(None) => (),
+				Err(e) => return Some(Err(e)),
+			}
+		}
+		None
+	}
 }
 
 #[cfg(target_os = "macos")]
@@ -215,7 +245,14 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8])>(&self, key: &Key, mut index: u64, log: &Q, mut f: F) -> Result<bool> {
+	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8]), K: Fn(&[u8]) -> bool>(
+		&self,
+		key: Option<&Key>,
+		mut index: u64,
+		log: &Q,
+		mut f: F,
+		key_filter: &K,
+	) -> Result<bool> {
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 
 		let mut part = 0;
@@ -237,6 +274,11 @@ impl ValueTable {
 				return Ok(false);
 			}
 
+			if key.is_none() && &buf[0..2] == INIT {
+				// uninitialized
+				return Ok(false);
+			}
+
 			let (content_offset, content_len, next) = if &buf[0..2] == MULTIPART {
 				let next = u64::from_le_bytes(buf[2..10].try_into().unwrap());
 				(10, self.entry_size as usize - 10, next)
@@ -246,16 +288,22 @@ impl ValueTable {
 			};
 
 			if part == 0 {
-				if key[6..] != buf[content_offset + 4..content_offset + 30] {
-					log::debug!(
-						target: "parity-db",
-						"{}: Key mismatch at {}. Expected {}, got {}",
-						self.id,
-						index,
-						hex(&key[6..]),
-						hex(&buf[content_offset + 4..content_offset + 30]),
-					);
-					return Ok(false);
+				if let Some(key) = key {
+					if key[6..] != buf[content_offset + 4..content_offset + 30] {
+						log::debug!(
+							target: "parity-db",
+							"{}: Key mismatch at {}. Expected {}, got {}",
+							self.id,
+							index,
+							hex(&key[6..]),
+							hex(&buf[content_offset + 4..content_offset + 30]),
+						);
+						return Ok(false);
+					}
+				} else {
+					if !key_filter(&buf[content_offset + 4..content_offset + 30]) {
+						return Ok(false);
+					}
 				}
 				f(&buf[content_offset + 30..content_offset + content_len]);
 			} else {
@@ -272,15 +320,24 @@ impl ValueTable {
 
 	pub fn get<Q: LogQuery>(&self, key: &Key, index: u64, log: &Q) -> Result<Option<Value>> {
 		let mut result = Vec::new();
-		if self.for_parts(key, index, log, |buf| result.extend_from_slice(buf))? {
+		if self.for_parts(Some(key), index, log, |buf| result.extend_from_slice(buf), &|_| true)? {
 			return Ok(Some(result));
 		}
 		Ok(None)
 	}
 
+	fn get_at<Q: LogQuery, K: Fn(&[u8]) -> bool>(&self, index: u64, log: &Q, key_filter: &K) -> Result<Option<Value>> {
+		let mut result = Vec::new();
+		if self.for_parts(None, index, log, |buf| result.extend_from_slice(buf), key_filter)? {
+			return Ok(Some(result));
+		}
+		Ok(None)
+	}
+
+
 	pub fn size<Q: LogQuery>(&self, key: &Key, index: u64, log: &Q) -> Result<Option<u32>> {
 		let mut result = 0;
-		if self.for_parts(key, index, log, |buf| result += buf.len() as u32)? {
+		if self.for_parts(Some(key), index, log, |buf| result += buf.len() as u32, &|_| true)? {
 			return Ok(Some(result));
 		}
 		Ok(None)
@@ -620,15 +677,15 @@ impl ValueTable {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
 	const ENTRY_SIZE: u16 = 64;
 	use super::{ValueTable, TableId, Key, Value};
 	use crate::{log::{Log, LogWriter, LogAction}, options::Options};
 
-	struct TempDir(std::path::PathBuf);
+	pub struct TempDir(pub(crate) std::path::PathBuf);
 
 	impl TempDir {
-		fn new(name: &'static str) -> TempDir {
+		pub(crate) fn new(name: &'static str) -> TempDir {
 			env_logger::try_init().ok();
 			let mut path = std::env::temp_dir();
 			path.push("parity-db-test");
@@ -666,11 +723,11 @@ mod test {
 		f(&mut writer);
 		log.end_record(writer.drain()).unwrap();
 		// Cycle through 2 log files
-		let _ = log.read_next();
+		let _ = log.read_next(true);
 		log.flush_one().unwrap();
-		let _ = log.read_next();
+		let _ = log.read_next(true);
 		log.flush_one().unwrap();
-		let mut reader = log.read_next().unwrap().unwrap();
+		let mut reader = log.read_next(true).unwrap().unwrap();
 		loop {
 			match reader.next().unwrap() {
 				LogAction::BeginRecord(_) | LogAction::InsertIndex { .. } | LogAction::DropTable { .. } => {

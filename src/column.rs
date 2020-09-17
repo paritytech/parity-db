@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::RwLock;
 use crate::{
 	error::{Error, Result},
-	table::{TableId as ValueTableId, ValueTable, Key, Value},
+	table::{TableId as ValueTableId, ValueTable, Key, Value, TableIter},
 	log::{Log, LogOverlays, LogReader, LogWriter, LogAction},
 	display::hex,
 	index::{IndexTable, TableId as IndexTableId, PlanOutcome, Address},
@@ -494,5 +494,37 @@ impl Column {
 		log::debug!(target: "parity-db", "Dropped {}", id);
 		Ok(())
 	}
+
+	pub fn iter<'a>(&'a self, log: &'a RwLock<LogOverlays>) -> ColumnIter<'a> {
+		ColumnIter {
+			column: self,
+			log,
+			index: 0,
+			table_iter: TableIter::new(log),
+		}
+	}
 }
 
+pub struct ColumnIter<'a> {
+	column: &'a Column,
+	index: usize,
+	log: &'a RwLock<LogOverlays>,
+	table_iter: TableIter<'a, RwLock<LogOverlays>>,
+}
+
+impl<'a> ColumnIter<'a> {
+	pub fn next<K: Fn(&[u8]) -> bool>(&mut self, key_filter: &K) -> Option<Result<Vec<u8>>> {
+		if self.index > 15 {
+			return None;
+		}
+		let tables = &self.column.tables.read().value[self.index];
+		match self.table_iter.next(tables, key_filter) {
+			Some(v) => Some(v),
+			None => {
+				self.index += 1;
+				self.table_iter = TableIter::new(self.log);
+				self.next(key_filter)
+			},
+		}
+	}
+}

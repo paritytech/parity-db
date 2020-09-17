@@ -37,7 +37,7 @@ use parking_lot::{RwLock, Mutex, Condvar};
 use crate::{
 	table::Key,
 	error::{Error, Result},
-	column::{ColId, Column},
+	column::{ColId, Column, ColumnIter},
 	log::{Log, LogAction},
 	index::PlanOutcome,
 	options::Options,
@@ -102,6 +102,7 @@ struct DbInner {
 	commit_worker_cv: Condvar,
 	commit_work: Mutex<bool>,
 	// Overlay of most recent values int the commit queue. ColumnId -> (Key -> (RecordId, Value)).
+	// TODO for iterator need RWLock per column
 	commit_overlay: RwLock<Vec<HashMap<Key, (u64, Option<Value>), IdentityBuildHasher>>>,
 	log_cv: Condvar,
 	log_queue_bytes: Mutex<u64>,
@@ -566,6 +567,20 @@ impl DbInner {
 			}
 		}
 	}
+
+	fn iter(&self, col: ColId) -> Iter {
+		let log = self.log.overlays();
+		let column_index = col as usize;
+		let column = self.columns[column_index].iter(log);
+		let overlay = self.commit_overlay.read();
+		let overlay_data = overlay[column_index].iter().filter_map(|(_k, v)| v.1.clone()).collect();
+		Iter {
+			column,
+			overlay,
+			column_index,
+			overlay_data,
+		}
+	}
 }
 
 pub struct Db {
@@ -672,6 +687,10 @@ impl Db {
 		log::debug!(target: "parity-db", "Flush worker shutdown");
 		Ok(())
 	}
+
+	pub fn iter(&self, col: ColId) -> Iter {
+		self.inner.iter(col)
+	}
 }
 
 impl Drop for Db {
@@ -683,3 +702,83 @@ impl Drop for Db {
 	}
 }
 
+type GuardOverlayLock<'a> = parking_lot::RwLockReadGuard<'a, Vec<HashMap<Key, (u64, Option<Value>), IdentityBuildHasher>>>;
+type OverlayIter<'a> = std::collections::hash_map::Iter<'a, Key, (u64, Option<Value>)>;
+
+pub struct Iter<'a> {
+	column: ColumnIter<'a>,
+	overlay: GuardOverlayLock<'a>,
+	column_index: usize,
+	overlay_data: Vec<Value>,
+}
+
+impl<'a> Iterator for Iter<'a> {
+	type Item = Result<Vec<u8>>;
+	fn next(&mut self) -> Option<Result<Vec<u8>>> {
+		let pop = self.overlay_data.pop();
+		if pop.is_some() {
+			return pop.map(|v| Ok(v));
+		}
+		let overlay = &self.overlay;
+		let column_index = self.column_index;
+		self.column.next(&|k| {
+			!overlay[column_index].contains_key(k)
+		})
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+	use crate::table::test::TempDir;
+	use crate::options::ColumnOptions;
+
+	#[test]
+	fn test_iter() {
+		let dir = TempDir::new("test_iter");
+		let options = Options {
+			path: dir.0.clone(),
+			columns: vec![
+				ColumnOptions {
+					preimage: false,
+					uniform: false,
+					sizes: [64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78],
+					ref_counted: false,
+				}
+			],
+			sync: false,
+			stats: false,
+		};
+		{
+			let db = Db::open(&options).unwrap();
+			for i in db.iter(0) {
+				println!("{:?}", i);
+			}
+
+
+			let values = vec![
+				(0, [0], Some(vec![1;50])),
+				(0, [1], Some(vec![2;65])), 
+			];
+			db.commit(values.clone()).unwrap();
+			for i in db.iter(0) {
+				println!("{:?}", i);
+			}
+		}
+
+		let db = Db::open(&options).unwrap();
+
+		let nb = 10u8;
+		let mut values = Vec::with_capacity(nb as usize);
+		for i in 0..nb {
+			values.push((0, [i], Some(vec![i; 70])));
+		}
+		
+		db.commit(values.clone()).unwrap();
+		for i in db.iter(0) {
+			println!("{:?}", i);
+		}
+
+		panic!("disp");
+	}
+}
