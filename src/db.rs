@@ -210,12 +210,13 @@ impl DbInner {
 			let record_id = queue.record_id + 1;
 
 			let mut bytes = 0;
-			for (c, k, v) in &commit {
+			for (c, mut k, v) in &commit {
+				&k[..6].copy_from_slice(&[0, 0, 0, 0, 0, 0]);
 				bytes += k.len();
 				bytes += v.as_ref().map_or(0, |v|v.len());
 				// Don't add removed ref-counted values to overlay.
 				if !self.options.columns[*c as usize].ref_counted || v.is_some() {
-					overlay[*c as usize].insert(*k, (record_id, v.clone()));
+					overlay[*c as usize].insert(k, (record_id, v.clone()));
 				}
 			}
 
@@ -722,7 +723,9 @@ impl<'a> Iterator for Iter<'a> {
 		let overlay = &self.overlay;
 		let column_index = self.column_index;
 		self.column.next(&|k| {
-			!overlay[column_index].contains_key(k)
+			let mut padded = [0; 32];
+			padded[6..].copy_from_slice(k);
+			!overlay[column_index].contains_key(&padded)
 		})
 	}
 }
