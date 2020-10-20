@@ -666,11 +666,11 @@ mod test {
 		f(&mut writer);
 		log.end_record(writer.drain()).unwrap();
 		// Cycle through 2 log files
-		let _ = log.read_next();
+		let _ = log.read_next(false);
 		log.flush_one().unwrap();
-		let _ = log.read_next();
+		let _ = log.read_next(false);
 		log.flush_one().unwrap();
-		let mut reader = log.read_next().unwrap().unwrap();
+		let mut reader = log.read_next(false).unwrap().unwrap();
 		loop {
 			match reader.next().unwrap() {
 				LogAction::BeginRecord(_) | LogAction::InsertIndex { .. } | LogAction::DropTable { .. } => {
