@@ -37,8 +37,8 @@ Options:
 	--writers=<#>      Number of writing threads [default: 1].
 	--commits=<n>      Total numbet of inserted commits.
 	--seed=<n>         Random seed used for key generation.
-	--archive=<n>      Do not perform deletions.
-	--append=<n>       Open an existing database.
+	--archive          Do not perform deletions.
+	--append           Open an existing database.
 ";
 
 #[derive(Clone)]

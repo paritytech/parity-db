@@ -16,8 +16,10 @@
 
 use std::io::Write;
 use crate::error::{Error, Result};
+use crate::column::Salt;
+use rand::Rng;
 
-const CURRENT_VERSION: u32 = 2;
+const CURRENT_VERSION: u32 = 3;
 
 /// Database configuration.
 #[derive(Clone)]
@@ -86,25 +88,29 @@ impl Options {
 		}
 	}
 
-	pub fn write_metadata(&self, path: &std::path::Path) -> Result<()> {
+	pub fn write_metadata(&self, path: &std::path::Path, salt: &Salt) -> Result<()> {
 		let mut file = std::fs::File::create(path)?;
 		writeln!(file, "version={}", CURRENT_VERSION)?;
+		writeln!(file, "salt={}", hex::encode(salt))?;
 		for i in 0..self.columns.len() {
 			writeln!(file, "col{}={}", i, self.columns[i].as_string())?;
 		}
 		Ok(())
 	}
 
-	pub fn validate_metadata(&self) -> Result<()> {
+	pub fn load_and_validate_metadata(&self) -> Result<Salt> {
 		use std::io::BufRead;
 		use std::str::FromStr;
 
 		let mut path = self.path.clone();
 		path.push("metadata");
 		if !path.exists() {
-			return self.write_metadata(&path)
+			let salt: Salt = rand::thread_rng().gen();
+			self.write_metadata(&path, &salt)?;
+			return Ok(salt)
 		}
 		let file = std::io::BufReader::new(std::fs::File::open(path)?);
+		let mut salt = Salt::default();
 		for l in file.lines() {
 			let l = l?;
 			let mut vals = l.split("=");
@@ -116,6 +122,9 @@ impl Options {
 					return Err(Error::InvalidConfiguration(format!(
 						"Unsupported database version {}. Expected {}", version, CURRENT_VERSION)));
 				}
+			} else if k == "salt" {
+					let s = hex::decode(v).map_err(|_| Error::Corruption("Bad salt string".into()))?;
+					salt.copy_from_slice(&s);
 			} else if k.starts_with("col") {
 				let col_index = u8::from_str(&k[3..]).map_err(|_| Error::Corruption("Bad metadata column index".into()))?;
 				if col_index as usize > self.columns.len() {
@@ -129,7 +138,7 @@ impl Options {
 				}
 			}
 		}
-		Ok(())
+		Ok(salt)
 	}
 }
 
