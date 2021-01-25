@@ -22,11 +22,12 @@
 // FILLED - highest index filled with live data
 //
 // Complete entry:
-// [SIZE: 2][REFS: 4][KEY: 26][VALUE: SIZE]
+// [SIZE: 2][REFS: 4][KEY: 26][VALUE: SIZE - 30]
 // SIZE: 16-bit value size. Sizes up to 0xfffd are allowed.
+// This includes size of REFS and KEY
 // REF: 32-bit reference counter.
 // KEY: lower 26 bytes of the key.
-// VALUE: SIZE payload bytes.
+// VALUE: SIZE-30  payload bytes.
 //
 // Partial entry (first part):
 // [MULTIPART: 2][NEXT: 8][REFS: 4][KEY: 26][VALUE]
