@@ -11,7 +11,7 @@ description = "Key-value database for the blockchain"
 [dependencies]
 log = "0.4.8"
 parking_lot = "0.10"
-memmap = "0.7"
+memmap2 = "0.2"
 blake2-rfc = "0.2.18"
 libc = "0.2"
 crc32fast = "1.2.0"
