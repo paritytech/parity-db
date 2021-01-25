@@ -121,7 +121,7 @@ pub enum PlanOutcome {
 
 pub struct IndexTable {
 	pub id: TableId,
-	map: RwLock<Option<memmap::MmapMut>>,
+	map: RwLock<Option<memmap2::MmapMut>>,
 	path: std::path::PathBuf,
 }
 
@@ -194,7 +194,7 @@ impl IndexTable {
 		};
 
 		file.set_len(file_size(id.index_bits()))?;
-		let map = unsafe { memmap::MmapMut::map_mut(&file)? };
+		let map = unsafe { memmap2::MmapMut::map_mut(&file)? };
 		log::debug!(target: "parity-db", "Opened existing index {}", id);
 		Ok(Some(IndexTable {
 			id,
@@ -228,7 +228,7 @@ impl IndexTable {
 		}
 	}
 
-	fn chunk_at(index: u64, map: &memmap::MmapMut) -> &[u8] {
+	fn chunk_at(index: u64, map: &memmap2::MmapMut) -> &[u8] {
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
 		&map[offset .. offset + CHUNK_LEN]
 	}
@@ -379,7 +379,7 @@ impl IndexTable {
 			log::debug!(target: "parity-db", "Created new index {}", self.id);
 			//TODO: check for potential overflows on 32-bit platforms
 			file.set_len(file_size(self.id.index_bits()))?;
-			*wmap = Some(unsafe { memmap::MmapMut::map_mut(&file)? });
+			*wmap = Some(unsafe { memmap2::MmapMut::map_mut(&file)? });
 			map = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wmap);
 		}
 
