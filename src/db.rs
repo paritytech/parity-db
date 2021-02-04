@@ -126,6 +126,7 @@ impl DbInner {
 				HashMap::with_hasher(std::hash::BuildHasherDefault::<IdentityKeyHash>::default())
 			);
 		}
+		log::info!(target: "parity-db", "Opened db {:?}, salt={:?}", options, salt);
 		Ok(DbInner {
 			columns,
 			options: options.clone(),

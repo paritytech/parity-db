@@ -20,9 +20,10 @@ use crate::column::Salt;
 use rand::Rng;
 
 const CURRENT_VERSION: u32 = 3;
+const LAST_SUPPORTED_VERSION: u32 = 2;
 
 /// Database configuration.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Options {
 	/// Database path.
 	pub path: std::path::PathBuf,
@@ -35,7 +36,7 @@ pub struct Options {
 	pub stats: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ColumnOptions {
 	/// Indicates that the column value is the preimage of the key.
 	/// This implies that a given value always has the same key.
@@ -98,7 +99,7 @@ impl Options {
 		Ok(())
 	}
 
-	pub fn load_and_validate_metadata(&self) -> Result<Salt> {
+	pub fn load_and_validate_metadata(&self) -> Result<Option<Salt>> {
 		use std::io::BufRead;
 		use std::str::FromStr;
 
@@ -107,10 +108,10 @@ impl Options {
 		if !path.exists() {
 			let salt: Salt = rand::thread_rng().gen();
 			self.write_metadata(&path, &salt)?;
-			return Ok(salt)
+			return Ok(Some(salt))
 		}
 		let file = std::io::BufReader::new(std::fs::File::open(path)?);
-		let mut salt = Salt::default();
+		let mut salt = None;
 		for l in file.lines() {
 			let l = l?;
 			let mut vals = l.split("=");
@@ -118,13 +119,15 @@ impl Options {
 			let v = vals.next().ok_or(Error::Corruption("Bad metadata".into()))?;
 			if k == "version" {
 				let version = u32::from_str(v).map_err(|_| Error::Corruption("Bad version string".into()))?;
-				if version != CURRENT_VERSION {
+				if version < LAST_SUPPORTED_VERSION  {
 					return Err(Error::InvalidConfiguration(format!(
 						"Unsupported database version {}. Expected {}", version, CURRENT_VERSION)));
 				}
 			} else if k == "salt" {
-					let s = hex::decode(v).map_err(|_| Error::Corruption("Bad salt string".into()))?;
-					salt.copy_from_slice(&s);
+					let salt_slice = hex::decode(v).map_err(|_| Error::Corruption("Bad salt string".into()))?;
+					let mut s = Salt::default();
+					s.copy_from_slice(&salt_slice);
+					salt = Some(s);
 			} else if k.starts_with("col") {
 				let col_index = u8::from_str(&k[3..]).map_err(|_| Error::Corruption("Bad metadata column index".into()))?;
 				if col_index as usize > self.columns.len() {

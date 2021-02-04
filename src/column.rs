@@ -51,7 +51,7 @@ pub struct Column {
 	uniform_keys: bool,
 	collect_stats: bool,
 	ref_counted: bool,
-	salt: Salt,
+	salt: Option<Salt>,
 	stats: ColumnStats,
 }
 
@@ -96,7 +96,7 @@ impl Column {
 		Ok(None)
 	}
 
-	pub fn open(col: ColId, options: &Options, salt: Salt) -> Result<Column> {
+	pub fn open(col: ColId, options: &Options, salt: Option<Salt>) -> Result<Column> {
 		let (index, reindexing, stats) = Self::open_index(&options.path, col)?;
 		let collect_stats = options.stats;
 		let path = &options.path;
@@ -143,11 +143,10 @@ impl Column {
 		let mut k = Key::default();
 		if self.uniform_keys {
 			k.copy_from_slice(&key[0..32]);
+		} else if let Some(salt) = &self.salt {
+			k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &salt[..], &key).as_bytes());
 		} else {
-			let mut salted = [0u8; 64];
-			salted[0..32].copy_from_slice(&self.salt);
-			salted[32..64].copy_from_slice(&key);
-			k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &[], &salted).as_bytes());
+			k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &[], &key).as_bytes());
 		}
 		k
 	}
