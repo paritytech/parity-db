@@ -449,7 +449,7 @@ impl Column {
 				let mut source_index = progress;
 				let mut count = 0;
 				if source_index % 50 == 0 {
-					log::info!(target: "parity-db", "{}: Reindexing at {}/{}", tables.index.id, source_index, source.id.total_chunks());
+					log::debug!(target: "parity-db", "{}: Reindexing at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				}
 				log::debug!(target: "parity-db", "{}: Continue reindex at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				while source_index < source.id.total_chunks() && count < MAX_REBALANCE_BATCH {
