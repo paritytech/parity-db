@@ -15,6 +15,7 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::collections::VecDeque;
+use std::cmp::min;
 use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::RwLock;
 use crate::{
@@ -145,8 +146,9 @@ impl Column {
 			k.copy_from_slice(&key[0..32]);
 		} else {
 			let mut salted = [0u8; 64];
+			let max_len = min(key.len(), 32);
 			salted[0..32].copy_from_slice(&self.salt);
-			salted[32..64].copy_from_slice(&key);
+			salted[32..(32 + max_len)].copy_from_slice(&key[..max_len]);
 			k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &[], &salted).as_bytes());
 		}
 		k
