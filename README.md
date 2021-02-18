@@ -1,5 +1,7 @@
 # A database for the blockchain.
 
+## **WARNING: PartyDB is still in development and should not be used in production. Use at your own risk.**
+
 ## Design considerations
 
 ### API
