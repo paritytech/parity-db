@@ -26,6 +26,7 @@ pub enum Error {
 	InvalidConfiguration(String),
 	InvalidInput(String),
 	Background(Arc<Error>),
+	Locked(std::io::Error),
 }
 
 impl fmt::Display for Error {
@@ -36,6 +37,7 @@ impl fmt::Display for Error {
 			Error::InvalidConfiguration(e) => write!(f, "Invalid configuration: {}", e),
 			Error::InvalidInput(e) => write!(f, "Invalid input: {}", e),
 			Error::Background(e) => write!(f, "Background worker error: {}", e),
+			Error::Locked(e) => write!(f, "Database file is in use. ({})", e),
 		}
     }
 }

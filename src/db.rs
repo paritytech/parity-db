@@ -34,6 +34,7 @@ use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::convert::TryInto;
 use std::collections::{HashMap, VecDeque};
 use parking_lot::{RwLock, Mutex, Condvar};
+use fs2::FileExt;
 use crate::{
 	table::Key,
 	error::{Error, Result},
@@ -112,11 +113,17 @@ struct DbInner {
 	next_reindex: AtomicU64,
 	collect_stats: bool,
 	bg_err: Mutex<Option<Arc<Error>>>,
+	_lock_file: std::fs::File,
 }
 
 impl DbInner {
 	fn open(options: &Options) -> Result<DbInner> {
 		std::fs::create_dir_all(&options.path)?;
+		let mut lock_path: std::path::PathBuf = options.path.clone();
+		lock_path.push("lock");
+		let lock_file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(lock_path.as_path())?;
+		lock_file.try_lock_exclusive().map_err(|e| Error::Locked(e))?;
+
 		let salt = options.load_and_validate_metadata()?;
 		let mut columns = Vec::with_capacity(options.columns.len());
 		let mut commit_overlay = Vec::with_capacity(options.columns.len());
@@ -148,6 +155,7 @@ impl DbInner {
 			last_enacted: AtomicU64::new(0),
 			collect_stats: options.stats,
 			bg_err: Mutex::new(None),
+			_lock_file: lock_file,
 		})
 	}
 
