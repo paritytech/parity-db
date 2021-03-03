@@ -181,6 +181,20 @@ impl DbInner {
 		self.columns[col as usize].get(&key, log)
 	}
 
+	fn get_size(&self, col: ColId, key: &[u8]) -> Result<Option<u32>> {
+		let key = self.columns[col as usize].hash(key);
+		let overlay = self.commit_overlay.read();
+		// Check commit overlay first
+		if let Some(l) = overlay.get(col as usize).and_then(
+			|o| o.get(&key).map(|(_, v)| v.as_ref().map(|v| v.len() as u32))
+		) {
+			return Ok(l);
+		}
+		// Go into tables and log overlay.
+		let log = self.log.overlays();
+		self.columns[col as usize].get_size(&key, log)
+	}
+
 	// Commit is simply adds the the data to the queue and to the overlay and
 	// exits as early as possible.
 	fn commit<I, K>(&self, tx: I) -> Result<()>
@@ -608,6 +622,10 @@ impl Db {
 
 	pub fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
 		self.inner.get(col, key)
+	}
+
+	pub fn get_size(&self, col: ColId, key: &[u8]) -> Result<Option<u32>> {
+		self.inner.get_size(col, key)
 	}
 
 	pub fn commit<I, K>(&self, tx: I) -> Result<()>

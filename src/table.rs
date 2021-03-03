@@ -607,7 +607,7 @@ impl ValueTable {
 	}
 
 	pub fn complete_plan(&self, log: &mut LogWriter) -> Result<()> {
-		if self.dirty_header.compare_and_swap(true, false, Ordering::Relaxed) {
+		if let Ok(true) = self.dirty_header.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed) {
 			// last_removed or filled pointers were modified. Add them to the log
 			let mut buf = [0u8; 16];
 			let last_removed = self.last_removed.load(Ordering::Relaxed);

@@ -78,6 +78,10 @@ impl Column {
 		Ok(None)
 	}
 
+	pub fn get_size(&self, key: &Key, log: &RwLock<LogOverlays>) -> Result<Option<u32>> {
+		self.get(key, log).map(|v| v.map(|v| v.len() as u32))
+	}
+
 	fn get_in_index(key: &Key, index: &IndexTable, tables: &Tables, log: &RwLock<LogOverlays>) -> Result<Option<(u8, Value)>> {
 		let (mut entry, mut sub_index) = index.get(key, 0, log);
 		while !entry.is_empty() {
