@@ -25,7 +25,7 @@ const HISTOGRAM_BUCKETS: usize = 2048;
 const HISTOGRAM_BUCKET_BITS: u8 = 4;
 const SIZE_TIERS: usize = 16;
 
-pub const TOTAL_SIZE: usize = 4 * HISTOGRAM_BUCKETS + 2 * 8 * SIZE_TIERS + 8 * 11;
+pub const TOTAL_SIZE: usize = 4 * HISTOGRAM_BUCKETS + 8 * HISTOGRAM_BUCKETS + 8 * SIZE_TIERS + 8 * 11;
 
 pub struct ColumnStats {
 	value_histogram: [AtomicU32; HISTOGRAM_BUCKETS],
@@ -174,7 +174,7 @@ impl ColumnStats {
 		writeln!(writer, "Removals: {}", self.removed_hit.load(Ordering::Relaxed))?;
 		writeln!(writer, "Missed removals: {}", self.removed_miss.load(Ordering::Relaxed))?;
 		writeln!(writer, "Compressed bytes: {}", self.compressed_bytes.load(Ordering::Relaxed))?;
-		write!(writer, "Compression deltas: [")?;
+		writeln!(writer, "Compression deltas:")?;
 		for i in 0 .. HISTOGRAM_BUCKETS {
 			let count = self.value_histogram[i].load(Ordering::Relaxed);
 			let delta = self.compression_delta[i].load(Ordering::Relaxed);
@@ -233,8 +233,8 @@ impl ColumnStats {
 			self.oversized_bytes.fetch_add(size as u64, Ordering::Relaxed);
 		}
 		self.total_values.fetch_add(1, Ordering::Relaxed);
-		self.total_bytes.fetch_add(size as u64, Ordering::Relaxed);
-		self.compressed_bytes.fetch_add(size as u64, Ordering::Relaxed);
+		self.total_bytes.fetch_add(compressed as u64, Ordering::Relaxed);
+		self.compressed_bytes.fetch_add(compressed as u64, Ordering::Relaxed);
 	}
 
 	pub fn remove(&self, size: u32, compressed: u32) {
@@ -243,11 +243,11 @@ impl ColumnStats {
 			self.compression_delta[index].fetch_sub(size as i64 - compressed as i64, Ordering::Relaxed);
 		} else {
 			self.oversized.fetch_sub(1, Ordering::Relaxed);
-			self.oversized_bytes.fetch_sub(size as u64, Ordering::Relaxed);
+			self.oversized_bytes.fetch_sub(compressed as u64, Ordering::Relaxed);
 		}
 		self.total_values.fetch_sub(1, Ordering::Relaxed);
-		self.total_bytes.fetch_sub(size as u64, Ordering::Relaxed);
-		self.compressed_bytes.fetch_sub(size as u64, Ordering::Relaxed);
+		self.total_bytes.fetch_sub(compressed as u64, Ordering::Relaxed);
+		self.compressed_bytes.fetch_sub(compressed as u64, Ordering::Relaxed);
 	}
 
 	pub fn insert_val(&self, size: u32, compressed: u32) {
