@@ -27,7 +27,7 @@ use crate::{
 const CHUNK_LEN: usize = 512; // bytes
 const CHUNK_ENTRIES: usize = 64;
 const HEADER_SIZE: usize = 512;
-const META_SIZE: usize = 16 * 1024; // Contains header and column stats
+const META_SIZE: usize = 32 * 1024; // Contains header and column stats
 const KEY_LEN: usize = 32;
 
 const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];

@@ -88,6 +88,7 @@ impl Column {
 			let size_tier = entry.address(index.id.index_bits()).size_tier() as usize;
 			match tables.value[size_tier].get(key, entry.address(index.id.index_bits()).offset(), log)? {
 				Some(value) => {
+					let value = Self::decompress(&value);
 					return Ok(Some((size_tier as u8, value)));
 				}
 				None =>  {
@@ -98,6 +99,14 @@ impl Column {
 			}
 		}
 		Ok(None)
+	}
+
+	fn compress(buf: &[u8]) -> Vec<u8> {
+		lz4::block::compress(buf, Some(lz4::block::CompressionMode::DEFAULT), true).unwrap()
+	}
+
+	fn decompress(buf: &[u8]) -> Vec<u8> {
+		lz4::block::decompress(buf, None).unwrap()
 	}
 
 	pub fn open(col: ColId, options: &Options, salt: Option<Salt>) -> Result<Column> {
@@ -269,7 +278,8 @@ impl Column {
 		let reindex = self.reindex.upgradable_read();
 		let existing = Self::search_all_indexes(key, &*tables, &*reindex, log)?;
 		if let &Some(ref val) = value {
-			let target_tier = tables.value.iter().position(|t| val.len() <= t.value_size() as usize);
+			let cval = Self::compress(&val);
+			let target_tier = tables.value.iter().position(|t| cval.len() <= t.value_size() as usize);
 			let target_tier = match target_tier {
 				Some(tier) => tier as usize,
 				None => {
@@ -282,7 +292,7 @@ impl Column {
 				let existing_tier = existing_tier as usize;
 				if self.collect_stats {
 					let cur_size = tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0);
-					self.stats.replace_val(cur_size, val.len() as u32);
+					self.stats.replace_val(cur_size, cur_size, val.len() as u32, cval.len() as u32);
 				}
 				if self.ref_counted {
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.index.id, hex(key));
@@ -295,12 +305,12 @@ impl Column {
 				}
 				if existing_tier == target_tier {
 					log::trace!(target: "parity-db", "{}: Replacing {}", tables.index.id, hex(key));
-					tables.value[target_tier].write_replace_plan(existing_address.offset(), key, val, log)?;
+					tables.value[target_tier].write_replace_plan(existing_address.offset(), key, &cval, log)?;
 					return Ok(PlanOutcome::Written);
 				} else {
 					log::trace!(target: "parity-db", "{}: Replacing in a new table {}", tables.index.id, hex(key));
 					tables.value[existing_tier].write_remove_plan(existing_address.offset(), log)?;
-					let new_offset = tables.value[target_tier].write_insert_plan(key, val, log)?;
+					let new_offset = tables.value[target_tier].write_insert_plan(key, &cval, log)?;
 					let new_address = Address::new(new_offset, target_tier as u8);
 					// If it was found in an older index we just insert a new entry. Reindex won't overwrite it.
 					let sub_index = if table.id == tables.index.id { Some(sub_index) } else { None };
@@ -308,7 +318,7 @@ impl Column {
 				}
 			} else {
 				log::trace!(target: "parity-db", "{}: Inserting new index {}", tables.index.id, hex(key));
-				let offset = tables.value[target_tier].write_insert_plan(key, val, log)?;
+				let offset = tables.value[target_tier].write_insert_plan(key, &cval, log)?;
 				let address = Address::new(offset, target_tier as u8);
 				match tables.index.write_insert_plan(key, address, None, log)? {
 					PlanOutcome::NeedReindex => {
@@ -319,7 +329,7 @@ impl Column {
 					}
 					_ => {
 						if self.collect_stats {
-							self.stats.insert_val(val.len() as u32);
+							self.stats.insert_val(val.len() as u32, cval.len() as u32);
 						}
 						return Ok(PlanOutcome::Written);
 					}
@@ -345,7 +355,7 @@ impl Column {
 				};
 				if remove {
 					if let Some(cur_size) = cur_size {
-						self.stats.remove_val(cur_size);
+						self.stats.remove_val(cur_size, cur_size);
 					}
 					table.write_remove_plan(key, sub_index, log)?;
 				}
