@@ -320,11 +320,12 @@ impl DbInner {
 			let record_id = writer.record_id();
 			let l = writer.drain();
 
-			let bytes = self.log.end_record(l)?;
-			{
+			let bytes = {
 				let mut logged_bytes = self.log_queue_bytes.lock();
+				let bytes = self.log.end_record(l)?;
 				*logged_bytes += bytes;
 				self.signal_flush_worker();
+				bytes
 			};
 
 			{
