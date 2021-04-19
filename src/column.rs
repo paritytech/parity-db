@@ -91,6 +91,8 @@ impl Column {
 					return Ok(Some((size_tier as u8, value)));
 				}
 				None =>  {
+					// [Review] probing: what happen if sub_index > 255 then next key index in theory (or is is not
+					// possible: increase nb_bit, 2x amplification...).
 					let (next_entry, next_index) = index.get(key, sub_index + 1, log);
 					entry = next_entry;
 					sub_index = next_index;

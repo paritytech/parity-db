@@ -142,7 +142,7 @@ pub struct TableId(u16);
 
 impl TableId {
 	pub fn new(col: ColId, index_bits: u8) -> TableId {
-		TableId(((col as u16) << 8)| (index_bits as u16))
+		TableId(((col as u16) << 8) | (index_bits as u16))
 	}
 
 	pub fn from_u16(id: u16) -> TableId {
@@ -154,7 +154,7 @@ impl TableId {
 	}
 
 	pub fn index_bits(&self) -> u8 {
-		(self.0 & 0xff) as u8
+		self.0 as u8
 	}
 
 	pub fn file_name(&self) -> String {
@@ -236,6 +236,7 @@ impl IndexTable {
 	fn find_entry(&self, key: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
 		let partial_key = Entry::extract_key(key, self.id.index_bits());
 		for i in sub_index .. CHUNK_ENTRIES {
+			// [Review] TODO isn't there an unsafe fn instead of unwrap??
 			let entry = Entry::from_u64(u64::from_le_bytes(chunk[i * 8 .. i * 8 + 8].try_into().unwrap()));
 			if !entry.is_empty() && entry.key_material(self.id.index_bits()) == partial_key {
 				return (entry, i);
@@ -244,9 +245,9 @@ impl IndexTable {
 		return (Entry::empty(), 0)
 	}
 
-	pub fn get<Q: LogQuery>(&self, key: &Key, sub_index: usize, log: &Q) -> (Entry, usize) {
+	pub fn get(&self, key: &Key, sub_index: usize, log: &impl LogQuery) -> (Entry, usize) {
 		log::trace!(target: "parity-db", "{}: Querying {}", self.id, hex(&key));
-		let key = u64::from_be_bytes((key[0..8]).try_into().unwrap());
+		let key = u64::from_be_bytes((key[0..8]).try_into().unwrap()); // 64 is a lot.
 		let chunk_index = key >> (64 - self.id.index_bits());
 
 		if let Some(entry) = log.with_index(self.id, chunk_index, |chunk| {
@@ -260,8 +261,8 @@ impl IndexTable {
 			log::trace!(target: "parity-db", "{}: Querying chunk at {}", self.id, chunk_index);
 			let chunk = Self::chunk_at(chunk_index, map);
 			return self.find_entry(key, sub_index, chunk);
-
 		}
+
 		return (Entry::empty(), 0)
 	}
 

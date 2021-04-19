@@ -25,10 +25,37 @@ Database should be restored to consistent state if IO is interrupted at any poin
 # Implementation
 
 ## Data structure
-Data is organized into columns. Each column serving a particular type of data, e.g. state or headers. Column consists of an index and a set of 16 value tables for varying value size.  
+Data is organized into columns. Each column serving a particular type of data, e.g. state or headers. Column consists of an index (up to 255) and a set of 16 value tables for varying value size.  
 
 ### Index
-Index is an is mmap-backed dynamically sized probing hash table. Each entry is a page of 64 8-byte entries, making 512 bytes.  Each 64-bit entry contains 32 bits of value address, 4 bits of value table index and 28 bit value `c` derived from  `k`. `c` is computed by skipping `n` high bits of `k` and taking the next 28 bits.  `k` is 256-bit key that is derived from the original key and is uniformly distributed. `n` is current index bit-size. First `n` bits of `k` map `k` to a page. Entries inside the page are unsorted. Empty entry is denoted with a zero value. Empty database starts with `n` = 16, which allows to put just 240 bits of `k` in the value table. 
+Index is an is mmap-backed dynamically sized probing hash table. Each entry is a page of 64 8-byte entries, making 512 bytes. Each 8-byte entry contains 32 bits of value address, 4 bits of value table index and 28 bit value `c` derived from  `k`. `c` is computed by skipping `n` high bits of `k` and taking the next 28 bits. `k` is 256-bit key that is derived from the original key and is uniformly distributed. `n` is current index bit-size. First `n` bits of `k` map `k` to a page. Entries inside the page are unsorted. Empty entry is denoted with a zero value. Empty database starts with `n` = 16, which allows to put just 240 bits of `k` in the value table. 
+
+
+#### Review Notes
+
+TODO not up to date: value range is not 32 bit but 6 (64 entry per page) + n as there is no more possible value from indexing (from comment).
+Leaving 64 - 4 - (6 + n) of hash (initially 38 bit).
+Value adress being n + 6 + 4 as we need to cover all entries of similar size case.
+
+Still could do with just 32 bit packed in page to find over the packed bit allowing better paralelle instruction support.
+
+512o 64 address of 64bit so 64 * 8 byte. AKA CHUNK_LEN.
+64 entries per chunck aka CHUNK_ENTRIES.
+-> but find is done only on less than half: (28 bit value), would make sense to me to pack those, maybe make then 32 bit and reduce value address to 28 bit + 4 bit table.
+
+2^16 -> 65k pages ~ 32Megs ix.
+
+TODO indicates `n` is called `index_bits` in code.
+Also currently `n` maximum is 64.
+Plus n increment by factor 2: 32m -> 64 -> 128: so 64 seems really enough.
+
+So logic is as much key content as possible to allow early key mismatch detection.
+Starting at 2^16 index * 64 = 4M value (2^22 index that needs to be available among all values categories: 26 bit of adressing).
+Remaining 38 bit of key.
+To fit in 64 bit, we can raise n to (64 - 10) / 2 = 27 (37 bit value address, 2^33 value
+
+TODO check Be and Le usage with u64.
+
 
 ### Value tables
 Value table is linear array of fixed-size entries that can grow as necessary. Each entry may contain one of the following:
