@@ -1,3 +1,19 @@
+# Review
+
+I did add md paragraph called review and comments starting with [Review].
+I also propose some simple changes:
+- minor syntactic changes.
+- additional comment when it would have save me code reading (I did not try to document all, just what would have help me moving through code while reading).
+
+Key fix to 32 byte:
+- index.rs: we only need 8 start byte so most size fits.
+
+Chunk (page) fix to 512 byte (64 entries):
+I am not sure if the choice here is related to the page size or the number of entries (with faster search would it be good to use bigger page size).
+
+
+- TODO a word on salt?? -> in col used for hash
+
 # A database for the blockchain.
 
 ## **WARNING: PartyDB is still in development and should not be used in production. Use at your own risk.**
@@ -37,7 +53,8 @@ TODO not up to date: value range is not 32 bit but 6 (64 entry per page) + n as 
 Leaving 64 - 4 - (6 + n) of hash (initially 38 bit).
 Value adress being n + 6 + 4 as we need to cover all entries of similar size case.
 
-Still could do with just 32 bit packed in page to find over the packed bit allowing better paralelle instruction support.
+To optimize the page search, I could think of : https://event.cwi.nl/damon2009/DaMoN09-KarySearch.pdf.
+Probably using 16 (8 seems to small like 256 over 64, 1/4 chance to conflict) bit of our k bits to search first. (then we need to access remaining of page but only at a given entry).
 
 512o 64 address of 64bit so 64 * 8 byte. AKA CHUNK_LEN.
 64 entries per chunck aka CHUNK_ENTRIES.
@@ -52,9 +69,11 @@ Plus n increment by factor 2: 32m -> 64 -> 128: so 64 seems really enough.
 So logic is as much key content as possible to allow early key mismatch detection.
 Starting at 2^16 index * 64 = 4M value (2^22 index that needs to be available among all values categories: 26 bit of adressing).
 Remaining 38 bit of key.
-To fit in 64 bit, we can raise n to (64 - 10) / 2 = 27 (37 bit value address, 2^33 value
+Considering the key content should at least key 16 bit, then max size for n becomes (64 - 10 - 16) = 38 bit (and 48 bit value address).
 
-TODO check Be and Le usage with u64.
+About Be and Le usage with u64.
+-> key material extracted from hash as BE (first 64 bits). Make senses to me.
+-> entry written as LE?? not sure, it puts value index first? BE everywhere seem less error prone.
 
 
 ### Value tables
@@ -77,12 +96,43 @@ Page size of 64 index entries trigger a reindex once load factor reaches about 5
 ### Reindex
 When a collision can't be resolved, a new table is created with twice the capacity. Insertion is immediately continued to the new table. A background process is started that moves entries from the old table to the new. All queries during that process check both tables.
 
+#### Review
+
+TODO duplicate tables, they got different names depending on accesses so it is ok, TODO does it lock write? prev comment indicate not but double querying: insert in new.
+TODO check if there may be concurrency issue with the background process??? (not if write is done on previous table: seems ~??).
+
 ## Transaction pipeline
 On `commit` all data is first moved to an in-memory overlay, making it available for queries. The commit is then added to the commit queue. This allows for `commit` function to return as early as possible.
 Commit queue is processed by a commit worker that collects data that would be modified in the tables and writes it to the available log file. All modified index and value table pages are placed in the in-memory overlay. The file is then handled to another background thread that flushes it to disk and adds it to the finalization queue.
 Finally, another thread handles the finalization queue. It reads the file and applies all changes to the tables, clearing the page overlay.
 
 On startup if the log files exists they are validated for corruption and enacted upon the tables.
+
+### Review
+
+'data is first moved to an in-memory overlay' -> is it log 'end_record' ? (begin_record create a writer that end_record flush into in memory.
+'The commit is then added to the commit queue' -> 'log.to_file' in 'end_record' : actually append before, but under a lock. -> meaning commit queue is file for 'append'. (the higher index in sort, make sense).
+-> at end the append become the source for next step
+'Commit queue is processed by a commit worker that collects data that would be modified in the tables and writes it to the available log file' -> this should be working on the two log file that are not use for append: source is flushing dest is reading: fn 'flush_one'.
+'The file is then handled to another background thread that flushes it to disk and adds it to the finalization queue' -> fn 'read_next' (use a LogReader).
+
+So three file with same format, ordered by execution: appending -> flushing -> reading
+appending receive committed change first: lock on commit of the single writer
+reading is writing to backend: lock by backend thread.
+flushing is ???: queue to avoid reading locking appending probably actually would make sense if just a tmp ptr to file.
+
+TODO put those on function from log.
+
+TODO unclear why clear value not at same pace -> that is probably when we read an insert index we insert a clear value which in read_end will remove value from in memory overlay: seems inefficient (except to allow atomicity), but what happen when you clear something that was change a second time before read_next call. Excpet if state machine is tightly processed, seems racy at first.
+
+
+TODO seems interesting to indicate the transaction buffer:
+- first the LogWriter overlay, local to the write only thread (not shared).
+- second the shared overlay, it is a buffer to allow queueing changes.
+- third is the file queuing change (redundant with shared overlay)
+- last is the db tables/files.
+
+So query goes through shared overlay and file, and if write is enable, query also goes through writer.
 
 # Potential issues
 * Memory mapped IO won't be able to support 32-bit systems once the index grows to 2GB.

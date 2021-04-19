@@ -75,6 +75,8 @@ const MULTIPART: &[u8] = &[0xff, 0xfe];
 pub type Key = [u8; KEY_LEN];
 pub type Value = Vec<u8>;
 
+/// One file per column.
+/// [Review] TODO I woul have expect one file per column per size of value (*16 files).
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub struct TableId(u16);
 
@@ -92,7 +94,7 @@ impl TableId {
 	}
 
 	pub fn size_tier(&self) -> u8 {
-		(self.0 & 0xff) as u8
+		self.0 as u8
 	}
 
 	pub fn file_name(&self) -> String {
@@ -112,6 +114,7 @@ impl std::fmt::Display for TableId {
 
 pub struct ValueTable {
 	pub id: TableId,
+	// [Review] I would consider this as an associated constant.
 	pub entry_size: u16,
 	file: std::fs::File,
 	capacity: AtomicU64,

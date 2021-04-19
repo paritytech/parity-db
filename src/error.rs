@@ -30,7 +30,7 @@ pub enum Error {
 }
 
 impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Error::Io(e) => write!(f, "IO Error: {}", e),
 			Error::Corruption(e) => write!(f, "Corruption: {}", e),
@@ -39,7 +39,7 @@ impl fmt::Display for Error {
 			Error::Background(e) => write!(f, "Background worker error: {}", e),
 			Error::Locked(e) => write!(f, "Database file is in use. ({})", e),
 		}
-    }
+	}
 }
 
 impl From<std::io::Error> for Error {

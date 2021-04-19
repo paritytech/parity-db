@@ -51,10 +51,15 @@ pub trait LogQuery {
 
 #[derive(Default)]
 pub struct LogOverlays {
+	// [Review] considering this bounded by number of column, should we use BTreeMap.
+	/// One log per column.
 	index: HashMap<IndexTableId, IndexLogOverlay>,
+	/// One log per column.
 	value: HashMap<ValueTableId, ValueLogOverlay>,
 }
 
+// [Review] having a struct for RwLock<LogOverlays> seems worth it: 'SharedOverlay' or name like
+// it.
 impl LogQuery for RwLock<LogOverlays> {
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R> (&self, table: IndexTableId, index: u64, f: F) -> Option<R> {
 		self.read().index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| f(data)))
@@ -79,6 +84,7 @@ pub struct Cleared {
 	values: Vec<(ValueTableId, u64)>,
 }
 
+/// Reader around a file of sequential serialized `LogAction`.
 pub struct LogReader<'a> {
 	file: RwLockWriteGuard<'a, std::io::BufReader<std::fs::File>>,
 	record_id: u64,
@@ -179,6 +185,7 @@ impl<'a> LogReader<'a> {
 		}
 	}
 
+	// [Review] duplicated code with previous read_buf
 	pub fn read(&mut self, buf: &mut [u8]) -> Result<()> {
 		self.file.read_exact(buf)?;
 		self.read_bytes += buf.len() as u64;
@@ -198,6 +205,7 @@ impl<'a> LogReader<'a> {
 }
 
 pub struct LogChange {
+	// [Review] local: LogOverlays? instead of two following fields.
 	local_index: HashMap<IndexTableId, IndexLogOverlay>,
 	local_values: HashMap<ValueTableId, ValueLogOverlay>,
 	record_id: u64,
@@ -229,7 +237,7 @@ impl LogChange {
 			Ok(())
 		};
 
-		write(&1u8.to_le_bytes())?; // Begin record
+		write(&1u8.to_le_bytes())?; // Begin record // TODO use an enum with repr u8
 		write(&self.record_id.to_le_bytes())?;
 
 		for (id, overlay) in self.local_index.iter() {
@@ -263,6 +271,7 @@ impl LogChange {
 	}
 }
 
+/// Stack local changes `log` over shared changes `overlays`.
 pub struct LogWriter<'a> {
 	overlays: &'a RwLock<LogOverlays>,
 	log: LogChange,
@@ -322,7 +331,9 @@ impl<'a> LogQuery for LogWriter<'a> {
 
 #[derive(Default)]
 pub struct IndexLogOverlay {
-	pub map: HashMap<u64, (u64, IndexChunk)>, // index -> (record_id, entry)
+	// Record id is stored with content so we only remove if no overwrite happen (overwrite means
+	// the record_id is increased).
+	pub map: HashMap<u64, (u64, IndexChunk)>, // index -> (record_id, entry) // [Review] use a RecordId alias?
 }
 
 
@@ -373,6 +384,8 @@ impl Log {
 		let (file2, id2) = Self::open_or_create_log_file(path.as_path())?;
 
 		let mut ids = [(id0.unwrap_or(0), Some(file0)), (id1.unwrap_or(0), Some(file1)), (id2.unwrap_or(0), Some(file2))];
+		// [Review] ??? append is bigger? so probably read then flush then append so get ordered, but
+		// how can it switch place?
 		ids.sort_by_key(|(id, _)|*id);
 		log::debug!(target: "parity-db", "Opened logs ({} {} {})", ids[0].0, ids[1].0, ids[2].0);
 		let reading = ids[0].1.take().unwrap();
@@ -408,6 +421,7 @@ impl Log {
 		let mut buf = [0; 9];
 		file.read_exact(&mut buf)?;
 		file.seek(std::io::SeekFrom::Start(0))?;
+		// [Review] debug_assert!(buf[0] == 1);
 		let id = u64::from_le_bytes(buf[1..].try_into().unwrap());
 		log::debug!(target: "parity-db", "Opened existing log {}, first record_id = {}", path.display(), id);
 
@@ -444,7 +458,7 @@ impl Log {
 		let id = self.next_record_id.fetch_add(1, Ordering::Relaxed);
 		let writer = LogWriter::new(
 			&self.overlays,
-			id
+			id,
 		);
 		writer
 	}

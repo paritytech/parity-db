@@ -64,6 +64,7 @@ impl Column {
 			}
 			return Ok(Some(value));
 		}
+		// [Review] does it make sense to use differnt RwLock for tables and reindex?
 		for r in &self.reindex.read().queue {
 			if let Some((tier, value)) = Self::get_in_index(key, &r, &*tables, log)? {
 				if self.collect_stats {
@@ -145,9 +146,15 @@ impl Column {
 		})
 	}
 
+	// [Review] would it make sense to allow different hash than blake2b.
+	// -> most likely, we only use the 64 first bit and don't really need crypto
+	// resistance, or am I missing something.
 	pub fn hash(&self, key: &[u8]) -> Key {
 		let mut k = Key::default();
 		if self.uniform_keys {
+			// [Review] TODO use Cow to avoid instantiation?.
+			// Bad idea, but using a given buffer could be good: add buffer in self
+			// and reuse it.
 			k.copy_from_slice(&key[0..32]);
 		} else if let Some(salt) = &self.salt {
 			k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &salt[..], &key).as_bytes());
@@ -161,7 +168,9 @@ impl Column {
 		let mut reindexing = VecDeque::new();
 		let mut top = None;
 		let mut stats = ColumnStats::empty();
-		for bits in (START_BITS .. 65).rev() {
+		// [Review] start bits to 64 is not doable, max 54 but 38 seems more ok.
+		// So maybe putting a constant to bound 'n' would be good.
+		for bits in (START_BITS ..= 64).rev() {
 			let id = IndexTableId::new(col, bits);
 			if let Some(table) = IndexTable::open_existing(path, id)? {
 				if top.is_none() {
@@ -184,6 +193,7 @@ impl Column {
 		ValueTable::open(path, id, entry_size)
 	}
 
+	// [REVIEW] Bookmark, next check this reindex process.
 	fn trigger_reindex(
 		tables: parking_lot::RwLockUpgradableReadGuard<Tables>,
 		reindex: parking_lot::RwLockUpgradableReadGuard<Reindex>,

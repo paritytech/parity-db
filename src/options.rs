@@ -33,6 +33,7 @@ pub struct Options {
 	/// guarantees. Off by default.
 	pub sync: bool,
 	/// Collect database statistics. May have effect on performance.
+	/// TODO could be associated const and Option could be a trait impl.
 	pub stats: bool,
 }
 
@@ -48,7 +49,7 @@ pub struct ColumnOptions {
 	pub uniform: bool,
 	/// Value size tiers.
 	pub sizes: [u16; 15],
-	/// Use referece counting for values.
+	/// Use reference counting for values.
 	pub ref_counted: bool,
 }
 
@@ -144,4 +145,3 @@ impl Options {
 		Ok(salt)
 	}
 }
-
