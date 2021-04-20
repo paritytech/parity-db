@@ -26,7 +26,7 @@ use crate::{
 
 const CHUNK_LEN: usize = 512; // bytes
 const CHUNK_ENTRIES: usize = 64;
-const HEADER_SIZE: usize = 512; // [Review] Header and meta ar not really use until middle of the file, could split (445 loc is small, still the indexing logic could be in its own module).
+const HEADER_SIZE: usize = 512; // [Review] Nothing in header??
 const META_SIZE: usize = 16 * 1024; // Contains header and column stats
 const KEY_LEN: usize = 32;
 
@@ -35,12 +35,9 @@ const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
 pub type Key = [u8; KEY_LEN];
 pub type Chunk = [u8; CHUNK_LEN];
 
-// Review: #[repr(transparent)] of any use?
+// [Review]: #[repr(transparent)] of any use?
 pub struct Entry(u64);
 
-/// Entry is BE u64, with last bits containing the value addressing content, and first bits
-/// containing the chunk index (n `index_bits`), remaining bits are containing `key_material`
-/// to allow early key mismatch detection.
 impl Entry {
 	#[inline]
 	fn new(address: Address, key_material: u64, index_bits: u8) -> Entry {
@@ -86,7 +83,7 @@ impl Entry {
 	}
 }
 
-// Review: #[repr(transparent)] of any use?
+// [Review]: #[repr(transparent)] of any use?
 /// Value address.
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub struct Address(u64);
@@ -152,8 +149,7 @@ fn file_size(index_bits: u8) -> u64 {
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub struct TableId(u16);
 
-// [Review] rather redundant with value table id (only index_bits -> size_tier).
-// But seems fine.
+// [Review] similar to TableId, not worth factoring I think.
 impl TableId {
 	pub fn new(col: ColId, index_bits: u8) -> TableId {
 		TableId(((col as u16) << 8) | (index_bits as u16))
@@ -207,16 +203,9 @@ impl IndexTable {
 			Ok(file) => file,
 		};
 
-		// [Review] Should be useless when considering correct size calculation, yet
-		// sending an error when set_len would shrink file would feel a bit safer (even if useless
-		// but would mean that shrinking is not doable).
+		// [Review] Sending an error when set_len would shrink file would feel a bit safer (even if useless
+		// but would mean that shrinking is not doable), even if useless in theory.
 		file.set_len(file_size(id.index_bits()))?;
-		// [Review] I guess we got a lock now, maybe some api over the directory
-		// with lock file mgmt and global files handling or some tricky file
-		// mgmt stuff. But tbh, I am fairly happy to call unsafe here, the only
-		// benefit to have this special db dir/file/mmap central mgmt would be to
-		// centralize these code (did not read value yet but I guess there may be
-		// redundancy (there is in TableId)).
 		let map = unsafe { memmap2::MmapMut::map_mut(&file)? };
 		log::debug!(target: "parity-db", "Opened existing index {}", id);
 		Ok(Some(IndexTable {
@@ -241,9 +230,6 @@ impl IndexTable {
 	}
 
 	// Column stats are stored as first elements into index meta.
-	// [Review] should move to stat and use a 'directory' db as input.
-	// Stat being stored in Meta of Index is not very explicit here.
-	// Also not sure if there is any use of not storing it in its own file.
 	pub fn load_stats(&self) -> ColumnStats {
 		if let Some(map) = &*self.map.read() {
 			ColumnStats::from_slice(&map[HEADER_SIZE .. HEADER_SIZE + stats::TOTAL_SIZE])
@@ -252,7 +238,6 @@ impl IndexTable {
 		}
 	}
 
-	// [Review] should move to stat and use a 'directory' db as input.
 	pub fn write_stats(&self, stats: &ColumnStats) {
 		if let Some(map) = &mut *self.map.write() {
 			let mut slice = &mut map[HEADER_SIZE .. HEADER_SIZE + stats::TOTAL_SIZE];
@@ -275,7 +260,7 @@ impl IndexTable {
 			let entry = Entry::from_u64(u64::from_le_bytes(chunk[i * 8 .. i * 8 + 8].try_into().unwrap()));
 			// [Review] so the entry are not packed: we always need 64 checks, we could
 			// change entry in page so that the first empty entry indicate we can exit the loop.
-			// (but then delete got a bit more costy.
+			// (but then delete got a bit more costy).
 			if !entry.is_empty() && entry.key_material(self.id.index_bits()) == partial_key {
 				return (entry, i);
 			}
@@ -287,7 +272,6 @@ impl IndexTable {
 	pub fn get(&self, key: &Key, sub_index: usize, log: &impl LogQuery) -> (Entry, usize) {
 		log::trace!(target: "parity-db", "{}: Querying {}", self.id, hex(&key));
 		let key = u64::from_be_bytes((key[0..8]).try_into().unwrap()); // 64 is a lot.
-		// [Review] result of `index_bits` could be associated constant, probably useless.
 		let chunk_index = key >> (64 - self.id.index_bits());
 
 		if let Some(entry) = log.with_index(self.id, chunk_index, |chunk| {
@@ -361,8 +345,8 @@ impl IndexTable {
 			if entry.is_empty() {
 				&mut chunk[i * 8 .. i * 8 + 8].copy_from_slice(&new_entry.as_u64().to_le_bytes());
 				log::trace!(target: "parity-db", "{}: Inserted at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
-				// [Review] here loading the whole chunk is must have, do we need to rewrite it in its
-				// entirety though.
+				// [Review] here loading the whole chunk is must have, but after we need to rewrite it in its
+				// entirety though. (using a insert_index_subindex variant instead).
 				log.insert_index(self.id, chunk_index, &chunk);
 				return Ok(PlanOutcome::Written); // [Review] could add an outcome NewPageLog, but no use at this point.
 			}
@@ -377,8 +361,8 @@ impl IndexTable {
 		let chunk_index = key >> (64 - self.id.index_bits());
 
 		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| chunk.clone()) {
-			// [Review]: insert then clone, using &mut over log could run good too
-			// (fn apply_on_log with default chunk as param instead)).
+			// [Review]: same as previous not about just changing an index, we could also
+			// work directly on a mutablo handle over the log.
 			return self.plan_insert_chunk(key, address, &chunk, sub_index, log)
 		}
 
@@ -428,7 +412,6 @@ impl IndexTable {
 		Ok(PlanOutcome::Skipped)
 	}
 
-	// [Review] TODO check if/how log content get removed.
 	// [Review] No mmap flush, so this does not indicate the log can
 	// be cleared, but `end_next` has been called.
 	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
@@ -447,7 +430,9 @@ impl IndexTable {
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
 		// Nasty mutable pointer cast. We do ensure that all chunks that are being written are accessed
 		// through the overlay in other threads.
-		// [Review] is also true for the use of mmap_mut everywhere.
+
+		// [Review] most api uses '&self', seems like we could use &mut some place and remove
+		// some atomics, also not sure why we don't get write lock here.
 		let ptr: *mut u8 = map.as_ptr() as *mut u8;
 		let mut chunk: &mut[u8] = unsafe {
 			let ptr = ptr.offset(offset as isize);
@@ -458,7 +443,6 @@ impl IndexTable {
 		Ok(())
 	}
 
-	// [Review] seems odd: read whole log to check?? TODO check this validat mechanism.
 	pub fn validate_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
 		if index >= self.id.total_entries() {
 			return Err(Error::Corruption("Bad index".into()));

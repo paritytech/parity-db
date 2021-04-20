@@ -152,7 +152,7 @@ impl Column {
 		let mut k = Key::default();
 		if self.uniform_keys {
 			// [Review] TODO use Cow to avoid instantiation?.
-			// Bad idea, but using a given buffer could be good: add buffer in self
+			// Bad idea, but using a inner buffer could be good: add buffer in self
 			// and reuse it.
 			k.copy_from_slice(&key[0..32]);
 		} else if let Some(salt) = &self.salt {
@@ -390,7 +390,7 @@ impl Column {
 					tables.index.enact_plan(record.index, log)?;
 				} else if let Some(table) = reindex.queue.iter().find(|r|r.id == record.table) {
 					// [Review] we write in reindexed table, but it is content from before reindex
-					// so should be fine.
+					// so should fit.
 					table.enact_plan(record.index, log)?;
 				} else {
 					log::warn!(
@@ -473,7 +473,8 @@ impl Column {
 	}
 
 	pub fn reindex(&self, log: &Log) -> Result<(Option<IndexTableId>, Vec<(Key, Address)>)> {
-		// [Review] is next TODO a thing?
+		// [Review] is next TODO still relevant?
+
 		// TODO: handle overlay
 		let tables = self.tables.read();
 		let reindex = self.reindex.read();

@@ -35,14 +35,14 @@
 // straight forward to flush (`fsync`) in the commit_worker.
 //
 // The only gain is from the `commit_worker` perspective where we do not
-// wait of flush.
-//
-// Ok it is useful (if the mmap writing got same guaranty).
+// wait for flush.
+// So it is useful :)
 
 // [Review] commit_worker means that any call to commit does not actually
 // commit data, just queue it in memory. (I did other comments on the
 // three log file system that indicates mmap not being flush was a durability
-// issue, but this is actually the same).
+// issue, but it is not really if we consider that resilting state of
+// a crash is a ok state for a given record_id.
 
 use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::convert::TryInto;
@@ -218,10 +218,10 @@ impl DbInner {
 	}
 
 	/// Commit data to the DB.
-	/// This does NOT indicate that data is persisted (actual
-	/// persistent write is asynchronous).
-	// Commit is simply adds the the data to the queue and to the overlay and
-	// exits as early as possible.
+	/// This does NOT indicate that data is persisted on disk
+	/// (actual persistent write is asynchronous).
+	/// Commit is simply adds the the data to in memory queue and to the overlay and
+	/// exits as early as possible.
 	fn commit<I, K>(&self, tx: I) -> Result<()>
 		where
 			I: IntoIterator<Item=(ColId, K, Option<Value>)>,
@@ -326,7 +326,7 @@ impl DbInner {
 					// Reindex has triggered another reindex.
 					PlanOutcome::NeedReindex => {
 						// [Review] Reindex handled at column level, this is only for
-						// the worker.
+						// the worker condvar release.
 						reindex = true;
 					},
 					_ => {},
@@ -338,13 +338,6 @@ impl DbInner {
 				c.complete_plan(&mut writer)?;
 			}
 			let record_id = writer.record_id();
-			// [Review] at this point change is both in commit overlay and
-			// log writer overlay -> is there any gain from writing
-			// in the log writer overlay and not directly writing the
-			// commit set to the shared log overlay??? Yes the write plan
-			// and complete plan methods got a cost that is different from
-			// the one of log file serilizing.
-			// More that on error we do not commit!!
 			let l = writer.drain();
 
 			let bytes = {
@@ -374,11 +367,6 @@ impl DbInner {
 				self.start_reindex(record_id);
 			}
 
-			// [Review] here we did not flush file, but we did return to the caller
-			// that things are committed.
-			// So the 'Durability' from README can suffer from crash of non flushed
-			// file?
-			// Should we simply do open the append file in write through mode
 			log::debug!(
 				target: "parity-db",
 				"Processed commit {} (record {}), {} ops, {} bytes written",
@@ -562,7 +550,9 @@ impl DbInner {
 			self.log.end_read(cleared, record_id);
 			{
 				// [Review] when validation_mode is true we still process
-				// the queue so I would think this condition is wrong.
+				// the queue. Logic here is that validation mode is not use
+				// from queue but on restart, maybe consider renaming 'validation_mode'
+				// to 'replay_mode'.
 				if !validation_mode {
 					let mut queue = self.log_queue_bytes.lock();
 					*queue -= bytes;
@@ -593,6 +583,10 @@ impl DbInner {
 		// call to start_reindex should be costless here (even if record_id
 		// is not easy to find but putting it to 1 should be enough).
 		log::debug!(target: "parity-db", "Replaying database log...");
+
+		// [Review] we should be able to delete the append log in case of error,
+		// not needed for consistency, same for flush.
+
 		// Process the oldest log first
 		while self.enact_logs(true)? { }
 		// Process intermediate logs
@@ -727,6 +721,9 @@ impl Db {
 			}
 
 			let more_commits = db.process_commits()?;
+			// Warning reindex cannot be concurrently use
+			// and need to be in same thread as commit
+			// processing.
 			let more_reindex = db.process_reindex()?;
 			more_work = more_commits || more_reindex;
 		}

@@ -226,7 +226,7 @@ impl ValueTable {
 		Ok(())
 	}
 
-	// [Review] wondering if Multipart def as associated const could be improvment here.
+	// [Review] wondering if defining Multipart as an associated constant could be improvment here.
 	pub fn for_parts(&self, key: &Key, mut index: u64, log: &impl LogQuery, mut f: impl FnMut(&[u8])) -> Result<bool> {
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 
@@ -416,7 +416,7 @@ impl ValueTable {
 				index,
 				hex(key),
 			);
-			// [Review] buff def out of loop?
+			// [Review] buff def out of loop? probably optimized anyway
 			let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 			let free_space = self.entry_size as usize - 2;
 			let (target_offset, value_len) = if remainder > free_space {

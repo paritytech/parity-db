@@ -58,9 +58,9 @@ pub trait LogQuery {
 #[derive(Default)]
 pub struct LogOverlays {
 	// [Review] considering this bounded by number of column, should we use BTreeMap.
-	/// One log per column.
+	/// One log per column only (except during reindex).
 	index: HashMap<IndexTableId, IndexLogOverlay>,
-	/// One log per column.
+	/// One log per column and value size.
 	value: HashMap<ValueTableId, ValueLogOverlay>,
 }
 
@@ -211,7 +211,7 @@ impl<'a> LogReader<'a> {
 }
 
 pub struct LogChange {
-	// [Review] local: LogOverlays? instead of two following fields.
+	// [Review] local: LogOverlays struct? instead of two following fields.
 	local_index: HashMap<IndexTableId, IndexLogOverlay>,
 	local_values: HashMap<ValueTableId, ValueLogOverlay>,
 	record_id: u64,
@@ -337,8 +337,8 @@ impl<'a> LogQuery for LogWriter<'a> {
 
 #[derive(Default)]
 pub struct IndexLogOverlay {
-	// Record id is stored with content so we only remove if no overwrite happen (overwrite means
-	// the record_id is increased).
+	// Record id is stored with content so we only remove if no overwrite happen
+	// (overwrite only happen if the record_id is increased).
 	pub map: HashMap<u64, (u64, IndexChunk)>, // index -> (record_id, entry) // [Review] use a RecordId alias?
 }
 
@@ -377,7 +377,7 @@ pub struct Log {
 	// Next reading file source, this file can be written as wanted.
 	flushing: Mutex<Flushing>,
 	// [Review] is it redundant with record_id from db queue? or just for assert.
-	// Wouldn't it be easier to pass 'record_id' when doing 'begin_index'.
+	// Wouldn't it be easier to pass 'record_id' as a parameter when doing 'begin_index'.
 	next_record_id: AtomicU64,
 	dirty: AtomicBool,
 	sync: bool,
@@ -396,8 +396,10 @@ impl Log {
 		let (file2, id2) = Self::open_or_create_log_file(path.as_path())?;
 
 		let mut ids = [(id0.unwrap_or(0), Some(file0)), (id1.unwrap_or(0), Some(file1)), (id2.unwrap_or(0), Some(file2))];
-		// [Review] ??? append is bigger? so probably read then flush then append so get ordered, but
-		// how can it switch place?
+
+		// [Review] could truncate all but last the last log (or truncate only if their record_id are incomplete
+		// which validate could say).
+
 		ids.sort_by_key(|(id, _)|*id);
 		log::debug!(target: "parity-db", "Opened logs ({} {} {})", ids[0].0, ids[1].0, ids[2].0);
 		let reading = ids[0].1.take().unwrap();
@@ -468,8 +470,6 @@ impl Log {
 
 	// Get a writer handle.
 	// The writer allows read (`LogQuery`).
-	// [Review] Do we strictly need this read access? actually
-	// seems pretty convenient LogQuery implementation.
 	pub fn begin_record<'a>(&'a self) -> LogWriter<'a> {
 		let id = self.next_record_id.fetch_add(1, Ordering::Relaxed);
 		let writer = LogWriter::new(
@@ -514,7 +514,7 @@ impl Log {
 		// [Review] this can happen because this is record_id from
 		// db queue and db_queue can fail so some id can be skippend.
 		if record_id >= self.next_record_id.load(Ordering::Relaxed) {
-			// [Review] racy.
+			// [Review] racy?
 			self.next_record_id.store(record_id + 1, Ordering::Relaxed);
 		}
 		let mut overlays = self.overlays.write();
@@ -574,12 +574,11 @@ impl Log {
 				read_next = true;
 			}
 
-			// [Review] this clear reading file: but I am not sure we
-			// know that mmap(s) got flushed before doing it.
-			// (I would keep them until flush, but do not know how to
+			// [Review] this clear reading file: but we
+			// do not know that mmap(s) got flushed before doing it.
+			// (I would keep it until flush, but do not know how to
 			// listen to mmap flush).
-			// Guess we need to ensure use of MAP_SYNC MAP_SHARED_VALIDATE.
-			// Is worth a comment (durability relyinig on MAP_SYNC).
+			// Guess we could ensure buy usingf MAP_SYNC MAP_SHARED_VALIDATE.
 			// -> mmap2 is oppening MAP_SHARED so no MAP_SYNC at this point.
 			// But still MAP_SYNC looks a bit frightening, quote from https://lwn.net/Articles/731706/:
 			// `The result is a relatively simple mechanism that will perform far better than the currently available alternative — manually calling fsync() before each write to persistent memory. The potential downside is that any write operation can now create a flurry of I/O as the filesystem flushes out dirty metadata. That can cause the process to block in what was supposed to be a simple memory write, introducing latency that may be unexpected and unwanted.`
@@ -605,7 +604,7 @@ impl Log {
 			// Flush to disk
 			log::debug!(target: "parity-db", "Flush: Flushing to disk");
 			// [Review] so if !self.sync, the flush worker is not use, could be
-			// switch off?
+			// switch off the thread?
 			if self.sync {
 				flushing.file.sync_data()?;
 			}
