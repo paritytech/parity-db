@@ -80,6 +80,7 @@ impl Column {
 	}
 
 	pub fn get_size(&self, key: &Key, log: &RwLock<LogOverlays>) -> Result<Option<u32>> {
+		// [Review] TODO could benefit from using 'size' function of table.rs
 		self.get(key, log).map(|v| v.map(|v| v.len() as u32))
 	}
 

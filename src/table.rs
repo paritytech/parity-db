@@ -25,9 +25,13 @@
 // [SIZE: 2][REFS: 4][KEY: 26][VALUE: SIZE - 30]
 // SIZE: 16-bit value size. Sizes up to 0xfffd are allowed.
 // This includes size of REFS and KEY
-// REF: 32-bit reference counter.
-// KEY: lower 26 bytes of the key.
-// VALUE: SIZE-30  payload bytes.
+// REF: 32-bit reference counter. // [Review] TODO could be skipped when not ref mode, associated
+// const?
+// KEY: lower 26 bytes of the key. // [Review] so we do not have full key, TODO is it key or
+// hash(key)? if hash, I would simply put the 32 byte, then value def would just need to be aligned
+// for a 40 bytes header.
+// VALUE: SIZE-30  payload bytes. // [Review] Guess 30 is the fix size. Or is it entry size, but
+// then it would be entry_size - 32 (KEY_LEN)
 //
 // Partial entry (first part):
 // [MULTIPART: 2][NEXT: 8][REFS: 4][KEY: 26][VALUE]
@@ -54,6 +58,8 @@
 // TOMBSTONE - Deleted entry marker. 0xffff
 // NEXT - 64-bit index of the next deleted entry.
 
+// [Review] for big value, would it be an idea to directly store a file instead of miltiparting.
+// Like using NEXT pointing to 0 (metadata).
 
 use std::convert::TryInto;
 use std::mem::MaybeUninit;
@@ -68,6 +74,7 @@ use crate::{
 
 pub const KEY_LEN: usize = 32;
 const MAX_ENTRY_SIZE: usize = 65533;
+const HEADER_SIZE: usize = 16;
 
 const TOMBSTONE: &[u8] = &[0xff, 0xff];
 const MULTIPART: &[u8] = &[0xff, 0xfe];
@@ -75,8 +82,7 @@ const MULTIPART: &[u8] = &[0xff, 0xfe];
 pub type Key = [u8; KEY_LEN];
 pub type Value = Vec<u8>;
 
-/// One file per column.
-/// [Review] TODO I woul have expect one file per column per size of value (*16 files).
+/// One file per column and size tier.
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub struct TableId(u16);
 
@@ -114,14 +120,15 @@ impl std::fmt::Display for TableId {
 
 pub struct ValueTable {
 	pub id: TableId,
-	// [Review] I would consider this as an associated constant.
+	// [Review] I would consider this as an associated constant, but would need to be define
+	// at compilation, probably not worth it.
 	pub entry_size: u16,
 	file: std::fs::File,
-	capacity: AtomicU64,
-	filled: AtomicU64,
-	last_removed: AtomicU64,
-	dirty_header: AtomicBool,
-	multipart: bool,
+	capacity: AtomicU64, // [Review] not sure why we use atomic here TODO try it without
+	filled: AtomicU64, // [Review] same
+	last_removed: AtomicU64, // [Review] same
+	dirty_header: AtomicBool, // [Review] same
+	multipart: bool, // [Review] this could be associated constant.
 }
 
 #[cfg(target_os = "macos")]
@@ -161,10 +168,10 @@ impl ValueTable {
 		}
 
 		let capacity = file_len / entry_size as u64;
-		let mut header: [u8; 16] = Default::default();
+		let mut header: [u8; HEADER_SIZE] = Default::default();
 		file.read_exact(&mut header)?;
 		let last_removed = u64::from_le_bytes(header[0..8].try_into().unwrap());
-		let mut filled = u64::from_le_bytes(header[8..16].try_into().unwrap());
+		let mut filled = u64::from_le_bytes(header[8..HEADER_SIZE].try_into().unwrap());
 		if filled == 0 {
 			filled = 1;
 		}
@@ -219,7 +226,8 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8])>(&self, key: &Key, mut index: u64, log: &Q, mut f: F) -> Result<bool> {
+	// [Review] wondering if Multipart def as associated const could be improvment here.
+	pub fn for_parts(&self, key: &Key, mut index: u64, log: &impl LogQuery, mut f: impl FnMut(&[u8])) -> Result<bool> {
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 
 		let mut part = 0;
@@ -250,6 +258,9 @@ impl ValueTable {
 			};
 
 			if part == 0 {
+				// [Review] Skipping 6 first byte does not make much sense to me.
+				// It is used to build key material, but part of the key material
+				// is overwrite, so we don't fully compare the 32 bytes.
 				if key[6..] != buf[content_offset + 4..content_offset + 30] {
 					log::debug!(
 						target: "parity-db",
@@ -274,7 +285,7 @@ impl ValueTable {
 		Ok(true)
 	}
 
-	pub fn get<Q: LogQuery>(&self, key: &Key, index: u64, log: &Q) -> Result<Option<Value>> {
+	pub fn get(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<Value>> {
 		let mut result = Vec::new();
 		if self.for_parts(key, index, log, |buf| result.extend_from_slice(buf))? {
 			return Ok(Some(result));
@@ -282,7 +293,7 @@ impl ValueTable {
 		Ok(None)
 	}
 
-	pub fn size<Q: LogQuery>(&self, key: &Key, index: u64, log: &Q) -> Result<Option<u32>> {
+	pub fn size(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<u32>> {
 		let mut result = 0;
 		if self.for_parts(key, index, log, |buf| result += buf.len() as u32)? {
 			return Ok(Some(result));
@@ -297,7 +308,7 @@ impl ValueTable {
 		})
 	}
 
-	pub fn partial_key_at<Q: LogQuery>(&self, index: u64, log: &Q) -> Result<Option<Key>> {
+	pub fn partial_key_at(&self, index: u64, log: &impl LogQuery) -> Result<Option<Key>> {
 		let mut buf = [0u8; 40];
 		let mut result = Key::default();
 		let buf = if log.value(self.id, index, &mut buf) {
@@ -405,6 +416,7 @@ impl ValueTable {
 				index,
 				hex(key),
 			);
+			// [Review] buff def out of loop?
 			let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 			let free_space = self.entry_size as usize - 2;
 			let (target_offset, value_len) = if remainder > free_space {
@@ -419,6 +431,7 @@ impl ValueTable {
 				(2, remainder)
 			};
 			if offset == 0 {
+				// Ref count init.
 				buf[target_offset..target_offset + 4].copy_from_slice(&1u32.to_le_bytes());
 				buf[target_offset + 4..target_offset + 30].copy_from_slice(&key[6..]);
 				buf[target_offset + 30..target_offset + value_len]
@@ -499,6 +512,7 @@ impl ValueTable {
 		Ok(())
 	}
 
+	// return true if entry should be removed.
 	pub fn write_dec_ref(&self, index: u64, log: &mut LogWriter) -> Result<bool> {
 		if self.change_ref(index, -1, log)? {
 			return Ok(true);
@@ -507,7 +521,7 @@ impl ValueTable {
 		Ok(false)
 	}
 
-	pub fn change_ref(&self, index: u64, delta: i32, log: &mut LogWriter) -> Result<bool> {
+	fn change_ref(&self, index: u64, delta: i32, log: &mut LogWriter) -> Result<bool> {
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 		let buf = if log.value(self.id, index, &mut buf) {
 			&mut buf
@@ -543,7 +557,7 @@ impl ValueTable {
 			self.grow()?;
 		}
 		if index == 0 {
-			let mut header = [0u8; 16];
+			let mut header = [0u8; HEADER_SIZE];
 			log.read(&mut header)?;
 			self.write_at(&header, 0)?;
 			return Ok(());
@@ -555,15 +569,14 @@ impl ValueTable {
 			log.read(&mut buf[2..10])?;
 			self.write_at(&buf[0..10], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted tombstone in slot {}", self.id, index);
-		}
-		else if &buf[0..2] == MULTIPART {
-				let entry_size = self.entry_size as usize;
-				log.read(&mut buf[2..entry_size])?;
-				self.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
-				log::trace!(target: "parity-db", "{}: Enacted multipart in slot {}", self.id, index);
+		} else if &buf[0..2] == MULTIPART {
+			let entry_size = self.entry_size as usize;
+			log.read(&mut buf[2..entry_size])?;
+			self.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
+			log::trace!(target: "parity-db", "{}: Enacted multipart in slot {}", self.id, index);
 		} else {
 			let len: u16 = u16::from_le_bytes(buf[0..2].try_into().unwrap());
-			log.read(&mut buf[2..2+len as usize])?;
+			log.read(&mut buf[2..2 + len as usize])?;
 			self.write_at(&buf[0..(2 + len as usize)], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted {}: {}, {} bytes", self.id, index, hex(&buf[6..32]), len);
 		}
@@ -572,7 +585,7 @@ impl ValueTable {
 
 	pub fn validate_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
 		if index == 0 {
-			let mut header = [0u8; 16];
+			let mut header = [0u8; HEADER_SIZE];
 			log.read(&mut header)?;
 			// TODO: sanity check last_removed and filled
 			return Ok(());
@@ -597,10 +610,10 @@ impl ValueTable {
 	}
 
 	pub fn refresh_metadata(&self) -> Result<()> {
-		let mut header: [u8; 16] = Default::default();
+		let mut header: [u8; HEADER_SIZE] = Default::default();
 		self.read_at(&mut header, 0)?;
 		let last_removed = u64::from_le_bytes(header[0..8].try_into().unwrap());
-		let mut filled = u64::from_le_bytes(header[8..16].try_into().unwrap());
+		let mut filled = u64::from_le_bytes(header[8..HEADER_SIZE].try_into().unwrap());
 		if filled == 0 {
 			filled = 1;
 		}
@@ -609,14 +622,15 @@ impl ValueTable {
 		Ok(())
 	}
 
+	// metadata written as any entry in log.
 	pub fn complete_plan(&self, log: &mut LogWriter) -> Result<()> {
 		if let Ok(true) = self.dirty_header.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed) {
 			// last_removed or filled pointers were modified. Add them to the log
-			let mut buf = [0u8; 16];
+			let mut buf = [0u8; HEADER_SIZE];
 			let last_removed = self.last_removed.load(Ordering::Relaxed);
 			let filled = self.filled.load(Ordering::Relaxed);
 			buf[0..8].copy_from_slice(&last_removed.to_le_bytes());
-			buf[8..16].copy_from_slice(&filled.to_le_bytes());
+			buf[8..HEADER_SIZE].copy_from_slice(&filled.to_le_bytes());
 			log.insert_value(self.id, 0, buf.to_vec());
 		}
 		Ok(())
