@@ -148,6 +148,11 @@ impl Column {
 	// [Review] would it make sense to allow different hash than blake2b.
 	// -> most likely, we only use the 64 first bit and don't really need crypto
 	// resistance, or am I missing something.
+	// Actually this would be true if we did store the full key (but we store the
+	// hash).
+	// Note storing full key should probably be done by writing it into value
+	// (then there is the issue of having weak hash and a collision: requires
+	// to check the stored value or have an api that returns multiple matches).
 	pub fn hash(&self, key: &[u8]) -> Key {
 		let mut k = Key::default();
 		if self.uniform_keys {
