@@ -27,6 +27,12 @@ use crate::{
 };
 
 pub struct InsertIndexAction {
+	// [Review] LogAction  and insert action are written
+	// from commit transacion (a record_id), all in memory.
+	// We could also order the content by column
+	// and use a start_column and end_column tag into a
+	// record instead: would be more compact.
+	// Would need that ChangeSet would need a btreeset.
 	pub table: IndexTableId,
 	pub index: u64,
 }
@@ -370,6 +376,8 @@ pub struct Log {
 	done_reading_cv: Condvar,
 	// Next reading file source, this file can be written as wanted.
 	flushing: Mutex<Flushing>,
+	// [Review] is it redundant with record_id from db queue? or just for assert.
+	// Wouldn't it be easier to pass 'record_id' when doing 'begin_index'.
 	next_record_id: AtomicU64,
 	dirty: AtomicBool,
 	sync: bool,
@@ -503,11 +511,10 @@ impl Log {
 	// Read from queue log enacted to db successfully,
 	// we therefore can remove them from the shared overlay.
 	pub fn end_read(&self, cleared: Cleared, record_id: u64) {
-		// [Review] is it possible (we fetch add previously and this
-		// id went through all the queue process)?
-		// (should debug_assert be enough?).
+		// [Review] this can happen because this is record_id from
+		// db queue and db_queue can fail so some id can be skippend.
 		if record_id >= self.next_record_id.load(Ordering::Relaxed) {
-			// [Review] seems racy?
+			// [Review] racy.
 			self.next_record_id.store(record_id + 1, Ordering::Relaxed);
 		}
 		let mut overlays = self.overlays.write();
@@ -574,6 +581,8 @@ impl Log {
 			// Guess we need to ensure use of MAP_SYNC MAP_SHARED_VALIDATE.
 			// Is worth a comment (durability relyinig on MAP_SYNC).
 			// -> mmap2 is oppening MAP_SHARED so no MAP_SYNC at this point.
+			// But still MAP_SYNC looks a bit frightening, quote from https://lwn.net/Articles/731706/:
+			// `The result is a relatively simple mechanism that will perform far better than the currently available alternative — manually calling fsync() before each write to persistent memory. The potential downside is that any write operation can now create a flurry of I/O as the filesystem flushes out dirty metadata. That can cause the process to block in what was supposed to be a simple memory write, introducing latency that may be unexpected and unwanted.`
 			flushing.file.set_len(0)?;
 			flushing.file.seek(std::io::SeekFrom::Start(0))?;
 			flushing.empty = true;
@@ -584,6 +593,7 @@ impl Log {
 			// Lock writer and reset it
 			let mut appending = self.appending.write();
 			if !appending.empty {
+				// get_mut is flushing the appending buffer.
 				std::mem::swap(appending.file.get_mut(), &mut flushing.file);
 				flush = true;
 				log::debug!(target: "parity-db", "Flush: Activated log writer");

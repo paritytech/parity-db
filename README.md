@@ -14,6 +14,9 @@ I am not sure if the choice here is related to the page size or the number of en
 
 - TODO a word on salt?? -> in col used for hash
 
+
+Question: not sure about the use case of 'validate'.
+
 # A database for the blockchain.
 
 ## **WARNING: PartyDB is still in development and should not be used in production. Use at your own risk.**
@@ -37,6 +40,25 @@ Transaction are applied atomically. Queries can't retrieve partially committed d
 
 ### Durability
 Database should be restored to consistent state if IO is interrupted at any point. 
+
+#### Review
+
+I firstly misunderstood 'Durability' (IO failing not breaking db) for some consitency (call to commit means data is written in db).
+So there is many irrelevant notes in code.
+Call to commit does not actuall mean data is written.
+- commit queue in db.rs does not seem compatible with this
+- mmap not having flush guarantee does not either.
+- flush worker also defers log flushing
+Ok
+So the db requires graceful shutdown.
+If it does not happen, state can be incorrect.
+
+Ok all is fine as long as all persistence is in a single db, but still would should be strongly underline.
+-> makes using a single db (no rocksdb in pkdot) rather prioritary.
+(IIUC, behave like rocksdb with 'DBOptions::manual_wal_flush', which can be a gain for rocksdb too (but would require some periodic similar flush call).
+
+The data is in the system at the moment it got flushed in on of the log: append or flush one.
+Corresponding to a 'record_id' atomicity (one call to commit), seems ok.
 
 # Implementation
 
@@ -101,6 +123,8 @@ When a collision can't be resolved, a new table is created with twice the capaci
 TODO duplicate tables, they got different names depending on accesses so it is ok, TODO does it lock write? prev comment indicate not but double querying: insert in new.
 TODO check if there may be concurrency issue with the background process??? (not if write is done on previous table: seems ~??).
 
+Question: I did not read all reindex yet, but I wonder about durability, shouldn't reindex be a LogAction? TODO del this question, stupid reindex is happening when enacting log which is last of actions.
+
 ## Transaction pipeline
 On `commit` all data is first moved to an in-memory overlay, making it available for queries. The commit is then added to the commit queue. This allows for `commit` function to return as early as possible.
 Commit queue is processed by a commit worker that collects data that would be modified in the tables and writes it to the available log file. All modified index and value table pages are placed in the in-memory overlay. The file is then handled to another background thread that flushes it to disk and adds it to the finalization queue.
@@ -127,10 +151,13 @@ TODO unclear why clear value not at same pace -> that is probably when we read a
 
 
 TODO seems interesting to indicate the transaction buffer:
+- zero is the db commit overlay
 - first the LogWriter overlay, local to the write only thread (not shared).
 - second the shared overlay, it is a buffer to allow queueing changes.
 - third is the file queuing change (redundant with shared overlay)
 - last is the db tables/files.
+
+TODO: think if merging some overlay is doable.
 
 So query goes through shared overlay and file, and if write is enable, query also goes through writer.
 

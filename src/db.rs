@@ -37,7 +37,12 @@
 // The only gain is from the `commit_worker` perspective where we do not
 // wait of flush.
 //
-// Ok it is useful.
+// Ok it is useful (if the mmap writing got same guaranty).
+
+// [Review] commit_worker means that any call to commit does not actually
+// commit data, just queue it in memory. (I did other comments on the
+// three log file system that indicates mmap not being flush was a durability
+// issue, but this is actually the same).
 
 use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::convert::TryInto;
@@ -212,6 +217,9 @@ impl DbInner {
 		self.columns[col as usize].get_size(&key, log)
 	}
 
+	/// Commit data to the DB.
+	/// This does NOT indicate that data is persisted (actual
+	/// persistent write is asynchronous).
 	// Commit is simply adds the the data to the queue and to the overlay and
 	// exits as early as possible.
 	fn commit<I, K>(&self, tx: I) -> Result<()>
@@ -269,6 +277,7 @@ impl DbInner {
 		Ok(())
 	}
 
+	// Return false if queue is empty.
 	fn process_commits(&self) -> Result<bool> {
 		{
 			// Wait if the queue is too big.
@@ -316,6 +325,8 @@ impl DbInner {
 				match self.columns[*c as usize].write_plan(key, value, &mut writer)? {
 					// Reindex has triggered another reindex.
 					PlanOutcome::NeedReindex => {
+						// [Review] Reindex handled at column level, this is only for
+						// the worker.
 						reindex = true;
 					},
 					_ => {},
@@ -327,11 +338,20 @@ impl DbInner {
 				c.complete_plan(&mut writer)?;
 			}
 			let record_id = writer.record_id();
+			// [Review] at this point change is both in commit overlay and
+			// log writer overlay -> is there any gain from writing
+			// in the log writer overlay and not directly writing the
+			// commit set to the shared log overlay??? Yes the write plan
+			// and complete plan methods got a cost that is different from
+			// the one of log file serilizing.
+			// More that on error we do not commit!!
 			let l = writer.drain();
 
 			let bytes = {
 				let mut logged_bytes = self.log_queue_bytes.lock();
 				let bytes = self.log.end_record(l)?;
+				// [Review] at this point change is both in commit overlay and
+				// log overlay
 				*logged_bytes += bytes;
 				self.signal_flush_worker();
 				bytes
@@ -377,8 +397,10 @@ impl DbInner {
 		self.next_reindex.store(record_id, Ordering::SeqCst);
 	}
 
+	// Return true if remaining work to process, or shall wait.
 	fn process_reindex(&self) -> Result<bool> {
 		let next_reindex = self.next_reindex.load(Ordering::SeqCst);
+		// Empty or not ready, we shall wait.
 		if next_reindex == 0 || next_reindex > self.last_enacted.load(Ordering::SeqCst) {
 			return Ok(false)
 		}
@@ -402,6 +424,8 @@ impl DbInner {
 					}
 				}
 				if let Some(table) = drop_index {
+					// [Review] is there a chance we drop old index but the new one is not flushed?
+					// Looks fine as this is using same column primitive as enact.
 					writer.drop_table(table);
 				}
 				let record_id = writer.record_id();
@@ -451,6 +475,9 @@ impl DbInner {
 						match reader.next()? {
 							LogAction::BeginRecord(_) => {
 								log::debug!(target: "parity-db", "Unexpected log header");
+								// [Review] on hall those validation error handling, 
+								// should we just crash the application. I mean
+								// is it ok to clear log silently?
 								std::mem::drop(reader);
 								self.log.clear_logs()?;
 								return Ok(false);
@@ -482,6 +509,7 @@ impl DbInner {
 						}
 					}
 					reader.reset()?;
+					// [Review] can assert it is a BeginRecored (but pretty useless).
 					reader.next()?;
 				}
 				loop {
@@ -533,6 +561,8 @@ impl DbInner {
 		if let Some((record_id, cleared, bytes)) = cleared {
 			self.log.end_read(cleared, record_id);
 			{
+				// [Review] when validation_mode is true we still process
+				// the queue so I would think this condition is wrong.
 				if !validation_mode {
 					let mut queue = self.log_queue_bytes.lock();
 					*queue -= bytes;
@@ -557,6 +587,11 @@ impl DbInner {
 	}
 
 	fn replay_all_logs(&self) -> Result<()> {
+		// [Review] should we also replay reindex first?
+		// ReIndex would be here in column from reading the file system,
+		// but the reindex worker may be stuck on the condvar?
+		// call to start_reindex should be costless here (even if record_id
+		// is not easy to find but putting it to 1 should be enough).
 		log::debug!(target: "parity-db", "Replaying database log...");
 		// Process the oldest log first
 		while self.enact_logs(true)? { }
@@ -724,4 +759,3 @@ impl Drop for Db {
 		self.commit_thread.take().map(|t| t.join());
 	}
 }
-

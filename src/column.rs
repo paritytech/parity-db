@@ -92,8 +92,6 @@ impl Column {
 					return Ok(Some((size_tier as u8, value)));
 				}
 				None =>  {
-					// [Review] probing: what happen if sub_index > 255 then next key index in theory (or is is not
-					// possible: increase nb_bit, 2x amplification...).
 					let (next_entry, next_index) = index.get(key, sub_index + 1, log);
 					entry = next_entry;
 					sub_index = next_index;
@@ -169,7 +167,8 @@ impl Column {
 		let mut top = None;
 		let mut stats = ColumnStats::empty();
 		// [Review] start bits to 64 is not doable, max 54 but 38 seems more ok.
-		// So maybe putting a constant to bound 'n' would be good.
+		// Probably not worth the ccheck.
+		// But putting a constant to bound 'n' would be good.
 		for bits in (START_BITS ..= 64).rev() {
 			let id = IndexTableId::new(col, bits);
 			if let Some(table) = IndexTable::open_existing(path, id)? {
@@ -193,7 +192,6 @@ impl Column {
 		ValueTable::open(path, id, entry_size)
 	}
 
-	// [REVIEW] Bookmark, next check this reindex process.
 	fn trigger_reindex(
 		tables: parking_lot::RwLockUpgradableReadGuard<Tables>,
 		reindex: parking_lot::RwLockUpgradableReadGuard<Reindex>,
@@ -216,6 +214,7 @@ impl Column {
 		reindex.queue.push_back(old_table);
 	}
 
+	// [Review] could use key as slice with only asumption size allow extraction the index.
 	pub fn write_index_plan(&self, key: &Key, address: Address, log: &mut LogWriter) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
@@ -249,6 +248,7 @@ impl Column {
 				return Ok(Some((&index, sub_index, existing_tier, existing_address)));
 			}
 
+			// probing
 			let (next_entry, next_index) = index.get(key, sub_index + 1, log);
 			existing_entry = next_entry;
 			sub_index = next_index;
@@ -279,7 +279,7 @@ impl Column {
 		//TODO: return sub-chunk position in index.get
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
-		let existing = Self::search_all_indexes(key, &*tables, &*reindex, log)?;
+		let existing_index = Self::search_all_indexes(key, &*tables, &*reindex, log)?;
 		if let &Some(ref val) = value {
 			let target_tier = tables.value.iter().position(|t| val.len() <= t.value_size() as usize);
 			let target_tier = match target_tier {
@@ -290,18 +290,25 @@ impl Column {
 				}
 			};
 
-			if let Some((table, sub_index, existing_tier, existing_address)) = existing {
+			if let Some((table, sub_index, existing_tier, existing_address)) = existing_index {
 				let existing_tier = existing_tier as usize;
 				if self.collect_stats {
+					// [Review] seems rather costy for the unsized value. Could consider storing size for
+					// those multipart value.
 					let cur_size = tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0);
 					self.stats.replace_val(cur_size, val.len() as u32);
 				}
 				if self.ref_counted {
+					// [Review] no check value is equal: means ref_count only works when preimage is true?
+					// should we 'debug_assert!(target_tier == existing_tier);'?
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.index.id, hex(key));
 					tables.value[target_tier].write_inc_ref(existing_address.offset(), log)?;
 					return Ok(PlanOutcome::Written);
 				}
 				if self.preimage {
+					// [Review] so from previous comment maybe ref_counted means implicitely preimage, but
+					// is not compatible with preimage mode?
+
 					// Replace is not supported
 					return Ok(PlanOutcome::Skipped);
 				}
@@ -326,6 +333,8 @@ impl Column {
 					PlanOutcome::NeedReindex => {
 						log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
 						Self::trigger_reindex(tables, reindex, self.path.as_path());
+						// [Review] Here we will call write_insert_plan a second time which seems fine, but
+						// could be skipped by just calling again tables.index.write_insert_plan?
 						self.write_plan(key, value, log)?;
 						return Ok(PlanOutcome::NeedReindex);
 					}
@@ -338,7 +347,7 @@ impl Column {
 				}
 			}
 		} else {
-			if let Some((table, sub_index, existing_tier, existing_address)) = existing {
+			if let Some((table, sub_index, existing_tier, existing_address)) = existing_index {
 				// Deletion
 				let existing_tier = existing_tier as usize;
 				let cur_size = if self.collect_stats {
@@ -379,9 +388,10 @@ impl Column {
 				if tables.index.id == record.table {
 					tables.index.enact_plan(record.index, log)?;
 				} else if let Some(table) = reindex.queue.iter().find(|r|r.id == record.table) {
+					// [Review] we write in reindexed table, but it is content from before reindex
+					// so should be fine.
 					table.enact_plan(record.index, log)?;
-				}
-				else {
+				} else {
 					log::warn!(
 						target: "parity-db",
 						"Missing table {}",
@@ -407,10 +417,18 @@ impl Column {
 					tables.index.validate_plan(record.index, log)?;
 				} else if let Some(table) = reindex.queue.iter().find(|r|r.id == record.table) {
 					table.validate_plan(record.index, log)?;
-				}
-				else {
+				} else {
+					// [Review] could this case be handle by triggering reindex in 'replay_all_logs',
+					// or is it specific to validate?
+
 					// Re-launch previously started reindex
 					// TODO: add explicit log records for reindexing events.
+
+					// [Review] I did think of writing it in log, but then conclude it would be wrong
+					// because reindex is triggered after enact_log. (so would need specific log).
+					// Would maintaining a persistence of 'index_bits' be enough (so we restart reindex at start)
+					// when opening index tables.
+
 					log::warn!(
 						target: "parity-db",
 						"Missing table {}, starting reindex",
@@ -454,6 +472,7 @@ impl Column {
 	}
 
 	pub fn reindex(&self, log: &Log) -> Result<(Option<IndexTableId>, Vec<(Key, Address)>)> {
+		// [Review] is next TODO a thing?
 		// TODO: handle overlay
 		let tables = self.tables.read();
 		let reindex = self.reindex.read();
@@ -475,11 +494,16 @@ impl Column {
 						if entry.is_empty() {
 							continue;
 						}
+						// [Review] TODO move folowing index key manipulation to index.rs as a function.
+						// (have things close to extract index from key logic).
+
 						// Reconstruct as much of the original key as possible.
 						let partial_key = entry.key_material(source.id.index_bits());
 						let k = 64 - crate::index::Entry::address_bits(source.id.index_bits());
 						let index_key = (source_index << 64 - source.id.index_bits()) |
 							(partial_key << (64 - k - source.id.index_bits()));
+						// [Review] could probably just have slice of 8 byte with slight changes in api.
+						// The change does not really look worth it (only for reindex).
 						let mut key = Key::default();
 						// restore 16 high bits
 						&mut key[0..8].copy_from_slice(&index_key.to_be_bytes());
@@ -506,7 +530,7 @@ impl Column {
 		if reindex.queue.front_mut().map_or(false, |index| index.id == id) {
 			let table = reindex.queue.pop_front();
 			reindex.progress.store(0, Ordering::Relaxed);
-			table.unwrap().drop_file()?;
+			table.expect("front_mut prior check.").drop_file()?;
 		} else {
 			log::warn!(target: "parity-db", "Dropping invalid index {}", id);
 			return Ok(());
@@ -515,4 +539,3 @@ impl Column {
 		Ok(())
 	}
 }
-
