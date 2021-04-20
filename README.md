@@ -134,6 +134,9 @@ TODO seems interesting to indicate the transaction buffer:
 
 So query goes through shared overlay and file, and if write is enable, query also goes through writer.
 
+Question: I did not imediatly get the purpose of the three files. I am still wondering why we do not use the mmap. Is issue that mmap does not work in case of system crash?
+Actually would not make sense as the `write_plan` `complete_plan` do not seems to force flush (so the mmap support crash), so the point is probably performance?
+
 # Potential issues
 * Memory mapped IO won't be able to support 32-bit systems once the index grows to 2GB.
 * Size amplification. Index grow up to about 50% capacity before rebalance is triggered. Which means about 50% of allocated space is actually used for occupied index entries. Additionally, each value table entry is only partially filled with actual data.

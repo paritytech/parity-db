@@ -30,6 +30,15 @@
 /// Each background worker is signalled with a conditional variable once
 /// there is some work to be done.
 
+// [Review] I am not sure of the use of the `flush_worker`: 
+// it is waiting of `Read` to be empty, so wouldn't it be more
+// straight forward to flush (`fsync`) in the commit_worker.
+//
+// The only gain is from the `commit_worker` perspective where we do not
+// wait of flush.
+//
+// Ok it is useful.
+
 use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::convert::TryInto;
 use std::collections::{HashMap, VecDeque};
@@ -345,6 +354,11 @@ impl DbInner {
 				self.start_reindex(record_id);
 			}
 
+			// [Review] here we did not flush file, but we did return to the caller
+			// that things are committed.
+			// So the 'Durability' from README can suffer from crash of non flushed
+			// file?
+			// Should we simply do open the append file in write through mode
 			log::debug!(
 				target: "parity-db",
 				"Processed commit {} (record {}), {} ops, {} bytes written",

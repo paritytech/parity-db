@@ -361,10 +361,14 @@ enum ReadingState {
 
 pub struct Log {
 	overlays: RwLock<LogOverlays>,
+	// Queue destination for change when `LogWriter` got committed
+	// to shared overlay.
 	appending: RwLock<Appending>,
+	// Reading file, source of queued change 
 	reading: RwLock<std::io::BufReader<std::fs::File>>,
 	reading_state: Mutex<ReadingState>,
 	done_reading_cv: Condvar,
+	// Next reading file source, this file can be written as wanted.
 	flushing: Mutex<Flushing>,
 	next_record_id: AtomicU64,
 	dirty: AtomicBool,
@@ -454,6 +458,10 @@ impl Log {
 		Ok(())
 	}
 
+	// Get a writer handle.
+	// The writer allows read (`LogQuery`).
+	// [Review] Do we strictly need this read access? actually
+	// seems pretty convenient LogQuery implementation.
 	pub fn begin_record<'a>(&'a self) -> LogWriter<'a> {
 		let id = self.next_record_id.fetch_add(1, Ordering::Relaxed);
 		let writer = LogWriter::new(
@@ -463,6 +471,7 @@ impl Log {
 		writer
 	}
 
+	// Commit records into the log queue and the shared overlay.
 	pub fn end_record(&self, log: LogChange) -> Result<u64> {
 		assert!(log.record_id + 1 == self.next_record_id.load(Ordering::Relaxed));
 		let record_id = log.record_id;
@@ -491,8 +500,14 @@ impl Log {
 		Ok(bytes)
 	}
 
+	// Read from queue log enacted to db successfully,
+	// we therefore can remove them from the shared overlay.
 	pub fn end_read(&self, cleared: Cleared, record_id: u64) {
+		// [Review] is it possible (we fetch add previously and this
+		// id went through all the queue process)?
+		// (should debug_assert be enough?).
 		if record_id >= self.next_record_id.load(Ordering::Relaxed) {
+			// [Review] seems racy?
 			self.next_record_id.store(record_id + 1, Ordering::Relaxed);
 		}
 		let mut overlays = self.overlays.write();
@@ -524,6 +539,10 @@ impl Log {
 		overlays.index.retain(|_, overlay| !overlay.map.is_empty());
 	}
 
+	// Flush a record to queue.
+	// Return true if another flush is needed and another true
+	// if we should call `read_next` (flush file did replace read
+	// file).
 	pub fn flush_one(&self) -> Result<(bool, bool)> {
 		// Wait for the reader to finish reading
 		let mut flushing = self.flushing.lock();
@@ -548,6 +567,13 @@ impl Log {
 				read_next = true;
 			}
 
+			// [Review] this clear reading file: but I am not sure we
+			// know that mmap(s) got flushed before doing it.
+			// (I would keep them until flush, but do not know how to
+			// listen to mmap flush).
+			// Guess we need to ensure use of MAP_SYNC MAP_SHARED_VALIDATE.
+			// Is worth a comment (durability relyinig on MAP_SYNC).
+			// -> mmap2 is oppening MAP_SHARED so no MAP_SYNC at this point.
 			flushing.file.set_len(0)?;
 			flushing.file.seek(std::io::SeekFrom::Start(0))?;
 			flushing.empty = true;
@@ -568,6 +594,8 @@ impl Log {
 		if flush {
 			// Flush to disk
 			log::debug!(target: "parity-db", "Flush: Flushing to disk");
+			// [Review] so if !self.sync, the flush worker is not use, could be
+			// switch off?
 			if self.sync {
 				flushing.file.sync_data()?;
 			}
@@ -578,6 +606,7 @@ impl Log {
 		Ok((!flushing.empty, read_next))
 	}
 
+	// Get a reader over current read file.
 	pub fn read_next<'a>(&'a self, validate: bool) -> Result<Option<LogReader<'a>>> {
 		let mut reading_state = self.reading_state.lock();
 		if *reading_state != ReadingState::Reading {

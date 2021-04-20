@@ -429,6 +429,8 @@ impl IndexTable {
 	}
 
 	// [Review] TODO check if/how log content get removed.
+	// [Review] No mmap flush, so this does not indicate the log can
+	// be cleared, but `end_next` has been called.
 	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
 		let mut map = self.map.upgradable_read();
 		if map.is_none() {
