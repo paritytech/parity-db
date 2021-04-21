@@ -422,10 +422,10 @@ impl ValueTable {
 					.copy_from_slice(&value[offset..offset + value_len - 30]);
 				offset += value_len - 30;
 			} else {
-				buf[target_offset..target_offset+value_len].copy_from_slice(&value[offset..offset+value_len]);
+				buf[target_offset..target_offset + value_len].copy_from_slice(&value[offset..offset + value_len]);
 				offset += value_len;
 			}
-			log.insert_value(self.id, index, buf[0..target_offset+value_len].to_vec());
+			log.insert_value(self.id, index, buf[0..target_offset + value_len].to_vec());
 			remainder -= value_len;
 			index = next_index;
 			if remainder == 0 {
