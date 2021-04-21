@@ -47,3 +47,10 @@ impl From<std::io::Error> for Error {
 		Error::Io(e)
 	}
 }
+
+impl From<std::io::ErrorKind> for Error {
+	fn from(e: std::io::ErrorKind) -> Self {
+		let e: std::io::Error = e.into();
+		e.into()
+	}
+}

@@ -50,19 +50,23 @@ pub struct ColumnOptions {
 	pub sizes: [u16; 15],
 	/// Use referece counting for values.
 	pub ref_counted: bool,
+	/// Compression to use for this column.
+	pub compression: crate::compress::CompressType,
 }
 
 impl ColumnOptions {
 	fn as_string(&self) -> String {
-		format!("preimage: {}, uniform: {}, refc: {}, sizes: [{}]",
+		format!("preimage: {}, uniform: {}, refc: {}, compression: {}, sizes: [{}]",
 			self.preimage,
 			self.uniform,
 			self.ref_counted,
+			self.compression as u8,
 			self.sizes.iter().fold(String::new(), |mut r, s| {
 				if !r.is_empty() {
 					r.push_str(", ");
 				}
-				r.push_str(&s.to_string()); r
+				r.push_str(&s.to_string());
+				r
 			})
 		)
 	}
@@ -74,6 +78,7 @@ impl Default for ColumnOptions {
 			preimage: false,
 			uniform: false,
 			ref_counted: false,
+			compression: crate::compress::CompressType::NoCompression,
 			sizes: [96, 128, 192, 256, 320, 512, 768, 1024, 1536, 2048, 3072, 4096, 8192, 16384, 32768],
 		}
 	}
@@ -90,9 +95,15 @@ impl Options {
 	}
 
 	pub fn write_metadata(&self, path: &std::path::Path, salt: &Salt) -> Result<()> {
+		self.write_metadata_old(path, Some(salt))
+	}
+
+	pub(crate) fn write_metadata_old(&self, path: &std::path::Path, salt: Option<&Salt>) -> Result<()> {
 		let mut file = std::fs::File::create(path)?;
 		writeln!(file, "version={}", CURRENT_VERSION)?;
-		writeln!(file, "salt={}", hex::encode(salt))?;
+		if let Some(salt) = salt {
+			writeln!(file, "salt={}", hex::encode(salt))?;
+		}
 		for i in 0..self.columns.len() {
 			writeln!(file, "col{}={}", i, self.columns[i].as_string())?;
 		}

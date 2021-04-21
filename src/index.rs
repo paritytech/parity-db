@@ -182,11 +182,9 @@ impl std::fmt::Display for TableId {
 }
 
 impl IndexTable {
-	pub fn open_existing(path: &std::path::Path, id: TableId) -> Result<Option<IndexTable>> {
-		let mut path: std::path::PathBuf = path.into();
-		path.push(id.file_name());
 
-		let file = match std::fs::OpenOptions::new().read(true).write(true).open(path.as_path()) {
+	fn open_mmap(path: &std::path::Path, id: &TableId) -> Result<Option<memmap2::MmapMut>> {
+		let file = match std::fs::OpenOptions::new().read(true).write(true).open(path) {
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
 				return Ok(None);
 			}
@@ -194,13 +192,22 @@ impl IndexTable {
 			Ok(file) => file,
 		};
 
+		//TODO: check for potential overflows on 32-bit platforms
 		file.set_len(file_size(id.index_bits()))?;
-		let map = unsafe { memmap2::MmapMut::map_mut(&file)? };
-		log::debug!(target: "parity-db", "Opened existing index {}", id);
-		Ok(Some(IndexTable {
-			id,
-			path,
-			map: RwLock::new(Some(map)),
+		Ok(Some(unsafe { memmap2::MmapMut::map_mut(&file)? }))
+	}
+
+	pub fn open_existing(path: &std::path::Path, id: TableId) -> Result<Option<IndexTable>> {
+		let mut path: std::path::PathBuf = path.into();
+		path.push(id.file_name());
+
+		Ok(Self::open_mmap(path.as_path(), &id)?.map(|map| {
+			log::debug!(target: "parity-db", "Opened existing index {}", id);
+			IndexTable {
+				id,
+				path,
+				map: RwLock::new(Some(map)),
+			}
 		}))
 	}
 
@@ -376,12 +383,13 @@ impl IndexTable {
 		let mut map = self.map.upgradable_read();
 		if map.is_none() {
 			let mut wmap = RwLockUpgradableReadGuard::upgrade(map);
-			let file = std::fs::OpenOptions::new().write(true).read(true).create_new(true).open(self.path.as_path())?;
-			log::debug!(target: "parity-db", "Created new index {}", self.id);
-			//TODO: check for potential overflows on 32-bit platforms
-			file.set_len(file_size(self.id.index_bits()))?;
-			*wmap = Some(unsafe { memmap2::MmapMut::map_mut(&file)? });
-			map = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wmap);
+			if let Some(mmap) = Self::open_mmap(self.path.as_path(), &self.id)? {
+				log::debug!(target: "parity-db", "Created new index {}", self.id);
+				*wmap = Some(mmap);
+				map = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wmap);
+			} else {
+				return Err(std::io::ErrorKind::NotFound.into());
+			}
 		}
 
 		let map = map.as_ref().unwrap();
@@ -412,6 +420,30 @@ impl IndexTable {
 		std::mem::drop(self.map);
 		std::fs::remove_file(self.path.as_path())?;
 		log::debug!(target: "parity-db", "{}: Dropped table", self.id);
+		Ok(())
+	}
+
+	// Copy full index file.
+	pub(crate) fn backup_index(&self, path: &std::path::Path) -> Result<()> {
+		let mut mmap = self.map.write().take();
+		mmap.as_mut().map(|mmap| mmap.flush());
+		std::mem::drop(mmap);
+		let mut path_bu: std::path::PathBuf = path.into();
+		let mut bu_name = self.id.file_name();
+		bu_name.push_str("_old");
+		path_bu.push(bu_name);
+		std::fs::copy(&self.path, path_bu)?;
+
+		*self.map.write() = Self::open_mmap(self.path.as_path(), &self.id)?;
+		Ok(())
+	}
+
+	pub(crate) fn remove_backup_index(&self, path: &std::path::Path) -> Result<()> {
+		let mut path_bu: std::path::PathBuf = path.into();
+		let mut bu_name = self.id.file_name();
+		bu_name.push_str("_old");
+		path_bu.push(bu_name);
+		std::fs::remove_file(path_bu)?;
 		Ok(())
 	}
 }

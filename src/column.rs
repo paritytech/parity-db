@@ -53,19 +53,20 @@ pub struct Column {
 	ref_counted: bool,
 	salt: Option<Salt>,
 	stats: ColumnStats,
+	compression: crate::compress::Compress,
 }
 
 impl Column {
 	pub fn get(&self, key: &Key, log: &RwLock<LogOverlays>) -> Result<Option<Value>> {
 		let tables = self.tables.read();
-		if let Some((tier, value)) = Self::get_in_index(key, &tables.index, &*tables, log)? {
+		if let Some((tier, value)) = self.get_in_index(key, &tables.index, &*tables, log)? {
 			if self.collect_stats {
 				self.stats.query_hit(tier);
 			}
 			return Ok(Some(value));
 		}
 		for r in &self.reindex.read().queue {
-			if let Some((tier, value)) = Self::get_in_index(key, &r, &*tables, log)? {
+			if let Some((tier, value)) = self.get_in_index(key, &r, &*tables, log)? {
 				if self.collect_stats {
 					self.stats.query_hit(tier);
 				}
@@ -82,13 +83,13 @@ impl Column {
 		self.get(key, log).map(|v| v.map(|v| v.len() as u32))
 	}
 
-	fn get_in_index(key: &Key, index: &IndexTable, tables: &Tables, log: &RwLock<LogOverlays>) -> Result<Option<(u8, Value)>> {
+	fn get_in_index(&self, key: &Key, index: &IndexTable, tables: &Tables, log: &RwLock<LogOverlays>) -> Result<Option<(u8, Value)>> {
 		let (mut entry, mut sub_index) = index.get(key, 0, log);
 		while !entry.is_empty() {
 			let size_tier = entry.address(index.id.index_bits()).size_tier() as usize;
 			match tables.value[size_tier].get(key, entry.address(index.id.index_bits()).offset(), log)? {
 				Some(value) => {
-					let value = Self::decompress(&value);
+					let value = self.decompress(&value);
 					return Ok(Some((size_tier as u8, value)));
 				}
 				None =>  {
@@ -101,12 +102,12 @@ impl Column {
 		Ok(None)
 	}
 
-	fn compress(buf: &[u8]) -> Vec<u8> {
-		lz4::block::compress(buf, Some(lz4::block::CompressionMode::DEFAULT), true).unwrap()
+	fn compress(&self, buf: &[u8]) -> Vec<u8> {
+		self.compression.compress(buf)
 	}
 
-	fn decompress(buf: &[u8]) -> Vec<u8> {
-		lz4::block::decompress(buf, None).unwrap()
+	fn decompress(&self, buf: &[u8]) -> Vec<u8> {
+		self.compression.decompress(buf)
 	}
 
 	pub fn open(col: ColId, options: &Options, salt: Option<Salt>) -> Result<Column> {
@@ -149,6 +150,7 @@ impl Column {
 			collect_stats,
 			salt,
 			stats,
+			compression: crate::compress::CompressType::Lz4.into(),
 		})
 	}
 
@@ -278,7 +280,7 @@ impl Column {
 		let reindex = self.reindex.upgradable_read();
 		let existing = Self::search_all_indexes(key, &*tables, &*reindex, log)?;
 		if let &Some(ref val) = value {
-			let cval = Self::compress(&val);
+			let cval = self.compress(&val);
 			let target_tier = tables.value.iter().position(|t| cval.len() <= t.value_size() as usize);
 			let target_tier = match target_tier {
 				Some(tier) => tier as usize,
@@ -512,5 +514,56 @@ impl Column {
 		log::debug!(target: "parity-db", "Dropped {}", id);
 		Ok(())
 	}
-}
 
+
+	// Migrate from current compression mode to another.
+	// Double column size during processsing.
+	// Do not support shutdown (old file are kept but
+	// need to be restored manually).
+	// Also require empty log and should not run when logger worker is active.
+	pub(crate) fn migrate_column(&mut self, compression_target: crate::compress::CompressType) -> Result<()> {
+		let mut tables = self.tables.write();
+		let compression: crate::compress::Compress = compression_target.into();
+		// store index as backup
+		tables.index.backup_index(&self.path)?;
+
+		// create value destination tables
+		let nb_tables = tables.value.len();
+		let mut dest_tables = Vec::with_capacity(nb_tables);
+		for (i, table) in tables.value.iter().enumerate() {
+			let size = if i == nb_tables - 1 {
+				Some(table.entry_size)
+			} else {
+				None
+			};
+			dest_tables.push(ValueTable::open_extension(&self.path, table.id, size, "_dest")?);
+		}
+
+		// process all value from index
+
+		// Update value tables replacing old
+		for table in tables.value.iter_mut() {
+			*table = dest_tables.remove(0);
+			let mut from: std::path::PathBuf = self.path.clone();
+			let mut file_name = table.id.file_name();
+			file_name.push_str("_dest");
+			from.push(file_name);
+			let mut to: std::path::PathBuf = self.path.clone();
+			to.push(table.id.file_name());
+			// TODO might need to close file first...
+			std::fs::rename(from, to)?;
+		}
+
+		// Revove index backups
+		tables.index.remove_backup_index(&self.path)?;
+
+		self.compression = compression;
+
+		Ok(())
+	}
+
+	// TODO
+	pub(crate) fn salt(&self) -> Option<Salt> {
+		self.salt.clone()
+	}
+}

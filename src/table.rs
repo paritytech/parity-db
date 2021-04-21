@@ -138,6 +138,10 @@ fn disable_read_ahead(_file: &std::fs::File) -> Result<()> {
 
 impl ValueTable {
 	pub fn open(path: &std::path::Path, id: TableId, entry_size: Option<u16>) -> Result<ValueTable> {
+		Self::open_extension(path, id, entry_size, "")
+	}
+
+	pub(crate) fn open_extension(path: &std::path::Path, id: TableId, entry_size: Option<u16>, extension: &str) -> Result<ValueTable> {
 		let (multipart, entry_size) = match entry_size {
 			Some(s) => (false, s),
 			None => (true, 4096),
@@ -146,7 +150,9 @@ impl ValueTable {
 		assert!(entry_size <= MAX_ENTRY_SIZE as u16);
 		// TODO: posix_fadvise
 		let mut path: std::path::PathBuf = path.into();
-		path.push(id.file_name());
+		let mut file_name = id.file_name();
+		file_name.push_str(extension);
+		path.push(file_name);
 
 		let mut file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?;
 		disable_read_ahead(&file)?;

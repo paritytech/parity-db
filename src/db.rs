@@ -590,6 +590,23 @@ impl DbInner {
 			}
 		}
 	}
+
+	pub(crate) fn migrate_column(&mut self, column: Option<u8>, compression_target: crate::compress::CompressType) -> Result<()> {
+		if let Some(col) = column {
+			self.columns[col as usize].migrate_column(compression_target)?;
+		} else {
+			for c in self.columns.iter_mut() {
+				c.migrate_column(compression_target)?;
+			}
+		}
+
+		// Rewrite metadata to the right compression method.
+		let mut path = self.options.path.clone();
+		path.push("metadata");
+		let salt = self.columns[0].salt();
+		self.options.write_metadata_old(path.as_path(), salt.as_ref())?;
+		Ok(())
+	}
 }
 
 pub struct Db {

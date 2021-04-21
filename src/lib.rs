@@ -23,6 +23,7 @@ mod log;
 mod display;
 mod options;
 mod stats;
+mod compress;
 
 pub use db::Db;
 pub use error::{Error, Result};
