@@ -589,6 +589,16 @@ impl DbInner {
 		}
 	}
 
+	pub(crate) fn do_clear_stats(&self, column: Option<u8>) {
+		if let Some(col) = column {
+			self.columns[col as usize].clear_stats();
+		} else {
+			for c in self.columns.iter() {
+				c.clear_stats();
+			}
+		}
+	}
+
 	fn store_err(&self, result: Result<()>) {
 		if let Err(e) = result {
 			log::warn!(target: "parity-db", "Background worker error: {}", e);

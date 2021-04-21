@@ -441,6 +441,12 @@ impl Column {
 		self.stats.write_summary(writer, tables.index.id.col());
 	}
 
+	pub fn clear_stats(&self) {
+		let tables = self.tables.read();
+		let empty_stats = ColumnStats::empty();
+		tables.index.write_stats(&empty_stats);
+	}
+
 	pub fn reindex(&self, log: &Log) -> Result<(Option<IndexTableId>, Vec<(Key, Address)>)> {
 		// TODO: handle overlay
 		let tables = self.tables.read();

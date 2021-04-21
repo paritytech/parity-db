@@ -60,8 +60,12 @@ pub fn run() {
 		SubCommand::Stats(stat) => {
 			let db = crate::db::DbInner::open(&options, false)
 				.expect("Invalid db");
-			let mut out = std::io::stdout();
-			db.do_collect_stats(&mut out, stat.column.clone());
+			if stat.clear {
+				db.do_clear_stats(stat.column.clone());
+			} else {
+				let mut out = std::io::stdout();
+				db.do_collect_stats(&mut out, stat.column.clone());
+			}
 		},
 	}
 }
@@ -142,4 +146,8 @@ pub struct Stats {
 	/// Only show stat for the given column.
 	#[structopt(long)]
 	pub column: Option<u8>,
+
+	/// Clear current stats.
+	#[structopt(long)]
+	pub clear: bool,
 }
