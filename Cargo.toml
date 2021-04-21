@@ -18,6 +18,7 @@ crc32fast = "1.2.0"
 rand = "0.8.2"
 hex = "0.4.2"
 fs2 = "0.4.3"
+structopt = { version = "0.3.8", optional = true }
 
 [dev-dependencies]
 env_logger = "0.8.2"
@@ -35,3 +36,7 @@ members = [
 	"bench/bin",
 ]
 
+[features]
+admin = [
+	"structopt",
+]

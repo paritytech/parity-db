@@ -100,7 +100,7 @@ impl Column {
 		Ok(None)
 	}
 
-	pub fn open(col: ColId, options: &Options, salt: Option<Salt>) -> Result<Column> {
+	pub fn open(col: ColId, options: &Options, salt: Option<Salt>, create: bool) -> Result<Column> {
 		let (index, reindexing, stats) = Self::open_index(&options.path, col)?;
 		let collect_stats = options.stats;
 		let path = &options.path;
@@ -108,22 +108,22 @@ impl Column {
 		let tables = Tables {
 			index,
 			value: [
-				Self::open_table(path, col, 0, Some(options.sizes[0]))?,
-				Self::open_table(path, col, 1, Some(options.sizes[1]))?,
-				Self::open_table(path, col, 2, Some(options.sizes[2]))?,
-				Self::open_table(path, col, 3, Some(options.sizes[3]))?,
-				Self::open_table(path, col, 4, Some(options.sizes[4]))?,
-				Self::open_table(path, col, 5, Some(options.sizes[5]))?,
-				Self::open_table(path, col, 6, Some(options.sizes[6]))?,
-				Self::open_table(path, col, 7, Some(options.sizes[7]))?,
-				Self::open_table(path, col, 8, Some(options.sizes[8]))?,
-				Self::open_table(path, col, 9, Some(options.sizes[9]))?,
-				Self::open_table(path, col, 10, Some(options.sizes[10]))?,
-				Self::open_table(path, col, 11, Some(options.sizes[11]))?,
-				Self::open_table(path, col, 12, Some(options.sizes[12]))?,
-				Self::open_table(path, col, 13, Some(options.sizes[13]))?,
-				Self::open_table(path, col, 14, Some(options.sizes[14]))?,
-				Self::open_table(path, col, 15, None)?,
+				Self::open_table(path, col, 0, Some(options.sizes[0]), create)?,
+				Self::open_table(path, col, 1, Some(options.sizes[1]), create)?,
+				Self::open_table(path, col, 2, Some(options.sizes[2]), create)?,
+				Self::open_table(path, col, 3, Some(options.sizes[3]), create)?,
+				Self::open_table(path, col, 4, Some(options.sizes[4]), create)?,
+				Self::open_table(path, col, 5, Some(options.sizes[5]), create)?,
+				Self::open_table(path, col, 6, Some(options.sizes[6]), create)?,
+				Self::open_table(path, col, 7, Some(options.sizes[7]), create)?,
+				Self::open_table(path, col, 8, Some(options.sizes[8]), create)?,
+				Self::open_table(path, col, 9, Some(options.sizes[9]), create)?,
+				Self::open_table(path, col, 10, Some(options.sizes[10]), create)?,
+				Self::open_table(path, col, 11, Some(options.sizes[11]), create)?,
+				Self::open_table(path, col, 12, Some(options.sizes[12]), create)?,
+				Self::open_table(path, col, 13, Some(options.sizes[13]), create)?,
+				Self::open_table(path, col, 14, Some(options.sizes[14]), create)?,
+				Self::open_table(path, col, 15, None, create)?,
 			],
 		};
 
@@ -177,9 +177,9 @@ impl Column {
 		Ok((table, reindexing, stats))
 	}
 
-	fn open_table(path: &std::path::Path, col: ColId, tier: u8, entry_size: Option<u16>) -> Result<ValueTable> {
+	fn open_table(path: &std::path::Path, col: ColId, tier: u8, entry_size: Option<u16>, create: bool) -> Result<ValueTable> {
 		let id = ValueTableId::new(col, tier);
-		ValueTable::open(path, id, entry_size)
+		ValueTable::open(path, id, entry_size, create)
 	}
 
 	fn trigger_reindex(
@@ -435,10 +435,10 @@ impl Column {
 		Ok(())
 	}
 
-	pub fn write_stats(&self, file: &std::fs::File) {
+	pub fn write_stats(&self, writer: &mut impl std::io::Write) {
 		let tables = self.tables.read();
 		tables.index.write_stats(&self.stats);
-		self.stats.write_summary(file, tables.index.id.col());
+		self.stats.write_summary(writer, tables.index.id.col());
 	}
 
 	pub fn reindex(&self, log: &Log) -> Result<(Option<IndexTableId>, Vec<(Key, Address)>)> {

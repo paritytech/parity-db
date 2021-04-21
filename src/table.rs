@@ -137,7 +137,7 @@ fn disable_read_ahead(_file: &std::fs::File) -> Result<()> {
 }
 
 impl ValueTable {
-	pub fn open(path: &std::path::Path, id: TableId, entry_size: Option<u16>) -> Result<ValueTable> {
+	pub fn open(path: &std::path::Path, id: TableId, entry_size: Option<u16>, create: bool) -> Result<ValueTable> {
 		let (multipart, entry_size) = match entry_size {
 			Some(s) => (false, s),
 			None => (true, 4096),
@@ -148,7 +148,7 @@ impl ValueTable {
 		let mut path: std::path::PathBuf = path.into();
 		path.push(id.file_name());
 
-		let mut file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?;
+		let mut file = std::fs::OpenOptions::new().create(create).read(true).write(true).open(path.as_path())?;
 		disable_read_ahead(&file)?;
 		let mut file_len = file.metadata()?.len();
 		if file_len == 0 {
@@ -645,7 +645,7 @@ mod test {
 
 		fn table(&self, size: Option<u16>) -> ValueTable {
 			let id = TableId::new(0, 0);
-			ValueTable::open(&self.0, id, size).unwrap()
+			ValueTable::open(&self.0, id, size, true).unwrap()
 		}
 
 		fn log(&self) -> Log {
