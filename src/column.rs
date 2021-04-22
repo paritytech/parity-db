@@ -571,31 +571,62 @@ impl Column {
 
 		log.clear_logs().unwrap(); // TODO this is only here because flush keep a log file at this point.
 		let index_bits = tables.index.id.index_bits();
+/*		let mut first = false;
+		let mut first = &mut first;*/
 		// process all value from index
 		tables.index.for_all(|key, mut entry| {
 			let size_tier = entry.address(index_bits).size_tier() as usize;
 			let full_key = key.clone();
 			let rc = 0u32;
-			match tables.value[size_tier].get_from_index(&mut (full_key, rc), entry.address(index_bits).offset(), &NoopsLogQuery) {
+			let mut pair = (full_key, rc);
+			match tables.value[size_tier].get_from_index(&mut pair, entry.address(index_bits).offset(), &NoopsLogQuery) {
 				Ok(Some(value)) => {
+					let full_key = pair.0;
+					let rc = pair.1;
+
 					let value = self.decompress(&value);
 					let cval = compression.compress(value.as_slice());
+
+					if self.collect_stats {
+/*						if value.len() > 8_000 {
+							println!("{} -> {}", value.len(), cval.len());
+						}*/
+						self.stats.insert_val(value.len() as u32, cval.len() as u32);
+					}
+
 					let target_tier = tables.value.iter().position(|t| cval.len() <= t.value_size() as usize);
 					let target_tier = match target_tier {
 						Some(tier) => tier as usize,
 						None => 15,
 					};
 
-
+/*					if size_tier == 15 {
+						println!("size_tier");
+					}
 					if cval.as_slice().len() == 1017646 {
 						println!("{:?}", (target_tier, dest_tables[target_tier].value_size()));
-					}
+					}*/
 					// Not using log would be way faster, but using it avoid duplicating code.
 					// TODO could also batch the log, but may be worth it do direct write
 					// (awkward part is managing multipart file).
 					// Especially since we skip log for index update.
 					let index = dest_tables[target_tier].force_append_write(&full_key, cval.as_slice(), rc).unwrap(); // TODO result if closure.
 					let address = Address::new(index, target_tier as u8);
+/*			if !*first {
+					let entry2 = crate::index::Entry::new(address, entry.key_material(index_bits), index_bits);
+				println!("key {:?}", key);
+				println!("key {:?}", full_key);
+				println!("rc {:?}", rc);
+				println!("entry {:x}", entry.0);
+				println!("entry2 {:x}", entry2.0);
+				println!("address {:x}", entry.address(index_bits).0);
+				println!("address2 {:x}", entry2.address(index_bits).0);
+				println!("index {}", index);
+				println!("address {:x}", entry.address(index_bits).offset());
+				*first = true;
+			}
+*/
+	
 					entry = crate::index::Entry::new(address, entry.key_material(index_bits), index_bits);
 /*					let mut writer = log.begin_record();
 					dest_tables[target_tier].write_insert_plan(&full_key, cval.as_slice(), &mut writer).unwrap();
@@ -637,6 +668,10 @@ impl Column {
 			// Return new entry for index update.
 			Some(entry)
 		}, Some(500));
+
+		if self.collect_stats {
+			tables.index.write_stats(&self.stats);
+		}
 
 		// Update value tables replacing old
 		for table in tables.value.iter_mut() {

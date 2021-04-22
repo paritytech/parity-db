@@ -36,7 +36,7 @@ const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
 pub type Key = [u8; KEY_LEN];
 pub type Chunk = [u8; CHUNK_LEN];
 
-pub struct Entry(u64);
+pub struct Entry(pub u64);
 
 impl Entry {
 	// TODO remove pub
@@ -84,7 +84,7 @@ impl Entry {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
-pub struct Address(u64);
+pub struct Address(pub u64);
 
 impl Address {
 	pub fn new(offset: u64, size_tier: u8) -> Address {
@@ -334,7 +334,7 @@ impl IndexTable {
 					let offset = META_SIZE + chunk_index as usize * CHUNK_LEN;
 					let dest = &mut map[offset .. offset + CHUNK_LEN];
 					// TODO fix for be arch
-					let source: [u8; CHUNK_LEN] = unsafe { std::mem::transmute(chunk) };
+					let source: [u8; CHUNK_LEN] = unsafe { std::mem::transmute(entries) };
 					dest.copy_from_slice(&source[..]);
 				} else {
 					break;

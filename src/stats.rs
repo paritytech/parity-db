@@ -281,4 +281,3 @@ impl ColumnStats {
 		self.commits.fetch_add(1, Ordering::Relaxed);
 	}
 }
-
