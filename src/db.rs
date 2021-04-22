@@ -614,9 +614,13 @@ impl DbInner {
 		let salt = self.columns[0].salt();
 		if let Some(col) = column {
 			self.columns[col as usize].migrate_column(compression_target, &self.log)?;
+			self.options.columns[col as usize].compression = compression_target;
 		} else {
 			for c in self.columns.iter_mut() {
 				c.migrate_column(compression_target, &self.log)?;
+			}
+			for option in self.options.columns.iter_mut() {
+				option.compression = compression_target;
 			}
 		}
 

@@ -562,13 +562,14 @@ impl Column {
 		let mut dest_tables = Vec::with_capacity(nb_tables);
 		for (i, table) in tables.value.iter().enumerate() {
 			let size = if i == nb_tables - 1 {
-				Some(table.entry_size)
-			} else {
 				None
+			} else {
+				Some(table.entry_size)
 			};
 			dest_tables.push(ValueTable::open_extension(&self.path, table.id, size, true, "_dest")?);
 		}
 
+		log.clear_logs().unwrap(); // TODO this is only here because flush keep a log file at this point.
 		let index_bits = tables.index.id.index_bits();
 		// process all value from index
 		tables.index.for_all(|key, mut entry| {
@@ -584,11 +585,15 @@ impl Column {
 						Some(tier) => tier as usize,
 						None => 15,
 					};
+
+
+					if cval.as_slice().len() == 1017646 {
+						println!("{:?}", (target_tier, dest_tables[target_tier].value_size()));
+					}
 					// Not using log would be way faster, but using it avoid duplicating code.
 					// TODO could also batch the log, but may be worth it do direct write
 					// (awkward part is managing multipart file).
 					// Especially since we skip log for index update.
-					log.clear_logs().unwrap(); // TODO this is only here because flush keep a log file at this point.
 					let index = dest_tables[target_tier].force_append_write(&full_key, cval.as_slice(), rc).unwrap(); // TODO result if closure.
 					let address = Address::new(index, target_tier as u8);
 					entry = crate::index::Entry::new(address, entry.key_material(index_bits), index_bits);
@@ -649,8 +654,6 @@ impl Column {
 
 		// Revove index backups
 		tables.index.remove_backup_index(&self.path)?;
-
-		self.compression = compression;
 
 		Ok(())
 	}

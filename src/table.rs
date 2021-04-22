@@ -478,6 +478,9 @@ impl ValueTable {
 		let mut remainder = value.len() + 30; // Prefix with key and ref counter
 		let mut offset = 0;
 		let mut start = 0;
+		if value.len() > self.value_size() as usize && !self.multipart {
+			println!("{} {}", value.len(), self.value_size());
+		}
 		assert!(self.multipart || value.len() <= self.value_size() as usize);
 		loop {
 			let index = self.filled.fetch_add(1, Ordering::Relaxed);

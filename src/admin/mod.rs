@@ -64,6 +64,14 @@ pub fn run() {
 	for i in cli.shared().uniform.iter() {
 		options.columns[*i as usize].uniform = true;
 	}
+	for enc in cli.shared().comp.iter() {
+		let split = enc.find('=').expect("compress should be 'col_index=compress_as_u8'");
+		let (a, b) = enc.split_at(split);
+		let col_ix: u8 = a.parse().expect("compress should be 'col_index=compress_as_u8'");
+		let c: u8 = b[1..].parse().expect("compress should be 'col_index=compress_as_u8'");
+		let compress: crate::compress::CompressType = c.into();
+		options.columns[col_ix as usize].compression = compress.into();
+	}
 //	let db = crate::db::DbInner
 	println!("{:?}, {:?}", cli, options);
 	match cli.subcommand {
@@ -122,6 +130,10 @@ pub struct Shared {
 	/// Set following column as uniform. 
 	#[structopt(long)]
 	pub uniform: Vec<u8>,
+
+	/// Define following column compression.
+	#[structopt(long)]
+	pub comp: Vec<String>,
 
 	/// Sets a custom logging filter. Syntax is <target>=<level>, e.g. -lsync=debug.
 	///
