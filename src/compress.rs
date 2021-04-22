@@ -38,6 +38,18 @@ enum Compressor {
 	Lz4Low(lz4::Lz4Low),
 }
 
+impl From<u8> for CompressType {
+	fn from(comp_type: u8) -> Self {
+		match comp_type {
+			a if a == CompressType::NoCompression as u8 => CompressType::NoCompression,
+			a if a == CompressType::Lz4 as u8 => CompressType::Lz4,
+			a if a == CompressType::Lz4High as u8 => CompressType::Lz4High,
+			a if a == CompressType::Lz4Low as u8 => CompressType::Lz4Low,
+			_ => panic!("Unkwown compression."),
+		}
+	}
+}
+
 impl From<CompressType> for Compress {
 	fn from(comp_type: CompressType) -> Self {
 		Compress(match comp_type {

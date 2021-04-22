@@ -150,7 +150,7 @@ impl Column {
 			collect_stats,
 			salt,
 			stats,
-			compression: crate::compress::CompressType::Lz4.into(),
+			compression: options.compression.into(),
 		})
 	}
 
@@ -521,7 +521,6 @@ impl Column {
 		Ok(())
 	}
 
-
 	// Migrate from current compression mode to another.
 	// Double column size during processsing.
 	// Do not support shutdown (old file are kept but
@@ -588,6 +587,7 @@ impl Column {
 					// TODO could also batch the log, but may be worth it do direct write
 					// (awkward part is managing multipart file).
 					// Especially since we skip log for index update.
+					log.clear_logs(); // TODO this is only here because flush keep a log file at this point.
 					let mut writer = log.begin_record();
 					dest_tables[target_tier].write_insert_plan(&full_key, cval.as_slice(), &mut writer).unwrap();
 					log.end_record(writer.drain()).unwrap();
@@ -599,6 +599,12 @@ impl Column {
 					let mut reader = log.read_next(false).unwrap().unwrap();
 					loop {
 						match reader.next().unwrap() {
+							LogAction::BeginRecord(_) => {
+								panic!("Unexpected log entry2");
+							},
+							LogAction::InsertIndex(_) => {
+								panic!("Unexpected log entry22");
+							},
 							LogAction::BeginRecord(_) | LogAction::InsertIndex { .. } | LogAction::DropTable { .. } => {
 								panic!("Unexpected log entry");
 							},

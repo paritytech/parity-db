@@ -638,12 +638,12 @@ pub struct Db {
 impl Db {
 	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Result<Db> {
 		let options = Options::with_columns(path, num_columns);
-		Self::open(&options)
+		Self::open(&options, true)
 	}
 
 	/// Open the database with given
-	pub fn open(options: &Options) -> Result<Db> {
-		let db = Arc::new(DbInner::open(options, true)?);
+	pub fn open(options: &Options, create: bool) -> Result<Db> {
+		let db = Arc::new(DbInner::open(options, create)?);
 		db.replay_all_logs()?;
 		let commit_worker_db = db.clone();
 		let commit_thread = std::thread::spawn(move ||

@@ -38,7 +38,17 @@ use structopt::StructOpt;
 /// Command line admin client entry point.
 /// Uses default column definition.
 pub fn run() {
+
 	let cli = Cli::from_args();
+	use env_logger::Builder;
+
+	let mut builder = Builder::from_default_env();
+	let logs = &cli.shared().log;
+	if logs.len() > 0 {
+		builder.parse_filters(logs.as_slice().join(",").as_str());
+	}
+	builder.init();
+
 	let db_path = cli.shared().base_path.clone()
 		.unwrap_or_else(|| std::env::current_dir().expect("Cannot resolve current dir"));
 	let nb_column = cli.shared().nb_columns;
@@ -66,6 +76,18 @@ pub fn run() {
 				let mut out = std::io::stdout();
 				db.do_collect_stats(&mut out, stat.column.clone());
 			}
+		},
+		SubCommand::Compress(stat) => {
+			let mut db = crate::db::DbInner::open(&options, false)
+				.expect("Invalid db");
+			let compression_target = crate::compress::CompressType::from(stat.compression);
+
+			db.migrate_column(stat.column, compression_target).unwrap();
+		},
+		SubCommand::Run(_run) => {
+			crate::db::Db::open(&options, false)
+				.expect("Invalid db");
+			loop { }
 		},
 	}
 }
@@ -100,6 +122,13 @@ pub struct Shared {
 	/// Set following column as uniform. 
 	#[structopt(long)]
 	pub uniform: Vec<u8>,
+
+	/// Sets a custom logging filter. Syntax is <target>=<level>, e.g. -lsync=debug.
+	///
+	/// Log levels (least to most verbose) are error, warn, info, debug, and trace.
+	/// By default, all targets log `info`. The global log level can be set with -l<level>.
+	#[structopt(short = "l", long, value_name = "LOG_PATTERN")]
+	pub log: Vec<String>,
 }
 
 /// Admin cli command for parity-db.
@@ -125,6 +154,10 @@ pub struct Cli {
 pub enum SubCommand {
 	/// Show stats.
 	Stats(Stats),
+	/// Compress values.
+	Compress(Compress),
+	/// Run with worker, allows flushing logs.
+	Run(Run),
 }
 
 impl Cli {
@@ -132,6 +165,12 @@ impl Cli {
 		match &self.subcommand {
 			SubCommand::Stats(stats) => {
 				&stats.shared
+			},
+			SubCommand::Compress(stats) => {
+				&stats.shared
+			},
+			SubCommand::Run(run) => {
+				&run.shared
 			},
 		}
 	}
@@ -150,4 +189,28 @@ pub struct Stats {
 	/// Clear current stats.
 	#[structopt(long)]
 	pub clear: bool,
+}
+
+/// Show stats for columns.
+#[derive(Debug, StructOpt)]
+pub struct Compress {
+	#[structopt(flatten)]
+	pub shared: Shared,
+
+	/// Only show stat for the given column.
+	#[structopt(long)]
+	pub column: Option<u8>,
+
+	/// Compression target number
+	/// (see enum variants in code).
+	#[structopt(long)]
+	pub compression: u8,
+}
+
+
+/// Run with worker, allows flushing logs.
+#[derive(Debug, StructOpt)]
+pub struct Run {
+	#[structopt(flatten)]
+	pub shared: Shared,
 }
