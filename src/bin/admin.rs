@@ -1,4 +1,4 @@
-// Copyright 2015-2020 Parity Technologies (UK) Ltd.
+// Copyright 2021-2021 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -14,21 +14,11 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-mod db;
-mod error;
-mod index;
-mod table;
-mod column;
-mod log;
-mod display;
-mod options;
-mod stats;
-mod compress;
-#[cfg(feature = "admin")]
-pub mod admin;
-#[cfg(not(feature = "admin"))]
-pub mod admin { }
+//! Command line admin client for parity-db.
+//! Experimental, some functionality may not
+//! guarantee db durability.
 
-pub use db::Db;
-pub use error::{Error, Result};
-pub use options::{ColumnOptions, Options};
+fn main() {
+	#[cfg(feature = "admin")]
+	parity_db::admin::run()
+}

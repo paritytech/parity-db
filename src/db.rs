@@ -91,7 +91,7 @@ impl std::hash::Hasher for IdentityKeyHash {
 	}
 }
 
-struct DbInner {
+pub(crate) struct DbInner {
 	columns: Vec<Column>,
 	options: Options,
 	shutdown: AtomicBool,
@@ -117,18 +117,18 @@ struct DbInner {
 }
 
 impl DbInner {
-	fn open(options: &Options) -> Result<DbInner> {
+	pub(crate) fn open(options: &Options, create: bool) -> Result<DbInner> {
 		std::fs::create_dir_all(&options.path)?;
 		let mut lock_path: std::path::PathBuf = options.path.clone();
 		lock_path.push("lock");
-		let lock_file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(lock_path.as_path())?;
+		let lock_file = std::fs::OpenOptions::new().create(create).read(true).write(true).open(lock_path.as_path())?;
 		lock_file.try_lock_exclusive().map_err(|e| Error::Locked(e))?;
 
 		let salt = options.load_and_validate_metadata()?;
 		let mut columns = Vec::with_capacity(options.columns.len());
 		let mut commit_overlay = Vec::with_capacity(options.columns.len());
 		for c in 0 .. options.columns.len() {
-			columns.push(Column::open(c as ColId, &options, salt.clone())?);
+			columns.push(Column::open(c as ColId, &options, salt.clone(), create)?);
 			commit_overlay.push(
 				HashMap::with_hasher(std::hash::BuildHasherDefault::<IdentityKeyHash>::default())
 			);
@@ -571,11 +571,30 @@ impl DbInner {
 			path.push("stats.txt");
 			match std::fs::File::create(path) {
 				Ok(file) => {
-					for c in self.columns.iter() {
-						c.write_stats(&file);
-					}
+					let mut writer = std::io::BufWriter::new(file);
+					self.do_collect_stats(&mut writer, None)
 				}
 				Err(e) => log::warn!(target: "parity-db", "Error creating stats file: {:?}", e),
+			}
+		}
+	}
+
+	pub(crate) fn do_collect_stats(&self, writer: &mut impl std::io::Write, column: Option<u8>) {
+		if let Some(col) = column {
+			self.columns[col as usize].write_stats(writer);
+		} else {
+			for c in self.columns.iter() {
+				c.write_stats(writer);
+			}
+		}
+	}
+
+	pub(crate) fn do_clear_stats(&self, column: Option<u8>) {
+		if let Some(col) = column {
+			self.columns[col as usize].clear_stats();
+		} else {
+			for c in self.columns.iter() {
+				c.clear_stats();
 			}
 		}
 	}
@@ -624,7 +643,7 @@ impl Db {
 
 	/// Open the database with given
 	pub fn open(options: &Options) -> Result<Db> {
-		let db = Arc::new(DbInner::open(options)?);
+		let db = Arc::new(DbInner::open(options, true)?);
 		db.replay_all_logs()?;
 		let commit_worker_db = db.clone();
 		let commit_thread = std::thread::spawn(move ||
