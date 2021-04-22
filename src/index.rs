@@ -39,9 +39,10 @@ pub type Chunk = [u8; CHUNK_LEN];
 pub struct Entry(u64);
 
 impl Entry {
+	// TODO remove pub
 	#[inline]
-	fn new(address: Address, key_material: u64, index_bits: u8) -> Entry {
-		Entry(((key_material as u64) << Self::address_bits(index_bits)) | address.as_u64())
+	pub fn new(address: Address, key_material: u64, index_bits: u8) -> Entry {
+		Entry((key_material << Self::address_bits(index_bits)) | address.as_u64())
 	}
 
 	#[inline]
@@ -63,7 +64,6 @@ impl Entry {
 	fn extract_key(key: u64, index_bits: u8) -> u64 {
 		(key << index_bits) >> Self::address_bits(index_bits)
 	}
-
 
 	#[inline]
 	pub fn is_empty(&self) -> bool {
@@ -287,6 +287,67 @@ impl IndexTable {
 		return unsafe { std::mem::transmute(EMPTY_CHUNK) };
 	}
 
+	pub(crate) fn for_all(&self, mut apply: impl FnMut(&Key, Entry) -> Option<Entry>, with_progress: Option<u64>) {
+		let mut key = Key::default();
+		let mut chunk_index = 0u64;
+		let index_bits = self.id.index_bits();
+		let total_chunks = total_chunks(index_bits);
+		if with_progress.is_some() {
+			// TODO replace those warn with trace
+			log::warn!(target: "parity-db", "Starting full index iteration at {:?}", std::time::Instant::now());
+			log::warn!(target: "parity-db", "for {} chunks", total_chunks);
+		}
+		let mut chunk = [0; CHUNK_LEN];
+		while chunk_index < total_chunks {
+			if let Some(step) = with_progress.as_ref() {
+				if chunk_index % step == 0 {
+					log::warn!(target: "parity-db", "Chunk iteration at {}", chunk_index);
+				}
+			}
+			let mut entries: [Entry; CHUNK_ENTRIES] = {
+				// TODO factor with 'entries' + fix for be arch
+				if let Some(map) = &*self.map.read() {
+					let source = Self::chunk_at(chunk_index, map);
+					chunk.copy_from_slice(source);
+					unsafe { std::mem::transmute(chunk) }
+				} else {
+					break;
+				}
+			};
+			let mut changed = false;
+			for i in 0 .. CHUNK_ENTRIES {
+				let entry = Entry(entries[i].0);
+				if !entry.is_empty() {
+					let key_index_bits = chunk_index << (64 - index_bits);
+					let key_material = entry.key_material(index_bits) << 10;
+					key[0..8].copy_from_slice(&(key_index_bits | key_material).to_be_bytes()[..]);
+					if let Some(entry) = apply(&key, entry) {
+						changed = true;
+						entries[i] = entry;
+					}
+				}
+			}
+			if changed {
+				// TODO could write handle for all precessing.
+				if let Some(map) = &mut *self.map.write() {
+					// TODO factor with chunk_at (and read logger?)
+					let offset = META_SIZE + chunk_index as usize * CHUNK_LEN;
+					let dest = &mut map[offset .. offset + CHUNK_LEN];
+					// TODO fix for be arch
+					let source: [u8; CHUNK_LEN] = unsafe { std::mem::transmute(chunk) };
+					dest.copy_from_slice(&source[..]);
+				} else {
+					break;
+				}
+			}
+	
+			chunk_index += 1;
+		}
+		if with_progress.is_some() {
+			log::warn!(target: "parity-db", "Ended full index iteration at {:?}", std::time::Instant::now());
+		}
+	}
+
 	fn plan_insert_chunk(
 		&self,
 		key: u64,
@@ -445,5 +506,36 @@ impl IndexTable {
 		path_bu.push(bu_name);
 		std::fs::remove_file(path_bu)?;
 		Ok(())
+	}
+}
+
+#[test]
+fn test_key_build() {
+	use rand::Rng;
+	for index_bits in 16..32 {
+		let key_init: u64 = rand::thread_rng().gen();
+		let address: u64 = rand::thread_rng().gen();
+		// fit address to right range
+		let address = Entry(address).address(index_bits);
+		// remove the key data from value key that is
+		// checked against value.
+		let in_value = key_init & 0xffff;
+		let partial_key = Entry::extract_key(key_init, index_bits);
+		let entry = Entry::new(address, partial_key, index_bits);
+		let chunk_index = key_init >> (64 - index_bits);
+		let mut from_key = Key::default();
+		let key_index_bits = chunk_index << (64 - index_bits);
+		let key_material = entry.key_material(index_bits) << 10;
+		let key = key_index_bits | key_material | in_value;
+		/*println!("address {:x}", address.0);
+		println!("partial_key {:x}", partial_key);
+		println!("entry {:x}", entry.0);
+		println!("chunk_index {:x}", chunk_index);
+		println!("key_index_bits {:x}", key_index_bits);
+		println!("in_value {:x}", in_value);
+		println!("key_material {:x}", key_material);
+		println!("key_init {:x}", key_init);
+		println!("key {:x}", key);*/
+		assert!(key_init == key);
 	}
 }

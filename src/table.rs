@@ -222,7 +222,7 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8])>(&self, key: &Key, mut index: u64, log: &Q, mut f: F) -> Result<bool> {
+	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8])>(&self, mut key: std::result::Result<&Key, &mut Key>, mut index: u64, log: &Q, mut f: F) -> Result<bool> {
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 
 		let mut part = 0;
@@ -253,16 +253,22 @@ impl ValueTable {
 			};
 
 			if part == 0 {
-				if key[6..] != buf[content_offset + 4..content_offset + 30] {
-					log::debug!(
-						target: "parity-db",
-						"{}: Key mismatch at {}. Expected {}, got {}",
-						self.id,
-						index,
-						hex(&key[6..]),
-						hex(&buf[content_offset + 4..content_offset + 30]),
-					);
-					return Ok(false);
+				// TODO use custom enum
+				match &mut key {
+					Err(key) => {
+						key[6..].copy_from_slice(&buf[content_offset + 4..content_offset + 30]);
+					},
+					Ok(key) => if key[6..] != buf[content_offset + 4..content_offset + 30] {
+						log::debug!(
+							target: "parity-db",
+							"{}: Key mismatch at {}. Expected {}, got {}",
+							self.id,
+							index,
+							hex(&key[6..]),
+							hex(&buf[content_offset + 4..content_offset + 30]),
+						);
+						return Ok(false);
+					},
 				}
 				f(&buf[content_offset + 30..content_offset + content_len]);
 			} else {
@@ -277,9 +283,17 @@ impl ValueTable {
 		Ok(true)
 	}
 
-	pub fn get<Q: LogQuery>(&self, key: &Key, index: u64, log: &Q) -> Result<Option<Value>> {
+	pub fn get(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<Value>> {
 		let mut result = Vec::new();
-		if self.for_parts(key, index, log, |buf| result.extend_from_slice(buf))? {
+		if self.for_parts(Ok(key), index, log, |buf| result.extend_from_slice(buf))? {
+			return Ok(Some(result));
+		}
+		Ok(None)
+	}
+
+	pub fn get_from_index(&self, key: &mut Key, index: u64, log: &impl LogQuery) -> Result<Option<Value>> {
+		let mut result = Vec::new();
+		if self.for_parts(Err(key), index, log, |buf| result.extend_from_slice(buf))? {
 			return Ok(Some(result));
 		}
 		Ok(None)
@@ -287,7 +301,7 @@ impl ValueTable {
 
 	pub fn size<Q: LogQuery>(&self, key: &Key, index: u64, log: &Q) -> Result<Option<u32>> {
 		let mut result = 0;
-		if self.for_parts(key, index, log, |buf| result += buf.len() as u32)? {
+		if self.for_parts(Ok(key), index, log, |buf| result += buf.len() as u32)? {
 			return Ok(Some(result));
 		}
 		Ok(None)

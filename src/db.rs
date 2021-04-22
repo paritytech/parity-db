@@ -593,10 +593,10 @@ impl DbInner {
 
 	pub(crate) fn migrate_column(&mut self, column: Option<u8>, compression_target: crate::compress::CompressType) -> Result<()> {
 		if let Some(col) = column {
-			self.columns[col as usize].migrate_column(compression_target)?;
+			self.columns[col as usize].migrate_column(compression_target, &self.log)?;
 		} else {
 			for c in self.columns.iter_mut() {
-				c.migrate_column(compression_target)?;
+				c.migrate_column(compression_target, &self.log)?;
 			}
 		}
 

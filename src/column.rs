@@ -521,8 +521,33 @@ impl Column {
 	// Do not support shutdown (old file are kept but
 	// need to be restored manually).
 	// Also require empty log and should not run when logger worker is active.
-	pub(crate) fn migrate_column(&mut self, compression_target: crate::compress::CompressType) -> Result<()> {
+	pub(crate) fn migrate_column(
+		&mut self,
+		compression_target: crate::compress::CompressType,
+		log: &Log,
+	) -> Result<()> {
+		struct NoopsLogQuery;
+
+		impl crate::log::LogQuery for NoopsLogQuery {
+			fn with_index<R, F: FnOnce(&crate::index::Chunk) -> R> (
+				&self,
+				_table: IndexTableId,
+				_index: u64,
+				_f: F,
+			) -> Option<R> {
+				None
+			}
+			fn value(&self, _table: ValueTableId, _index: u64, _dest: &mut[u8]) -> bool {
+				false
+			}
+		}
+
+
 		let mut tables = self.tables.write();
+		let reindex = self.reindex.write(); // keeping it locked until end.
+		if !reindex.queue.is_empty() {
+			return Err(Error::InvalidConfiguration("Db need ot be flush before migrating compression.".into()));
+		}
 		let compression: crate::compress::Compress = compression_target.into();
 		// store index as backup
 		tables.index.backup_index(&self.path)?;
@@ -539,7 +564,58 @@ impl Column {
 			dest_tables.push(ValueTable::open_extension(&self.path, table.id, size, "_dest")?);
 		}
 
+		let index_bits = tables.index.id.index_bits();
 		// process all value from index
+		tables.index.for_all(|key, mut entry| {
+			let size_tier = entry.address(index_bits).size_tier() as usize;
+			let mut full_key = key.clone();
+			match tables.value[size_tier].get_from_index(&mut full_key, entry.address(index_bits).offset(), &NoopsLogQuery) {
+				Ok(Some(value)) => {
+					let value = self.decompress(&value);
+					let cval = compression.compress(value.as_slice());
+					let target_tier = tables.value.iter().position(|t| cval.len() <= t.value_size() as usize);
+					let target_tier = match target_tier {
+						Some(tier) => tier as usize,
+						None => 15,
+					};
+					// Not using log would be way faster, but using it avoid duplicating code.
+					// TODO could also batch the log, but may be worth it do direct write
+					// (awkward part is managing multipart file).
+					// Especially since we skip log for index update.
+					let mut writer = log.begin_record();
+					dest_tables[target_tier].write_insert_plan(&full_key, cval.as_slice(), &mut writer).unwrap();
+					log.end_record(writer.drain()).unwrap();
+					// Cycle through 2 log files
+					let _ = log.read_next(false);
+					log.flush_one().unwrap();
+					let _ = log.read_next(false);
+					log.flush_one().unwrap();
+					let mut reader = log.read_next(false).unwrap().unwrap();
+					loop {
+						match reader.next().unwrap() {
+							LogAction::BeginRecord(_) | LogAction::InsertIndex { .. } | LogAction::DropTable { .. } => {
+								panic!("Unexpected log entry");
+							},
+							LogAction::EndRecord => {
+								break;
+							},
+							LogAction::InsertValue(insertion) => {
+								let address = Address::new(insertion.index, insertion.table.size_tier());
+								entry = crate::index::Entry::new(address, entry.key_material(index_bits), index_bits);
+								dest_tables[insertion.table.size_tier() as usize]
+									.enact_plan(insertion.index, &mut reader).unwrap();
+							},
+						}
+
+					}
+				},
+				_ => {
+					log::error!("Missing value for {:?}", key);
+				},
+			}
+			// Return new entry for index update.
+			Some(entry)
+		}, Some(500));
 
 		// Update value tables replacing old
 		for table in tables.value.iter_mut() {
