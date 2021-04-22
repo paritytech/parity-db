@@ -573,8 +573,9 @@ impl Column {
 		// process all value from index
 		tables.index.for_all(|key, mut entry| {
 			let size_tier = entry.address(index_bits).size_tier() as usize;
-			let mut full_key = key.clone();
-			match tables.value[size_tier].get_from_index(&mut full_key, entry.address(index_bits).offset(), &NoopsLogQuery) {
+			let full_key = key.clone();
+			let rc = 0u32;
+			match tables.value[size_tier].get_from_index(&mut (full_key, rc), entry.address(index_bits).offset(), &NoopsLogQuery) {
 				Ok(Some(value)) => {
 					let value = self.decompress(&value);
 					let cval = compression.compress(value.as_slice());
@@ -587,8 +588,11 @@ impl Column {
 					// TODO could also batch the log, but may be worth it do direct write
 					// (awkward part is managing multipart file).
 					// Especially since we skip log for index update.
-					log.clear_logs(); // TODO this is only here because flush keep a log file at this point.
-					let mut writer = log.begin_record();
+					log.clear_logs().unwrap(); // TODO this is only here because flush keep a log file at this point.
+					let index = dest_tables[target_tier].force_append_write(&full_key, cval.as_slice(), rc).unwrap(); // TODO result if closure.
+					let address = Address::new(index, target_tier as u8);
+					entry = crate::index::Entry::new(address, entry.key_material(index_bits), index_bits);
+/*					let mut writer = log.begin_record();
 					dest_tables[target_tier].write_insert_plan(&full_key, cval.as_slice(), &mut writer).unwrap();
 					log.end_record(writer.drain()).unwrap();
 					// Cycle through 2 log files
@@ -618,8 +622,8 @@ impl Column {
 									.enact_plan(insertion.index, &mut reader).unwrap();
 							},
 						}
-
 					}
+*/
 				},
 				_ => {
 					log::error!("Missing value for {:?}", key);
@@ -632,6 +636,7 @@ impl Column {
 		// Update value tables replacing old
 		for table in tables.value.iter_mut() {
 			*table = dest_tables.remove(0);
+			table.force_write_header()?;
 			let mut from: std::path::PathBuf = self.path.clone();
 			let mut file_name = table.id.file_name();
 			file_name.push_str("_dest");

@@ -222,7 +222,7 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8])>(&self, mut key: std::result::Result<&Key, &mut Key>, mut index: u64, log: &Q, mut f: F) -> Result<bool> {
+	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8])>(&self, mut key: std::result::Result<&Key, &mut (Key, u32)>, mut index: u64, log: &Q, mut f: F) -> Result<bool> {
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 
 		let mut part = 0;
@@ -255,7 +255,8 @@ impl ValueTable {
 			if part == 0 {
 				// TODO use custom enum
 				match &mut key {
-					Err(key) => {
+					Err((key, rc)) => {
+						*rc = u32::from_le_bytes(buf[content_offset..content_offset + 4].try_into().unwrap());
 						key[6..].copy_from_slice(&buf[content_offset + 4..content_offset + 30]);
 					},
 					Ok(key) => if key[6..] != buf[content_offset + 4..content_offset + 30] {
@@ -291,7 +292,7 @@ impl ValueTable {
 		Ok(None)
 	}
 
-	pub fn get_from_index(&self, key: &mut Key, index: u64, log: &impl LogQuery) -> Result<Option<Value>> {
+	pub fn get_from_index(&self, key: &mut (Key, u32), index: u64, log: &impl LogQuery) -> Result<Option<Value>> {
 		let mut result = Vec::new();
 		if self.for_parts(Err(key), index, log, |buf| result.extend_from_slice(buf))? {
 			return Ok(Some(result));
@@ -457,6 +458,64 @@ impl ValueTable {
 			}
 		}
 
+		Ok(start)
+	}
+
+	pub(crate) fn force_write_header(&self) -> Result<()> {
+		// writing current state.
+		// TODO factor with complete_plan
+		let mut buf = [0u8; 16];
+		let last_removed = self.last_removed.load(Ordering::Relaxed);
+		let filled = self.filled.load(Ordering::Relaxed);
+		buf[0..8].copy_from_slice(&last_removed.to_le_bytes());
+		buf[8..16].copy_from_slice(&filled.to_le_bytes());
+		self.write_at(&buf, 0)?;
+		Ok(())
+	}
+
+	/// Write that skip log, only for admin usage.
+	pub(crate) fn force_append_write(&self, key: &Key, value: &[u8], rc: u32) -> Result<u64> {
+		let mut remainder = value.len() + 30; // Prefix with key and ref counter
+		let mut offset = 0;
+		let mut start = 0;
+		assert!(self.multipart || value.len() <= self.value_size() as usize);
+		loop {
+			let index = self.filled.fetch_add(1, Ordering::Relaxed);
+			log::trace!(
+				target: "parity-db",
+				"{}: Writing slot {}: {}",
+				self.id,
+				index,
+				hex(key),
+			);
+			let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
+			let entry_size = self.entry_size as usize;
+			let free_space = entry_size - 2;
+			let (target_offset, value_len) = if remainder > free_space {
+				buf[0..2].copy_from_slice(&MULTIPART);
+				buf[2..10].copy_from_slice(&(index as u64 + 1).to_le_bytes());
+				(10, free_space - 8)
+			} else {
+				buf[0..2].copy_from_slice(&(remainder as u16).to_le_bytes());
+				(2, remainder)
+			};
+			if offset == 0 {
+				buf[target_offset..target_offset + 4].copy_from_slice(&rc.to_le_bytes());
+				buf[target_offset + 4..target_offset + 30].copy_from_slice(&key[6..]);
+				buf[target_offset + 30..target_offset + value_len]
+					.copy_from_slice(&value[offset..offset + value_len - 30]);
+				offset += value_len - 30;
+				start = index;
+			} else {
+				buf[target_offset..target_offset + value_len].copy_from_slice(&value[offset..offset + value_len]);
+				offset += value_len;
+			}
+			self.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
+			remainder -= value_len;
+			if remainder == 0 {
+				break;
+			}
+		}
 		Ok(start)
 	}
 
