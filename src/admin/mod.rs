@@ -78,7 +78,7 @@ pub fn run() {
 			}
 		},
 		SubCommand::Compress(stat) => {
-			let mut db = crate::db::DbInner::open(&options, false)
+			let db = crate::db::DbInner::open(&options, false)
 				.expect("Invalid db");
 			let compression_target = crate::compress::CompressType::from(stat.compression);
 

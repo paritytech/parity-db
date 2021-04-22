@@ -19,7 +19,7 @@
 
 /// Different compression type
 /// allowend and their u8 representation.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum CompressType {
 	NoCompression = 0,

@@ -523,7 +523,6 @@ fn test_key_build() {
 		let partial_key = Entry::extract_key(key_init, index_bits);
 		let entry = Entry::new(address, partial_key, index_bits);
 		let chunk_index = key_init >> (64 - index_bits);
-		let mut from_key = Key::default();
 		let key_index_bits = chunk_index << (64 - index_bits);
 		let key_material = entry.key_material(index_bits) << 10;
 		let key = key_index_bits | key_material | in_value;
