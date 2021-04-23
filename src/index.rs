@@ -505,8 +505,9 @@ impl IndexTable {
 		let mut bu_name = self.id.file_name();
 		bu_name.push_str("_old");
 		path_bu.push(bu_name);
-		std::fs::copy(&self.path, path_bu)?;
-
+		if self.path.exists() {
+			std::fs::copy(&self.path, path_bu)?;
+		}
 		*self.map.write() = Self::open_mmap(self.path.as_path(), &self.id)?;
 		Ok(())
 	}
@@ -516,7 +517,9 @@ impl IndexTable {
 		let mut bu_name = self.id.file_name();
 		bu_name.push_str("_old");
 		path_bu.push(bu_name);
-		std::fs::remove_file(path_bu)?;
+		if path_bu.exists() {
+			std::fs::remove_file(path_bu)?;
+		}
 		Ok(())
 	}
 }
