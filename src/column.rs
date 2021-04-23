@@ -569,13 +569,20 @@ impl Column {
 					let rc = pair.1;
 
 					let value = self.decompress(&value);
-					let cval = compression.compress(value.as_slice());
+					let mut cval = compression.compress(value.as_slice());
+					//let cval = compression.compress(value.as_slice());
 
 					if self.collect_stats {
 /*						if value.len() > 8_000 {
 							println!("{} -> {}", value.len(), cval.len());
 						}*/
 						self.stats.insert_val(value.len() as u32, cval.len() as u32);
+					}
+/* TODO would need to store if compression did happen
+ * into the size for instance.
+ * */
+					if cval.len() > value.len() {
+						cval = value;
 					}
 
 					let target_tier = tables.value.iter().position(|t| cval.len() <= t.value_size() as usize);

@@ -26,6 +26,9 @@ pub enum CompressType {
 	Lz4 = 1,
 	Lz4High = 2,
 	Lz4Low = 3,
+	Zstd = 4,
+	Snappy = 5,
+	Snap = 6,
 }
 
 /// Compression implementation.
@@ -36,6 +39,9 @@ enum Compressor {
 	Lz4(lz4::Lz4),
 	Lz4High(lz4::Lz4High),
 	Lz4Low(lz4::Lz4Low),
+	Zstd(zstd::Zstd),
+	Snappy(snappy::Snappy),
+	Snap(snap::Snap),
 }
 
 impl From<u8> for CompressType {
@@ -45,6 +51,9 @@ impl From<u8> for CompressType {
 			a if a == CompressType::Lz4 as u8 => CompressType::Lz4,
 			a if a == CompressType::Lz4High as u8 => CompressType::Lz4High,
 			a if a == CompressType::Lz4Low as u8 => CompressType::Lz4Low,
+			a if a == CompressType::Zstd as u8 => CompressType::Zstd,
+			a if a == CompressType::Snappy as u8 => CompressType::Snappy,
+			a if a == CompressType::Snap as u8 => CompressType::Snap,
 			_ => panic!("Unkwown compression."),
 		}
 	}
@@ -57,6 +66,9 @@ impl From<CompressType> for Compress {
 			CompressType::Lz4 => Compressor::Lz4(lz4::Lz4::new()),
 			CompressType::Lz4High => Compressor::Lz4High(lz4::Lz4High::new()),
 			CompressType::Lz4Low => Compressor::Lz4Low(lz4::Lz4Low::new()),
+			CompressType::Zstd => Compressor::Zstd(zstd::Zstd::new()),
+			CompressType::Snappy => Compressor::Snappy(snappy::Snappy::new()),
+			CompressType::Snap => Compressor::Snap(snap::Snap::new()),
 			#[allow(unreachable_patterns)]
 			_ => unimplemented!("Missing compression implementation."),
 		})
@@ -70,6 +82,9 @@ impl From<&Compress> for CompressType {
 			Compressor::Lz4(_) => CompressType::Lz4,
 			Compressor::Lz4High(_) => CompressType::Lz4High,
 			Compressor::Lz4Low(_) => CompressType::Lz4Low,
+			Compressor::Zstd(_) => CompressType::Zstd,
+			Compressor::Snappy(_) => CompressType::Snappy,
+			Compressor::Snap(_) => CompressType::Snap,
 			#[allow(unreachable_patterns)]
 			_ => unimplemented!("Missing compression implementation."),
 		}
@@ -84,6 +99,9 @@ impl Compress {
 			Compressor::Lz4(inner) => inner.compress(buf),
 			Compressor::Lz4High(inner) => inner.compress(buf),
 			Compressor::Lz4Low(inner) => inner.compress(buf),
+			Compressor::Zstd(inner) => inner.compress(buf),
+			Compressor::Snappy(inner) => inner.compress(buf),
+			Compressor::Snap(inner) => inner.compress(buf),
 			#[allow(unreachable_patterns)]
 			_ => unimplemented!("Missing compression implementation."),
 		}
@@ -95,6 +113,9 @@ impl Compress {
 			Compressor::Lz4(inner) => inner.decompress(buf),
 			Compressor::Lz4High(inner) => inner.decompress(buf),
 			Compressor::Lz4Low(inner) => inner.decompress(buf),
+			Compressor::Zstd(inner) => inner.decompress(buf),
+			Compressor::Snappy(inner) => inner.decompress(buf),
+			Compressor::Snap(inner) => inner.decompress(buf),
 			#[allow(unreachable_patterns)]
 			_ => unimplemented!("Missing compression implementation."),
 		}
@@ -151,6 +172,81 @@ mod lz4 {
 		pub(super) fn decompress(&self, buf: &[u8]) -> Vec<u8> {
 			lz4::block::decompress(buf, None)
 				.unwrap()
+		}
+	}
+}
+
+mod zstd {
+	pub(super) struct Zstd {
+		//write_buffer: RefCell<Vec<u8>>,
+	}
+
+	impl Zstd {
+		pub(super) fn new() -> Self {
+			Zstd {
+			}
+		}
+
+		pub(super) fn compress(&self, value: &[u8]) -> Vec<u8> {
+			//let buf = self.write_buffer.borrow_mut();
+			//buf.clear();
+			let buf = Vec::new();
+			let mut encoder = zstd::Encoder::new(buf, 0).unwrap();
+			use std::io::Write;
+			encoder.write_all(value).unwrap();
+			let buf = encoder.finish().unwrap();
+			buf
+		}
+
+		pub(super) fn decompress(&self, value: &[u8]) -> Vec<u8> {
+			let decoder = zstd::Decoder::with_buffer(value).unwrap();
+			let buf = decoder.finish();
+			buf.to_vec()
+		}
+	}
+}
+
+mod snappy {
+	pub(super) struct Snappy {
+	}
+
+	impl Snappy {
+		pub(super) fn new() -> Self {
+			Snappy {
+			}
+		}
+
+		pub(super) fn compress(&self, value: &[u8]) -> Vec<u8> {
+			snappy::compress(value)
+		}
+
+		pub(super) fn decompress(&self, value: &[u8]) -> Vec<u8> {
+			snappy::uncompress(value).unwrap()
+		}
+	}
+}
+
+mod snap {
+	pub(super) struct Snap {
+	}
+
+	impl Snap {
+		pub(super) fn new() -> Self {
+			Snap {
+			}
+		}
+
+		pub(super) fn compress(&self, mut value: &[u8]) -> Vec<u8> {
+			let mut encoder = snap::write::FrameEncoder::new(Vec::new());
+			std::io::copy(&mut value, &mut encoder).unwrap();
+			encoder.into_inner().unwrap()
+		}
+
+		pub(super) fn decompress(&self, value: &[u8]) -> Vec<u8> {
+			let mut decoder = snap::read::FrameDecoder::new(value);
+			let mut result = Vec::new();
+			std::io::copy(&mut decoder, &mut result).unwrap();
+			result
 		}
 	}
 }
