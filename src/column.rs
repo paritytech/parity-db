@@ -646,7 +646,8 @@ impl Column {
 */
 				},
 				_ => {
-					log::error!("Missing value for {:?}", key);
+					log::error!("Missing value for {:?}, removing index", key);
+					entry = crate::index::Entry::empty();
 				},
 			}
 			// Return new entry for index update.
@@ -722,6 +723,12 @@ impl Column {
 				},
 				Ok(None) => {
 					println!("Missing value for index entry: {:x}", entry.0);
+
+					if check_param.remove_on_corrupted {
+						println!("Index will be removed.");
+
+						result = Some(crate::index::Entry::empty());
+					}
 				},
 				Err(Error::Corruption(e)) => {
 					println!("Corrupted value for index entry: {:x}:\n\t{}", entry.0, e);

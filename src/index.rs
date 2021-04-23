@@ -297,10 +297,13 @@ impl IndexTable {
 		let total_chunks = total_chunks(index_bits);
 		let total_chunks = end.map(|end| std::cmp::min(total_chunks, end))
 			.unwrap_or(total_chunks);
+		let mut start = None;
 		if with_progress.is_some() {
+			let start_time = std::time::Instant::now();
 			// TODO replace those warn with trace
-			log::warn!(target: "parity-db", "Starting full index iteration at {:?}", std::time::Instant::now());
-			log::warn!(target: "parity-db", "for {} chunks", total_chunks);
+			log::warn!(target: "parity-db", "Starting full index iteration at {:?}", start_time);
+			log::warn!(target: "parity-db", "for {} chunks of column {}", total_chunks, self.id.col());
+			start = Some(start_time);
 		}
 		let mut chunk = [0; CHUNK_LEN];
 		while chunk_index < total_chunks {
@@ -349,7 +352,11 @@ impl IndexTable {
 			chunk_index += 1;
 		}
 		if with_progress.is_some() {
-			log::warn!(target: "parity-db", "Ended full index iteration at {:?}", std::time::Instant::now());
+			log::warn!(
+				target: "parity-db",
+				"Ended full index iteration, elapsed {:?}",
+				start.map(|start| std::time::Instant::now() - start),
+			);
 		}
 	}
 
