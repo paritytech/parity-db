@@ -708,24 +708,17 @@ impl Column {
 					let full_key = pair.0;
 					let rc = pair.1;
 
-					let mut value = self.decompress(&value);
-					let mut truncate = None;
-					if let Some(t) = check_param.truncate_value_display.as_ref() {
-						let t = *t as usize;
-						if value.len() > t {
-							truncate = Some(value.len());
-							value.truncate(t);
-						}
-					}
-
+					let value = self.decompress(&value);
 					if check_param.display_content {
 						println!("Index entry: {:x}", entry.0);
 						println!("Index key: {}", hex(&full_key));
 						println!("Rc: {}", rc);
-						println!("Value: {}", hex(&value));
-						truncate.map(|l| {
-							println!("Value len: {}", l);
-						});
+						if let Some(t) = check_param.truncate_value_display.as_ref() {
+							println!("Value: {}", hex(&value[..std::cmp::min(*t as usize, value.len())]));
+							println!("Value len: {}", value.len());
+						} else {
+							println!("Value: {}", hex(&value));
+						}
 					}
 				},
 				Ok(None) => {

@@ -92,7 +92,6 @@ impl From<&Compress> for CompressType {
 }
 
 impl Compress {
-	// TODO maybe fn compress(&'a self, buf: &[u8]) -> &'a [u8] {
 	pub(crate) fn compress(&self, buf: &[u8]) -> Vec<u8> {
 		match &self.0 {
 			Compressor::NoCompression(inner) => inner.compress(buf),
