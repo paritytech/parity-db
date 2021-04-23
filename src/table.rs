@@ -260,19 +260,9 @@ impl ValueTable {
 				(2, size as usize, 0)
 			};
 
-			if check && content_len == 0 {
+			if check && part == 0 && content_offset + 30 > content_offset  + content_len {
 				log::debug!(target: "parity-db", "Corrupted value: {}", hex(&buf[..entry_size]));
-				// encoded value do include the 2 size byte.
-				return Err(Error::Corruption("Empty value entry.".to_string()));
-			}
-			if check && part == 0 && content_len < content_offset + 30 {
-				log::debug!(target: "parity-db", "Corrupted value: {}", hex(&buf[..entry_size]));
-				return Err(Error::Corruption("First entry too small for meta.".to_string()));
-			}
-			if check && part != 0 && content_len < content_offset {
-				log::debug!(target: "parity-db", "Corrupted value: {}", hex(&buf[..entry_size]));
-				// basically encoded value of one.
-				return Err(Error::Corruption("Entry too small for meta.".to_string()));
+				return Err(Error::Corruption("First entry size too small for meta.".to_string()));
 			}
 			if check && (content_offset + content_len) > entry_size {
 				log::debug!(target: "parity-db", "Corrupted value: {}", hex(&buf[..entry_size]));
@@ -298,10 +288,8 @@ impl ValueTable {
 						return Ok(false);
 					},
 				}
-				// TODO should be f(&buf[content_offset + 30..content_len]);
 				f(&buf[content_offset + 30..content_offset + content_len]);
 			} else {
-				// TODO should be f(&buf[content_offset..content_len]);
 				f(&buf[content_offset..content_offset + content_len]);
 			}
 			if next == 0 {
