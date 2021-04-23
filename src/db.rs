@@ -632,6 +632,13 @@ impl DbInner {
 	}
 
 	pub(crate) fn check_from_index(mut self, check_param: check::CheckParam) -> Result<()> {
+		if let Some(col) = check_param.column.clone() {
+			self.columns[col as usize].check_from_index(&check_param)?;
+		} else {
+			for c in self.columns.iter_mut() {
+				c.check_from_index(&check_param)?;
+			}
+		}
 		Ok(())
 	}
 }
@@ -758,11 +765,12 @@ impl Drop for Db {
 /// Verification operation utilities.
 pub(crate) mod check {
 	pub(crate) struct CheckParam {
-		column: Option<u8>,
-		from: Option<u64>,
-		bound: Option<u64>,
-		display_content: bool,
-		truncate_value_display: Option<u64>,
+		pub column: Option<u8>,
+		pub from: Option<u64>,
+		pub bound: Option<u64>,
+		pub display_content: bool,
+		pub truncate_value_display: Option<u64>,
+		pub remove_on_corrupted: bool,
 	}
 
 	impl CheckParam {
@@ -772,6 +780,7 @@ pub(crate) mod check {
 			bound: Option<u64>,
 			display_content: bool,
 			truncate_value_display: Option<u64>,
+			remove_on_corrupted: bool,
 		) -> Self {
 			CheckParam {
 				column,
@@ -779,6 +788,7 @@ pub(crate) mod check {
 				bound,
 				display_content,
 				truncate_value_display,
+				remove_on_corrupted,
 			}
 		}
 	}

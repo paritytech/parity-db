@@ -105,6 +105,7 @@ pub fn run() {
 				check.range_len,
 				check.display,
 				check.display_value_max,
+				check.remove_on_corrupted,
 			);
 			db.check_from_index(check_param).unwrap();
 		},
@@ -262,12 +263,20 @@ pub struct Check {
 	#[structopt(long)]
 	pub index_value: bool,
 
+	/// Remove index on corrupted
+	/// value.
+	/// Db will probably be missing
+	/// data: use for debugging only.
+	#[structopt(long)]
+	pub remove_on_corrupted: bool,
+
 	/// Start range for operation.
-	/// Eg index position in db.
+	/// Eg index start chunk in db.
 	#[structopt(long)]
 	pub range_start: Option<u64>,
 
-	/// Number of item to process.
+	/// End range for operation.
+	/// Eg number index chunk number.
 	#[structopt(long)]
 	pub range_len: Option<u64>,
 

@@ -36,6 +36,7 @@ const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
 pub type Key = [u8; KEY_LEN];
 pub type Chunk = [u8; CHUNK_LEN];
 
+// TODO remove pub by imlementing LowerHex
 pub struct Entry(pub u64);
 
 impl Entry {
@@ -74,7 +75,8 @@ impl Entry {
 		self.0
 	}
 
-	fn empty() -> Self {
+	// TODO remove pub
+	pub fn empty() -> Self {
 		Entry(0)
 	}
 
@@ -83,6 +85,7 @@ impl Entry {
 	}
 }
 
+// TODO remove pub by imlementing LowerHex
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub struct Address(pub u64);
 
@@ -287,11 +290,13 @@ impl IndexTable {
 		return unsafe { std::mem::transmute(EMPTY_CHUNK) };
 	}
 
-	pub(crate) fn for_all(&self, mut apply: impl FnMut(&Key, Entry) -> Option<Entry>, with_progress: Option<u64>) {
+	pub(crate) fn for_all(&self, from: Option<u64>, end: Option<u64>, mut apply: impl FnMut(&Key, Entry) -> Option<Entry>, with_progress: Option<u64>) {
 		let mut key = Key::default();
-		let mut chunk_index = 0u64;
+		let mut chunk_index = from.unwrap_or(0u64);
 		let index_bits = self.id.index_bits();
 		let total_chunks = total_chunks(index_bits);
+		let total_chunks = end.map(|end| std::cmp::min(total_chunks, end))
+			.unwrap_or(total_chunks);
 		if with_progress.is_some() {
 			// TODO replace those warn with trace
 			log::warn!(target: "parity-db", "Starting full index iteration at {:?}", std::time::Instant::now());

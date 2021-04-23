@@ -60,7 +60,7 @@ use std::mem::MaybeUninit;
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::{
-	error::Result,
+	error::{Error, Result},
 	column::ColId,
 	log::{LogQuery, LogReader, LogWriter},
 	display::hex,
@@ -222,10 +222,18 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8])>(&self, mut key: std::result::Result<&Key, &mut (Key, u32)>, mut index: u64, log: &Q, mut f: F) -> Result<bool> {
+	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8])>(
+		&self,
+		mut key: std::result::Result<&Key, &mut (Key, u32)>,
+		mut index: u64,
+		log: &Q,
+		mut f: F,
+		check: bool,
+	) -> Result<bool> {
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 
 		let mut part = 0;
+		let entry_size = self.entry_size as usize;
 		loop {
 			let buf = if log.value(self.id, index, &mut buf) {
 				&buf
@@ -236,8 +244,8 @@ impl ValueTable {
 					self.id,
 					index,
 				);
-				self.read_at(&mut buf[0..self.entry_size as usize], index * self.entry_size as u64)?;
-				&buf[0..self.entry_size as usize]
+				self.read_at(&mut buf[0..entry_size], index * self.entry_size as u64)?;
+				&buf[0..entry_size]
 			};
 
 			if &buf[0..2] == TOMBSTONE {
@@ -246,11 +254,30 @@ impl ValueTable {
 
 			let (content_offset, content_len, next) = if &buf[0..2] == MULTIPART {
 				let next = u64::from_le_bytes(buf[2..10].try_into().unwrap());
-				(10, self.entry_size as usize - 10, next)
+				(10, entry_size - 10, next)
 			} else {
 				let size: u16 = u16::from_le_bytes(buf[0..2].try_into().unwrap());
 				(2, size as usize, 0)
 			};
+
+			if check && content_len == 0 {
+				log::debug!(target: "parity-db", "Corrupted value: {}", hex(&buf[..entry_size]));
+				// encoded value do include the 2 size byte.
+				return Err(Error::Corruption("Empty value entry.".to_string()));
+			}
+			if check && part == 0 && content_len < content_offset + 30 {
+				log::debug!(target: "parity-db", "Corrupted value: {}", hex(&buf[..entry_size]));
+				return Err(Error::Corruption("First entry too small for meta.".to_string()));
+			}
+			if check && part != 0 && content_len < content_offset {
+				log::debug!(target: "parity-db", "Corrupted value: {}", hex(&buf[..entry_size]));
+				// basically encoded value of one.
+				return Err(Error::Corruption("Entry too small for meta.".to_string()));
+			}
+			if check && (content_offset + content_len) > entry_size {
+				log::debug!(target: "parity-db", "Corrupted value: {}", hex(&buf[..entry_size]));
+				return Err(Error::Corruption("Oversized value entry.".to_string()));
+			}
 
 			if part == 0 {
 				// TODO use custom enum
@@ -271,8 +298,10 @@ impl ValueTable {
 						return Ok(false);
 					},
 				}
+				// TODO should be f(&buf[content_offset + 30..content_len]);
 				f(&buf[content_offset + 30..content_offset + content_len]);
 			} else {
+				// TODO should be f(&buf[content_offset..content_len]);
 				f(&buf[content_offset..content_offset + content_len]);
 			}
 			if next == 0 {
@@ -286,15 +315,15 @@ impl ValueTable {
 
 	pub fn get(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<Value>> {
 		let mut result = Vec::new();
-		if self.for_parts(Ok(key), index, log, |buf| result.extend_from_slice(buf))? {
+		if self.for_parts(Ok(key), index, log, |buf| result.extend_from_slice(buf), false)? {
 			return Ok(Some(result));
 		}
 		Ok(None)
 	}
 
-	pub fn get_from_index(&self, key: &mut (Key, u32), index: u64, log: &impl LogQuery) -> Result<Option<Value>> {
+	pub fn get_from_index(&self, key: &mut (Key, u32), index: u64, log: &impl LogQuery, check: bool) -> Result<Option<Value>> {
 		let mut result = Vec::new();
-		if self.for_parts(Err(key), index, log, |buf| result.extend_from_slice(buf))? {
+		if self.for_parts(Err(key), index, log, |buf| result.extend_from_slice(buf), check)? {
 			return Ok(Some(result));
 		}
 		Ok(None)
@@ -302,7 +331,7 @@ impl ValueTable {
 
 	pub fn size<Q: LogQuery>(&self, key: &Key, index: u64, log: &Q) -> Result<Option<u32>> {
 		let mut result = 0;
-		if self.for_parts(Ok(key), index, log, |buf| result += buf.len() as u32)? {
+		if self.for_parts(Ok(key), index, log, |buf| result += buf.len() as u32, false)? {
 			return Ok(Some(result));
 		}
 		Ok(None)

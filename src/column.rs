@@ -531,27 +531,10 @@ impl Column {
 		compression_target: crate::compress::CompressType,
 		log: &Log,
 	) -> Result<()> {
-		struct NoopsLogQuery;
-
-		impl crate::log::LogQuery for NoopsLogQuery {
-			fn with_index<R, F: FnOnce(&crate::index::Chunk) -> R> (
-				&self,
-				_table: IndexTableId,
-				_index: u64,
-				_f: F,
-			) -> Option<R> {
-				None
-			}
-			fn value(&self, _table: ValueTableId, _index: u64, _dest: &mut[u8]) -> bool {
-				false
-			}
-		}
-
-
 		let mut tables = self.tables.write();
 		let reindex = self.reindex.write(); // keeping it locked until end.
 		if !reindex.queue.is_empty() {
-			return Err(Error::InvalidConfiguration("Db need ot be flush before migrating compression.".into()));
+			return Err(Error::InvalidConfiguration("Db need ot be flush before runnig admin method.".into()));
 		}
 		let compression: crate::compress::Compress = compression_target.into();
 		// store index as backup
@@ -569,17 +552,18 @@ impl Column {
 			dest_tables.push(ValueTable::open_extension(&self.path, table.id, size, true, "_dest")?);
 		}
 
-		log.clear_logs().unwrap(); // TODO this is only here because flush keep a log file at this point.
+		log.clear_logs().unwrap(); // TODO this is only here because flush keep a log file at this point. + TODO with this implementation we can move this to db.
 		let index_bits = tables.index.id.index_bits();
 /*		let mut first = false;
 		let mut first = &mut first;*/
 		// process all value from index
-		tables.index.for_all(|key, mut entry| {
+		tables.index.for_all(None, None, |key, mut entry| {
 			let size_tier = entry.address(index_bits).size_tier() as usize;
 			let full_key = key.clone();
+			std::mem::drop(key); // avoid using key
 			let rc = 0u32;
 			let mut pair = (full_key, rc);
-			match tables.value[size_tier].get_from_index(&mut pair, entry.address(index_bits).offset(), &NoopsLogQuery) {
+			match tables.value[size_tier].get_from_index(&mut pair, entry.address(index_bits).offset(), &admin::NoopsLogQuery, false) {
 				Ok(Some(value)) => {
 					let full_key = pair.0;
 					let rc = pair.1;
@@ -693,8 +677,95 @@ impl Column {
 		Ok(())
 	}
 
+	pub(crate) fn check_from_index(&mut self, check_param: &crate::db::check::CheckParam) -> Result<()> {
+		// lock all, this is an admin method.
+		let tables = self.tables.write();
+		let reindex = self.reindex.write();
+		if !reindex.queue.is_empty() {
+			return Err(Error::InvalidConfiguration("Db need ot be flush before runnig admin method.".into()));
+		}
+
+		let index_bits = tables.index.id.index_bits();
+		let end = check_param.bound
+			.map(|len| check_param.from.clone().unwrap_or(0) + len);
+		tables.index.for_all(check_param.from.clone(), end, |key, entry| {
+			let mut result = None;
+			let size_tier = entry.address(index_bits).size_tier() as usize;
+			let full_key = key.clone();
+			std::mem::drop(key); // avoid using key
+			let rc = 0u32;
+			let mut pair = (full_key, rc);
+			match tables.value[size_tier].get_from_index(&mut pair, entry.address(index_bits).offset(), &admin::NoopsLogQuery, true) {
+				Ok(Some(value)) => {
+					let full_key = pair.0;
+					let rc = pair.1;
+
+					let mut value = self.decompress(&value);
+					let mut truncate = None;
+					if let Some(t) = check_param.truncate_value_display.as_ref() {
+						let t = *t as usize;
+						if value.len() > t {
+							truncate = Some(value.len());
+							value.truncate(t);
+						}
+					}
+
+					if check_param.display_content {
+						println!("Index entry: {:x}", entry.0);
+						println!("Index key: {}", hex(&full_key));
+						println!("Rc: {}", rc);
+						println!("Value: {}", hex(&value));
+						truncate.map(|l| {
+							println!("Value len: {}", l);
+						});
+					}
+				},
+				Ok(None) => {
+					println!("Missing value for index entry: {:x}", entry.0);
+				},
+				Err(Error::Corruption(e)) => {
+					println!("Corrupted value for index entry: {:x}:\n\t{}", entry.0, e);
+					if check_param.remove_on_corrupted {
+						println!("Index will be removed.");
+
+						result = Some(crate::index::Entry::empty());
+					}
+				},
+				Err(e) => {
+					println!("Error value for index entry: {:x}:\n\t{}", entry.0, e);
+				},
+			}
+	
+			result
+		}, Some(500));
+	
+		Ok(())
+	}
+
 	// TODO
 	pub(crate) fn salt(&self) -> Option<Salt> {
 		self.salt.clone()
+	}
+}
+
+/// Utility for admin operation.
+pub(crate) mod admin {
+	use super::*;
+
+	pub struct NoopsLogQuery;
+
+	impl crate::log::LogQuery for NoopsLogQuery {
+		fn with_index<R, F: FnOnce(&crate::index::Chunk) -> R> (
+			&self,
+			_table: IndexTableId,
+			_index: u64,
+			_f: F,
+		) -> Option<R> {
+			None
+		}
+
+		fn value(&self, _table: ValueTableId, _index: u64, _dest: &mut[u8]) -> bool {
+			false
+		}
 	}
 }
