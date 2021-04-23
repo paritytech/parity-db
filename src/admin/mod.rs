@@ -92,6 +92,22 @@ pub fn run() {
 
 			db.migrate_column(stat.column, compression_target).unwrap();
 		},
+		SubCommand::Check(check) => {
+			let db = crate::db::DbInner::open(&options, false)
+				.expect("Invalid db");
+			if !check.index_value {
+				// TODO use a enum with structopt and all...
+				println!("Require one of the following check flag: index_value");
+			}
+			let check_param = crate::db::check::CheckParam::new(
+				check.column,
+				check.range_start,
+				check.range_len,
+				check.display,
+				check.display_value_max,
+			);
+			db.check_from_index(check_param).unwrap();
+		},
 		SubCommand::Run(_run) => {
 			crate::db::Db::open(&options, false)
 				.expect("Invalid db");
@@ -170,6 +186,8 @@ pub enum SubCommand {
 	Compress(Compress),
 	/// Run with worker, allows flushing logs.
 	Run(Run),
+	/// Check db content.
+	Check(Check),
 }
 
 impl Cli {
@@ -183,6 +201,9 @@ impl Cli {
 			},
 			SubCommand::Run(run) => {
 				&run.shared
+			},
+			SubCommand::Check(check) => {
+				&check.shared
 			},
 		}
 	}
@@ -219,10 +240,42 @@ pub struct Compress {
 	pub compression: u8,
 }
 
-
 /// Run with worker, allows flushing logs.
 #[derive(Debug, StructOpt)]
 pub struct Run {
 	#[structopt(flatten)]
 	pub shared: Shared,
+}
+
+/// Check db.
+#[derive(Debug, StructOpt)]
+pub struct Check {
+	#[structopt(flatten)]
+	pub shared: Shared,
+
+	/// Only process a given column.
+	#[structopt(long)]
+	pub column: Option<u8>,
+
+	/// Parse indexes and
+	/// lookup values.
+	#[structopt(long)]
+	pub index_value: bool,
+
+	/// Start range for operation.
+	/// Eg index position in db.
+	#[structopt(long)]
+	pub range_start: Option<u64>,
+
+	/// Number of item to process.
+	#[structopt(long)]
+	pub range_len: Option<u64>,
+
+	/// When active, display parsed index and value content.
+	#[structopt(long)]
+	pub display: bool,
+
+	/// Max length for value to display.
+	#[structopt(long)]
+	pub display_value_max: Option<u64>,
 }

@@ -630,6 +630,10 @@ impl DbInner {
 		self.options.write_metadata_old(path.as_path(), salt.as_ref())?;
 		Ok(())
 	}
+
+	pub(crate) fn check_from_index(mut self, check_param: check::CheckParam) -> Result<()> {
+		Ok(())
+	}
 }
 
 pub struct Db {
@@ -751,3 +755,31 @@ impl Drop for Db {
 	}
 }
 
+/// Verification operation utilities.
+pub(crate) mod check {
+	pub(crate) struct CheckParam {
+		column: Option<u8>,
+		from: Option<u64>,
+		bound: Option<u64>,
+		display_content: bool,
+		truncate_value_display: Option<u64>,
+	}
+
+	impl CheckParam {
+		pub(crate) fn new(
+			column: Option<u8>,
+			from: Option<u64>,
+			bound: Option<u64>,
+			display_content: bool,
+			truncate_value_display: Option<u64>,
+		) -> Self {
+			CheckParam {
+				column,
+				from,
+				bound,
+				display_content,
+				truncate_value_display,
+			}
+		}
+	}
+}
