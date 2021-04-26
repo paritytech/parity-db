@@ -52,6 +52,8 @@ pub struct ColumnOptions {
 	pub ref_counted: bool,
 	/// Compression to use for this column.
 	pub compression: crate::compress::CompressType,
+	/// Minimal value size treshold to attempt compressing a value.
+	pub compression_treshold: usize,
 }
 
 impl ColumnOptions {
@@ -133,6 +135,7 @@ impl Default for ColumnOptions {
 			uniform: false,
 			ref_counted: false,
 			compression: crate::compress::CompressType::NoCompression,
+			compression_treshold: usize::max_value(),
 			sizes: [96, 128, 192, 256, 320, 512, 768, 1024, 1536, 2048, 3072, 4096, 8192, 16384, 32768],
 		}
 	}

@@ -610,14 +610,19 @@ impl DbInner {
 		}
 	}
 
-	pub(crate) fn migrate_column(mut self, column: Option<u8>, compression_target: crate::compress::CompressType) -> Result<()> {
+	pub(crate) fn migrate_column(
+		mut self,
+		column: Option<u8>,
+		compression_target: crate::compress::CompressType,
+		compression_threshold: usize,
+	) -> Result<()> {
 		let salt = self.columns[0].salt();
 		if let Some(col) = column {
-			self.columns[col as usize].migrate_column(compression_target, &self.log)?;
+			self.columns[col as usize].migrate_column(compression_target, compression_threshold, &self.log)?;
 			self.options.columns[col as usize].compression = compression_target;
 		} else {
 			for c in self.columns.iter_mut() {
-				c.migrate_column(compression_target, &self.log)?;
+				c.migrate_column(compression_target, compression_threshold, &self.log)?;
 			}
 			for option in self.options.columns.iter_mut() {
 				option.compression = compression_target;

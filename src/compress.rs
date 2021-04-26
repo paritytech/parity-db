@@ -32,7 +32,19 @@ pub enum CompressType {
 }
 
 /// Compression implementation.
-pub(crate) struct Compress(Compressor);
+pub(crate) struct Compress {
+	inner: Compressor,
+	pub treshold: usize,
+}
+
+impl Compress {
+	pub(crate) fn new(kind: CompressType, treshold: usize) -> Self {
+		Compress {
+			inner: kind.into(),
+			treshold,
+		}
+	}
+}
 
 enum Compressor {
 	NoCompression(NoCompression),
@@ -59,9 +71,9 @@ impl From<u8> for CompressType {
 	}
 }
 
-impl From<CompressType> for Compress {
+impl From<CompressType> for Compressor {
 	fn from(comp_type: CompressType) -> Self {
-		Compress(match comp_type {
+		match comp_type {
 			CompressType::NoCompression => Compressor::NoCompression(NoCompression),
 			CompressType::Lz4 => Compressor::Lz4(lz4::Lz4::new()),
 			CompressType::Lz4High => Compressor::Lz4High(lz4::Lz4High::new()),
@@ -71,13 +83,13 @@ impl From<CompressType> for Compress {
 			CompressType::Snap => Compressor::Snap(snap::Snap::new()),
 			#[allow(unreachable_patterns)]
 			_ => unimplemented!("Missing compression implementation."),
-		})
+		}
 	}
 }
 
 impl From<&Compress> for CompressType {
 	fn from(compression: &Compress) -> Self {
-		match compression.0 {
+		match compression.inner {
 			Compressor::NoCompression(_) => CompressType::NoCompression,
 			Compressor::Lz4(_) => CompressType::Lz4,
 			Compressor::Lz4High(_) => CompressType::Lz4High,
@@ -93,7 +105,7 @@ impl From<&Compress> for CompressType {
 
 impl Compress {
 	pub(crate) fn compress(&self, buf: &[u8]) -> Vec<u8> {
-		match &self.0 {
+		match &self.inner {
 			Compressor::NoCompression(inner) => inner.compress(buf),
 			Compressor::Lz4(inner) => inner.compress(buf),
 			Compressor::Lz4High(inner) => inner.compress(buf),
@@ -107,7 +119,7 @@ impl Compress {
 	}
 
 	pub(crate) fn decompress(&self, buf: &[u8]) -> Vec<u8> {
-		match &self.0 {
+		match &self.inner {
 			Compressor::NoCompression(inner) => inner.decompress(buf),
 			Compressor::Lz4(inner) => inner.decompress(buf),
 			Compressor::Lz4High(inner) => inner.decompress(buf),

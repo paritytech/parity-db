@@ -26,6 +26,7 @@ use crate::{
 	options::Options,
 	stats::ColumnStats,
 };
+use crate::compress::Compress;
 
 const START_BITS: u8 = 16;
 const MAX_REBALANCE_BATCH: u32 = 1024;
@@ -53,7 +54,7 @@ pub struct Column {
 	ref_counted: bool,
 	salt: Option<Salt>,
 	stats: ColumnStats,
-	compression: crate::compress::Compress,
+	compression: Compress,
 }
 
 impl Column {
@@ -108,13 +109,19 @@ impl Column {
 
 	/// Compress if needed and return the target tier to use.
 	fn compress(&self, key: &Key, value: &[u8], tables: &Tables) -> (Option<Vec<u8>>, usize) {
-		let cvalue = self.compression.compress(value);
-		let mut compressed = true;
-		let len = if cvalue.len() <= value.len() {
-			compressed = false;
-			cvalue.len()
+		Self::compress_internal(&self.compression, key, value, tables)
+	}
+
+	fn compress_internal(compression: &Compress, key: &Key, value: &[u8], tables: &Tables) -> (Option<Vec<u8>>, usize) {
+		let (len, result) = if value.len() > compression.treshold {
+			let cvalue = compression.compress(value);
+			if cvalue.len() <= value.len() {
+				(cvalue.len(), Some(cvalue))
+			} else {
+				(value.len(), None)
+			}
 		} else {
-			value.len()
+			(value.len(), None)
 		};
 		let target_tier = tables.value.iter().position(|t| len <= t.value_size() as usize);
 		let target_tier = match target_tier {
@@ -125,11 +132,7 @@ impl Column {
 			}
 		};
 
-		if compressed {
-			(Some(cvalue), target_tier)
-		} else {
-			(None, target_tier)
-		}
+		(result, target_tier)
 	}
 
 	fn decompress(&self, buf: &[u8]) -> Vec<u8> {
@@ -176,7 +179,7 @@ impl Column {
 			collect_stats,
 			salt,
 			stats,
-			compression: options.compression.into(),
+			compression: Compress::new(options.compression, options.compression_treshold),
 		})
 	}
 
@@ -550,6 +553,7 @@ impl Column {
 	pub(crate) fn migrate_column(
 		&mut self,
 		compression_target: crate::compress::CompressType,
+		compression_treshold: usize,
 		log: &Log,
 	) -> Result<()> {
 		let mut tables = self.tables.write();
@@ -557,7 +561,7 @@ impl Column {
 		if !reindex.queue.is_empty() {
 			return Err(Error::InvalidConfiguration("Db need ot be flush before runnig admin method.".into()));
 		}
-		let compression: crate::compress::Compress = compression_target.into();
+		let compression = Compress::new(compression_target, compression_treshold);
 		// store index as backup
 		tables.index.backup_index(&self.path)?;
 
@@ -594,7 +598,8 @@ impl Column {
 					} else {
 						value
 					};
-					let (cval, target_tier) = self.compress(&key, value.as_slice(), &*tables);
+
+					let (cval, target_tier) = Self::compress_internal(&compression, &key, value.as_slice(), &*tables);
 					let (cval, compressed) = cval.as_ref()
 						.map(|cval|(cval.as_slice(), true))
 						.unwrap_or((value.as_slice(), false));

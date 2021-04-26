@@ -89,8 +89,11 @@ pub fn run() {
 			let db = crate::db::DbInner::open(&options, false)
 				.expect("Invalid db");
 			let compression_target = crate::compress::CompressType::from(stat.compression);
+			let compression_threshold = stat.compression_threshold
+				.unwrap_or(usize::max_value());
 
-			db.migrate_column(stat.column, compression_target).unwrap();
+			db.migrate_column(stat.column, compression_target, compression_threshold)
+				.unwrap();
 		},
 		SubCommand::Check(check) => {
 			let db = crate::db::DbInner::open(&options, false)
@@ -239,6 +242,10 @@ pub struct Compress {
 	/// (see enum variants in code).
 	#[structopt(long)]
 	pub compression: u8,
+
+	/// Compression threshold to use.
+	#[structopt(long)]
+	pub compression_threshold: Option<usize>,
 }
 
 /// Run with worker, allows flushing logs.
