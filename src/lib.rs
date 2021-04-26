@@ -24,10 +24,6 @@ mod display;
 mod options;
 mod stats;
 mod compress;
-#[cfg(feature = "admin")]
-pub mod admin;
-#[cfg(not(feature = "admin"))]
-pub mod admin { }
 
 pub use db::Db;
 pub use error::{Error, Result};

@@ -42,7 +42,7 @@ pub struct Entry(pub u64);
 impl Entry {
 	// TODO remove pub
 	#[inline]
-	pub fn new(address: Address, key_material: u64, index_bits: u8) -> Entry {
+	fn new(address: Address, key_material: u64, index_bits: u8) -> Entry {
 		Entry((key_material << Self::address_bits(index_bits)) | address.as_u64())
 	}
 
@@ -75,8 +75,7 @@ impl Entry {
 		self.0
 	}
 
-	// TODO remove pub
-	pub fn empty() -> Self {
+	fn empty() -> Self {
 		Entry(0)
 	}
 
@@ -85,9 +84,8 @@ impl Entry {
 	}
 }
 
-// TODO remove pub by imlementing LowerHex
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
-pub struct Address(pub u64);
+pub struct Address(u64);
 
 impl Address {
 	pub fn new(offset: u64, size_tier: u8) -> Address {
@@ -185,9 +183,11 @@ impl std::fmt::Display for TableId {
 }
 
 impl IndexTable {
+	pub fn open_existing(path: &std::path::Path, id: TableId) -> Result<Option<IndexTable>> {
+		let mut path: std::path::PathBuf = path.into();
+		path.push(id.file_name());
 
-	fn open_mmap(path: &std::path::Path, id: &TableId, create: bool) -> Result<Option<memmap2::MmapMut>> {
-		let file = match std::fs::OpenOptions::new().read(true).write(true).create(create).open(path) {
+		let file = match std::fs::OpenOptions::new().read(true).write(true).open(path.as_path()) {
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
 				return Ok(None);
 			}
@@ -195,22 +195,13 @@ impl IndexTable {
 			Ok(file) => file,
 		};
 
-		//TODO: check for potential overflows on 32-bit platforms
 		file.set_len(file_size(id.index_bits()))?;
-		Ok(Some(unsafe { memmap2::MmapMut::map_mut(&file)? }))
-	}
-
-	pub fn open_existing(path: &std::path::Path, id: TableId) -> Result<Option<IndexTable>> {
-		let mut path: std::path::PathBuf = path.into();
-		path.push(id.file_name());
-
-		Ok(Self::open_mmap(path.as_path(), &id, false)?.map(|map| {
-			log::debug!(target: "parity-db", "Opened existing index {}", id);
-			IndexTable {
-				id,
-				path,
-				map: RwLock::new(Some(map)),
-			}
+		let map = unsafe { memmap2::MmapMut::map_mut(&file)? };
+		log::debug!(target: "parity-db", "Opened existing index {}", id);
+		Ok(Some(IndexTable {
+			id,
+			path,
+			map: RwLock::new(Some(map)),
 		}))
 	}
 
@@ -288,76 +279,6 @@ impl IndexTable {
 			return unsafe { std::mem::transmute(chunk) };
 		}
 		return unsafe { std::mem::transmute(EMPTY_CHUNK) };
-	}
-
-	pub(crate) fn for_all(&self, from: Option<u64>, end: Option<u64>, mut apply: impl FnMut(&Key, Entry) -> Option<Entry>, with_progress: Option<u64>) {
-		let mut key = Key::default();
-		let mut chunk_index = from.unwrap_or(0u64);
-		let index_bits = self.id.index_bits();
-		let total_chunks = total_chunks(index_bits);
-		let total_chunks = end.map(|end| std::cmp::min(total_chunks, end))
-			.unwrap_or(total_chunks);
-		let mut start = None;
-		if with_progress.is_some() {
-			let start_time = std::time::Instant::now();
-			// TODO replace those warn with trace
-			log::warn!(target: "parity-db", "Starting full index iteration at {:?}", start_time);
-			log::warn!(target: "parity-db", "for {} chunks of column {}", total_chunks, self.id.col());
-			start = Some(start_time);
-		}
-		let mut chunk = [0; CHUNK_LEN];
-		while chunk_index < total_chunks {
-			if let Some(step) = with_progress.as_ref() {
-				if chunk_index % step == 0 {
-					log::warn!(target: "parity-db", "Chunk iteration at {}", chunk_index);
-				}
-			}
-			let mut entries: [Entry; CHUNK_ENTRIES] = {
-				// TODO factor with 'entries' + fix for be arch
-				if let Some(map) = &*self.map.read() {
-					let source = Self::chunk_at(chunk_index, map);
-					chunk.copy_from_slice(source);
-					unsafe { std::mem::transmute(chunk) }
-				} else {
-					break;
-				}
-			};
-			let mut changed = false;
-			for i in 0 .. CHUNK_ENTRIES {
-				let entry = Entry(entries[i].0);
-				if !entry.is_empty() {
-					let key_index_bits = chunk_index << (64 - index_bits);
-					let key_material = entry.key_material(index_bits) << 10;
-					key[0..8].copy_from_slice(&(key_index_bits | key_material).to_be_bytes()[..]);
-					if let Some(entry) = apply(&key, entry) {
-						changed = true;
-						entries[i] = entry;
-					}
-				}
-			}
-			if changed {
-				// TODO could write handle for all precessing.
-				if let Some(map) = &mut *self.map.write() {
-					// TODO factor with chunk_at (and read logger?)
-					let offset = META_SIZE + chunk_index as usize * CHUNK_LEN;
-					let dest = &mut map[offset .. offset + CHUNK_LEN];
-					// TODO fix for be arch
-					let source: [u8; CHUNK_LEN] = unsafe { std::mem::transmute(entries) };
-					dest.copy_from_slice(&source[..]);
-				} else {
-					break;
-				}
-			}
-	
-			chunk_index += 1;
-		}
-		if with_progress.is_some() {
-			log::warn!(
-				target: "parity-db",
-				"Ended full index iteration, elapsed {:?}",
-				start.map(|start| start.elapsed()),
-			);
-		}
 	}
 
 	fn plan_insert_chunk(
@@ -456,13 +377,12 @@ impl IndexTable {
 		let mut map = self.map.upgradable_read();
 		if map.is_none() {
 			let mut wmap = RwLockUpgradableReadGuard::upgrade(map);
-			if let Some(mmap) = Self::open_mmap(self.path.as_path(), &self.id, true)? {
-				log::debug!(target: "parity-db", "Created new index {}", self.id);
-				*wmap = Some(mmap);
-				map = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wmap);
-			} else {
-				return Err(std::io::ErrorKind::NotFound.into());
-			}
+			let file = std::fs::OpenOptions::new().write(true).read(true).create_new(true).open(self.path.as_path())?;
+			log::debug!(target: "parity-db", "Created new index {}", self.id);
+			//TODO: check for potential overflows on 32-bit platforms
+			file.set_len(file_size(self.id.index_bits()))?;
+			*wmap = Some(unsafe { memmap2::MmapMut::map_mut(&file)? });
+			map = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wmap);
 		}
 
 		let map = map.as_ref().unwrap();
@@ -494,62 +414,5 @@ impl IndexTable {
 		std::fs::remove_file(self.path.as_path())?;
 		log::debug!(target: "parity-db", "{}: Dropped table", self.id);
 		Ok(())
-	}
-
-	// Copy full index file.
-	pub(crate) fn backup_index(&self, path: &std::path::Path) -> Result<()> {
-		let mut mmap = self.map.write().take();
-		mmap.as_mut().map(|mmap| mmap.flush());
-		std::mem::drop(mmap);
-		let mut path_bu: std::path::PathBuf = path.into();
-		let mut bu_name = self.id.file_name();
-		bu_name.push_str("_old");
-		path_bu.push(bu_name);
-		if self.path.exists() {
-			std::fs::copy(&self.path, path_bu)?;
-		}
-		*self.map.write() = Self::open_mmap(self.path.as_path(), &self.id, false)?;
-		Ok(())
-	}
-
-	pub(crate) fn remove_backup_index(&self, path: &std::path::Path) -> Result<()> {
-		let mut path_bu: std::path::PathBuf = path.into();
-		let mut bu_name = self.id.file_name();
-		bu_name.push_str("_old");
-		path_bu.push(bu_name);
-		if path_bu.exists() {
-			std::fs::remove_file(path_bu)?;
-		}
-		Ok(())
-	}
-}
-
-#[test]
-fn test_key_build() {
-	use rand::Rng;
-	for index_bits in 16..32 {
-		let key_init: u64 = rand::thread_rng().gen();
-		let address: u64 = rand::thread_rng().gen();
-		// fit address to right range
-		let address = Entry(address).address(index_bits);
-		// remove the key data from value key that is
-		// checked against value.
-		let in_value = key_init & 0xffff;
-		let partial_key = Entry::extract_key(key_init, index_bits);
-		let entry = Entry::new(address, partial_key, index_bits);
-		let chunk_index = key_init >> (64 - index_bits);
-		let key_index_bits = chunk_index << (64 - index_bits);
-		let key_material = entry.key_material(index_bits) << 10;
-		let key = key_index_bits | key_material | in_value;
-		/*println!("address {:x}", address.0);
-		println!("partial_key {:x}", partial_key);
-		println!("entry {:x}", entry.0);
-		println!("chunk_index {:x}", chunk_index);
-		println!("key_index_bits {:x}", key_index_bits);
-		println!("in_value {:x}", in_value);
-		println!("key_material {:x}", key_material);
-		println!("key_init {:x}", key_init);
-		println!("key {:x}", key);*/
-		assert!(key_init == key);
 	}
 }

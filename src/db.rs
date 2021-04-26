@@ -91,7 +91,7 @@ impl std::hash::Hasher for IdentityKeyHash {
 	}
 }
 
-pub(crate) struct DbInner {
+struct DbInner {
 	columns: Vec<Column>,
 	options: Options,
 	shutdown: AtomicBool,
@@ -117,18 +117,18 @@ pub(crate) struct DbInner {
 }
 
 impl DbInner {
-	pub(crate) fn open(options: &Options, create: bool) -> Result<DbInner> {
+	fn open(options: &Options) -> Result<DbInner> {
 		std::fs::create_dir_all(&options.path)?;
 		let mut lock_path: std::path::PathBuf = options.path.clone();
 		lock_path.push("lock");
-		let lock_file = std::fs::OpenOptions::new().create(create).read(true).write(true).open(lock_path.as_path())?;
+		let lock_file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(lock_path.as_path())?;
 		lock_file.try_lock_exclusive().map_err(|e| Error::Locked(e))?;
 
 		let salt = options.load_and_validate_metadata()?;
 		let mut columns = Vec::with_capacity(options.columns.len());
 		let mut commit_overlay = Vec::with_capacity(options.columns.len());
 		for c in 0 .. options.columns.len() {
-			columns.push(Column::open(c as ColId, &options, salt.clone(), create)?);
+			columns.push(Column::open(c as ColId, &options, salt.clone())?);
 			commit_overlay.push(
 				HashMap::with_hasher(std::hash::BuildHasherDefault::<IdentityKeyHash>::default())
 			);
@@ -571,30 +571,11 @@ impl DbInner {
 			path.push("stats.txt");
 			match std::fs::File::create(path) {
 				Ok(file) => {
-					let mut writer = std::io::BufWriter::new(file);
-					self.do_collect_stats(&mut writer, None)
+					for c in self.columns.iter() {
+						c.write_stats(&file);
+					}
 				}
 				Err(e) => log::warn!(target: "parity-db", "Error creating stats file: {:?}", e),
-			}
-		}
-	}
-
-	pub(crate) fn do_collect_stats(&self, writer: &mut impl std::io::Write, column: Option<u8>) {
-		if let Some(col) = column {
-			self.columns[col as usize].write_stats(writer);
-		} else {
-			for c in self.columns.iter() {
-				c.write_stats(writer);
-			}
-		}
-	}
-
-	pub(crate) fn do_clear_stats(&self, column: Option<u8>) {
-		if let Some(col) = column {
-			self.columns[col as usize].clear_stats();
-		} else {
-			for c in self.columns.iter() {
-				c.clear_stats();
 			}
 		}
 	}
@@ -609,43 +590,6 @@ impl DbInner {
 			}
 		}
 	}
-
-	pub(crate) fn migrate_column(
-		mut self,
-		column: Option<u8>,
-		compression_target: crate::compress::CompressType,
-		compression_threshold: usize,
-	) -> Result<()> {
-		let salt = self.columns[0].salt();
-		if let Some(col) = column {
-			self.columns[col as usize].migrate_column(compression_target, compression_threshold, &self.log)?;
-			self.options.columns[col as usize].compression = compression_target;
-		} else {
-			for c in self.columns.iter_mut() {
-				c.migrate_column(compression_target, compression_threshold, &self.log)?;
-			}
-			for option in self.options.columns.iter_mut() {
-				option.compression = compression_target;
-			}
-		}
-
-		// Rewrite metadata to the right compression method.
-		let mut path = self.options.path.clone();
-		path.push("metadata");
-		self.options.write_metadata_old(path.as_path(), salt.as_ref())?;
-		Ok(())
-	}
-
-	pub(crate) fn check_from_index(mut self, check_param: check::CheckParam) -> Result<()> {
-		if let Some(col) = check_param.column.clone() {
-			self.columns[col as usize].check_from_index(&check_param)?;
-		} else {
-			for c in self.columns.iter_mut() {
-				c.check_from_index(&check_param)?;
-			}
-		}
-		Ok(())
-	}
 }
 
 pub struct Db {
@@ -658,12 +602,12 @@ pub struct Db {
 impl Db {
 	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Result<Db> {
 		let options = Options::with_columns(path, num_columns);
-		Self::open(&options, true)
+		Self::open(&options)
 	}
 
 	/// Open the database with given
-	pub fn open(options: &Options, create: bool) -> Result<Db> {
-		let db = Arc::new(DbInner::open(options, create)?);
+	pub fn open(options: &Options) -> Result<Db> {
+		let db = Arc::new(DbInner::open(options)?);
 		db.replay_all_logs()?;
 		let commit_worker_db = db.clone();
 		let commit_thread = std::thread::spawn(move ||
@@ -764,37 +708,5 @@ impl Drop for Db {
 		self.log_thread.take().map(|t| t.join());
 		self.flush_thread.take().map(|t| t.join());
 		self.commit_thread.take().map(|t| t.join());
-	}
-}
-
-/// Verification operation utilities.
-pub(crate) mod check {
-	pub(crate) struct CheckParam {
-		pub column: Option<u8>,
-		pub from: Option<u64>,
-		pub bound: Option<u64>,
-		pub display_content: bool,
-		pub truncate_value_display: Option<u64>,
-		pub remove_on_corrupted: bool,
-	}
-
-	impl CheckParam {
-		pub(crate) fn new(
-			column: Option<u8>,
-			from: Option<u64>,
-			bound: Option<u64>,
-			display_content: bool,
-			truncate_value_display: Option<u64>,
-			remove_on_corrupted: bool,
-		) -> Self {
-			CheckParam {
-				column,
-				from,
-				bound,
-				display_content,
-				truncate_value_display,
-				remove_on_corrupted,
-			}
-		}
 	}
 }

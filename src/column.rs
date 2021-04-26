@@ -139,7 +139,7 @@ impl Column {
 		self.compression.decompress(buf)
 	}
 
-	pub fn open(col: ColId, options: &Options, salt: Option<Salt>, create: bool) -> Result<Column> {
+	pub fn open(col: ColId, options: &Options, salt: Option<Salt>) -> Result<Column> {
 		let (index, reindexing, stats) = Self::open_index(&options.path, col)?;
 		let collect_stats = options.stats;
 		let path = &options.path;
@@ -147,22 +147,22 @@ impl Column {
 		let tables = Tables {
 			index,
 			value: [
-				Self::open_table(path, col, 0, Some(options.sizes[0]), create)?,
-				Self::open_table(path, col, 1, Some(options.sizes[1]), create)?,
-				Self::open_table(path, col, 2, Some(options.sizes[2]), create)?,
-				Self::open_table(path, col, 3, Some(options.sizes[3]), create)?,
-				Self::open_table(path, col, 4, Some(options.sizes[4]), create)?,
-				Self::open_table(path, col, 5, Some(options.sizes[5]), create)?,
-				Self::open_table(path, col, 6, Some(options.sizes[6]), create)?,
-				Self::open_table(path, col, 7, Some(options.sizes[7]), create)?,
-				Self::open_table(path, col, 8, Some(options.sizes[8]), create)?,
-				Self::open_table(path, col, 9, Some(options.sizes[9]), create)?,
-				Self::open_table(path, col, 10, Some(options.sizes[10]), create)?,
-				Self::open_table(path, col, 11, Some(options.sizes[11]), create)?,
-				Self::open_table(path, col, 12, Some(options.sizes[12]), create)?,
-				Self::open_table(path, col, 13, Some(options.sizes[13]), create)?,
-				Self::open_table(path, col, 14, Some(options.sizes[14]), create)?,
-				Self::open_table(path, col, 15, None, create)?,
+				Self::open_table(path, col, 0, Some(options.sizes[0]))?,
+				Self::open_table(path, col, 1, Some(options.sizes[1]))?,
+				Self::open_table(path, col, 2, Some(options.sizes[2]))?,
+				Self::open_table(path, col, 3, Some(options.sizes[3]))?,
+				Self::open_table(path, col, 4, Some(options.sizes[4]))?,
+				Self::open_table(path, col, 5, Some(options.sizes[5]))?,
+				Self::open_table(path, col, 6, Some(options.sizes[6]))?,
+				Self::open_table(path, col, 7, Some(options.sizes[7]))?,
+				Self::open_table(path, col, 8, Some(options.sizes[8]))?,
+				Self::open_table(path, col, 9, Some(options.sizes[9]))?,
+				Self::open_table(path, col, 10, Some(options.sizes[10]))?,
+				Self::open_table(path, col, 11, Some(options.sizes[11]))?,
+				Self::open_table(path, col, 12, Some(options.sizes[12]))?,
+				Self::open_table(path, col, 13, Some(options.sizes[13]))?,
+				Self::open_table(path, col, 14, Some(options.sizes[14]))?,
+				Self::open_table(path, col, 15, None)?,
 			],
 		};
 
@@ -217,9 +217,9 @@ impl Column {
 		Ok((table, reindexing, stats))
 	}
 
-	fn open_table(path: &std::path::Path, col: ColId, tier: u8, entry_size: Option<u16>, create: bool) -> Result<ValueTable> {
+	fn open_table(path: &std::path::Path, col: ColId, tier: u8, entry_size: Option<u16>) -> Result<ValueTable> {
 		let id = ValueTableId::new(col, tier);
-		ValueTable::open(path, id, entry_size, create)
+		ValueTable::open(path, id, entry_size)
 	}
 
 	fn trigger_reindex(
@@ -471,16 +471,10 @@ impl Column {
 		Ok(())
 	}
 
-	pub fn write_stats(&self, writer: &mut impl std::io::Write) {
+	pub fn write_stats(&self, file: &std::fs::File) {
 		let tables = self.tables.read();
 		tables.index.write_stats(&self.stats);
-		self.stats.write_summary(writer, tables.index.id.col());
-	}
-
-	pub fn clear_stats(&self) {
-		let tables = self.tables.read();
-		let empty_stats = ColumnStats::empty();
-		tables.index.write_stats(&empty_stats);
+		self.stats.write_summary(file, tables.index.id.col());
 	}
 
 	pub fn reindex(&self, log: &Log) -> Result<(Option<IndexTableId>, Vec<(Key, Address)>)> {
@@ -543,248 +537,5 @@ impl Column {
 		}
 		log::debug!(target: "parity-db", "Dropped {}", id);
 		Ok(())
-	}
-
-	// Migrate from current compression mode to another.
-	// Double column size during processsing.
-	// Do not support shutdown (old file are kept but
-	// need to be restored manually).
-	// Also require empty log and should not run when logger worker is active.
-	pub(crate) fn migrate_column(
-		&mut self,
-		compression_target: crate::compress::CompressType,
-		compression_treshold: usize,
-		log: &Log,
-	) -> Result<()> {
-		let mut tables = self.tables.write();
-		let reindex = self.reindex.write(); // keeping it locked until end.
-		if !reindex.queue.is_empty() {
-			return Err(Error::InvalidConfiguration("Db need ot be flush before runnig admin method.".into()));
-		}
-		let compression = Compress::new(compression_target, compression_treshold);
-		// store index as backup
-		tables.index.backup_index(&self.path)?;
-
-		// create value destination tables
-		let nb_tables = tables.value.len();
-		let mut dest_tables = Vec::with_capacity(nb_tables);
-		for (i, table) in tables.value.iter().enumerate() {
-			let size = if i == nb_tables - 1 {
-				None
-			} else {
-				Some(table.entry_size)
-			};
-			dest_tables.push(ValueTable::open_extension(&self.path, table.id, size, true, "_dest")?);
-		}
-
-		log.clear_logs().unwrap(); // TODO this is only here because flush keep a log file at this point. + TODO with this implementation we can move this to db.
-		let index_bits = tables.index.id.index_bits();
-/*		let mut first = false;
-		let mut first = &mut first;*/
-		// process all value from index
-		tables.index.for_all(None, None, |key, mut entry| {
-			let size_tier = entry.address(index_bits).size_tier() as usize;
-			let full_key = key.clone();
-			std::mem::drop(key); // avoid using key
-			let rc = 0u32;
-			let mut pair = (full_key, rc);
-			match tables.value[size_tier].get_from_index(&mut pair, entry.address(index_bits).offset(), &admin::NoopsLogQuery, false) {
-				Ok(Some((value, compressed))) => {
-					let full_key = pair.0;
-					let rc = pair.1;
-
-					let value = if compressed {
-						self.decompress(&value)
-					} else {
-						value
-					};
-
-					let (cval, target_tier) = Self::compress_internal(&compression, &key, value.as_slice(), &*tables);
-					let (cval, compressed) = cval.as_ref()
-						.map(|cval|(cval.as_slice(), true))
-						.unwrap_or((value.as_slice(), false));
-
-					if self.collect_stats {
-						self.stats.insert_val(value.len() as u32, cval.len() as u32);
-					}
-
-					let index = dest_tables[target_tier].force_append_write(&full_key, cval, rc, compressed).unwrap();
-					let address = Address::new(index, target_tier as u8);
-/*			if !*first {
-					let entry2 = crate::index::Entry::new(address, entry.key_material(index_bits), index_bits);
-				println!("key {:?}", key);
-				println!("key {:?}", full_key);
-				println!("rc {:?}", rc);
-				println!("entry {:x}", entry.0);
-				println!("entry2 {:x}", entry2.0);
-				println!("address {:x}", entry.address(index_bits).0);
-				println!("address2 {:x}", entry2.address(index_bits).0);
-				println!("index {}", index);
-				println!("address {:x}", entry.address(index_bits).offset());
-				*first = true;
-			}
-*/
-	
-					entry = crate::index::Entry::new(address, entry.key_material(index_bits), index_bits);
-/*					let mut writer = log.begin_record();
-					dest_tables[target_tier].write_insert_plan(&full_key, cval.as_slice(), &mut writer).unwrap();
-					log.end_record(writer.drain()).unwrap();
-					// Cycle through 2 log files
-					let _ = log.read_next(false);
-					log.flush_one().unwrap();
-					let _ = log.read_next(false);
-					log.flush_one().unwrap();
-					let mut reader = log.read_next(false).unwrap().unwrap();
-					loop {
-						match reader.next().unwrap() {
-							LogAction::BeginRecord(_) => {
-								panic!("Unexpected log entry2");
-							},
-							LogAction::InsertIndex(_) => {
-								panic!("Unexpected log entry22");
-							},
-							LogAction::BeginRecord(_) | LogAction::InsertIndex { .. } | LogAction::DropTable { .. } => {
-								panic!("Unexpected log entry");
-							},
-							LogAction::EndRecord => {
-								break;
-							},
-							LogAction::InsertValue(insertion) => {
-								let address = Address::new(insertion.index, insertion.table.size_tier());
-								entry = crate::index::Entry::new(address, entry.key_material(index_bits), index_bits);
-								dest_tables[insertion.table.size_tier() as usize]
-									.enact_plan(insertion.index, &mut reader).unwrap();
-							},
-						}
-					}
-*/
-				},
-				_ => {
-					log::error!("Missing value for {:?}, removing index", key);
-					entry = crate::index::Entry::empty();
-				},
-			}
-			// Return new entry for index update.
-			Some(entry)
-		}, Some(500));
-
-		if self.collect_stats {
-			tables.index.write_stats(&self.stats);
-		}
-
-		// Update value tables replacing old
-		for table in tables.value.iter_mut() {
-			*table = dest_tables.remove(0);
-			table.force_write_header()?;
-			let mut from: std::path::PathBuf = self.path.clone();
-			let mut file_name = table.id.file_name();
-			file_name.push_str("_dest");
-			from.push(file_name);
-			let mut to: std::path::PathBuf = self.path.clone();
-			to.push(table.id.file_name());
-			// TODO might need to close file first...
-			std::fs::rename(from, to)?;
-		}
-
-		// Revove index backups
-		tables.index.remove_backup_index(&self.path)?;
-
-		Ok(())
-	}
-
-	pub(crate) fn check_from_index(&mut self, check_param: &crate::db::check::CheckParam) -> Result<()> {
-		// lock all, this is an admin method.
-		let tables = self.tables.write();
-		let reindex = self.reindex.write();
-		if !reindex.queue.is_empty() {
-			return Err(Error::InvalidConfiguration("Db need ot be flush before runnig admin method.".into()));
-		}
-
-		let index_bits = tables.index.id.index_bits();
-		let end = check_param.bound
-			.map(|len| check_param.from.clone().unwrap_or(0) + len);
-		tables.index.for_all(check_param.from.clone(), end, |key, entry| {
-			let mut result = None;
-			let size_tier = entry.address(index_bits).size_tier() as usize;
-			let full_key = key.clone();
-			std::mem::drop(key); // avoid using key
-			let rc = 0u32;
-			let mut pair = (full_key, rc);
-			match tables.value[size_tier].get_from_index(&mut pair, entry.address(index_bits).offset(), &admin::NoopsLogQuery, true) {
-				Ok(Some((value, compressed))) => {
-					let full_key = pair.0;
-					let rc = pair.1;
-
-					let value = if compressed {
-						self.decompress(&value)
-					} else {
-						value
-					};
-					if check_param.display_content {
-						println!("Index entry: {:x}", entry.0);
-						println!("Index key: {}", hex(&full_key));
-						println!("Rc: {}", rc >> 1);
-						println!("Compressed: {}", compressed);
-						if let Some(t) = check_param.truncate_value_display.as_ref() {
-							println!("Value: {}", hex(&value[..std::cmp::min(*t as usize, value.len())]));
-							println!("Value len: {}", value.len());
-						} else {
-							println!("Value: {}", hex(&value));
-						}
-					}
-				},
-				Ok(None) => {
-					println!("Missing value for index entry: {:x}", entry.0);
-
-					if check_param.remove_on_corrupted {
-						println!("Index will be removed.");
-
-						result = Some(crate::index::Entry::empty());
-					}
-				},
-				Err(Error::Corruption(e)) => {
-					println!("Corrupted value for index entry: {:x}:\n\t{}", entry.0, e);
-					if check_param.remove_on_corrupted {
-						println!("Index will be removed.");
-
-						result = Some(crate::index::Entry::empty());
-					}
-				},
-				Err(e) => {
-					println!("Error value for index entry: {:x}:\n\t{}", entry.0, e);
-				},
-			}
-	
-			result
-		}, Some(500));
-	
-		Ok(())
-	}
-
-	// TODO
-	pub(crate) fn salt(&self) -> Option<Salt> {
-		self.salt.clone()
-	}
-}
-
-/// Utility for admin operation.
-pub(crate) mod admin {
-	use super::*;
-
-	pub struct NoopsLogQuery;
-
-	impl crate::log::LogQuery for NoopsLogQuery {
-		fn with_index<R, F: FnOnce(&crate::index::Chunk) -> R> (
-			&self,
-			_table: IndexTableId,
-			_index: u64,
-			_f: F,
-		) -> Option<R> {
-			None
-		}
-
-		fn value(&self, _table: ValueTableId, _index: u64, _dest: &mut[u8]) -> bool {
-			false
-		}
 	}
 }

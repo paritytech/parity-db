@@ -19,11 +19,7 @@ rand = "0.8.2"
 hex = "0.4.2"
 fs2 = "0.4.3"
 lz4 = "1.23.2"
-zstd = "0.7.0"
-snap = "1.0.4"
 snappy = "0.4.0"
-structopt = { version = "0.3.8", optional = true }
-env_logger = { version = "0.8.3", optional = true }
 
 [dev-dependencies]
 env_logger = "0.8.2"
@@ -39,10 +35,4 @@ members = [
 	".",
 	"bench/core",
 	"bench/bin",
-]
-
-[features]
-admin = [
-	"structopt",
-	"env_logger",
 ]

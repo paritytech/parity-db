@@ -72,60 +72,6 @@ impl ColumnOptions {
 			})
 		)
 	}
-
-	fn from_string(encoded: &str) -> Option<(u8, ColumnOptions)> {
-		let mut result = ColumnOptions::default();
-		let split = encoded.find('=')?;
-		let (col, encoded) = encoded.split_at(split);
-		// "col = "
-		let col: u8 = col[3..].parse().ok()?;
-		let mut size_ix = 0;
-		for pair in encoded[1..].split(',') {
-			if size_ix > 0 {
-				if size_ix == result.sizes.len() - 1 {
-					result.sizes[size_ix] = pair[1..pair.len() - 1].parse().ok()?;
-				} else {
-					result.sizes[size_ix] = pair[1..].parse().ok()?;
-				}
-				size_ix += 1;
-				continue;
-			}
-			let split = pair.find(':')?;
-			match pair.split_at(split) {
-				/*(a,b) => {
-					result.preimage = true;
-				},*/
-				("preimage", ": true") => {
-					result.preimage = true;
-				},
-				("preimage", ": false") => {
-					result.preimage = false;
-				},
-				(" uniform", ": true") => {
-					result.uniform = true;
-				},
-				(" uniform", ": false") => {
-					result.uniform = false;
-				},
-				(" refc", ": true") => {
-					result.ref_counted = true;
-				},
-				(" refc", ": false") => {
-					result.ref_counted = false;
-				},
-				(" compression", comp) => {
-					let compression: u8 = comp[2..].parse().ok()?;
-					result.compression = compression.into();
-				},
-				(" sizes", sizes) => {
-					result.sizes[size_ix] = sizes[3..].parse().ok()?;
-					size_ix += 1;
-				},
-				_ => return None,
-			}
-		}
-		Some((col, result))
-	}
 }
 
 impl Default for ColumnOptions {
@@ -152,66 +98,14 @@ impl Options {
 	}
 
 	pub fn write_metadata(&self, path: &std::path::Path, salt: &Salt) -> Result<()> {
-		self.write_metadata_old(path, Some(salt))
-	}
-
-	pub(crate) fn write_metadata_old(&self, path: &std::path::Path, salt: Option<&Salt>) -> Result<()> {
 		let mut file = std::fs::File::create(path)?;
 		writeln!(file, "version={}", CURRENT_VERSION)?;
-		if let Some(salt) = salt {
-			writeln!(file, "salt={}", hex::encode(salt))?;
-		}
+		writeln!(file, "salt={}", hex::encode(salt))?;
 		for i in 0..self.columns.len() {
 			writeln!(file, "col{}={}", i, self.columns[i].as_string())?;
 		}
 		Ok(())
 	}
-
-	pub fn read_metadata(path: &std::path::Path) -> Result<(Option<Salt>, Options)> {
-		use std::io::BufRead;
-		use std::str::FromStr;
-
-		let mut path: std::path::PathBuf = path.into();
-		let mut options = Options {
-			path: path.clone(),
-			columns: Vec::new(),
-			sync: false,
-			stats: true,
-		};
-
-		path.push("metadata");
-		let file = std::io::BufReader::new(std::fs::File::open(path)?);
-		let mut salt = None;
-		for l in file.lines() {
-			let l = l?;
-			let mut vals = l.split("=");
-			let k = vals.next().ok_or(Error::Corruption("Bad metadata".into()))?;
-			let v = vals.next().ok_or(Error::Corruption("Bad metadata".into()))?;
-			if k == "version" {
-				let version = u32::from_str(v).map_err(|_| Error::Corruption("Bad version string".into()))?;
-				if version < LAST_SUPPORTED_VERSION  {
-					return Err(Error::InvalidConfiguration(format!(
-						"Unsupported database version {}. Expected {}", version, CURRENT_VERSION)));
-				}
-			} else if k == "salt" {
-					let salt_slice = hex::decode(v).map_err(|_| Error::Corruption("Bad salt string".into()))?;
-					let mut s = Salt::default();
-					s.copy_from_slice(&salt_slice);
-					salt = Some(s);
-			} else if k.starts_with("col") {
-				if let Some((ix, col_option)) = ColumnOptions::from_string(k) {
-					assert!(ix == options.columns.len() as u8);
-					options.columns.push(col_option);
-				} else {
-					return Err(Error::InvalidConfiguration(format!(
-						"Couldn't read column configuration: {:?}",
-						k)));
-				}
-			}
-		}
-		Ok((salt, options))
-	}
-
 
 	pub fn load_and_validate_metadata(&self) -> Result<Option<Salt>> {
 		use std::io::BufRead;
@@ -257,12 +151,4 @@ impl Options {
 		}
 		Ok(salt)
 	}
-}
-
-#[test]
-fn encode_decode_option() {
-	let col = ColumnOptions::default();
-	let encoded = format!("col{}={}", 3, col.as_string());
-	let decoded = ColumnOptions::from_string(encoded.as_str()).unwrap();
-	assert_eq!((3, col), decoded);
 }

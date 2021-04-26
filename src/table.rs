@@ -141,11 +141,7 @@ fn disable_read_ahead(_file: &std::fs::File) -> Result<()> {
 }
 
 impl ValueTable {
-	pub fn open(path: &std::path::Path, id: TableId, entry_size: Option<u16>, create: bool) -> Result<ValueTable> {
-		Self::open_extension(path, id, entry_size, create, "")
-	}
-
-	pub(crate) fn open_extension(path: &std::path::Path, id: TableId, entry_size: Option<u16>, create: bool, extension: &str) -> Result<ValueTable> {
+	pub fn open(path: &std::path::Path, id: TableId, entry_size: Option<u16>) -> Result<ValueTable> {
 		let (multipart, entry_size) = match entry_size {
 			Some(s) => (false, s),
 			None => (true, 4096),
@@ -154,11 +150,9 @@ impl ValueTable {
 		assert!(entry_size <= MAX_ENTRY_SIZE as u16);
 		// TODO: posix_fadvise
 		let mut path: std::path::PathBuf = path.into();
-		let mut file_name = id.file_name();
-		file_name.push_str(extension);
-		path.push(file_name);
+		path.push(id.file_name());
 
-		let mut file = std::fs::OpenOptions::new().create(create).read(true).write(true).open(path.as_path())?;
+		let mut file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?;
 		disable_read_ahead(&file)?;
 		let mut file_len = file.metadata()?.len();
 		if file_len == 0 {
@@ -312,15 +306,6 @@ impl ValueTable {
 	pub fn get(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool)>> {
 		let mut result = Vec::new();
 		let (success, compressed) = self.for_parts(Ok(key), index, log, |buf| result.extend_from_slice(buf), false)?;
-		if success {
-			return Ok(Some((result, compressed)));
-		}
-		Ok(None)
-	}
-
-	pub fn get_from_index(&self, key: &mut (Key, u32), index: u64, log: &impl LogQuery, check: bool) -> Result<Option<(Value, bool)>> {
-		let mut result = Vec::new();
-		let (success, compressed) = self.for_parts(Err(key), index, log, |buf| result.extend_from_slice(buf), check)?;
 		if success {
 			return Ok(Some((result, compressed)));
 		}
@@ -492,72 +477,6 @@ impl ValueTable {
 			}
 		}
 
-		Ok(start)
-	}
-
-	pub(crate) fn force_write_header(&self) -> Result<()> {
-		// writing current state.
-		// TODO factor with complete_plan
-		let mut buf = [0u8; 16];
-		let last_removed = self.last_removed.load(Ordering::Relaxed);
-		let filled = self.filled.load(Ordering::Relaxed);
-		buf[0..8].copy_from_slice(&last_removed.to_le_bytes());
-		buf[8..16].copy_from_slice(&filled.to_le_bytes());
-		self.write_at(&buf, 0)?;
-		Ok(())
-	}
-
-	/// Write that skip log, only for admin usage.
-	pub(crate) fn force_append_write(&self, key: &Key, value: &[u8], rc: u32, compressed: bool) -> Result<u64> {
-		let mut remainder = value.len() + 30; // Prefix with key and ref counter
-		let mut offset = 0;
-		let mut start = 0;
-/*		if value.len() > self.value_size() as usize && !self.multipart {
-			println!("{} {}", value.len(), self.value_size());
-		}*/
-		assert!(self.multipart || value.len() <= self.value_size() as usize);
-		loop {
-			let index = self.filled.fetch_add(1, Ordering::Relaxed);
-			log::trace!(
-				target: "parity-db",
-				"{}: Writing slot {}: {}",
-				self.id,
-				index,
-				hex(key),
-			);
-			let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
-			let entry_size = self.entry_size as usize;
-			let free_space = entry_size - 2;
-			let (target_offset, value_len) = if remainder > free_space {
-				buf[0..2].copy_from_slice(&MULTIPART);
-				buf[2..10].copy_from_slice(&(index as u64 + 1).to_le_bytes());
-				(10, free_space - 8)
-			} else {
-				buf[0..2].copy_from_slice(&(remainder as u16).to_le_bytes());
-				(2, remainder)
-			};
-			if offset == 0 {
-				let rc = if compressed {
-					rc | COMPRESSED_MASK
-				} else {
-					rc
-				};
-				buf[target_offset..target_offset + 4].copy_from_slice(&rc.to_le_bytes());
-				buf[target_offset + 4..target_offset + 30].copy_from_slice(&key[6..]);
-				buf[target_offset + 30..target_offset + value_len]
-					.copy_from_slice(&value[offset..offset + value_len - 30]);
-				offset += value_len - 30;
-				start = index;
-			} else {
-				buf[target_offset..target_offset + value_len].copy_from_slice(&value[offset..offset + value_len]);
-				offset += value_len;
-			}
-			self.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
-			remainder -= value_len;
-			if remainder == 0 {
-				break;
-			}
-		}
 		Ok(start)
 	}
 
@@ -790,7 +709,7 @@ mod test {
 
 		fn table(&self, size: Option<u16>) -> ValueTable {
 			let id = TableId::new(0, 0);
-			ValueTable::open(&self.0, id, size, true).unwrap()
+			ValueTable::open(&self.0, id, size).unwrap()
 		}
 
 		fn log(&self) -> Log {
