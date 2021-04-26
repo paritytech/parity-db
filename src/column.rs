@@ -88,8 +88,12 @@ impl Column {
 		while !entry.is_empty() {
 			let size_tier = entry.address(index.id.index_bits()).size_tier() as usize;
 			match tables.value[size_tier].get(key, entry.address(index.id.index_bits()).offset(), log)? {
-				Some(value) => {
-					let value = self.decompress(&value);
+				Some((value, compressed)) => {
+					let value = if compressed {
+						self.decompress(&value)
+					} else {
+						value
+					};
 					return Ok(Some((size_tier as u8, value)));
 				}
 				None =>  {
@@ -281,6 +285,12 @@ impl Column {
 		let existing = Self::search_all_indexes(key, &*tables, &*reindex, log)?;
 		if let &Some(ref val) = value {
 			let cval = self.compress(&val);
+			let mut cval = cval.as_slice();
+			let mut compressed = true;
+			if cval.len() <= val.len() {
+				compressed = false;
+				cval = val.as_slice();
+			}
 			let target_tier = tables.value.iter().position(|t| cval.len() <= t.value_size() as usize);
 			let target_tier = match target_tier {
 				Some(tier) => tier as usize,
@@ -298,7 +308,7 @@ impl Column {
 				}
 				if self.ref_counted {
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.index.id, hex(key));
-					tables.value[target_tier].write_inc_ref(existing_address.offset(), log)?;
+					tables.value[target_tier].write_inc_ref(existing_address.offset(), log, compressed)?;
 					return Ok(PlanOutcome::Written);
 				}
 				if self.preimage {
@@ -307,12 +317,12 @@ impl Column {
 				}
 				if existing_tier == target_tier {
 					log::trace!(target: "parity-db", "{}: Replacing {}", tables.index.id, hex(key));
-					tables.value[target_tier].write_replace_plan(existing_address.offset(), key, &cval, log)?;
+					tables.value[target_tier].write_replace_plan(existing_address.offset(), key, &cval, log, compressed)?;
 					return Ok(PlanOutcome::Written);
 				} else {
 					log::trace!(target: "parity-db", "{}: Replacing in a new table {}", tables.index.id, hex(key));
 					tables.value[existing_tier].write_remove_plan(existing_address.offset(), log)?;
-					let new_offset = tables.value[target_tier].write_insert_plan(key, &cval, log)?;
+					let new_offset = tables.value[target_tier].write_insert_plan(key, &cval, log, compressed)?;
 					let new_address = Address::new(new_offset, target_tier as u8);
 					// If it was found in an older index we just insert a new entry. Reindex won't overwrite it.
 					let sub_index = if table.id == tables.index.id { Some(sub_index) } else { None };
@@ -320,7 +330,7 @@ impl Column {
 				}
 			} else {
 				log::trace!(target: "parity-db", "{}: Inserting new index {}", tables.index.id, hex(key));
-				let offset = tables.value[target_tier].write_insert_plan(key, &cval, log)?;
+				let offset = tables.value[target_tier].write_insert_plan(key, &cval, log, compressed)?;
 				let address = Address::new(offset, target_tier as u8);
 				match tables.index.write_insert_plan(key, address, None, log)? {
 					PlanOutcome::NeedReindex => {
@@ -564,12 +574,17 @@ impl Column {
 			let rc = 0u32;
 			let mut pair = (full_key, rc);
 			match tables.value[size_tier].get_from_index(&mut pair, entry.address(index_bits).offset(), &admin::NoopsLogQuery, false) {
-				Ok(Some(value)) => {
+				Ok(Some((value, compressed))) => {
 					let full_key = pair.0;
 					let rc = pair.1;
 
-					let value = self.decompress(&value);
-					let mut cval = compression.compress(value.as_slice());
+					let value = if compressed {
+						self.decompress(&value)
+					} else {
+						value
+					};
+					let cval = compression.compress(value.as_slice());
+					let mut cval = cval.as_slice();
 					//let cval = compression.compress(value.as_slice());
 
 					if self.collect_stats {
@@ -581,8 +596,10 @@ impl Column {
 /* TODO would need to store if compression did happen
  * into the size for instance.
  * */
-					if cval.len() > value.len() {
-						cval = value;
+					let mut compressed = true;
+					if cval.len() <= value.len() {
+						compressed = false;
+						cval = value.as_slice();
 					}
 
 					let target_tier = tables.value.iter().position(|t| cval.len() <= t.value_size() as usize);
@@ -601,7 +618,8 @@ impl Column {
 					// TODO could also batch the log, but may be worth it do direct write
 					// (awkward part is managing multipart file).
 					// Especially since we skip log for index update.
-					let index = dest_tables[target_tier].force_append_write(&full_key, cval.as_slice(), rc).unwrap(); // TODO result if closure.
+					// TODO rc here is with the old compress bit: semantic is not that good.
+					let index = dest_tables[target_tier].force_append_write(&full_key, cval, rc, compressed).unwrap(); // TODO result if closure.
 					let address = Address::new(index, target_tier as u8);
 /*			if !*first {
 					let entry2 = crate::index::Entry::new(address, entry.key_material(index_bits), index_bits);
@@ -704,15 +722,20 @@ impl Column {
 			let rc = 0u32;
 			let mut pair = (full_key, rc);
 			match tables.value[size_tier].get_from_index(&mut pair, entry.address(index_bits).offset(), &admin::NoopsLogQuery, true) {
-				Ok(Some(value)) => {
+				Ok(Some((value, compressed))) => {
 					let full_key = pair.0;
 					let rc = pair.1;
 
-					let value = self.decompress(&value);
+					let value = if compressed {
+						self.decompress(&value)
+					} else {
+						value
+					};
 					if check_param.display_content {
 						println!("Index entry: {:x}", entry.0);
 						println!("Index key: {}", hex(&full_key));
-						println!("Rc: {}", rc);
+						println!("Rc: {}", rc >> 1);
+						println!("Compressed: {}", compressed);
 						if let Some(t) = check_param.truncate_value_display.as_ref() {
 							println!("Value: {}", hex(&value[..std::cmp::min(*t as usize, value.len())]));
 							println!("Value len: {}", value.len());

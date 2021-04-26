@@ -25,7 +25,7 @@
 // [SIZE: 2][REFS: 4][KEY: 26][VALUE: SIZE - 30]
 // SIZE: 16-bit value size. Sizes up to 0xfffd are allowed.
 // This includes size of REFS and KEY
-// REF: 32-bit reference counter.
+// REF: 31-bit reference counter, first bit reserved to flag an applied compression.
 // KEY: lower 26 bytes of the key.
 // VALUE: SIZE-30  payload bytes.
 //
@@ -34,7 +34,7 @@
 // MULTIPART - Split entry marker. 0xfffe.
 // NEXT - 64-bit index of the entry that holds the next part.
 // take all available space in this entry.
-// REF: 32-bit reference counter.
+// REF: 31-bit reference counter, first bit reserved to flag an applied compression.
 // KEY: lower 26 bytes of the key.
 // VALUE: The rest of the entry is filled with payload bytes.
 //
@@ -67,10 +67,14 @@ use crate::{
 };
 
 pub const KEY_LEN: usize = 32;
-const MAX_ENTRY_SIZE: usize = 65533;
+const MAX_ENTRY_SIZE: usize = 0xfffd;
 
 const TOMBSTONE: &[u8] = &[0xff, 0xff];
 const MULTIPART: &[u8] = &[0xff, 0xfe];
+const COMPRESSED_MASK: u32 = 0xa0_00_00_00;
+// When a rc reach locked ref, it is locked in db.
+const LOCKED_REF: u32 = 0x7fff_ffff;
+
 
 pub type Key = [u8; KEY_LEN];
 pub type Value = Vec<u8>;
@@ -222,6 +226,7 @@ impl ValueTable {
 		Ok(())
 	}
 
+	// Return if there was content, and if it was compressed.
 	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8])>(
 		&self,
 		mut key: std::result::Result<&Key, &mut (Key, u32)>,
@@ -229,10 +234,11 @@ impl ValueTable {
 		log: &Q,
 		mut f: F,
 		check: bool,
-	) -> Result<bool> {
+	) -> Result<(bool, bool)> {
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 
 		let mut part = 0;
+		let mut compressed = false;
 		let entry_size = self.entry_size as usize;
 		loop {
 			let buf = if log.value(self.id, index, &mut buf) {
@@ -249,7 +255,7 @@ impl ValueTable {
 			};
 
 			if &buf[0..2] == TOMBSTONE {
-				return Ok(false);
+				return Ok((false, false));
 			}
 
 			let (content_offset, content_len, next) = if &buf[0..2] == MULTIPART {
@@ -270,10 +276,12 @@ impl ValueTable {
 			}
 
 			if part == 0 {
+				let rc = u32::from_le_bytes(buf[content_offset..content_offset + 4].try_into().unwrap());
+				compressed = rc & COMPRESSED_MASK > 0;
 				// TODO use custom enum
 				match &mut key {
-					Err((key, rc)) => {
-						*rc = u32::from_le_bytes(buf[content_offset..content_offset + 4].try_into().unwrap());
+					Err((key, returned_rc)) => {
+						*returned_rc = rc;
 						key[6..].copy_from_slice(&buf[content_offset + 4..content_offset + 30]);
 					},
 					Ok(key) => if key[6..] != buf[content_offset + 4..content_offset + 30] {
@@ -285,7 +293,7 @@ impl ValueTable {
 							hex(&key[6..]),
 							hex(&buf[content_offset + 4..content_offset + 30]),
 						);
-						return Ok(false);
+						return Ok((false, false));
 					},
 				}
 				f(&buf[content_offset + 30..content_offset + content_len]);
@@ -298,28 +306,31 @@ impl ValueTable {
 			part += 1;
 			index = next;
 		}
-		Ok(true)
+		Ok((true, compressed))
 	}
 
-	pub fn get(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<Value>> {
+	pub fn get(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool)>> {
 		let mut result = Vec::new();
-		if self.for_parts(Ok(key), index, log, |buf| result.extend_from_slice(buf), false)? {
-			return Ok(Some(result));
+		let (success, compressed) = self.for_parts(Ok(key), index, log, |buf| result.extend_from_slice(buf), false)?;
+		if success {
+			return Ok(Some((result, compressed)));
 		}
 		Ok(None)
 	}
 
-	pub fn get_from_index(&self, key: &mut (Key, u32), index: u64, log: &impl LogQuery, check: bool) -> Result<Option<Value>> {
+	pub fn get_from_index(&self, key: &mut (Key, u32), index: u64, log: &impl LogQuery, check: bool) -> Result<Option<(Value, bool)>> {
 		let mut result = Vec::new();
-		if self.for_parts(Err(key), index, log, |buf| result.extend_from_slice(buf), check)? {
-			return Ok(Some(result));
+		let (success, compressed) = self.for_parts(Err(key), index, log, |buf| result.extend_from_slice(buf), check)?;
+		if success {
+			return Ok(Some((result, compressed)));
 		}
 		Ok(None)
 	}
 
 	pub fn size<Q: LogQuery>(&self, key: &Key, index: u64, log: &Q) -> Result<Option<u32>> {
 		let mut result = 0;
-		if self.for_parts(Ok(key), index, log, |buf| result += buf.len() as u32, false)? {
+		let (success, _compressed) = self.for_parts(Ok(key), index, log, |buf| result += buf.len() as u32, false)? ;
+		if success {
 			return Ok(Some(result));
 		}
 		Ok(None)
@@ -407,7 +418,7 @@ impl ValueTable {
 		Ok(index)
 	}
 
-	fn overwrite_chain(&self, key: &Key, value: &[u8], log: &mut LogWriter, at: Option<u64>) -> Result<u64> {
+	fn overwrite_chain(&self, key: &Key, value: &[u8], log: &mut LogWriter, at: Option<u64>, compressed: bool) -> Result<u64> {
 		let mut remainder = value.len() + 30; // Prefix with key and ref counter
 		let mut offset = 0;
 		let mut start = 0;
@@ -454,7 +465,13 @@ impl ValueTable {
 				(2, remainder)
 			};
 			if offset == 0 {
-				buf[target_offset..target_offset + 4].copy_from_slice(&1u32.to_le_bytes());
+				// first rc.
+				let rc = if compressed {
+					1u32 | COMPRESSED_MASK
+				} else {
+					1u32
+				};
+				buf[target_offset..target_offset + 4].copy_from_slice(&rc.to_le_bytes());
 				buf[target_offset + 4..target_offset + 30].copy_from_slice(&key[6..]);
 				buf[target_offset + 30..target_offset + value_len]
 					.copy_from_slice(&value[offset..offset + value_len - 30]);
@@ -491,7 +508,7 @@ impl ValueTable {
 	}
 
 	/// Write that skip log, only for admin usage.
-	pub(crate) fn force_append_write(&self, key: &Key, value: &[u8], rc: u32) -> Result<u64> {
+	pub(crate) fn force_append_write(&self, key: &Key, value: &[u8], rc: u32, compressed: bool) -> Result<u64> {
 		let mut remainder = value.len() + 30; // Prefix with key and ref counter
 		let mut offset = 0;
 		let mut start = 0;
@@ -520,6 +537,11 @@ impl ValueTable {
 				(2, remainder)
 			};
 			if offset == 0 {
+				let rc = if compressed {
+					rc | COMPRESSED_MASK
+				} else {
+					rc
+				};
 				buf[target_offset..target_offset + 4].copy_from_slice(&rc.to_le_bytes());
 				buf[target_offset + 4..target_offset + 30].copy_from_slice(&key[6..]);
 				buf[target_offset + 30..target_offset + value_len]
@@ -572,12 +594,12 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn write_insert_plan(&self, key: &Key, value: &[u8], log: &mut LogWriter) -> Result<u64> {
-		self.overwrite_chain(key, value, log, None)
+	pub fn write_insert_plan(&self, key: &Key, value: &[u8], log: &mut LogWriter, compressed: bool) -> Result<u64> {
+		self.overwrite_chain(key, value, log, None, compressed)
 	}
 
-	pub fn write_replace_plan(&self, index: u64, key: &Key, value: &[u8], log: &mut LogWriter) -> Result<()> {
-		self.overwrite_chain(key, value, log, Some(index))?;
+	pub fn write_replace_plan(&self, index: u64, key: &Key, value: &[u8], log: &mut LogWriter, compressed: bool) -> Result<()> {
+		self.overwrite_chain(key, value, log, Some(index), compressed)?;
 		Ok(())
 	}
 
@@ -590,20 +612,20 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn write_inc_ref(&self, index: u64, log: &mut LogWriter) -> Result<()> {
-		self.change_ref(index, 1, log)?;
+	pub fn write_inc_ref(&self, index: u64, log: &mut LogWriter, compressed: bool) -> Result<()> {
+		self.change_ref(index, 1, log, Some(compressed))?;
 		Ok(())
 	}
 
 	pub fn write_dec_ref(&self, index: u64, log: &mut LogWriter) -> Result<bool> {
-		if self.change_ref(index, -1, log)? {
+		if self.change_ref(index, -1, log, None)? {
 			return Ok(true);
 		}
 		self.write_remove_plan(index, log)?;
 		Ok(false)
 	}
 
-	pub fn change_ref(&self, index: u64, delta: i32, log: &mut LogWriter) -> Result<bool> {
+	pub fn change_ref(&self, index: u64, delta: i32, log: &mut LogWriter, compressed: Option<bool>) -> Result<bool> {
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 		let buf = if log.value(self.id, index, &mut buf) {
 			&mut buf
@@ -624,10 +646,35 @@ impl ValueTable {
 		};
 
 		let mut counter: u32 = u32::from_le_bytes(buf[counter_offset..counter_offset + 4].try_into().unwrap());
-		counter = counter.wrapping_add(delta as u32);
-		if counter == 0 {
-			return Ok(false);
+		debug_assert!(compressed.map(|compressed| if counter & COMPRESSED_MASK > 0 {
+				compressed == true
+			} else {
+				compressed == false
+			}).unwrap_or(true)
+		);
+
+		let compressed = counter & COMPRESSED_MASK > 0;
+		counter = counter & !COMPRESSED_MASK;
+		if delta > 0 {
+			if counter >= LOCKED_REF - delta as u32 {
+				counter = LOCKED_REF
+			} else {
+				counter = counter + delta as u32;
+			}
+		} else {
+			if counter != LOCKED_REF {
+				counter = counter.saturating_sub((delta * -1) as u32);
+				if counter == 0 {
+					return Ok(false);
+				}
+			}
 		}
+		counter = if compressed {
+			counter | COMPRESSED_MASK
+		} else {
+			LOCKED_REF
+		};
+
 		buf[counter_offset..counter_offset + 4].copy_from_slice(&counter.to_le_bytes());
 		// TODO: optimize actual buf size
 		log.insert_value(self.id, index, buf[0..size].to_vec());
@@ -651,8 +698,7 @@ impl ValueTable {
 			log.read(&mut buf[2..10])?;
 			self.write_at(&buf[0..10], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted tombstone in slot {}", self.id, index);
-		}
-		else if &buf[0..2] == MULTIPART {
+		} else if &buf[0..2] == MULTIPART {
 				let entry_size = self.entry_size as usize;
 				log.read(&mut buf[2..entry_size])?;
 				self.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
@@ -686,7 +732,7 @@ impl ValueTable {
 		} else {
 			// TODO: check len
 			let len: u16 = u16::from_le_bytes(buf[0..2].try_into().unwrap());
-			log.read(&mut buf[2..2+len as usize])?;
+			log.read(&mut buf[2..2 + len as usize])?;
 			log::trace!(target: "parity-db", "{}: Validated {}: {}, {} bytes", self.id, index, hex(&buf[2..32]), len);
 		}
 		Ok(())
@@ -808,13 +854,14 @@ mod test {
 
 		let key = key(1);
 		let val = value(19);
+		let compressed = true;
 
 		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(&key, &val, writer).unwrap();
-			assert_eq!(table.get(&key, 1, writer).unwrap(), Some(val.clone()));
+			table.write_insert_plan(&key, &val, writer, compressed).unwrap();
+			assert_eq!(table.get(&key, 1, writer).unwrap(), Some((val.clone(), compressed)));
 		});
 
-		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some(val));
+		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some((val, compressed)));
 		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 2);
 	}
 
@@ -835,10 +882,11 @@ mod test {
 		let key2 = key(2);
 		let val1 = value(11);
 		let val2 = value(21);
+		let compressed = false;
 
 		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(&key1, &val1, writer).unwrap();
-			table.write_insert_plan(&key2, &val2, writer).unwrap();
+			table.write_insert_plan(&key1, &val1, writer, compressed).unwrap();
+			table.write_insert_plan(&key2, &val2, writer, compressed).unwrap();
 		});
 
 		write_ops(&table, &log, |writer| {
@@ -849,9 +897,9 @@ mod test {
 		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 1);
 
 		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(&key1, &val1, writer).unwrap();
+			table.write_insert_plan(&key1, &val1, writer, compressed).unwrap();
 		});
-		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), Some(val1));
+		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), Some((val1, compressed)));
 		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
 	}
 
@@ -867,17 +915,18 @@ mod test {
 		let val1 = value(11);
 		let val2 = value(21);
 		let val3 = value(31);
+		let compressed = true;
 
 		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(&key1, &val1, writer).unwrap();
-			table.write_insert_plan(&key2, &val2, writer).unwrap();
+			table.write_insert_plan(&key1, &val1, writer, compressed).unwrap();
+			table.write_insert_plan(&key2, &val2, writer, compressed).unwrap();
 		});
 
 		write_ops(&table, &log, |writer| {
-			table.write_replace_plan(1, &key3, &val3, writer).unwrap();
+			table.write_replace_plan(1, &key3, &val3, writer, compressed).unwrap();
 		});
 
-		assert_eq!(table.get(&key3, 1, log.overlays()).unwrap(), Some(val3));
+		assert_eq!(table.get(&key3, 1, log.overlays()).unwrap(), Some((val3, compressed)));
 		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
 	}
 
@@ -892,20 +941,21 @@ mod test {
 		let val1 = value(20000);
 		let val2 = value(30);
 		let val1s = value(5000);
+		let compressed = false;
 
 		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(&key1, &val1, writer).unwrap();
-			table.write_insert_plan(&key2, &val2, writer).unwrap();
+			table.write_insert_plan(&key1, &val1, writer, compressed).unwrap();
+			table.write_insert_plan(&key2, &val2, writer, compressed).unwrap();
 		});
 
-		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), Some(val1));
+		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), Some((val1, compressed)));
 		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
 		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 7);
 
 		write_ops(&table, &log, |writer| {
-			table.write_replace_plan(1, &key1, &val1s, writer).unwrap();
+			table.write_replace_plan(1, &key1, &val1s, writer, compressed).unwrap();
 		});
-		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), Some(val1s));
+		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), Some((val1s, compressed)));
 		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 5);
 		write_ops(&table, &log, |writer| {
 			assert_eq!(table.read_next_free(5, writer).unwrap(), 4);
@@ -925,20 +975,21 @@ mod test {
 		let val1 = value(5000);
 		let val2 = value(30);
 		let val1l = value(20000);
+		let compressed = false;
 
 		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(&key1, &val1, writer).unwrap();
-			table.write_insert_plan(&key2, &val2, writer).unwrap();
+			table.write_insert_plan(&key1, &val1, writer, compressed).unwrap();
+			table.write_insert_plan(&key2, &val2, writer, compressed).unwrap();
 		});
 
-		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), Some(val1));
+		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), Some((val1, compressed)));
 		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
 		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 4);
 
 		write_ops(&table, &log, |writer| {
-			table.write_replace_plan(1, &key1, &val1l, writer).unwrap();
+			table.write_replace_plan(1, &key1, &val1l, writer, compressed).unwrap();
 		});
-		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), Some(val1l));
+		assert_eq!(table.get(&key1, 1, log.overlays()).unwrap(), Some((val1l, compressed)));
 		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
 		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 7);
 	}
@@ -952,15 +1003,16 @@ mod test {
 		let key = key(1);
 		let val = value(5000);
 
+		let compressed = true;
 		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(&key, &val, writer).unwrap();
-			table.write_inc_ref(1, writer).unwrap();
+			table.write_insert_plan(&key, &val, writer, compressed).unwrap();
+			table.write_inc_ref(1, writer, compressed).unwrap();
 		});
-		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some(val.clone()));
+		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some((val.clone(), compressed)));
 		write_ops(&table, &log, |writer| {
 			table.write_dec_ref(1, writer).unwrap();
 		});
-		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some(val));
+		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some((val, compressed)));
 		write_ops(&table, &log, |writer| {
 			table.write_dec_ref(1, writer).unwrap();
 		});
