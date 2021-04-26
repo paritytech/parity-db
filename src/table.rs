@@ -923,10 +923,10 @@ mod test {
 		});
 
 		write_ops(&table, &log, |writer| {
-			table.write_replace_plan(1, &key3, &val3, writer, compressed).unwrap();
+			table.write_replace_plan(1, &key3, &val3, writer, false).unwrap();
 		});
 
-		assert_eq!(table.get(&key3, 1, log.overlays()).unwrap(), Some((val3, compressed)));
+		assert_eq!(table.get(&key3, 1, log.overlays()).unwrap(), Some((val3, false)));
 		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
 	}
 
