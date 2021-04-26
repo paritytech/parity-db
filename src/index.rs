@@ -355,7 +355,7 @@ impl IndexTable {
 			log::warn!(
 				target: "parity-db",
 				"Ended full index iteration, elapsed {:?}",
-				start.map(|start| std::time::Instant::now() - start),
+				start.map(|start| start.elapsed()),
 			);
 		}
 	}
