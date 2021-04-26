@@ -24,9 +24,7 @@
 pub enum CompressType {
 	NoCompression = 0,
 	Lz4 = 1,
-	Lz4High = 2,
-	Lz4Low = 3,
-	Snappy = 4,
+	Snappy = 2,
 }
 
 /// Compression implementation.
@@ -47,8 +45,6 @@ impl Compress {
 enum Compressor {
 	NoCompression(NoCompression),
 	Lz4(lz4::Lz4),
-	Lz4High(lz4::Lz4High),
-	Lz4Low(lz4::Lz4Low),
 	Snappy(snappy::Snappy),
 }
 
@@ -57,8 +53,6 @@ impl From<u8> for CompressType {
 		match comp_type {
 			a if a == CompressType::NoCompression as u8 => CompressType::NoCompression,
 			a if a == CompressType::Lz4 as u8 => CompressType::Lz4,
-			a if a == CompressType::Lz4High as u8 => CompressType::Lz4High,
-			a if a == CompressType::Lz4Low as u8 => CompressType::Lz4Low,
 			a if a == CompressType::Snappy as u8 => CompressType::Snappy,
 			_ => panic!("Unkwown compression."),
 		}
@@ -70,8 +64,6 @@ impl From<CompressType> for Compressor {
 		match comp_type {
 			CompressType::NoCompression => Compressor::NoCompression(NoCompression),
 			CompressType::Lz4 => Compressor::Lz4(lz4::Lz4::new()),
-			CompressType::Lz4High => Compressor::Lz4High(lz4::Lz4High::new()),
-			CompressType::Lz4Low => Compressor::Lz4Low(lz4::Lz4Low::new()),
 			CompressType::Snappy => Compressor::Snappy(snappy::Snappy::new()),
 			#[allow(unreachable_patterns)]
 			_ => unimplemented!("Missing compression implementation."),
@@ -84,8 +76,6 @@ impl From<&Compress> for CompressType {
 		match compression.inner {
 			Compressor::NoCompression(_) => CompressType::NoCompression,
 			Compressor::Lz4(_) => CompressType::Lz4,
-			Compressor::Lz4High(_) => CompressType::Lz4High,
-			Compressor::Lz4Low(_) => CompressType::Lz4Low,
 			Compressor::Snappy(_) => CompressType::Snappy,
 			#[allow(unreachable_patterns)]
 			_ => unimplemented!("Missing compression implementation."),
@@ -98,8 +88,6 @@ impl Compress {
 		match &self.inner {
 			Compressor::NoCompression(inner) => inner.compress(buf),
 			Compressor::Lz4(inner) => inner.compress(buf),
-			Compressor::Lz4High(inner) => inner.compress(buf),
-			Compressor::Lz4Low(inner) => inner.compress(buf),
 			Compressor::Snappy(inner) => inner.compress(buf),
 			#[allow(unreachable_patterns)]
 			_ => unimplemented!("Missing compression implementation."),
@@ -110,8 +98,6 @@ impl Compress {
 		match &self.inner {
 			Compressor::NoCompression(inner) => inner.decompress(buf),
 			Compressor::Lz4(inner) => inner.decompress(buf),
-			Compressor::Lz4High(inner) => inner.decompress(buf),
-			Compressor::Lz4Low(inner) => inner.decompress(buf),
 			Compressor::Snappy(inner) => inner.decompress(buf),
 			#[allow(unreachable_patterns)]
 			_ => unimplemented!("Missing compression implementation."),
@@ -132,37 +118,15 @@ impl NoCompression {
 }
 
 mod lz4 {
-	pub(super) type Lz4 = Lz4Inner<DefaultMode>;
-	pub(super) type Lz4High = Lz4Inner<HighMode>;
-	pub(super) type Lz4Low = Lz4Inner<LowMode>;
+	pub(super) struct Lz4;
 
-	pub(super) trait Lz4Mode {
-		const MODE: lz4::block::CompressionMode;
-	}
-
-	pub(super) struct DefaultMode;
-	pub(super) struct LowMode;
-	pub(super) struct HighMode;
-
-	pub(super) struct Lz4Inner<M>(std::marker::PhantomData<M>);
-
-	impl Lz4Mode for DefaultMode {
-		const MODE: lz4::block::CompressionMode = lz4::block::CompressionMode::DEFAULT;
-	}
-	impl Lz4Mode for HighMode {
-		const MODE: lz4::block::CompressionMode = lz4::block::CompressionMode::HIGHCOMPRESSION(9);
-	}
-	impl Lz4Mode for LowMode {
-		const MODE: lz4::block::CompressionMode = lz4::block::CompressionMode::FAST(1);
-	}
-
-	impl<M: Lz4Mode> Lz4Inner<M> {
+	impl Lz4 {
 		pub(super) fn new() -> Self {
-			Lz4Inner(Default::default())
+			Lz4
 		}
 
 		pub(super) fn compress(&self, buf: &[u8]) -> Vec<u8> {
-			lz4::block::compress(buf, Some(M::MODE), true)
+			lz4::block::compress(buf, Some(lz4::block::CompressionMode::DEFAULT), true)
 				.unwrap()
 		}
 
@@ -174,13 +138,11 @@ mod lz4 {
 }
 
 mod snappy {
-	pub(super) struct Snappy {
-	}
+	pub(super) struct Snappy;
 
 	impl Snappy {
 		pub(super) fn new() -> Self {
-			Snappy {
-			}
+			Snappy
 		}
 
 		pub(super) fn compress(&self, value: &[u8]) -> Vec<u8> {
