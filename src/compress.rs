@@ -26,9 +26,7 @@ pub enum CompressType {
 	Lz4 = 1,
 	Lz4High = 2,
 	Lz4Low = 3,
-	Zstd = 4,
-	Snappy = 5,
-	Snap = 6,
+	Snappy = 4,
 }
 
 /// Compression implementation.
