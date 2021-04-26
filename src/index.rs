@@ -186,8 +186,8 @@ impl std::fmt::Display for TableId {
 
 impl IndexTable {
 
-	fn open_mmap(path: &std::path::Path, id: &TableId) -> Result<Option<memmap2::MmapMut>> {
-		let file = match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+	fn open_mmap(path: &std::path::Path, id: &TableId, create: bool) -> Result<Option<memmap2::MmapMut>> {
+		let file = match std::fs::OpenOptions::new().read(true).write(true).create(create).open(path) {
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
 				return Ok(None);
 			}
@@ -204,7 +204,7 @@ impl IndexTable {
 		let mut path: std::path::PathBuf = path.into();
 		path.push(id.file_name());
 
-		Ok(Self::open_mmap(path.as_path(), &id)?.map(|map| {
+		Ok(Self::open_mmap(path.as_path(), &id, false)?.map(|map| {
 			log::debug!(target: "parity-db", "Opened existing index {}", id);
 			IndexTable {
 				id,
@@ -456,7 +456,7 @@ impl IndexTable {
 		let mut map = self.map.upgradable_read();
 		if map.is_none() {
 			let mut wmap = RwLockUpgradableReadGuard::upgrade(map);
-			if let Some(mmap) = Self::open_mmap(self.path.as_path(), &self.id)? {
+			if let Some(mmap) = Self::open_mmap(self.path.as_path(), &self.id, true)? {
 				log::debug!(target: "parity-db", "Created new index {}", self.id);
 				*wmap = Some(mmap);
 				map = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wmap);
@@ -508,7 +508,7 @@ impl IndexTable {
 		if self.path.exists() {
 			std::fs::copy(&self.path, path_bu)?;
 		}
-		*self.map.write() = Self::open_mmap(self.path.as_path(), &self.id)?;
+		*self.map.write() = Self::open_mmap(self.path.as_path(), &self.id, false)?;
 		Ok(())
 	}
 
