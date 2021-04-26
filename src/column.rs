@@ -106,8 +106,30 @@ impl Column {
 		Ok(None)
 	}
 
-	fn compress(&self, buf: &[u8]) -> Vec<u8> {
-		self.compression.compress(buf)
+	/// Compress if needed and return the target tier to use.
+	fn compress(&self, key: &Key, value: &[u8], tables: &Tables) -> (Option<Vec<u8>>, usize) {
+		let cvalue = self.compression.compress(value);
+		let mut compressed = true;
+		let len = if cvalue.len() <= value.len() {
+			compressed = false;
+			cvalue.len()
+		} else {
+			value.len()
+		};
+		let target_tier = tables.value.iter().position(|t| len <= t.value_size() as usize);
+		let target_tier = match target_tier {
+			Some(tier) => tier as usize,
+			None => {
+				log::trace!(target: "parity-db", "Using blob {}", hex(key));
+				15
+			}
+		};
+
+		if compressed {
+			(Some(cvalue), target_tier)
+		} else {
+			(None, target_tier)
+		}
 	}
 
 	fn decompress(&self, buf: &[u8]) -> Vec<u8> {
@@ -284,21 +306,10 @@ impl Column {
 		let reindex = self.reindex.upgradable_read();
 		let existing = Self::search_all_indexes(key, &*tables, &*reindex, log)?;
 		if let &Some(ref val) = value {
-			let cval = self.compress(&val);
-			let mut cval = cval.as_slice();
-			let mut compressed = true;
-			if cval.len() <= val.len() {
-				compressed = false;
-				cval = val.as_slice();
-			}
-			let target_tier = tables.value.iter().position(|t| cval.len() <= t.value_size() as usize);
-			let target_tier = match target_tier {
-				Some(tier) => tier as usize,
-				None => {
-					log::trace!(target: "parity-db", "Inserted blob {}", hex(key));
-					15
-				}
-			};
+			let (cval, target_tier) = self.compress(&key, &val, &*tables);
+			let (cval, compressed) = cval.as_ref()
+				.map(|cval| (cval.as_slice(), true))
+				.unwrap_or((val.as_slice(), false));
 
 			if let Some((table, sub_index, existing_tier, existing_address)) = existing {
 				let existing_tier = existing_tier as usize;
@@ -583,43 +594,16 @@ impl Column {
 					} else {
 						value
 					};
-					let cval = compression.compress(value.as_slice());
-					let mut cval = cval.as_slice();
-					//let cval = compression.compress(value.as_slice());
+					let (cval, target_tier) = self.compress(&key, value.as_slice(), &*tables);
+					let (cval, compressed) = cval.as_ref()
+						.map(|cval|(cval.as_slice(), true))
+						.unwrap_or((value.as_slice(), false));
 
 					if self.collect_stats {
-/*						if value.len() > 8_000 {
-							println!("{} -> {}", value.len(), cval.len());
-						}*/
 						self.stats.insert_val(value.len() as u32, cval.len() as u32);
 					}
-/* TODO would need to store if compression did happen
- * into the size for instance.
- * */
-					let mut compressed = true;
-					if cval.len() <= value.len() {
-						compressed = false;
-						cval = value.as_slice();
-					}
 
-					let target_tier = tables.value.iter().position(|t| cval.len() <= t.value_size() as usize);
-					let target_tier = match target_tier {
-						Some(tier) => tier as usize,
-						None => 15,
-					};
-
-/*					if size_tier == 15 {
-						println!("size_tier");
-					}
-					if cval.as_slice().len() == 1017646 {
-						println!("{:?}", (target_tier, dest_tables[target_tier].value_size()));
-					}*/
-					// Not using log would be way faster, but using it avoid duplicating code.
-					// TODO could also batch the log, but may be worth it do direct write
-					// (awkward part is managing multipart file).
-					// Especially since we skip log for index update.
-					// TODO rc here is with the old compress bit: semantic is not that good.
-					let index = dest_tables[target_tier].force_append_write(&full_key, cval, rc, compressed).unwrap(); // TODO result if closure.
+					let index = dest_tables[target_tier].force_append_write(&full_key, cval, rc, compressed).unwrap();
 					let address = Address::new(index, target_tier as u8);
 /*			if !*first {
 					let entry2 = crate::index::Entry::new(address, entry.key_material(index_bits), index_bits);
