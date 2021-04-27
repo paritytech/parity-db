@@ -223,7 +223,7 @@ impl ValueTable {
 	// Return if there was content, and if it was compressed.
 	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8])>(
 		&self,
-		mut key: std::result::Result<&Key, &mut (Key, u32)>,
+		key: &Key,
 		mut index: u64,
 		log: &Q,
 		mut f: F,
@@ -272,23 +272,16 @@ impl ValueTable {
 			if part == 0 {
 				let rc = u32::from_le_bytes(buf[content_offset..content_offset + 4].try_into().unwrap());
 				compressed = rc & COMPRESSED_MASK > 0;
-				// TODO use custom enum
-				match &mut key {
-					Err((key, returned_rc)) => {
-						*returned_rc = rc;
-						key[6..].copy_from_slice(&buf[content_offset + 4..content_offset + 30]);
-					},
-					Ok(key) => if key[6..] != buf[content_offset + 4..content_offset + 30] {
-						log::debug!(
-							target: "parity-db",
-							"{}: Key mismatch at {}. Expected {}, got {}",
-							self.id,
-							index,
-							hex(&key[6..]),
-							hex(&buf[content_offset + 4..content_offset + 30]),
-						);
-						return Ok((false, false));
-					},
+				if key[6..] != buf[content_offset + 4..content_offset + 30] {
+					log::debug!(
+						target: "parity-db",
+						"{}: Key mismatch at {}. Expected {}, got {}",
+						self.id,
+						index,
+						hex(&key[6..]),
+						hex(&buf[content_offset + 4..content_offset + 30]),
+					);
+					return Ok((false, false));
 				}
 				f(&buf[content_offset + 30..content_offset + content_len]);
 			} else {
@@ -305,7 +298,7 @@ impl ValueTable {
 
 	pub fn get(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool)>> {
 		let mut result = Vec::new();
-		let (success, compressed) = self.for_parts(Ok(key), index, log, |buf| result.extend_from_slice(buf), false)?;
+		let (success, compressed) = self.for_parts(key, index, log, |buf| result.extend_from_slice(buf), false)?;
 		if success {
 			return Ok(Some((result, compressed)));
 		}
@@ -314,7 +307,7 @@ impl ValueTable {
 
 	pub fn size<Q: LogQuery>(&self, key: &Key, index: u64, log: &Q) -> Result<Option<u32>> {
 		let mut result = 0;
-		let (success, _compressed) = self.for_parts(Ok(key), index, log, |buf| result += buf.len() as u32, false)? ;
+		let (success, _compressed) = self.for_parts(key, index, log, |buf| result += buf.len() as u32, false)? ;
 		if success {
 			return Ok(Some(result));
 		}
