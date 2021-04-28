@@ -36,11 +36,9 @@ const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
 pub type Key = [u8; KEY_LEN];
 pub type Chunk = [u8; CHUNK_LEN];
 
-// TODO remove pub by imlementing LowerHex
-pub struct Entry(pub u64);
+pub struct Entry(u64);
 
 impl Entry {
-	// TODO remove pub
 	#[inline]
 	fn new(address: Address, key_material: u64, index_bits: u8) -> Entry {
 		Entry((key_material << Self::address_bits(index_bits)) | address.as_u64())

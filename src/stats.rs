@@ -21,18 +21,12 @@ use std::mem::MaybeUninit;
 use std::io::{Read, Write, Cursor};
 use crate::{error::Result, column::ColId};
 
-// store up to value of size HISTOGRAM_BUCKETS * HISTOGRAM_BUCKET_BITS,
+// store up to value of size HISTOGRAM_BUCKETS * 2 ^ HISTOGRAM_BUCKET_BITS,
 // that is 32ko
-// TODO restore 2048 this, this is just to run test without a db migration.
 const HISTOGRAM_BUCKETS: usize = 1024;
-// const HISTOGRAM_BUCKETS: usize = 2048;
-//const HISTOGRAM_BUCKET_BITS: u8 = 4;
-// TODO restore 4 this, this is just to run test without a db migration.
 const HISTOGRAM_BUCKET_BITS: u8 = 5;
 const SIZE_TIERS: usize = 16;
-// 4 * 2048 + 8 * 16 + 8 * 11 = 8408
-// 8 * 2048 = 16384
-// 24792
+
 pub const TOTAL_SIZE: usize = 4 * HISTOGRAM_BUCKETS + 8 * HISTOGRAM_BUCKETS + 8 * SIZE_TIERS + 8 * 11;
 
 pub struct ColumnStats {
