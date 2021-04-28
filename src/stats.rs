@@ -232,7 +232,7 @@ impl ColumnStats {
 			self.compression_delta[index].fetch_add(size as i64 - compressed as i64, Ordering::Relaxed);
 		} else {
 			self.oversized.fetch_add(1, Ordering::Relaxed);
-			self.oversized_bytes.fetch_add(size as u64, Ordering::Relaxed);
+			self.oversized_bytes.fetch_add(compressed as u64, Ordering::Relaxed);
 		}
 		self.total_values.fetch_add(1, Ordering::Relaxed);
 		self.total_bytes.fetch_add(compressed as u64, Ordering::Relaxed);

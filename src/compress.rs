@@ -21,7 +21,7 @@
 /// allowend and their u8 representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
-pub enum CompressType {
+pub enum CompressionType {
 	NoCompression = 0,
 	Lz4 = 1,
 	Snappy = 2,
@@ -30,11 +30,11 @@ pub enum CompressType {
 /// Compression implementation.
 pub(crate) struct Compress {
 	inner: Compressor,
-	pub treshold: usize,
+	pub treshold: u32,
 }
 
 impl Compress {
-	pub(crate) fn new(kind: CompressType, treshold: usize) -> Self {
+	pub(crate) fn new(kind: CompressionType, treshold: u32) -> Self {
 		Compress {
 			inner: kind.into(),
 			treshold,
@@ -48,35 +48,35 @@ enum Compressor {
 	Snappy(snappy::Snappy),
 }
 
-impl From<u8> for CompressType {
+impl From<u8> for CompressionType {
 	fn from(comp_type: u8) -> Self {
 		match comp_type {
-			a if a == CompressType::NoCompression as u8 => CompressType::NoCompression,
-			a if a == CompressType::Lz4 as u8 => CompressType::Lz4,
-			a if a == CompressType::Snappy as u8 => CompressType::Snappy,
+			a if a == CompressionType::NoCompression as u8 => CompressionType::NoCompression,
+			a if a == CompressionType::Lz4 as u8 => CompressionType::Lz4,
+			a if a == CompressionType::Snappy as u8 => CompressionType::Snappy,
 			_ => panic!("Unkwown compression."),
 		}
 	}
 }
 
-impl From<CompressType> for Compressor {
-	fn from(comp_type: CompressType) -> Self {
+impl From<CompressionType> for Compressor {
+	fn from(comp_type: CompressionType) -> Self {
 		match comp_type {
-			CompressType::NoCompression => Compressor::NoCompression(NoCompression),
-			CompressType::Lz4 => Compressor::Lz4(lz4::Lz4::new()),
-			CompressType::Snappy => Compressor::Snappy(snappy::Snappy::new()),
+			CompressionType::NoCompression => Compressor::NoCompression(NoCompression),
+			CompressionType::Lz4 => Compressor::Lz4(lz4::Lz4::new()),
+			CompressionType::Snappy => Compressor::Snappy(snappy::Snappy::new()),
 			#[allow(unreachable_patterns)]
 			_ => unimplemented!("Missing compression implementation."),
 		}
 	}
 }
 
-impl From<&Compress> for CompressType {
+impl From<&Compress> for CompressionType {
 	fn from(compression: &Compress) -> Self {
 		match compression.inner {
-			Compressor::NoCompression(_) => CompressType::NoCompression,
-			Compressor::Lz4(_) => CompressType::Lz4,
-			Compressor::Snappy(_) => CompressType::Snappy,
+			Compressor::NoCompression(_) => CompressionType::NoCompression,
+			Compressor::Lz4(_) => CompressionType::Lz4,
+			Compressor::Snappy(_) => CompressionType::Snappy,
 			#[allow(unreachable_patterns)]
 			_ => unimplemented!("Missing compression implementation."),
 		}

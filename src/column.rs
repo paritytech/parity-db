@@ -113,7 +113,7 @@ impl Column {
 	}
 
 	fn compress_internal(compression: &Compress, key: &Key, value: &[u8], tables: &Tables) -> (Option<Vec<u8>>, usize) {
-		let (len, result) = if value.len() > compression.treshold {
+		let (len, result) = if value.len() > compression.treshold as usize {
 			let cvalue = compression.compress(value);
 			if cvalue.len() <= value.len() {
 				(cvalue.len(), Some(cvalue))
