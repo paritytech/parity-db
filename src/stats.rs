@@ -42,7 +42,7 @@ pub struct ColumnStats {
 	removed_hit: AtomicU64,
 	removed_miss: AtomicU64,
 	queries_miss: AtomicU64,
-	compressed_bytes: AtomicU64,
+	uncompressed_bytes: AtomicU64,
 	compression_delta: [AtomicI64; HISTOGRAM_BUCKETS],
 }
 
@@ -109,7 +109,7 @@ impl ColumnStats {
 			removed_hit: read_u64(&mut cursor),
 			removed_miss: read_u64(&mut cursor),
 			queries_miss: read_u64(&mut cursor),
-			compressed_bytes: read_u64(&mut cursor),
+			uncompressed_bytes: read_u64(&mut cursor),
 			compression_delta: unsafe { MaybeUninit::uninit().assume_init() },
 		};
 		for n in 0 .. HISTOGRAM_BUCKETS {
@@ -134,7 +134,7 @@ impl ColumnStats {
 			removed_hit: Default::default(),
 			removed_miss: Default::default(),
 			queries_miss: Default::default(),
-			compressed_bytes: Default::default(),
+			uncompressed_bytes: Default::default(),
 			compression_delta: unsafe { std::mem::transmute([0i64; HISTOGRAM_BUCKETS]) },
 		}
 	}
@@ -157,7 +157,7 @@ impl ColumnStats {
 		write_u64(&mut cursor, &self.removed_hit);
 		write_u64(&mut cursor, &self.removed_miss);
 		write_u64(&mut cursor, &self.queries_miss);
-		write_u64(&mut cursor, &self.compressed_bytes);
+		write_u64(&mut cursor, &self.uncompressed_bytes);
 		for n in 0 .. HISTOGRAM_BUCKETS {
 			write_i64(&mut cursor, &self.compression_delta[n]);
 		}
@@ -175,7 +175,7 @@ impl ColumnStats {
 		writeln!(writer, "Existing value insertions: {}", self.inserted_overwrite.load(Ordering::Relaxed))?;
 		writeln!(writer, "Removals: {}", self.removed_hit.load(Ordering::Relaxed))?;
 		writeln!(writer, "Missed removals: {}", self.removed_miss.load(Ordering::Relaxed))?;
-		writeln!(writer, "Compressed bytes: {}", self.compressed_bytes.load(Ordering::Relaxed))?;
+		writeln!(writer, "Uncompressed bytes: {}", self.uncompressed_bytes.load(Ordering::Relaxed))?;
 		writeln!(writer, "Compression deltas:")?;
 		for i in 0 .. HISTOGRAM_BUCKETS {
 			let count = self.value_histogram[i].load(Ordering::Relaxed);
@@ -236,7 +236,7 @@ impl ColumnStats {
 		}
 		self.total_values.fetch_add(1, Ordering::Relaxed);
 		self.total_bytes.fetch_add(compressed as u64, Ordering::Relaxed);
-		self.compressed_bytes.fetch_add(compressed as u64, Ordering::Relaxed);
+		self.uncompressed_bytes.fetch_add(size as u64, Ordering::Relaxed);
 	}
 
 	pub fn remove(&self, size: u32, compressed: u32) {
@@ -249,7 +249,7 @@ impl ColumnStats {
 		}
 		self.total_values.fetch_sub(1, Ordering::Relaxed);
 		self.total_bytes.fetch_sub(compressed as u64, Ordering::Relaxed);
-		self.compressed_bytes.fetch_sub(compressed as u64, Ordering::Relaxed);
+		self.uncompressed_bytes.fetch_sub(size as u64, Ordering::Relaxed);
 	}
 
 	pub fn insert_val(&self, size: u32, compressed: u32) {
