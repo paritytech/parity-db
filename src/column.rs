@@ -317,8 +317,18 @@ impl Column {
 			if let Some((table, sub_index, existing_tier, existing_address)) = existing {
 				let existing_tier = existing_tier as usize;
 				if self.collect_stats {
-					let cur_size = tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0);
-					self.stats.replace_val(cur_size, cur_size, val.len() as u32, cval.len() as u32);
+					let (cur_size, compressed) = tables.value[existing_tier].size(&key, existing_address.offset(), log)?
+						.unwrap_or((0, false));
+					if compressed {
+						// This is very costy.
+						let compressed = tables.value[existing_tier].get(&key, existing_address.offset(), log)?
+							.expect("Same query as size").0;
+						let uncompressed = self.decompress(compressed.as_slice());
+
+						self.stats.replace_val(cur_size, uncompressed.len() as u32, val.len() as u32, cval.len() as u32);
+					} else {
+						self.stats.replace_val(cur_size, cur_size, val.len() as u32, cval.len() as u32);
+					}
 				}
 				if self.ref_counted {
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.index.id, hex(key));
@@ -366,7 +376,18 @@ impl Column {
 				// Deletion
 				let existing_tier = existing_tier as usize;
 				let cur_size = if self.collect_stats {
-					Some(tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0))
+					let (cur_size, compressed) = tables.value[existing_tier].size(&key, existing_address.offset(), log)?
+						.unwrap_or((0, false));
+					Some(if compressed {
+						// This is very costy.
+						let compressed = tables.value[existing_tier].get(&key, existing_address.offset(), log)?
+							.expect("Same query as size").0;
+						let uncompressed = self.decompress(compressed.as_slice());
+
+						(cur_size, uncompressed.len() as u32)
+					} else {
+						(cur_size, cur_size)
+					})
 				} else {
 					None
 				};
@@ -380,8 +401,8 @@ impl Column {
 					true
 				};
 				if remove {
-					if let Some(cur_size) = cur_size {
-						self.stats.remove_val(cur_size, cur_size);
+					if let Some((cur_size, compressed_size)) = cur_size {
+						self.stats.remove_val(cur_size, compressed_size);
 					}
 					table.write_remove_plan(key, sub_index, log)?;
 				}

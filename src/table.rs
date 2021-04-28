@@ -60,7 +60,7 @@ use std::mem::MaybeUninit;
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::{
-	error::{Error, Result},
+	error::Result,
 	column::ColId,
 	log::{LogQuery, LogReader, LogWriter},
 	display::hex,
@@ -227,7 +227,6 @@ impl ValueTable {
 		mut index: u64,
 		log: &Q,
 		mut f: F,
-		check: bool,
 	) -> Result<(bool, bool)> {
 		let mut buf: [u8; MAX_ENTRY_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
 
@@ -260,15 +259,6 @@ impl ValueTable {
 				(2, size as usize, 0)
 			};
 
-			if check && part == 0 && content_offset + 30 > content_offset  + content_len {
-				log::debug!(target: "parity-db", "Corrupted value: {}", hex(&buf[..entry_size]));
-				return Err(Error::Corruption("First entry size too small for meta.".to_string()));
-			}
-			if check && (content_offset + content_len) > entry_size {
-				log::debug!(target: "parity-db", "Corrupted value: {}", hex(&buf[..entry_size]));
-				return Err(Error::Corruption("Oversized value entry.".to_string()));
-			}
-
 			if part == 0 {
 				let rc = u32::from_le_bytes(buf[content_offset..content_offset + 4].try_into().unwrap());
 				compressed = rc & COMPRESSED_MASK > 0;
@@ -298,18 +288,18 @@ impl ValueTable {
 
 	pub fn get(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool)>> {
 		let mut result = Vec::new();
-		let (success, compressed) = self.for_parts(key, index, log, |buf| result.extend_from_slice(buf), false)?;
+		let (success, compressed) = self.for_parts(key, index, log, |buf| result.extend_from_slice(buf))?;
 		if success {
 			return Ok(Some((result, compressed)));
 		}
 		Ok(None)
 	}
 
-	pub fn size<Q: LogQuery>(&self, key: &Key, index: u64, log: &Q) -> Result<Option<u32>> {
+	pub fn size(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<(u32, bool)>> {
 		let mut result = 0;
-		let (success, _compressed) = self.for_parts(key, index, log, |buf| result += buf.len() as u32, false)? ;
+		let (success, compressed) = self.for_parts(key, index, log, |buf| result += buf.len() as u32)? ;
 		if success {
-			return Ok(Some(result));
+			return Ok(Some((result, compressed)));
 		}
 		Ok(None)
 	}
