@@ -204,7 +204,7 @@ impl Column {
 		reindex.queue.push_back(old_table);
 	}
 
-	pub fn write_index_plan(&self, key: &Key, address: Address, log: &mut LogWriter) -> Result<PlanOutcome> {
+	pub fn write_reindex_plan(&self, key: &Key, address: Address, log: &mut LogWriter) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
 		if Self::search_index(key, &tables.index, &*tables, log)?.is_some() {
@@ -214,7 +214,7 @@ impl Column {
 			PlanOutcome::NeedReindex => {
 				log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
 				Self::trigger_reindex(tables, reindex, self.path.as_path());
-				self.write_index_plan(key, address, log)?;
+				self.write_reindex_plan(key, address, log)?;
 				return Ok(PlanOutcome::NeedReindex);
 			}
 			_ => {

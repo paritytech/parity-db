@@ -380,7 +380,7 @@ impl DbInner {
 					writer.record_id(),
 				);
 				for (key, address) in batch.into_iter() {
-					match column.write_index_plan(&key, address, &mut writer)? {
+					match column.write_reindex_plan(&key, address, &mut writer)? {
 						PlanOutcome::NeedReindex => {
 							next_reindex = true
 						},
