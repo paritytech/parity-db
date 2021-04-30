@@ -19,11 +19,10 @@
 use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
 use std::mem::MaybeUninit;
 use std::io::{Read, Write, Cursor};
-use crate::{error::Result, column::ColId};
+use crate::{error::Result, column::ColId, table::SIZE_TIERS};
 
 const HISTOGRAM_BUCKETS: usize = 2048;
 const HISTOGRAM_BUCKET_BITS: u8 = 4;
-const SIZE_TIERS: usize = 16;
 
 pub const TOTAL_SIZE: usize = 4 * HISTOGRAM_BUCKETS + 8 * SIZE_TIERS + 8 * 10;
 
@@ -232,6 +231,3 @@ impl ColumnStats {
 		self.commits.fetch_add(1, Ordering::Relaxed);
 	}
 }
-
-
-

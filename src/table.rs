@@ -67,6 +67,8 @@ use crate::{
 };
 
 pub const KEY_LEN: usize = 32;
+pub const SIZE_TIERS: usize = 16;
+pub const SIZE_TIERS_BITS: u8 = 4;
 const MAX_ENTRY_SIZE: usize = 65533;
 
 const TOMBSTONE: &[u8] = &[0xff, 0xff];
