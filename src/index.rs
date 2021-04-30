@@ -43,7 +43,7 @@ pub struct Entry(u64);
 impl Entry {
 	#[inline]
 	fn new(address: Address, key_material: u64, index_bits: u8) -> Entry {
-		Entry(((key_material as u64) << Self::address_bits(index_bits)) | address.as_u64())
+		Entry((key_material << Self::address_bits(index_bits)) | address.as_u64())
 	}
 
 	#[inline]

@@ -151,8 +151,8 @@ impl DbInner {
 			flush_worker_cv: Condvar::new(),
 			flush_work: Mutex::new(false),
 			enact_mutex: Mutex::new(()),
-			next_reindex: AtomicU64::new(0),
-			last_enacted: AtomicU64::new(0),
+			next_reindex: AtomicU64::new(1),
+			last_enacted: AtomicU64::new(1),
 			collect_stats: options.stats,
 			bg_err: Mutex::new(None),
 			_lock_file: lock_file,
@@ -380,7 +380,7 @@ impl DbInner {
 					writer.record_id(),
 				);
 				for (key, address) in batch.into_iter() {
-					match column.write_index_plan(&key, address, &mut writer)? {
+					match column.write_reindex_plan(&key, address, &mut writer)? {
 						PlanOutcome::NeedReindex => {
 							next_reindex = true
 						},
@@ -608,6 +608,8 @@ impl Db {
 	/// Open the database with given
 	pub fn open(options: &Options) -> Result<Db> {
 		let db = Arc::new(DbInner::open(options)?);
+		// This needs to be call before log thread: so first reindexing
+		// will run in correct state.
 		db.replay_all_logs()?;
 		let commit_worker_db = db.clone();
 		let commit_thread = std::thread::spawn(move ||
@@ -667,7 +669,8 @@ impl Db {
 	}
 
 	fn log_worker(db: Arc<DbInner>) -> Result<()> {
-		let mut more_work = false;
+		// Start with pending reindex.
+		let mut more_work = db.process_reindex()?;
 		while !db.shutdown.load(Ordering::SeqCst) {
 			if !more_work {
 				let mut work = db.log_work.lock();
@@ -710,4 +713,3 @@ impl Drop for Db {
 		self.commit_thread.take().map(|t| t.join());
 	}
 }
-

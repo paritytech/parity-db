@@ -36,7 +36,7 @@ pub struct Options {
 	pub stats: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnOptions {
 	/// Indicates that the column value is the preimage of the key.
 	/// This implies that a given value always has the same key.
@@ -50,19 +50,25 @@ pub struct ColumnOptions {
 	pub sizes: [u16; 15],
 	/// Use referece counting for values.
 	pub ref_counted: bool,
+	/// Compression to use for this column.
+	pub compression: crate::compress::CompressionType,
+	/// Minimal value size treshold to attempt compressing a value.
+	pub compression_treshold: u32,
 }
 
 impl ColumnOptions {
 	fn as_string(&self) -> String {
-		format!("preimage: {}, uniform: {}, refc: {}, sizes: [{}]",
+		format!("preimage: {}, uniform: {}, refc: {}, compression: {}, sizes: [{}]",
 			self.preimage,
 			self.uniform,
 			self.ref_counted,
+			self.compression as u8,
 			self.sizes.iter().fold(String::new(), |mut r, s| {
 				if !r.is_empty() {
 					r.push_str(", ");
 				}
-				r.push_str(&s.to_string()); r
+				r.push_str(&s.to_string());
+				r
 			})
 		)
 	}
@@ -74,6 +80,8 @@ impl Default for ColumnOptions {
 			preimage: false,
 			uniform: false,
 			ref_counted: false,
+			compression: crate::compress::CompressionType::NoCompression,
+			compression_treshold: 4096,
 			sizes: [96, 128, 192, 256, 320, 512, 768, 1024, 1536, 2048, 3072, 4096, 8192, 16384, 32768],
 		}
 	}
@@ -144,4 +152,3 @@ impl Options {
 		Ok(salt)
 	}
 }
-
