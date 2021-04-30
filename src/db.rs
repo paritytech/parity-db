@@ -713,4 +713,3 @@ impl Drop for Db {
 		self.commit_thread.take().map(|t| t.join());
 	}
 }
-

@@ -18,6 +18,8 @@ crc32fast = "1.2.0"
 rand = "0.8.2"
 hex = "0.4.2"
 fs2 = "0.4.3"
+lz4 = "1.23.2"
+snappy = "0.4.0"
 
 [dev-dependencies]
 env_logger = "0.8.2"
@@ -34,4 +36,3 @@ members = [
 	"bench/core",
 	"bench/bin",
 ]
-

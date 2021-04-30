@@ -28,6 +28,7 @@ const CHUNK_LEN: usize = 512; // bytes
 const CHUNK_ENTRIES: usize = 64;
 const HEADER_SIZE: usize = 512;
 const META_SIZE: usize = 16 * 1024; // Contains header and column stats
+// TODO restore const META_SIZE: usize = 32 * 1024; // Contains header and column stats
 const KEY_LEN: usize = 32;
 
 const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
@@ -40,7 +41,7 @@ pub struct Entry(u64);
 impl Entry {
 	#[inline]
 	fn new(address: Address, key_material: u64, index_bits: u8) -> Entry {
-		Entry(((key_material as u64) << Self::address_bits(index_bits)) | address.as_u64())
+		Entry((key_material << Self::address_bits(index_bits)) | address.as_u64())
 	}
 
 	#[inline]
@@ -62,7 +63,6 @@ impl Entry {
 	fn extract_key(key: u64, index_bits: u8) -> u64 {
 		(key << index_bits) >> Self::address_bits(index_bits)
 	}
-
 
 	#[inline]
 	pub fn is_empty(&self) -> bool {

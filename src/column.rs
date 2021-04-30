@@ -26,6 +26,7 @@ use crate::{
 	options::Options,
 	stats::ColumnStats,
 };
+use crate::compress::Compress;
 
 const START_BITS: u8 = 16;
 const MAX_REBALANCE_BATCH: u32 = 1024;
@@ -53,19 +54,20 @@ pub struct Column {
 	ref_counted: bool,
 	salt: Option<Salt>,
 	stats: ColumnStats,
+	compression: Compress,
 }
 
 impl Column {
 	pub fn get(&self, key: &Key, log: &RwLock<LogOverlays>) -> Result<Option<Value>> {
 		let tables = self.tables.read();
-		if let Some((tier, value)) = Self::get_in_index(key, &tables.index, &*tables, log)? {
+		if let Some((tier, value)) = self.get_in_index(key, &tables.index, &*tables, log)? {
 			if self.collect_stats {
 				self.stats.query_hit(tier);
 			}
 			return Ok(Some(value));
 		}
 		for r in &self.reindex.read().queue {
-			if let Some((tier, value)) = Self::get_in_index(key, &r, &*tables, log)? {
+			if let Some((tier, value)) = self.get_in_index(key, &r, &*tables, log)? {
 				if self.collect_stats {
 					self.stats.query_hit(tier);
 				}
@@ -82,12 +84,17 @@ impl Column {
 		self.get(key, log).map(|v| v.map(|v| v.len() as u32))
 	}
 
-	fn get_in_index(key: &Key, index: &IndexTable, tables: &Tables, log: &RwLock<LogOverlays>) -> Result<Option<(u8, Value)>> {
+	fn get_in_index(&self, key: &Key, index: &IndexTable, tables: &Tables, log: &RwLock<LogOverlays>) -> Result<Option<(u8, Value)>> {
 		let (mut entry, mut sub_index) = index.get(key, 0, log);
 		while !entry.is_empty() {
 			let size_tier = entry.address(index.id.index_bits()).size_tier() as usize;
 			match tables.value[size_tier].get(key, entry.address(index.id.index_bits()).offset(), log)? {
-				Some(value) => {
+				Some((value, compressed)) => {
+					let value = if compressed {
+						self.decompress(&value)
+					} else {
+						value
+					};
 					return Ok(Some((size_tier as u8, value)));
 				}
 				None =>  {
@@ -98,6 +105,38 @@ impl Column {
 			}
 		}
 		Ok(None)
+	}
+
+	/// Compress if needed and return the target tier to use.
+	fn compress(&self, key: &Key, value: &[u8], tables: &Tables) -> (Option<Vec<u8>>, usize) {
+		Self::compress_internal(&self.compression, key, value, tables)
+	}
+
+	fn compress_internal(compression: &Compress, key: &Key, value: &[u8], tables: &Tables) -> (Option<Vec<u8>>, usize) {
+		let (len, result) = if value.len() > compression.treshold as usize {
+			let cvalue = compression.compress(value);
+			if cvalue.len() <= value.len() {
+				(cvalue.len(), Some(cvalue))
+			} else {
+				(value.len(), None)
+			}
+		} else {
+			(value.len(), None)
+		};
+		let target_tier = tables.value.iter().position(|t| len <= t.value_size() as usize);
+		let target_tier = match target_tier {
+			Some(tier) => tier as usize,
+			None => {
+				log::trace!(target: "parity-db", "Using blob {}", hex(key));
+				15
+			}
+		};
+
+		(result, target_tier)
+	}
+
+	fn decompress(&self, buf: &[u8]) -> Vec<u8> {
+		self.compression.decompress(buf)
 	}
 
 	pub fn open(col: ColId, options: &Options, salt: Option<Salt>) -> Result<Column> {
@@ -140,6 +179,7 @@ impl Column {
 			collect_stats,
 			salt,
 			stats,
+			compression: Compress::new(options.compression, options.compression_treshold),
 		})
 	}
 
@@ -269,24 +309,30 @@ impl Column {
 		let reindex = self.reindex.upgradable_read();
 		let existing = Self::search_all_indexes(key, &*tables, &*reindex, log)?;
 		if let &Some(ref val) = value {
-			let target_tier = tables.value.iter().position(|t| val.len() <= t.value_size() as usize);
-			let target_tier = match target_tier {
-				Some(tier) => tier as usize,
-				None => {
-					log::trace!(target: "parity-db", "Inserted blob {}", hex(key));
-					15
-				}
-			};
+			let (cval, target_tier) = self.compress(&key, &val, &*tables);
+			let (cval, compressed) = cval.as_ref()
+				.map(|cval| (cval.as_slice(), true))
+				.unwrap_or((val.as_slice(), false));
 
 			if let Some((table, sub_index, existing_tier, existing_address)) = existing {
 				let existing_tier = existing_tier as usize;
 				if self.collect_stats {
-					let cur_size = tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0);
-					self.stats.replace_val(cur_size, val.len() as u32);
+					let (cur_size, compressed) = tables.value[existing_tier].size(&key, existing_address.offset(), log)?
+						.unwrap_or((0, false));
+					if compressed {
+						// This is very costy.
+						let compressed = tables.value[existing_tier].get(&key, existing_address.offset(), log)?
+							.expect("Same query as size").0;
+						let uncompressed = self.decompress(compressed.as_slice());
+
+						self.stats.replace_val(cur_size, uncompressed.len() as u32, val.len() as u32, cval.len() as u32);
+					} else {
+						self.stats.replace_val(cur_size, cur_size, val.len() as u32, cval.len() as u32);
+					}
 				}
 				if self.ref_counted {
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.index.id, hex(key));
-					tables.value[target_tier].write_inc_ref(existing_address.offset(), log)?;
+					tables.value[target_tier].write_inc_ref(existing_address.offset(), log, compressed)?;
 					return Ok(PlanOutcome::Written);
 				}
 				if self.preimage {
@@ -295,12 +341,12 @@ impl Column {
 				}
 				if existing_tier == target_tier {
 					log::trace!(target: "parity-db", "{}: Replacing {}", tables.index.id, hex(key));
-					tables.value[target_tier].write_replace_plan(existing_address.offset(), key, val, log)?;
+					tables.value[target_tier].write_replace_plan(existing_address.offset(), key, &cval, log, compressed)?;
 					return Ok(PlanOutcome::Written);
 				} else {
 					log::trace!(target: "parity-db", "{}: Replacing in a new table {}", tables.index.id, hex(key));
 					tables.value[existing_tier].write_remove_plan(existing_address.offset(), log)?;
-					let new_offset = tables.value[target_tier].write_insert_plan(key, val, log)?;
+					let new_offset = tables.value[target_tier].write_insert_plan(key, &cval, log, compressed)?;
 					let new_address = Address::new(new_offset, target_tier as u8);
 					// If it was found in an older index we just insert a new entry. Reindex won't overwrite it.
 					let sub_index = if table.id == tables.index.id { Some(sub_index) } else { None };
@@ -308,7 +354,7 @@ impl Column {
 				}
 			} else {
 				log::trace!(target: "parity-db", "{}: Inserting new index {}", tables.index.id, hex(key));
-				let offset = tables.value[target_tier].write_insert_plan(key, val, log)?;
+				let offset = tables.value[target_tier].write_insert_plan(key, &cval, log, compressed)?;
 				let address = Address::new(offset, target_tier as u8);
 				match tables.index.write_insert_plan(key, address, None, log)? {
 					PlanOutcome::NeedReindex => {
@@ -319,7 +365,7 @@ impl Column {
 					}
 					_ => {
 						if self.collect_stats {
-							self.stats.insert_val(val.len() as u32);
+							self.stats.insert_val(val.len() as u32, cval.len() as u32);
 						}
 						return Ok(PlanOutcome::Written);
 					}
@@ -330,7 +376,18 @@ impl Column {
 				// Deletion
 				let existing_tier = existing_tier as usize;
 				let cur_size = if self.collect_stats {
-					Some(tables.value[existing_tier].size(&key, existing_address.offset(), log)?.unwrap_or(0))
+					let (cur_size, compressed) = tables.value[existing_tier].size(&key, existing_address.offset(), log)?
+						.unwrap_or((0, false));
+					Some(if compressed {
+						// This is very costy.
+						let compressed = tables.value[existing_tier].get(&key, existing_address.offset(), log)?
+							.expect("Same query as size").0;
+						let uncompressed = self.decompress(compressed.as_slice());
+
+						(cur_size, uncompressed.len() as u32)
+					} else {
+						(cur_size, cur_size)
+					})
 				} else {
 					None
 				};
@@ -344,8 +401,8 @@ impl Column {
 					true
 				};
 				if remove {
-					if let Some(cur_size) = cur_size {
-						self.stats.remove_val(cur_size);
+					if let Some((cur_size, compressed_size)) = cur_size {
+						self.stats.remove_val(cur_size, compressed_size);
 					}
 					table.write_remove_plan(key, sub_index, log)?;
 				}
@@ -510,4 +567,3 @@ impl Column {
 		Ok(())
 	}
 }
-
