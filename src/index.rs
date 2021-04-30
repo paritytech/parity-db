@@ -24,8 +24,8 @@ use crate::{
 	stats::{self, ColumnStats},
 };
 
-const CHUNK_LEN: usize = 512; // bytes
-const CHUNK_ENTRIES: usize = 64;
+const CHUNK_LEN: usize = CHUNK_ENTRIES  * ENTRY_LEN as usize / 8; // 512 bytes
+const CHUNK_ENTRIES: usize = 1 << CHUNK_ENTRIES_BITS;
 const CHUNK_ENTRIES_BITS: u8 = 6;
 const HEADER_SIZE: usize = 512;
 const META_SIZE: usize = crate::table::SIZE_TIERS * 1024; // Contains header and column stats
