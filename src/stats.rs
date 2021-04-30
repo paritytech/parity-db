@@ -19,13 +19,12 @@
 use std::sync::atomic::{AtomicU64, AtomicU32, AtomicI64, Ordering};
 use std::mem::MaybeUninit;
 use std::io::{Read, Write, Cursor};
-use crate::{error::Result, column::ColId};
+use crate::{error::Result, column::ColId, table::SIZE_TIERS};
 
 // store up to value of size HISTOGRAM_BUCKETS * 2 ^ HISTOGRAM_BUCKET_BITS,
 // that is 32ko
 const HISTOGRAM_BUCKETS: usize = 1024;
 const HISTOGRAM_BUCKET_BITS: u8 = 5;
-const SIZE_TIERS: usize = 16;
 
 pub const TOTAL_SIZE: usize = 4 * HISTOGRAM_BUCKETS + 8 * HISTOGRAM_BUCKETS + 8 * SIZE_TIERS + 8 * 11;
 
