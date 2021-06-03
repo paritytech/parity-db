@@ -138,6 +138,8 @@ mod lz4 {
 }
 
 mod snappy {
+    use std::io::{Read, Write};
+
 	pub(super) struct Snappy;
 
 	impl Snappy {
@@ -146,11 +148,40 @@ mod snappy {
 		}
 
 		pub(super) fn compress(&self, value: &[u8]) -> Vec<u8> {
-			snappy::compress(value)
+			let mut buf = Vec::with_capacity(value.len() << 3);
+			let mut encoder = snap::write::FrameEncoder::new(&mut buf);
+			encoder.write(value).expect("Expect in memory write to succeed.");
+			buf
 		}
 
 		pub(super) fn decompress(&self, value: &[u8]) -> Vec<u8> {
-			snappy::uncompress(value).unwrap()
+			let mut buf = Vec::with_capacity(value.len());
+			let mut decoder = snap::read::FrameDecoder::new(value);
+			decoder.read_to_end(&mut buf).expect("Compression corrupted.");
+			buf
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+	#[test]
+	fn test_compression_interfaces() {
+		let original = vec![42;100];
+		let types = vec![
+			CompressionType::NoCompression,
+			CompressionType::Snappy,
+			CompressionType::Lz4
+		];
+
+		for compression_type in types {
+			let compress = Compress::new(compression_type, 0);
+			let v = compress.compress(&original[..]);
+			assert!(v.len() <= 100);
+			let round_tripped = compress.decompress( &v[..]);
+			assert_eq!(original, round_tripped);
 		}
 	}
 }
