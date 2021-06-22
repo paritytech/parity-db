@@ -667,6 +667,11 @@ impl ValueTable {
 		}
 		Ok(())
 	}
+
+	pub fn flush(&self) -> Result<()> {
+		self.file.sync_data()?;
+		Ok(())
+	}
 }
 
 #[cfg(test)]
@@ -717,9 +722,9 @@ mod test {
 		log.end_record(writer.drain()).unwrap();
 		// Cycle through 2 log files
 		let _ = log.read_next(false);
-		log.flush_one().unwrap();
+		log.flush_one(|| Ok(())).unwrap();
 		let _ = log.read_next(false);
-		log.flush_one().unwrap();
+		log.flush_one(|| Ok(())).unwrap();
 		let mut reader = log.read_next(false).unwrap().unwrap();
 		loop {
 			match reader.next().unwrap() {

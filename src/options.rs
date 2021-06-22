@@ -91,7 +91,7 @@ impl Options {
 	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Options {
 		Options {
 			path: path.into(),
-			sync: false,
+			sync: true,
 			stats: true,
 			columns: (0..num_columns).map(|_| Default::default()).collect(),
 		}

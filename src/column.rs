@@ -195,6 +195,15 @@ impl Column {
 		k
 	}
 
+	pub fn flush(&self) -> Result<()> {
+		let tables = self.tables.write();
+		tables.index.flush()?;
+		for t in tables.value.iter() {
+			t.flush()?;
+		}
+		Ok(())
+	}
+
 	fn open_index(path: &std::path::Path, col: ColId) -> Result<(IndexTable, VecDeque<IndexTable>, ColumnStats)> {
 		let mut reindexing = VecDeque::new();
 		let mut top = None;
