@@ -510,7 +510,7 @@ impl Log {
 		overlays.index.retain(|_, overlay| !overlay.map.is_empty());
 	}
 
-	pub fn flush_one(&self, f: impl Fn() -> Result<()>) -> Result<(bool, bool)> {
+	pub fn flush_one(&self, on_read_complete: impl Fn() -> Result<()>) -> Result<(bool, bool)> {
 		// Wait for the reader to finish reading
 		let mut flushing = self.flushing.lock();
 		let mut read_next = false;
@@ -522,7 +522,7 @@ impl Log {
 				self.done_reading_cv.wait(&mut reading_state)
 			}
 			// Call reader callback
-			f()?;
+			on_read_complete()?;
 			if *reading_state == ReadingState::Shutdown {
 				return Ok((false, false))
 			}
