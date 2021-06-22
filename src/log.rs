@@ -522,7 +522,9 @@ impl Log {
 				self.done_reading_cv.wait(&mut reading_state)
 			}
 			// Call reader callback
-			on_read_complete()?;
+			if self.sync {
+				on_read_complete()?;
+			}
 			if *reading_state == ReadingState::Shutdown {
 				return Ok((false, false))
 			}
