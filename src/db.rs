@@ -535,7 +535,12 @@ impl DbInner {
 	}
 
 	fn flush_logs(&self) -> Result<bool> {
-		let (flush_next, read_next) = self.log.flush_one()?;
+		let (flush_next, read_next) = self.log.flush_one(|| {
+			for c in self.columns.iter() {
+				c.flush()?;
+			}
+			Ok(())
+		})?;
 		if read_next {
 			self.signal_commit_worker();
 		}
