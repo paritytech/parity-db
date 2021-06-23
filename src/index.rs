@@ -451,7 +451,7 @@ impl IndexTable {
 	}
 
 	pub fn flush(&self) -> Result<()> {
-		if let Some(map) = & *self.map.read() {
+		if let Some(map) = &*self.map.read() {
 			map.flush()?;
 		}
 		Ok(())
