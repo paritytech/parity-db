@@ -196,7 +196,7 @@ impl Column {
 	}
 
 	pub fn flush(&self) -> Result<()> {
-		let tables = self.tables.write();
+		let tables = self.tables.read();
 		tables.index.flush()?;
 		for t in tables.value.iter() {
 			t.flush()?;
