@@ -567,7 +567,7 @@ impl ValueTable {
 			}
 		} else {
 			if counter != LOCKED_REF {
-				counter = counter.saturating_sub((delta * -1) as u32);
+				counter = counter.saturating_sub(-delta as u32);
 				if counter == 0 {
 					return Ok(false);
 				}
@@ -576,7 +576,7 @@ impl ValueTable {
 		counter = if compressed {
 			counter | COMPRESSED_MASK
 		} else {
-			LOCKED_REF
+			counter
 		};
 
 		buf[counter_offset..counter_offset + 4].copy_from_slice(&counter.to_le_bytes());
@@ -905,14 +905,40 @@ mod test {
 
 	#[test]
 	fn ref_counting() {
-		let dir = TempDir::new("ref_counting");
+		for compressed in [false, true] {
+			let dir = TempDir::new("ref_counting");
+			let table = dir.table(None);
+			let log = dir.log();
+
+			let key = key(1);
+			let val = value(5000);
+
+			write_ops(&table, &log, |writer| {
+				table.write_insert_plan(&key, &val, writer, compressed).unwrap();
+				table.write_inc_ref(1, writer, compressed).unwrap();
+			});
+			assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some((val.clone(), compressed)));
+			write_ops(&table, &log, |writer| {
+				table.write_dec_ref(1, writer).unwrap();
+			});
+			assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some((val, compressed)));
+			write_ops(&table, &log, |writer| {
+				table.write_dec_ref(1, writer).unwrap();
+			});
+			assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), None);
+		}
+	}
+
+	#[test]
+	fn ref_underflow() {
+		let dir = TempDir::new("ref_underflow");
 		let table = dir.table(None);
 		let log = dir.log();
 
 		let key = key(1);
-		let val = value(5000);
+		let val = value(10);
 
-		let compressed = true;
+		let compressed = false;
 		write_ops(&table, &log, |writer| {
 			table.write_insert_plan(&key, &val, writer, compressed).unwrap();
 			table.write_inc_ref(1, writer, compressed).unwrap();
@@ -920,9 +946,7 @@ mod test {
 		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some((val.clone(), compressed)));
 		write_ops(&table, &log, |writer| {
 			table.write_dec_ref(1, writer).unwrap();
-		});
-		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some((val, compressed)));
-		write_ops(&table, &log, |writer| {
+			table.write_dec_ref(1, writer).unwrap();
 			table.write_dec_ref(1, writer).unwrap();
 		});
 		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), None);

@@ -224,6 +224,7 @@ impl DbInner {
 		{
 			let mut queue = self.commit_queue.lock();
 			if queue.bytes > MAX_COMMIT_QUEUE_BYTES {
+				log::debug!(target: "parity-db", "Waiting, qb={}", queue.bytes);
 				self.commit_queue_full_cv.wait(&mut queue);
 			}
 			let mut overlay = self.commit_overlay.write();
@@ -265,6 +266,7 @@ impl DbInner {
 			// Wait if the queue is too big.
 			let mut queue = self.log_queue_bytes.lock();
 			if *queue > MAX_LOG_QUEUE_BYTES {
+				log::debug!(target: "parity-db", "Waiting, log_bytes={}", queue);
 				self.log_cv.wait(&mut queue);
 			}
 		}
