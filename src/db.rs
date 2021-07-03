@@ -573,12 +573,14 @@ impl DbInner {
 		self.signal_flush_worker();
 		self.signal_log_worker();
 		self.signal_commit_worker();
-		self.log.shutdown();
 	}
 
 	fn kill_logs(&self) -> Result<()> {
 		log::debug!(target: "parity-db", "Processing leftover commits");
 		while self.process_commits(true)? {};
+		while self.enact_logs(true)? {};
+		self.log.flush_one(0, || Ok(()))?;
+		while self.enact_logs(true)? {};
 		self.log.flush_one(0, || Ok(()))?;
 		while self.enact_logs(true)? {};
 		self.log.kill_logs(&self.options);

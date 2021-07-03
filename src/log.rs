@@ -345,7 +345,6 @@ struct Flushing {
 enum ReadingState {
 	Reading,
 	Idle,
-	Shutdown,
 }
 
 pub struct Log {
@@ -544,8 +543,8 @@ impl Log {
 		let mut flush = false;
 		{
 			// Lock writer and reset it
-			let activate = self.appending.read().size > min_size;
-			if activate {
+			let cur_size = self.appending.read().size;
+			if cur_size > 0 && cur_size > min_size {
 				let mut appending = self.appending.write();
 				std::mem::swap(appending.file.get_mut(), &mut flushing.file);
 				flush = true;
@@ -593,12 +592,6 @@ impl Log {
 
 	pub fn overlays(&self) -> &RwLock<LogOverlays> {
 		&self.overlays
-	}
-
-	pub fn shutdown(&self) {
-		let mut reading_state = self.reading_state.lock();
-		*reading_state = ReadingState::Shutdown;
-		self.done_reading_cv.notify_one();
 	}
 
 	pub fn kill_logs(&self, options: &Options) {
