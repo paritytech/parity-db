@@ -672,7 +672,7 @@ impl Db {
 
 	fn commit_worker(db: Arc<DbInner>) -> Result<()> {
 		let mut more_work = false;
-		while !db.shutdown.load(Ordering::SeqCst) {
+		while !db.shutdown.load(Ordering::SeqCst) || more_work {
 			if !more_work {
 				let mut work = db.commit_work.lock();
 				while !*work {
@@ -690,7 +690,7 @@ impl Db {
 	fn log_worker(db: Arc<DbInner>) -> Result<()> {
 		// Start with pending reindex.
 		let mut more_work = db.process_reindex()?;
-		while !db.shutdown.load(Ordering::SeqCst) {
+		while !db.shutdown.load(Ordering::SeqCst) || more_work {
 			if !more_work {
 				let mut work = db.log_work.lock();
 				while !*work {

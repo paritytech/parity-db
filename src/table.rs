@@ -199,6 +199,7 @@ impl ValueTable {
 	#[cfg(unix)]
 	fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
 		use std::os::unix::fs::FileExt;
+		self.dirty.store(true, Ordering::Relaxed);
 		Ok(self.file.write_all_at(buf, offset)?)
 	}
 
@@ -212,8 +213,8 @@ impl ValueTable {
 	#[cfg(windows)]
 	fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
 		use std::os::windows::fs::FileExt;
+		self.dirty.store(true, Ordering::Relaxed);
 		self.file.seek_write(buf, offset)?;
-		self.dirty_header.store(true, Ordering::Relaxed);
 		Ok(())
 	}
 
