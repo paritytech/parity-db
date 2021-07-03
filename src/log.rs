@@ -333,7 +333,7 @@ pub struct ValueLogOverlay {
 
 struct Appending {
 	file: std::io::BufWriter<std::fs::File>,
-	empty: bool,
+	size: u64,
 }
 
 struct Flushing {
@@ -383,8 +383,8 @@ impl Log {
 		Ok(Log {
 			overlays: Default::default(),
 			appending: RwLock::new(Appending {
+				size: appending.metadata()?.len(),
 				file: std::io::BufWriter::new(appending),
-				empty: false,
 			}),
 			reading: RwLock::new(std::io::BufReader::new(reading)),
 			reading_state: Mutex::new(ReadingState::Reading),
@@ -417,7 +417,7 @@ impl Log {
 	pub fn clear_logs(&self) -> Result<()> {
 		{
 			let mut appending = self.appending.write();
-			appending.empty = true;
+			appending.size = 0;
 			appending.file.flush()?;
 			appending.file.get_mut().set_len(0)?;
 		}
@@ -472,7 +472,7 @@ impl Log {
 			total_index,
 			total_value,
 		);
-		appending.empty = false;
+		appending.size += bytes;
 		self.dirty.store(true, Ordering::Relaxed);
 		Ok(bytes)
 	}
@@ -510,7 +510,7 @@ impl Log {
 		overlays.index.retain(|_, overlay| !overlay.map.is_empty());
 	}
 
-	pub fn flush_one(&self, on_read_complete: impl Fn() -> Result<()>) -> Result<(bool, bool)> {
+	pub fn flush_one(&self, min_size: u64, on_read_complete: impl Fn() -> Result<()>) -> Result<(bool, bool)> {
 		// Wait for the reader to finish reading
 		let mut flushing = self.flushing.lock();
 		let mut read_next = false;
@@ -523,10 +523,8 @@ impl Log {
 			}
 			// Call reader callback
 			if self.sync {
+				log::debug!(target: "parity-db", "Flush: Read done. Syncing data.");
 				on_read_complete()?;
-			}
-			if *reading_state == ReadingState::Shutdown {
-				return Ok((false, false))
 			}
 
 			{
@@ -546,22 +544,23 @@ impl Log {
 		let mut flush = false;
 		{
 			// Lock writer and reset it
-			let mut appending = self.appending.write();
-			if !appending.empty {
+			let activate = self.appending.read().size > min_size;
+			if activate {
+				let mut appending = self.appending.write();
 				std::mem::swap(appending.file.get_mut(), &mut flushing.file);
 				flush = true;
 				log::debug!(target: "parity-db", "Flush: Activated log writer");
-				appending.empty = true;
+				appending.size = 0;
 			}
 		}
 
 		if flush {
 			// Flush to disk
-			log::debug!(target: "parity-db", "Flush: Flushing to disk");
 			if self.sync {
+				log::debug!(target: "parity-db", "Flush: Flushing log to disk");
 				flushing.file.sync_data()?;
+				log::debug!(target: "parity-db", "Flush: Flushing log completed");
 			}
-			log::debug!(target: "parity-db", "Flush: Flushing completed");
 			flushing.empty = false;
 		}
 
@@ -600,5 +599,16 @@ impl Log {
 		let mut reading_state = self.reading_state.lock();
 		*reading_state = ReadingState::Shutdown;
 		self.done_reading_cv.notify_one();
+	}
+
+	pub fn kill_logs(&self, options: &Options) {
+		let rm_file = |name| {
+			if let Err(e) = std::fs::remove_file(options.path.join(name)) {
+				log::warn!(target: "parity-db", "Error removing log file {:?}", e);
+			}
+		};
+		rm_file("log0");
+		rm_file("log1");
+		rm_file("log2");
 	}
 }

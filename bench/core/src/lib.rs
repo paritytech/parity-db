@@ -180,63 +180,67 @@ pub fn run<D: Db>() {
 	if path.exists() && !args.append {
 		std::fs::remove_dir_all(path.as_path()).unwrap();
 	}
+
+	let commits = {
+		let db = Arc::new(Db::open(path.as_path())) as Arc<D>;
+		let start = std::time::Instant::now();
+
+		let mut threads = Vec::new();
+
+		{
+			let commits = args.commits;
+			let shutdown = shutdown.clone();
+			threads.push(thread::spawn(move || informant(shutdown, commits)));
+		}
+
+		for i in 0 .. args.readers {
+			let db = db.clone();
+			let shutdown = shutdown.clone();
+
+			threads.push(
+				thread::Builder::new()
+				.name(format!("reader {}", i))
+				.spawn(move || reader(db, shutdown))
+				.unwrap()
+			);
+		}
+
+		for i in 0 .. args.writers {
+			let db = db.clone();
+			let shutdown = shutdown.clone();
+			let pool = pool.clone();
+			let args = args.clone();
+
+			threads.push(
+				thread::Builder::new()
+				.name(format!("writer {}", i))
+				.spawn(move || writer(db, args, pool, shutdown))
+				.unwrap()
+			);
+		}
+
+		while COMMITS.load(Ordering::Relaxed) < args.commits {
+			thread::sleep(std::time::Duration::from_millis(50));
+		}
+		shutdown.store(true, Ordering::SeqCst);
+
+		for t in threads.into_iter() {
+			t.join().unwrap();
+		}
+
+		let commits = COMMITS.load(Ordering::SeqCst);
+		let elapsed = start.elapsed().as_secs_f64();
+
+		println!(
+			"Completed {} commits in {} seconds. {} cps",
+			commits,
+			elapsed,
+			commits as f64  / elapsed
+		);
+		commits
+	};
+
 	let db = Arc::new(Db::open(path.as_path())) as Arc<D>;
-	let start = std::time::Instant::now();
-
-	let mut threads = Vec::new();
-
-	{
-		let commits = args.commits;
-		let shutdown = shutdown.clone();
-		threads.push(thread::spawn(move || informant(shutdown, commits)));
-	}
-
-	for i in 0 .. args.readers {
-		let db = db.clone();
-		let shutdown = shutdown.clone();
-
-		threads.push(
-			thread::Builder::new()
-			.name(format!("reader {}", i))
-			.spawn(move || reader(db, shutdown))
-			.unwrap()
-		);
-	}
-
-	for i in 0 .. args.writers {
-		let db = db.clone();
-		let shutdown = shutdown.clone();
-		let pool = pool.clone();
-		let args = args.clone();
-
-		threads.push(
-			thread::Builder::new()
-			.name(format!("writer {}", i))
-			.spawn(move || writer(db, args, pool, shutdown))
-			.unwrap()
-		);
-	}
-
-	while COMMITS.load(Ordering::Relaxed) < args.commits {
-		thread::sleep(std::time::Duration::from_millis(50));
-	}
-	shutdown.store(true, Ordering::SeqCst);
-
-	for t in threads.into_iter() {
-		t.join().unwrap();
-	}
-
-	let commits = COMMITS.load(Ordering::SeqCst);
-	let elapsed = start.elapsed().as_secs_f64();
-
-	println!(
-		"Completed {} commits in {} seconds. {} cps",
-		commits,
-		elapsed,
-		commits as f64  / elapsed
-	);
-
-	thread::sleep(std::time::Duration::from_secs(1));
 
 	// Verify content
 	let start = std::time::Instant::now();

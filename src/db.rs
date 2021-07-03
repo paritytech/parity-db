@@ -47,7 +47,8 @@ use crate::{
 // These are in memory, so we use usize
 const MAX_COMMIT_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 // These are disk-backed, so we use u64
-const MAX_LOG_QUEUE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_LOG_QUEUE_BYTES: u64 = 128 * 1024 * 1024;
+const MIN_LOG_SIZE: u64 = 16 * 1024 * 1024;
 
 /// Value is just a vector of bytes. Value sizes up to 4Gb are allowed.
 pub type Value = Vec<u8>;
@@ -261,11 +262,11 @@ impl DbInner {
 		Ok(())
 	}
 
-	fn process_commits(&self) -> Result<bool> {
+	fn process_commits(&self, force: bool) -> Result<bool> {
 		{
 			// Wait if the queue is too big.
 			let mut queue = self.log_queue_bytes.lock();
-			if *queue > MAX_LOG_QUEUE_BYTES {
+			if !force && *queue > MAX_LOG_QUEUE_BYTES {
 				log::debug!(target: "parity-db", "Waiting, log_bytes={}", queue);
 				self.log_cv.wait(&mut queue);
 			}
@@ -536,8 +537,8 @@ impl DbInner {
 		}
 	}
 
-	fn flush_logs(&self) -> Result<bool> {
-		let (flush_next, read_next) = self.log.flush_one(|| {
+	fn flush_logs(&self, min_log_size: u64) -> Result<bool> {
+		let (flush_next, read_next) = self.log.flush_one(min_log_size, || {
 			for c in self.columns.iter() {
 				c.flush()?;
 			}
@@ -554,7 +555,7 @@ impl DbInner {
 		// Process the oldest log first
 		while self.enact_logs(true)? { }
 		// Process intermediate logs
-		while self.flush_logs()? {
+		while self.flush_logs(0)? {
 			while self.enact_logs(true)? { }
 		}
 		// Need one more pass to enact the last log.
@@ -563,7 +564,7 @@ impl DbInner {
 		for c in self.columns.iter() {
 			c.refresh_metadata()?;
 		}
-		log::debug!(target: "parity-db", "Done.");
+		log::debug!(target: "parity-db", "Replay is complete.");
 		Ok(())
 	}
 
@@ -573,6 +574,14 @@ impl DbInner {
 		self.signal_log_worker();
 		self.signal_commit_worker();
 		self.log.shutdown();
+	}
+
+	fn kill_logs(&self) -> Result<()> {
+		log::debug!(target: "parity-db", "Processing leftover commits");
+		while self.process_commits(true)? {};
+		self.log.flush_one(0, || Ok(()))?;
+		while self.enact_logs(true)? {};
+		self.log.kill_logs(&self.options);
 		if self.collect_stats {
 			let mut path = self.options.path.clone();
 			path.push("stats.txt");
@@ -585,6 +594,7 @@ impl DbInner {
 				Err(e) => log::warn!(target: "parity-db", "Error creating stats file: {:?}", e),
 			}
 		}
+		Ok(())
 	}
 
 	fn store_err(&self, result: Result<()>) {
@@ -687,7 +697,7 @@ impl Db {
 				*work = false;
 			}
 
-			let more_commits = db.process_commits()?;
+			let more_commits = db.process_commits(false)?;
 			let more_reindex = db.process_reindex()?;
 			more_work = more_commits || more_reindex;
 		}
@@ -705,9 +715,10 @@ impl Db {
 				};
 				*work = false;
 			}
-			more_work = db.flush_logs()?;
+			more_work = db.flush_logs(MIN_LOG_SIZE)?;
 		}
 		log::debug!(target: "parity-db", "Flush worker shutdown");
+		db.flush_logs(0)?;
 		Ok(())
 	}
 }
@@ -718,5 +729,8 @@ impl Drop for Db {
 		self.log_thread.take().map(|t| t.join());
 		self.flush_thread.take().map(|t| t.join());
 		self.commit_thread.take().map(|t| t.join());
+		if let Err(e) = self.inner.kill_logs() {
+			log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
+		}
 	}
 }

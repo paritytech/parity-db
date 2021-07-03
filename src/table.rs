@@ -124,6 +124,7 @@ pub struct ValueTable {
 	filled: AtomicU64,
 	last_removed: AtomicU64,
 	dirty_header: AtomicBool,
+	dirty: AtomicBool,
 	multipart: bool,
 }
 
@@ -180,6 +181,7 @@ impl ValueTable {
 			filled: AtomicU64::new(filled),
 			last_removed: AtomicU64::new(last_removed),
 			dirty_header: AtomicBool::new(false),
+			dirty: AtomicBool::new(false),
 			multipart,
 		})
 	}
@@ -211,6 +213,7 @@ impl ValueTable {
 	fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
 		use std::os::windows::fs::FileExt;
 		self.file.seek_write(buf, offset)?;
+		self.dirty_header.store(true, Ordering::Relaxed);
 		Ok(())
 	}
 
@@ -669,7 +672,9 @@ impl ValueTable {
 	}
 
 	pub fn flush(&self) -> Result<()> {
-		self.file.sync_data()?;
+		if let Ok(true) = self.dirty.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed) {
+			self.file.sync_data()?;
+		}
 		Ok(())
 	}
 }
@@ -722,9 +727,9 @@ mod test {
 		log.end_record(writer.drain()).unwrap();
 		// Cycle through 2 log files
 		let _ = log.read_next(false);
-		log.flush_one(|| Ok(())).unwrap();
+		log.flush_one(0, || Ok(())).unwrap();
 		let _ = log.read_next(false);
-		log.flush_one(|| Ok(())).unwrap();
+		log.flush_one(0, || Ok(())).unwrap();
 		let mut reader = log.read_next(false).unwrap().unwrap();
 		loop {
 			match reader.next().unwrap() {
