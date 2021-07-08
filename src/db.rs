@@ -395,15 +395,15 @@ impl DbInner {
 				}
 				let record_id = writer.record_id();
 				let l = writer.drain();
-				let bytes = self.log.end_record(l)?;
 
+				let mut logged_bytes = self.log_queue_bytes.lock();
+				let bytes = self.log.end_record(l)?;
 				log::debug!(
 					target: "parity-db",
 					"Created reindex record {}, {} bytes",
 					record_id,
 					bytes,
 				);
-				let mut logged_bytes = self.log_queue_bytes.lock();
 				*logged_bytes += bytes;
 				if next_reindex {
 					self.start_reindex(record_id);
@@ -524,6 +524,16 @@ impl DbInner {
 			{
 				if !validation_mode {
 					let mut queue = self.log_queue_bytes.lock();
+					if *queue < bytes {
+						log::warn!(
+							target: "parity-db",
+							"Detected log undeflow record {}, {} bytes, {} queued, reindex = {}",
+							record_id,
+							bytes,
+							*queue,
+							self.next_reindex.load(Ordering::SeqCst),
+						);
+					}
 					*queue -= bytes;
 					if *queue <= MAX_LOG_QUEUE_BYTES && (*queue + bytes) > MAX_LOG_QUEUE_BYTES {
 						self.log_cv.notify_all();

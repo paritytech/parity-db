@@ -725,7 +725,7 @@ mod test {
 	fn write_ops<F: FnOnce(&mut LogWriter)>(table: &ValueTable, log: &Log, f: F) {
 		let mut writer = log.begin_record();
 		f(&mut writer);
-		log.end_record(writer.drain()).unwrap();
+		let bytes_written = log.end_record(writer.drain()).unwrap();
 		// Cycle through 2 log files
 		let _ = log.read_next(false);
 		log.flush_one(0, || Ok(())).unwrap();
@@ -738,6 +738,8 @@ mod test {
 					panic!("Unexpected log entry");
 				},
 				LogAction::EndRecord => {
+					let bytes_read = reader.read_bytes();
+					assert_eq!(bytes_written, bytes_read);
 					break;
 				},
 				LogAction::InsertValue(insertion) => {
