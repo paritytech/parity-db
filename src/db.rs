@@ -215,23 +215,27 @@ impl DbInner {
 		self.columns[col as usize].get_size(&key, log)
 	}
 
-	// Commit is simply adds the the data to the queue and to the overlay and
+	// Commit simply adds the the data to the queue and to the overlay and
 	// exits as early as possible.
 	fn commit<I, K>(&self, tx: I) -> Result<()>
-		where
-			I: IntoIterator<Item=(ColId, K, Option<Value>)>,
-			K: AsRef<[u8]>,
+	where
+		I: IntoIterator<Item=(ColId, K, Option<Value>)>,
+		K: AsRef<[u8]>,
 	{
+		let commit: Vec<_> = tx.into_iter().map(
+			|(c, k, v)| (c, self.columns[c as usize].hash(k.as_ref()), v)
+		).collect();
+
+		self.commit_raw(commit)
+	}
+
+	fn commit_raw(&self, commit: Vec<(ColId, Key, Option<Value>)>) -> Result<()> {
 		{
 			let bg_err = self.bg_err.lock();
 			if let Some(err) = &*bg_err {
 				return Err(Error::Background(err.clone()));
 			}
 		}
-
-		let commit: Vec<_> = tx.into_iter().map(
-			|(c, k, v)| (c, self.columns[c as usize].hash(k.as_ref()), v)
-		).collect();
 
 		{
 			let mut queue = self.commit_queue.lock();
@@ -672,6 +676,10 @@ impl DbInner {
 			}
 		}
 	}
+
+	fn iter_column_while(&self, c: ColId, f: impl FnMut (u64, Key, u32, Vec<u8>) -> bool) -> Result<()> {
+		self.columns[c as usize].iter_while(&self.log, f)
+	}
 }
 
 pub struct Db {
@@ -738,8 +746,16 @@ impl Db {
 		self.inner.commit(tx)
 	}
 
+	pub(crate) fn commit_raw(&self, commit: Vec<(ColId, Key, Option<Value>)>) -> Result<()> {
+		self.inner.commit_raw(commit)
+	}
+
 	pub fn num_columns(&self) -> u8 {
 		self.inner.columns.len() as u8
+	}
+
+	pub(crate) fn iter_column_while(&self, c: ColId, f: impl FnMut (u64, Key, u32, Vec<u8>) -> bool) -> Result<()> {
+		self.inner.iter_column_while(c, f)
 	}
 
 	fn commit_worker(db: Arc<DbInner>) -> Result<()> {

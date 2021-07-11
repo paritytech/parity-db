@@ -374,18 +374,18 @@ impl ValueTable {
 		Ok(())
 	}
 
-	// Return if there was content, and if it was compressed.
+	// Return ref counter, and if it was compressed.
 	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8])>(
 		&self,
 		key: &Key,
 		mut index: u64,
 		log: &Q,
 		mut f: F,
-	) -> Result<(bool, bool)> {
+	) -> Result<(u32, bool)> {
 		let mut buf = FullEntry::new_uninit();
-
 		let mut part = 0;
 		let mut compressed = false;
+		let mut rc = 0;
 		let entry_size = self.entry_size as usize;
 		loop {
 			let buf = if log.value(self.id, index, buf.as_mut()) {
@@ -404,7 +404,7 @@ impl ValueTable {
 			buf.set_offset(0);
 
 			if buf.is_tombstone() {
-				return Ok((false, false));
+				return Ok((0, false));
 			}
 
 			let (entry_end, next) = if buf.is_multipart() {
@@ -419,7 +419,7 @@ impl ValueTable {
 
 			if part == 0 {
 				if self.ref_counted {
-					buf.skip_rc();
+					rc = buf.read_rc();
 				}
 				let key_partial = buf.read_partial();
 				if partial_key(key) != key_partial {
@@ -431,7 +431,7 @@ impl ValueTable {
 						hex(partial_key(key)),
 						hex(key_partial),
 					);
-					return Ok((false, false));
+					return Ok((0, false));
 				}
 				f(buf.remaining_to(entry_end))
 			} else {
@@ -443,22 +443,32 @@ impl ValueTable {
 			part += 1;
 			index = next;
 		}
-		Ok((true, compressed))
+		Ok((rc, compressed))
 	}
 
 	pub fn get(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool)>> {
 		let mut result = Vec::new();
-		let (success, compressed) = self.for_parts(key, index, log, |buf| result.extend_from_slice(buf))?;
-		if success {
+		let (rc, compressed) = self.for_parts(key, index, log, |buf| result.extend_from_slice(buf))?;
+		if rc > 0 {
 			return Ok(Some((result, compressed)));
 		}
 		Ok(None)
 	}
 
+	pub fn get_rc(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<(Value, u32, bool)>> {
+		let mut result = Vec::new();
+		let (rc, compressed) = self.for_parts(key, index, log, |buf| result.extend_from_slice(buf))?;
+		if rc > 0 {
+			return Ok(Some((result, rc, compressed)));
+		}
+		Ok(None)
+	}
+
+
 	pub fn size(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<(u32, bool)>> {
 		let mut result = 0;
-		let (success, compressed) = self.for_parts(key, index, log, |buf| result += buf.len() as u32)? ;
-		if success {
+		let (rc, compressed) = self.for_parts(key, index, log, |buf| result += buf.len() as u32)? ;
+		if rc > 0 {
 			return Ok(Some((result, compressed)));
 		}
 		Ok(None)

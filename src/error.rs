@@ -27,6 +27,7 @@ pub enum Error {
 	InvalidInput(String),
 	Background(Arc<Error>),
 	Locked(std::io::Error),
+	Migration(String),
 }
 
 impl fmt::Display for Error {
@@ -38,6 +39,7 @@ impl fmt::Display for Error {
 			Error::InvalidInput(e) => write!(f, "Invalid input: {}", e),
 			Error::Background(e) => write!(f, "Background worker error: {}", e),
 			Error::Locked(e) => write!(f, "Database file is in use. ({})", e),
+			Error::Migration(e) => write!(f, "Migration error: {}", e),
 		}
     }
 }

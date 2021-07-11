@@ -6,8 +6,16 @@ publish = false
 edition = "2018"
 
 [dependencies]
-parity-db = { path = "../.." }
-db-bench = { path = "../core" }
+parity-db = { path = ".." }
+log = { version = "0.4.8" }
+
+[dependencies.env_logger]
+version = "0.7.1"
+#default-features = false
+
+[dependencies.rand]
+features = ["small_rng"]
+version = "0.7.3"
 
 [target.'cfg(all(not(windows), not(target_env = "musl")))'.dependencies]
 jemallocator = "0.3.0"

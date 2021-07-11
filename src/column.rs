@@ -107,6 +107,8 @@ impl Column {
 		Ok(None)
 	}
 
+
+
 	/// Compress if needed and return the target tier to use.
 	fn compress(&self, key: &Key, value: &[u8], tables: &Tables) -> (Option<Vec<u8>>, usize) {
 		Self::compress_internal(&self.compression, key, value, tables)
@@ -511,6 +513,41 @@ impl Column {
 		let tables = self.tables.read();
 		tables.index.write_stats(&self.stats);
 		self.stats.write_summary(file, tables.index.id.col());
+	}
+
+	pub fn iter_while(&self, log: &Log, mut f: impl FnMut (u64, Key, u32, Vec<u8>) -> bool) -> Result<()> {
+		let tables = self.tables.read();
+		let source = &tables.index;
+		for c in 0 .. source.id.total_chunks() {
+			let entries = source.entries(c, &*log.overlays());
+			for entry in entries.iter() {
+				if entry.is_empty() {
+					continue;
+				}
+				let partial_key = entry.key_material(source.id.index_bits());
+				let k = 64 - crate::index::Entry::address_bits(source.id.index_bits());
+				let index_key = (c << 64 - source.id.index_bits()) |
+					(partial_key << (64 - k - source.id.index_bits()));
+				let mut key = Key::default();
+				let address = entry.address(source.id.index_bits());
+				&mut key[0..8].copy_from_slice(&index_key.to_be_bytes());
+				let value_key = tables.value[address.size_tier() as usize]
+					.partial_key_at(address.offset(), &*log.overlays())?;
+				let value_key = value_key.ok_or_else(|| Error::Corruption("Missing indexed value".into()))?;
+				&mut key[8..].copy_from_slice(&value_key[8..]);
+				let value = tables.value[address.size_tier() as usize].get_rc(&key, address.offset(), &*log.overlays())?;
+				let (value, rc, compressed) = value.ok_or_else(|| Error::Corruption("Missing indexed value".into()))?;
+				let value = if compressed {
+						self.decompress(&value)
+				} else {
+					value
+				};
+				if !f(c, key, rc, value) {
+					return Ok(())
+				}
+			}
+		}
+		Ok(())
 	}
 
 	pub fn reindex(&self, log: &Log) -> Result<(Option<IndexTableId>, Vec<(Key, Address)>)> {

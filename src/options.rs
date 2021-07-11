@@ -15,6 +15,9 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::io::Write;
+use std::collections::HashMap;
+use std::convert::TryInto;
+use std::path::{PathBuf, Path};
 use crate::error::{Error, Result};
 use crate::column::Salt;
 use crate::compress::CompressionType;
@@ -85,6 +88,33 @@ impl ColumnOptions {
 		}
 		true
 	}
+
+	fn from_string(s: &str) -> Option<Self> {
+		let mut split = s.split("sizes: ");
+		let vals = split.next()?;
+		let sizes = split.next()?;
+		let sizes: Vec<u16> = sizes.split(",").filter_map(|v| v.parse().ok()).collect();
+		let sizes: [u16; 15] = sizes.try_into().ok()?;
+
+		let vals: HashMap<&str, &str> = vals.split(",").filter_map(|s| {
+			let mut pair = s.split("=");
+			Some((pair.next()?, pair.next()?))
+		}).collect();
+
+		let preimage = vals.get("preimage")?.parse().ok()?;
+		let uniform = vals.get("uniform")?.parse().ok()?;
+		let ref_counted = vals.get("refc")?.parse().ok()?;
+		let compression: u8 = vals.get("compression")?.parse().ok()?;
+
+		Some(ColumnOptions {
+			preimage,
+			uniform,
+			ref_counted,
+			compression: compression.into(),
+			sizes,
+			compression_treshold: 4096,
+		})
+	}
 }
 
 impl Default for ColumnOptions {
@@ -122,18 +152,41 @@ impl Options {
 	}
 
 	pub fn load_and_validate_metadata(&self) -> Result<Option<Salt>> {
+		let (cols, mut salt) = Self::load_metadata(&self.path)?;
+
+		if let Some(mut cols) = cols {
+			if cols.len() != self.columns.len() {
+				return Err(Error::InvalidConfiguration("Column config mismatch".into()));
+			}
+
+			for c in 0..cols.len() {
+				cols[c].compression_treshold = self.columns[c].compression_treshold;
+				if cols[c] != self.columns[c] {
+					return Err(Error::InvalidConfiguration(format!(
+								"Column config mismatch for column {}. Expected \"{}\", got \"{}\"",
+								c, self.columns[c].as_string(), cols[c].as_string())));
+				}
+			}
+		} else {
+			let s: Salt = rand::thread_rng().gen();
+			self.write_metadata(&self.path, &s)?;
+			salt = Some(s);
+		}
+		Ok(salt)
+	}
+
+	pub fn load_metadata(path: &Path) -> Result<(Option<Vec<ColumnOptions>>,  Option<Salt>)> {
 		use std::io::BufRead;
 		use std::str::FromStr;
 
-		let mut path = self.path.clone();
+		let mut path: PathBuf = path.into();
 		path.push("metadata");
 		if !path.exists() {
-			let salt: Salt = rand::thread_rng().gen();
-			self.write_metadata(&path, &salt)?;
-			return Ok(Some(salt))
+			return Ok((None, None))
 		}
 		let file = std::io::BufReader::new(std::fs::File::open(path)?);
 		let mut salt = None;
+		let mut columns = Vec::new();
 		for l in file.lines() {
 			let l = l?;
 			let mut vals = l.split("=");
@@ -151,19 +204,11 @@ impl Options {
 					s.copy_from_slice(&salt_slice);
 					salt = Some(s);
 			} else if k.starts_with("col") {
-				let col_index = u8::from_str(&k[3..]).map_err(|_| Error::Corruption("Bad metadata column index".into()))?;
-				if col_index as usize > self.columns.len() {
-					return Err(Error::InvalidConfiguration(format!("Column config mismatch. Bad metadata column index: {}", col_index)));
-				}
-				let column_meta = self.columns[col_index as usize].as_string();
-				if column_meta != v {
-					return Err(Error::InvalidConfiguration(format!(
-						"Column config mismatch for column {}. Expected \"{}\", got \"{}\"",
-						col_index, v, column_meta)));
-				}
+				let col = ColumnOptions::from_string(v).ok_or_else(|| Error::Corruption("Bad column metadata".into()))?;
+				columns.push(col);
 			}
 		}
-		Ok(salt)
+		Ok((Some(columns), salt))
 	}
 
 	pub fn is_valid(&self) -> bool {

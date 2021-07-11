@@ -18,23 +18,58 @@
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
-struct BenchAdapter(parity_db::Db);
+pub use parity_db::Db;
 
-impl db_bench::Db for BenchAdapter {
-	fn open(path: &std::path::Path) -> Self {
-		BenchAdapter(parity_db::Db::with_columns(path, 1).unwrap())
-	}
+const USAGE: &str = "
+Usage: migrate source_dir dest_meta
 
-	fn get(&self, key: &db_bench::Key) -> Option<db_bench::Value> {
-		self.0.get(0, key).unwrap()
-	}
+Options:
+	--clear-dest           Clear dest dir befoe attemtimg migration.
+";
 
-	fn commit<I: IntoIterator<Item=(db_bench::Key, Option<db_bench::Value>)>>(&self, tx: I) {
-		self.0.commit(tx.into_iter().map(|(k, v)| (0, k, v))).unwrap()
+#[derive(Clone)]
+struct Args {
+	clear_dest: bool,
+}
+
+impl Default for Args {
+	fn default() -> Args {
+		Args {
+			clear_dest: false,
+		}
 	}
+}
+
+fn parse<'a, I, T>(mut iter: I) -> T
+where
+	I: Iterator<Item = &'a str>,
+	T: std::str::FromStr,
+	<T as std::str::FromStr>::Err: std::fmt::Debug,
+{
+	iter.next().expect(USAGE).parse().expect(USAGE)
+}
+
+impl Args {
+	fn parse() -> Args {
+		let mut args = Args::default();
+		for raw_arg in std::env::args().skip(1) {
+			let mut splits = raw_arg[2..].split('=');
+			match splits.next().unwrap() {
+				"clear-dest" => args.clear_dest = parse(&mut splits),
+				other => panic!("unknown option: {}, {}", other, USAGE),
+			}
+		}
+		args
+	}
+}
+
+pub fn run() {
+	env_logger::try_init().unwrap();
+	let args = Args::parse();
 }
 
 fn main() {
-	db_bench::run::<BenchAdapter>();
+	run()
 }
+
 
