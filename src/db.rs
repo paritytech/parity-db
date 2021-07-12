@@ -111,7 +111,6 @@ struct DbInner {
 	flush_work: Mutex<bool>,
 	cleanup_worker_cv: Condvar,
 	cleanup_work: Mutex<bool>,
-	enact_mutex: Mutex<()>,
 	last_enacted: AtomicU64,
 	next_reindex: AtomicU64,
 	collect_stats: bool,
@@ -155,7 +154,6 @@ impl DbInner {
 			flush_work: Mutex::new(false),
 			cleanup_worker_cv: Condvar::new(),
 			cleanup_work: Mutex::new(false),
-			enact_mutex: Mutex::new(()),
 			next_reindex: AtomicU64::new(1),
 			last_enacted: AtomicU64::new(1),
 			collect_stats: options.stats,
@@ -428,7 +426,6 @@ impl DbInner {
 
 	fn enact_logs(&self, validation_mode: bool) -> Result<bool> {
 		let cleared = {
-			//let _lock = self.enact_mutex.lock();
 			let reader = match self.log.read_next(validation_mode) {
 				Ok(reader) => reader,
 				Err(Error::Corruption(_)) if validation_mode => {

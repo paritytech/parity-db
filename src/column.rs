@@ -257,6 +257,7 @@ impl Column {
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
 		if Self::search_index(key, &tables.index, &*tables, log)?.is_some() {
+			println!("SKIP REINDEX");
 			return Ok(PlanOutcome::Skipped);
 		}
 		match tables.index.write_insert_plan(key, address, None, log)? {
