@@ -568,10 +568,24 @@ impl DbInner {
 
 	fn cleanup_logs(&self) -> Result<bool> {
 		let num_cleanup = self.log.num_dirty_logs();
+		/*
+		for c in self.columns.iter() {
+			c.flush()?;
+		}*/
+		if num_cleanup > 16 {
+			self.log.clean_logs(num_cleanup - 16)
+		} else {
+			Ok(false)
+		}
+	}
+
+	fn clean_all_logs(&self) -> Result<()> {
 		for c in self.columns.iter() {
 			c.flush()?;
 		}
-		self.log.clean_logs(num_cleanup)
+		let num_cleanup = self.log.num_dirty_logs();
+		self.log.clean_logs(num_cleanup)?;
+		Ok(())
 	}
 
 	fn replay_all_logs(&mut self) -> Result<()> {
@@ -607,7 +621,7 @@ impl DbInner {
 		while self.enact_logs(true)? {};
 		self.log.flush_one(0)?;
 		while self.enact_logs(true)? {};
-		while self.cleanup_logs()? {};
+		self.clean_all_logs()?;
 		self.log.kill_logs();
 		if self.collect_stats {
 			let mut path = self.options.path.clone();

@@ -710,5 +710,11 @@ impl Log {
 				log::warn!(target: "parity-db", "Error removing log file {:?}", e);
 			}
 		}
+		if let Some(reading) = self.reading.write().take() {
+			std::mem::drop(reading.file);
+			if let Err(e) = self.drop_log(reading.id) {
+				log::warn!(target: "parity-db", "Error removing log file {:?}", e);
+			}
+		}
 	}
 }
