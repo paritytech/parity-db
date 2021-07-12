@@ -256,10 +256,10 @@ impl Column {
 	pub fn write_reindex_plan(&self, key: &Key, address: Address, log: &mut LogWriter) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
+		/*
 		if Self::search_index(key, &tables.index, &*tables, log)?.is_some() {
-			println!("SKIP REINDEX");
 			return Ok(PlanOutcome::Skipped);
-		}
+		} */
 		match tables.index.write_insert_plan(key, address, None, log)? {
 			PlanOutcome::NeedReindex => {
 				log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));

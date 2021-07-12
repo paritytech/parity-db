@@ -415,7 +415,11 @@ impl IndexTable {
 			log::debug!(target: "parity-db", "Created new index {}", self.id);
 			//TODO: check for potential overflows on 32-bit platforms
 			file.set_len(file_size(self.id.index_bits()))?;
-			*wmap = Some(unsafe { memmap2::MmapMut::map_mut(&file)? });
+			let mut mmap = unsafe { memmap2::MmapMut::map_mut(&file)? };
+			unsafe {
+				libc::madvise(mmap.as_mut_ptr() as _, file_size(self.id.index_bits()) as usize, libc::MADV_RANDOM);
+			}
+			*wmap = Some(mmap);
 			map = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wmap);
 		}
 
