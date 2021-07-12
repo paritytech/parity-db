@@ -728,9 +728,9 @@ mod test {
 		let bytes_written = log.end_record(writer.drain()).unwrap();
 		// Cycle through 2 log files
 		let _ = log.read_next(false);
-		log.flush_one(0, || Ok(())).unwrap();
+		log.flush_one(0).unwrap();
 		let _ = log.read_next(false);
-		log.flush_one(0, || Ok(())).unwrap();
+		log.flush_one(0).unwrap();
 		let mut reader = log.read_next(false).unwrap().unwrap();
 		loop {
 			match reader.next().unwrap() {

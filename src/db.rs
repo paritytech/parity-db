@@ -48,7 +48,7 @@ use crate::{
 const MAX_COMMIT_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 // These are disk-backed, so we use u64
 const MAX_LOG_QUEUE_BYTES: u64 = 128 * 1024 * 1024;
-const MIN_LOG_SIZE: u64 = 16 * 1024 * 1024;
+const MIN_LOG_SIZE: u64 = 64 * 1024 * 1024;
 
 /// Value is just a vector of bytes. Value sizes up to 4Gb are allowed.
 pub type Value = Vec<u8>;
@@ -109,6 +109,8 @@ struct DbInner {
 	log_queue_bytes: Mutex<u64>,
 	flush_worker_cv: Condvar,
 	flush_work: Mutex<bool>,
+	cleanup_worker_cv: Condvar,
+	cleanup_work: Mutex<bool>,
 	enact_mutex: Mutex<()>,
 	last_enacted: AtomicU64,
 	next_reindex: AtomicU64,
@@ -151,6 +153,8 @@ impl DbInner {
 			log_cv: Condvar::new(),
 			flush_worker_cv: Condvar::new(),
 			flush_work: Mutex::new(false),
+			cleanup_worker_cv: Condvar::new(),
+			cleanup_work: Mutex::new(false),
 			enact_mutex: Mutex::new(()),
 			next_reindex: AtomicU64::new(1),
 			last_enacted: AtomicU64::new(1),
@@ -176,6 +180,12 @@ impl DbInner {
 		let mut work = self.flush_work.lock();
 		*work = true;
 		self.flush_worker_cv.notify_one();
+	}
+
+	fn signal_cleanup_worker(&self) {
+		let mut work = self.cleanup_work.lock();
+		*work = true;
+		self.cleanup_worker_cv.notify_one();
 	}
 
 	fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
@@ -262,11 +272,11 @@ impl DbInner {
 		Ok(())
 	}
 
-	fn process_commits(&self, force: bool) -> Result<bool> {
+	fn process_commits(&self, _force: bool) -> Result<bool> {
 		{
 			// Wait if the queue is too big.
 			let mut queue = self.log_queue_bytes.lock();
-			if !force && *queue > MAX_LOG_QUEUE_BYTES {
+			if !self.shutdown.load(Ordering::Relaxed) && *queue > MAX_LOG_QUEUE_BYTES {
 				log::debug!(target: "parity-db", "Waiting, log_bytes={}", queue);
 				self.log_cv.wait(&mut queue);
 			}
@@ -324,8 +334,8 @@ impl DbInner {
 			let l = writer.drain();
 
 			let bytes = {
-				let mut logged_bytes = self.log_queue_bytes.lock();
 				let bytes = self.log.end_record(l)?;
+				let mut logged_bytes = self.log_queue_bytes.lock();
 				*logged_bytes += bytes;
 				self.signal_flush_worker();
 				bytes
@@ -418,12 +428,12 @@ impl DbInner {
 
 	fn enact_logs(&self, validation_mode: bool) -> Result<bool> {
 		let cleared = {
-			let _lock = self.enact_mutex.lock();
+			//let _lock = self.enact_mutex.lock();
 			let reader = match self.log.read_next(validation_mode) {
 				Ok(reader) => reader,
 				Err(Error::Corruption(_)) if validation_mode => {
 					log::debug!(target: "parity-db", "Bad log header");
-					self.log.clear_logs()?;
+					self.log.clear_replay_logs()?;
 					return Ok(false);
 				}
 				Err(e) => return Err(e),
@@ -441,7 +451,7 @@ impl DbInner {
 							LogAction::BeginRecord(_) => {
 								log::debug!(target: "parity-db", "Unexpected log header");
 								std::mem::drop(reader);
-								self.log.clear_logs()?;
+								self.log.clear_replay_logs()?;
 								return Ok(false);
 							},
 							LogAction::EndRecord => {
@@ -452,7 +462,7 @@ impl DbInner {
 								if let Err(e) = self.columns[col].validate_plan(LogAction::InsertIndex(insertion), &mut reader) {
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
 									std::mem::drop(reader);
-									self.log.clear_logs()?;
+									self.log.clear_replay_logs()?;
 									return Ok(false);
 								}
 							},
@@ -461,7 +471,7 @@ impl DbInner {
 								if let Err(e) = self.columns[col].validate_plan(LogAction::InsertValue(insertion), &mut reader) {
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
 									std::mem::drop(reader);
-									self.log.clear_logs()?;
+									self.log.clear_replay_logs()?;
 									return Ok(false);
 								}
 							},
@@ -515,6 +525,7 @@ impl DbInner {
 				self.last_enacted.store(record_id, Ordering::SeqCst);
 				Some((record_id, cleared, bytes))
 			} else {
+				log::debug!(target: "parity-db", "End of log");
 				None
 			}
 		};
@@ -548,28 +559,29 @@ impl DbInner {
 	}
 
 	fn flush_logs(&self, min_log_size: u64) -> Result<bool> {
-		let (flush_next, read_next) = self.log.flush_one(min_log_size, || {
-			for c in self.columns.iter() {
-				c.flush()?;
-			}
-			Ok(())
-		})?;
+		let (flush_next, read_next, cleanup_next) = self.log.flush_one(min_log_size)?;
 		if read_next {
 			self.signal_commit_worker();
+		}
+		if cleanup_next {
+			self.signal_cleanup_worker();
 		}
 		Ok(flush_next)
 	}
 
-	fn replay_all_logs(&self) -> Result<()> {
-		log::debug!(target: "parity-db", "Replaying database log...");
-		// Process the oldest log first
-		while self.enact_logs(true)? { }
-		// Process intermediate logs
-		while self.flush_logs(0)? {
+	fn cleanup_logs(&self) -> Result<bool> {
+		let num_cleanup = self.log.num_dirty_logs();
+		for c in self.columns.iter() {
+			c.flush()?;
+		}
+		self.log.clean_logs(num_cleanup)
+	}
+
+	fn replay_all_logs(&mut self) -> Result<()> {
+		while let Some(id) = self.log.replay_next()? {
+			log::debug!(target: "parity-db", "Replaying database log {}", id);
 			while self.enact_logs(true)? { }
 		}
-		// Need one more pass to enact the last log.
-		while self.enact_logs(true)? { }
 		// Re-read any cached metadata
 		for c in self.columns.iter() {
 			c.refresh_metadata()?;
@@ -580,20 +592,26 @@ impl DbInner {
 
 	fn shutdown(&self) {
 		self.shutdown.store(true, Ordering::SeqCst);
+		self.log.shutdown();
+		self.log_cv.notify_all();
 		self.signal_flush_worker();
 		self.signal_log_worker();
 		self.signal_commit_worker();
+		self.signal_cleanup_worker();
 	}
 
 	fn kill_logs(&self) -> Result<()> {
 		log::debug!(target: "parity-db", "Processing leftover commits");
+		while self.enact_logs(true)? {};
+		self.log.flush_one(0)?;
 		while self.process_commits(true)? {};
 		while self.enact_logs(true)? {};
-		self.log.flush_one(0, || Ok(()))?;
+		self.log.flush_one(0)?;
 		while self.enact_logs(true)? {};
-		self.log.flush_one(0, || Ok(()))?;
+		self.log.flush_one(0)?;
 		while self.enact_logs(true)? {};
-		self.log.kill_logs(&self.options);
+		while self.cleanup_logs()? {};
+		self.log.kill_logs();
 		if self.collect_stats {
 			let mut path = self.options.path.clone();
 			path.push("stats.txt");
@@ -626,6 +644,7 @@ pub struct Db {
 	commit_thread: Option<std::thread::JoinHandle<()>>,
 	flush_thread: Option<std::thread::JoinHandle<()>>,
 	log_thread: Option<std::thread::JoinHandle<()>>,
+	cleanup_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Db {
@@ -636,10 +655,11 @@ impl Db {
 
 	/// Open the database with given
 	pub fn open(options: &Options) -> Result<Db> {
-		let db = Arc::new(DbInner::open(options)?);
+		let mut db = DbInner::open(options)?;
 		// This needs to be call before log thread: so first reindexing
 		// will run in correct state.
 		db.replay_all_logs()?;
+		let db = Arc::new(db);
 		let commit_worker_db = db.clone();
 		let commit_thread = std::thread::spawn(move ||
 			commit_worker_db.store_err(Self::commit_worker(commit_worker_db.clone()))
@@ -652,11 +672,16 @@ impl Db {
 		let log_thread = std::thread::spawn(move ||
 			log_worker_db.store_err(Self::log_worker(log_worker_db.clone()))
 		);
+		let cleanup_worker_db = db.clone();
+		let cleanup_thread = std::thread::spawn(move ||
+			cleanup_worker_db.store_err(Self::cleanup_worker(cleanup_worker_db.clone()))
+		);
 		Ok(Db {
 			inner: db,
 			commit_thread: Some(commit_thread),
 			flush_thread: Some(flush_thread),
 			log_thread: Some(log_thread),
+			cleanup_thread: Some(cleanup_thread),
 		})
 	}
 
@@ -730,7 +755,23 @@ impl Db {
 			more_work = db.flush_logs(MIN_LOG_SIZE)?;
 		}
 		log::debug!(target: "parity-db", "Flush worker shutdown");
-		db.flush_logs(0)?;
+		Ok(())
+	}
+
+	fn cleanup_worker(db: Arc<DbInner>) -> Result<()> {
+		// Start with pending reindex.
+		let mut more_work = true;
+		while !db.shutdown.load(Ordering::SeqCst) || more_work {
+			if !more_work {
+				let mut work = db.cleanup_work.lock();
+				while !*work {
+					db.cleanup_worker_cv.wait(&mut work)
+				};
+				*work = false;
+			}
+			more_work = db.cleanup_logs()?;
+		}
+		log::debug!(target: "parity-db", "Cleanup worker shutdown");
 		Ok(())
 	}
 }
@@ -741,6 +782,7 @@ impl Drop for Db {
 		self.log_thread.take().map(|t| t.join());
 		self.flush_thread.take().map(|t| t.join());
 		self.commit_thread.take().map(|t| t.join());
+		self.cleanup_thread.take().map(|t| t.join());
 		if let Err(e) = self.inner.kill_logs() {
 			log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
 		}

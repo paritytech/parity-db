@@ -14,17 +14,20 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::collections::HashMap;
+use std::collections::{VecDeque, HashMap};
 use std::io::{Read, Write, Seek};
 use std::convert::TryInto;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use parking_lot::{Condvar, Mutex, RwLock, RwLockWriteGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
+use parking_lot::{Condvar, Mutex, RwLock, RwLockWriteGuard, MappedRwLockWriteGuard};
 use crate::{
 	error::{Error, Result},
 	table::TableId as ValueTableId,
 	index::{TableId as IndexTableId, Chunk as IndexChunk},
 	options::Options,
 };
+
+const MAX_REPLAY_LOGS: u32 = 64;
+const MAX_LOG_POOL_SIZE: usize = 16;
 
 pub struct InsertIndexAction {
 	pub table: IndexTableId,
@@ -80,7 +83,7 @@ pub struct Cleared {
 }
 
 pub struct LogReader<'a> {
-	file: RwLockWriteGuard<'a, std::io::BufReader<std::fs::File>>,
+	file: MappedRwLockWriteGuard<'a, std::io::BufReader<std::fs::File>>,
 	record_id: u64,
 	read_bytes: u64,
 	crc32: crc32fast::Hasher,
@@ -94,7 +97,7 @@ impl<'a> LogReader<'a> {
 	}
 
 	fn new(
-		file: RwLockWriteGuard<'a, std::io::BufReader<std::fs::File>>,
+		file: MappedRwLockWriteGuard<'a, std::io::BufReader<std::fs::File>>,
 		validate: bool,
 	) -> LogReader<'a> {
 		LogReader {
@@ -175,7 +178,9 @@ impl<'a> LogReader<'a> {
 				let table = IndexTableId::from_u16(u16::from_le_bytes(buf[0..2].try_into().unwrap()));
 				Ok(LogAction::DropTable(table))
 			}
-			_ => Err(Error::Corruption("Bad log entry type".into()))
+			_ => {
+				Err(Error::Corruption("Bad log entry type".into()))
+			}
 		}
 	}
 
@@ -332,74 +337,92 @@ pub struct ValueLogOverlay {
 }
 
 struct Appending {
+	id: u32,
 	file: std::io::BufWriter<std::fs::File>,
 	size: u64,
 }
 
 struct Flushing {
+	id: u32,
 	file: std::fs::File,
-	empty: bool,
+}
+
+struct Reading {
+	id: u32,
+	file: std::io::BufReader<std::fs::File>,
 }
 
 #[derive(Eq, PartialEq)]
 enum ReadingState {
 	Reading,
 	Idle,
+	Shutdown,
 }
 
 pub struct Log {
 	overlays: RwLock<LogOverlays>,
-	appending: RwLock<Appending>,
-	reading: RwLock<std::io::BufReader<std::fs::File>>,
+	appending: RwLock<Option<Appending>>,
+	reading: RwLock<Option<Reading>>,
 	reading_state: Mutex<ReadingState>,
 	done_reading_cv: Condvar,
-	flushing: Mutex<Flushing>,
+	flushing: Mutex<Option<Flushing>>,
 	next_record_id: AtomicU64,
 	dirty: AtomicBool,
+	log_pool: RwLock<VecDeque<(u32, std::fs::File)>>,
+	cleanup_queue: RwLock<VecDeque<(u32, std::fs::File)>>,
+	replay_queue: VecDeque<(u32, u64, std::fs::File)>,
+	path: std::path::PathBuf,
+	next_log_id: AtomicU32,
 	sync: bool,
 }
 
 impl Log {
 	pub fn open(options: &Options) -> Result<Log> {
-		let mut path = options.path.clone();
-		path.push("log0");
-		let (file0, id0) = Self::open_or_create_log_file(path.as_path())?;
-		path.pop();
-		path.push("log1");
-		let (file1, id1) = Self::open_or_create_log_file(path.as_path())?;
-		path.pop();
-		path.push("log2");
-		let (file2, id2) = Self::open_or_create_log_file(path.as_path())?;
-
-		let mut ids = [(id0.unwrap_or(0), Some(file0)), (id1.unwrap_or(0), Some(file1)), (id2.unwrap_or(0), Some(file2))];
-		ids.sort_by_key(|(id, _)|*id);
-		log::debug!(target: "parity-db", "Opened logs ({} {} {})", ids[0].0, ids[1].0, ids[2].0);
-		let reading = ids[0].1.take().unwrap();
-		let flushing = ids[1].1.take().unwrap();
-		let mut appending = ids[2].1.take().unwrap();
-		appending.seek(std::io::SeekFrom::End(0))?;
+		let path = options.path.clone();
+		let mut logs = VecDeque::new();
+		for nlog in 0 .. MAX_REPLAY_LOGS {
+			let path = Self::log_path(&path, nlog);
+			if let Ok(_) = std::fs::metadata(&path) {
+				let (file, record_id) = Self::open_log_file(&path)?;
+				if let Some(record_id) = record_id {
+					log::debug!(target: "parity-db", "Opened log {}, record {}", nlog, record_id);
+					logs.push_back((nlog, record_id, file));
+				} else {
+					log::debug!(target: "parity-db", "Removing log {}", nlog);
+					std::mem::drop(file);
+					std::fs::remove_file(&path)?;
+				}
+			}
+		}
+		logs.make_contiguous().sort_by_key(|(_id, record_id,  _)| *record_id);
+		let next_log_id = logs.back().map_or(0, |(id, _, _)| id + 1);
 
 		Ok(Log {
 			overlays: Default::default(),
-			appending: RwLock::new(Appending {
-				size: appending.metadata()?.len(),
-				file: std::io::BufWriter::new(appending),
-			}),
-			reading: RwLock::new(std::io::BufReader::new(reading)),
-			reading_state: Mutex::new(ReadingState::Reading),
+			appending: RwLock::new(None),
+			reading: RwLock::new(None),
+			reading_state: Mutex::new(ReadingState::Idle),
 			done_reading_cv: Condvar::new(),
-			flushing: Mutex::new(Flushing {
-				file: flushing,
-				empty: false,
-			}),
+			flushing: Mutex::new(None),
 			next_record_id: AtomicU64::new(1),
+			next_log_id: AtomicU32::new(next_log_id),
 			dirty: AtomicBool::new(true),
 			sync: options.sync,
+			replay_queue: logs,
+			cleanup_queue: RwLock::new(VecDeque::new()),
+			log_pool: RwLock::new(Default::default()),
+			path,
 		})
 	}
 
-	pub fn open_or_create_log_file(path: &std::path::Path) -> Result<(std::fs::File, Option<u64>)> {
-		let mut file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path)?;
+	fn log_path(root: &std::path::Path, id: u32) -> std::path::PathBuf {
+		let mut path: std::path::PathBuf = root.into();
+		path.push(format!("log{}", id));
+		path
+	}
+
+	pub fn open_log_file(path: &std::path::Path) -> Result<(std::fs::File, Option<u64>)> {
+		let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
 		if file.metadata()?.len() == 0 {
 			return Ok((file, None));
 		}
@@ -409,33 +432,30 @@ impl Log {
 		file.seek(std::io::SeekFrom::Start(0))?;
 		let id = u64::from_le_bytes(buf[1..].try_into().unwrap());
 		log::debug!(target: "parity-db", "Opened existing log {}, first record_id = {}", path.display(), id);
-
 		Ok((file, Some(id)))
 	}
 
-	pub fn clear_logs(&self) -> Result<()> {
-		{
-			let mut appending = self.appending.write();
-			appending.size = 0;
-			appending.file.flush()?;
-			appending.file.get_mut().set_len(0)?;
-		}
-		{
-			let mut flushing = self.flushing.lock();
-			flushing.empty = true;
-			flushing.file.set_len(0)?;
-			flushing.file.seek(std::io::SeekFrom::Start(0))?;
-		}
+	fn drop_log(&self, id: u32) -> Result<()> {
+		log::debug!(target: "parity-db", "Drop log {}", id);
+		let path = Self::log_path(&self.path, id);
+		std::fs::remove_file(&path)?;
+		Ok(())
+	}
+
+	pub fn clear_replay_logs(&self) -> Result<()> {
 		{
 			let mut reading = self.reading.write();
-			reading.get_mut().set_len(0)?;
-			reading.seek(std::io::SeekFrom::Start(0))?;
+			let id = reading.as_ref().map(|r| r.id);
+			*reading = None;
+			if let Some(id) = id {
+				self.drop_log(id)?;
+			}
 		}
 		let mut overlays = self.overlays.write();
 		overlays.index.clear();
 		overlays.value.clear();
-		*self.reading_state.lock() = ReadingState::Reading;
-		self.dirty.store(true, Ordering::Relaxed);
+		*self.reading_state.lock() = ReadingState::Idle;
+		self.dirty.store(false, Ordering::Relaxed);
 		Ok(())
 	}
 
@@ -451,7 +471,27 @@ impl Log {
 	pub fn end_record(&self, log: LogChange) -> Result<u64> {
 		assert!(log.record_id + 1 == self.next_record_id.load(Ordering::Relaxed));
 		let record_id = log.record_id;
+		if self.appending.read().is_none() {
+			// Find a log file in the pool or create a new one
+			let (id, file) = if let Some((id, file)) = self.log_pool.write().pop_front() {
+				log::debug!(target: "parity-db", "Flush: Activated pool writer {}", id);
+				(id, file)
+			} else {
+				// find a free id
+				let id = self.next_log_id.fetch_add(1, Ordering::SeqCst);
+				let path = Self::log_path(&self.path, id);
+				let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path)?;
+				log::debug!(target: "parity-db", "Flush: Activated new writer {}", id);
+				(id, file)
+			};
+			*self.appending.write() = Some(Appending {
+				size: 0,
+				file: std::io::BufWriter::new(file),
+				id,
+			});
+		}
 		let mut appending = self.appending.write();
+		let appending = appending.as_mut().unwrap();
 		let (index, values, bytes) = log.to_file(&mut appending.file)?;
 		let mut overlays = self.overlays.write();
 		let mut total_index = 0;
@@ -509,61 +549,128 @@ impl Log {
 		overlays.index.retain(|_, overlay| !overlay.map.is_empty());
 	}
 
-	pub fn flush_one(&self, min_size: u64, on_read_complete: impl Fn() -> Result<()>) -> Result<(bool, bool)> {
+	pub fn flush_one(&self, min_size: u64) -> Result<(bool, bool, bool)> {
 		// Wait for the reader to finish reading
 		let mut flushing = self.flushing.lock();
 		let mut read_next = false;
-		if !flushing.empty {
+		let mut cleanup = false;
+		if flushing.is_some() {
 			let mut reading_state = self.reading_state.lock();
 
 			while *reading_state == ReadingState::Reading  {
 				log::debug!(target: "parity-db", "Flush: Awaiting log reader");
 				self.done_reading_cv.wait(&mut reading_state)
 			}
-			// Call reader callback
-			if self.sync {
-				log::debug!(target: "parity-db", "Flush: Read done. Syncing data.");
-				on_read_complete()?;
+
+			if *reading_state == ReadingState::Shutdown {
+				*reading_state = ReadingState::Reading;
+				log::debug!(target: "parity-db", "Flush: Reader shutdown");
+				return Ok((false, false, false));
 			}
 
 			{
-				log::debug!(target: "parity-db", "Flush: Activated log reader");
 				let mut reading = self.reading.write();
-				std::mem::swap(reading.get_mut(), &mut flushing.file);
-				reading.seek(std::io::SeekFrom::Start(0))?;
-				*reading_state = ReadingState::Reading;
-				read_next = true;
-			}
+				if let Some(reading) = reading.take() {
+					log::debug!(target: "parity-db", "Flush: Activated log cleanup {}", reading.id);
+					let file = reading.file.into_inner();
+					self.cleanup_queue.write().push_back((reading.id, file));
+					*reading_state = ReadingState::Idle;
+					cleanup = true;
+				}
 
-			flushing.file.set_len(0)?;
-			flushing.file.seek(std::io::SeekFrom::Start(0))?;
-			flushing.empty = true;
+				if let Some(mut flushing) = flushing.take() {
+					log::debug!(target: "parity-db", "Flush: Activated log reader {}", flushing.id);
+					flushing.file.seek(std::io::SeekFrom::Start(0))?;
+					*reading = Some(Reading {
+						id: flushing.id,
+						file: std::io::BufReader::new(flushing.file),
+					});
+					*reading_state = ReadingState::Reading;
+					read_next = true;
+				}
+			}
 		}
 
-		let mut flush = false;
 		{
 			// Lock writer and reset it
-			let cur_size = self.appending.read().size;
+			let cur_size = self.appending.read().as_ref().map_or(0, |r| r.size);
 			if cur_size > 0 && cur_size > min_size {
 				let mut appending = self.appending.write();
-				std::mem::swap(appending.file.get_mut(), &mut flushing.file);
-				flush = true;
-				log::debug!(target: "parity-db", "Flush: Activated log writer");
-				appending.size = 0;
+				let to_flush = appending.take();
+				*flushing = to_flush.map(|to_flush| Flushing {
+					file: to_flush.file.into_inner().unwrap(),
+					id: to_flush.id,
+				});
 			}
 		}
 
-		if flush {
-			// Flush to disk
-			if self.sync {
+		// Flush to disk
+		if self.sync {
+			if let Some(flushing) = flushing.as_ref() {
 				log::debug!(target: "parity-db", "Flush: Flushing log to disk");
 				flushing.file.sync_data()?;
 				log::debug!(target: "parity-db", "Flush: Flushing log completed");
 			}
-			flushing.empty = false;
 		}
 
-		Ok((!flushing.empty, read_next))
+		Ok((flushing.is_some(), read_next, cleanup))
+	}
+
+	pub fn replay_next(&mut self) -> Result<Option<u32>> {
+		let mut reading = self.reading.write();
+		{
+			if let Some(reading) = reading.take() {
+				log::debug!(target: "parity-db", "Replay: Activated log cleanup {}", reading.id);
+				let file = reading.file.into_inner();
+				self.cleanup_queue.write().push_back((reading.id, file));
+			}
+		}
+		if let Some((id, _record_id, file)) = self.replay_queue.pop_front() {
+			log::debug!(target: "parity-db", "Replay: Activated log reader {}", id);
+			*reading = Some(Reading {
+				id,
+				file: std::io::BufReader::new(file),
+			});
+			*self.reading_state.lock() = ReadingState::Reading;
+			Ok(Some(id))
+		} else {
+			*self.reading_state.lock() = ReadingState::Idle;
+			Ok(None)
+		}
+	}
+
+	pub fn clean_logs(&self, count: usize) -> Result<bool> {
+		let mut cleaned: Vec<_> = {
+			self.cleanup_queue.write().drain(0..count).collect()
+		};
+		for (id, ref mut file) in cleaned.iter_mut() {
+			log::debug!(target: "parity-db", "Cleaned: {}", id);
+			file.seek(std::io::SeekFrom::Start(0))?;
+			file.set_len(0)?;
+		}
+		// Move cleaned logs back to the pool
+		let mut pool = self.log_pool.write();
+		pool.extend(cleaned);
+		// Sort to resue lower IDs an prevent IDs from growing.
+		pool.make_contiguous().sort_by_key(|(id, _)| *id);
+		if pool.len() > MAX_LOG_POOL_SIZE {
+			let removed = pool.drain(MAX_LOG_POOL_SIZE..);
+			for (id, file) in removed {
+				std::mem::drop(file);
+				self.drop_log(id)?;
+			}
+		}
+		Ok(!self.cleanup_queue.read().is_empty())
+	}
+
+	pub fn num_dirty_logs(&self) -> usize {
+		self.cleanup_queue.read().len()
+	}
+
+	pub fn shutdown(&self) {
+		let mut reading_state = self.reading_state.lock();
+		*reading_state = ReadingState::Shutdown;
+		self.done_reading_cv.notify_one();
 	}
 
 	pub fn read_next<'a>(&'a self, validate: bool) -> Result<Option<LogReader<'a>>> {
@@ -574,6 +681,7 @@ impl Log {
 		}
 
 		let reading = self.reading.write();
+		let reading = RwLockWriteGuard::map(reading, |r| &mut r.as_mut().unwrap().file);
 		let mut reader = LogReader::new(reading, validate);
 		match reader.next() {
 			Ok(LogAction::BeginRecord(_)) => {
@@ -594,14 +702,13 @@ impl Log {
 		&self.overlays
 	}
 
-	pub fn kill_logs(&self, options: &Options) {
-		let rm_file = |name| {
-			if let Err(e) = std::fs::remove_file(options.path.join(name)) {
+	pub fn kill_logs(&self) {
+		let mut log_pool = self.log_pool.write();
+		for (id, file) in log_pool.drain(..) {
+			std::mem::drop(file);
+			if let Err(e) = self.drop_log(id) {
 				log::warn!(target: "parity-db", "Error removing log file {:?}", e);
 			}
-		};
-		rm_file("log0");
-		rm_file("log1");
-		rm_file("log2");
+		}
 	}
 }
