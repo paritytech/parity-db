@@ -96,6 +96,7 @@ struct DbInner {
 	columns: Vec<Column>,
 	options: Options,
 	shutdown: AtomicBool,
+	shutdown_commit: AtomicBool,
 	log: Log,
 	commit_queue: Mutex<CommitQueue>,
 	commit_queue_full_cv: Condvar,
@@ -139,6 +140,7 @@ impl DbInner {
 			columns,
 			options: options.clone(),
 			shutdown: std::sync::atomic::AtomicBool::new(false),
+			shutdown_commit: std::sync::atomic::AtomicBool::new(false),
 			log: Log::open(&options)?,
 			commit_queue: Mutex::new(Default::default()),
 			commit_queue_full_cv: Condvar::new(),
@@ -682,7 +684,7 @@ impl Db {
 
 	fn commit_worker(db: Arc<DbInner>) -> Result<()> {
 		let mut more_work = false;
-		while !db.shutdown.load(Ordering::SeqCst) || more_work {
+		while !db.shutdown_commit.load(Ordering::SeqCst) || more_work {
 			if !more_work {
 				let mut work = db.commit_work.lock();
 				while !*work {
@@ -731,6 +733,8 @@ impl Db {
 		}
 		log::debug!(target: "parity-db", "Flush worker shutdown");
 		db.flush_logs(0)?;
+		db.shutdown_commit.store(true, Ordering::SeqCst);
+		db.signal_commit_worker();
 		Ok(())
 	}
 }
