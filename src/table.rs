@@ -506,14 +506,14 @@ impl ValueTable {
 	}
 
 	fn overwrite_chain(&self, key: &Key, value: &[u8], log: &mut LogWriter, at: Option<u64>, compressed: bool) -> Result<u64> {
-		let mut remainder = value.len();
+		let mut remainder = value.len() + REFS_SIZE + PARTIAL_SIZE;
+		let mut offset = 0;
 		let mut start = 0;
 		assert!(self.multipart || value.len() <= self.value_size() as usize);
 		let (mut index, mut follow) = match at {
 			Some(index) => (index, true),
 			None => (self.next_free(log)?, false)
 		};
-		let mut buf = FullEntry::new();
 		loop {
 			if start == 0 {
 				start = index;
@@ -538,25 +538,21 @@ impl ValueTable {
 				index,
 				hex(key),
 			);
-			buf.set_offset(0);
-			let free_space = self.entry_size as usize - if remainder == value.len() {
-				SIZE_SIZE + REFS_SIZE + PARTIAL_SIZE
-			} else {
-				SIZE_SIZE
-			};
+			let mut buf = FullEntry::new();
+			let free_space = self.entry_size as usize - SIZE_SIZE;
 			let value_len = if remainder > free_space {
 				if !follow {
 					next_index = self.next_free(log)?
 				}
 				buf.write_multipart();
-				let start_offset = buf.offset();
 				buf.write_next(next_index);
-				free_space - (buf.offset() - start_offset)
+				free_space - INDEX_SIZE
 			} else {
 				buf.write_size(remainder as u16);
 				remainder
 			};
-			if remainder == value.len() {
+			let init_offset = buf.offset();
+			if offset == 0 {
 				// first rc.
 				let rc = if compressed {
 					1u32 | COMPRESSED_MASK
@@ -566,10 +562,11 @@ impl ValueTable {
 				buf.write_rc(rc);
 				buf.write_slice(table_slice(key));
 			}
-			let offset = value.len() - remainder;
-			buf.write_slice(&value[offset..offset + value_len]);
-			remainder -= value_len;
+			let written = buf.offset() - init_offset;
+			buf.write_slice(&value[offset..offset + value_len - written]);
+			offset += value_len - written;
 			log.insert_value(self.id, index, buf.1[..buf.offset()].to_vec());
+			remainder -= value_len;
 			index = next_index;
 			if remainder == 0 {
 				if index != 0 {
