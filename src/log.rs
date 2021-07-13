@@ -441,6 +441,10 @@ impl Log {
 		path
 	}
 
+	pub fn replay_record_id(&self) -> Option<u64> {
+		self.replay_queue.read().front().map(|(_id, record_id, _)| *record_id)
+	}
+
 	pub fn open_log_file(path: &std::path::Path) -> Result<(std::fs::File, Option<u64>)> {
 		let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
 		if file.metadata()?.len() == 0 {

@@ -129,6 +129,8 @@ impl DbInner {
 		let salt = options.load_and_validate_metadata()?;
 		let mut columns = Vec::with_capacity(options.columns.len());
 		let mut commit_overlay = Vec::with_capacity(options.columns.len());
+		let log = Log::open(&options)?;
+		let last_enacted = log.replay_record_id().unwrap_or(2) - 1;
 		for c in 0 .. options.columns.len() {
 			columns.push(Column::open(c as ColId, &options, salt.clone())?);
 			commit_overlay.push(
@@ -140,7 +142,7 @@ impl DbInner {
 			columns,
 			options: options.clone(),
 			shutdown: std::sync::atomic::AtomicBool::new(false),
-			log: Log::open(&options)?,
+			log,
 			commit_queue: Mutex::new(Default::default()),
 			commit_queue_full_cv: Condvar::new(),
 			log_worker_cv: Condvar::new(),
@@ -155,7 +157,7 @@ impl DbInner {
 			cleanup_worker_cv: Condvar::new(),
 			cleanup_work: Mutex::new(false),
 			next_reindex: AtomicU64::new(1),
-			last_enacted: AtomicU64::new(1),
+			last_enacted: AtomicU64::new(last_enacted),
 			collect_stats: options.stats,
 			bg_err: Mutex::new(None),
 			_lock_file: lock_file,
@@ -442,6 +444,17 @@ impl DbInner {
 					reader.record_id(),
 				);
 				if validation_mode {
+					if reader.record_id() != self.last_enacted.load(Ordering::Relaxed) + 1 {
+						log::warn!(
+							target: "parity-db",
+							"Log sequence error. Expected record {}, got {}",
+							self.last_enacted.load(Ordering::Relaxed) + 1,
+							reader.record_id(),
+						);
+						std::mem::drop(reader);
+						self.log.clear_replay_logs()?;
+						return Ok(false);
+					}
 					// Validate all records before applying anything
 					loop {
 						let next = match reader.next() {
