@@ -681,6 +681,10 @@ impl Log {
 		}
 
 		let reading = self.reading.write();
+		if reading.is_none() {
+			log::trace!(target: "parity-db", "No active reader");
+			return Ok(None);
+		}
 		let reading = RwLockWriteGuard::map(reading, |r| &mut r.as_mut().unwrap().file);
 		let mut reader = LogReader::new(reading, validate);
 		match reader.next() {
