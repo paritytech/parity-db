@@ -338,7 +338,7 @@ impl IndexTable {
 			assert!(entry.key_material(self.id.index_bits()) == new_entry.key_material(self.id.index_bits()));
 			Self::write_entry(&new_entry, i, &mut chunk);
 			log::trace!(target: "parity-db", "{}: Replaced at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
-			log.insert_index(self.id, chunk_index, &chunk);
+			log.insert_index(self.id, chunk_index, i as u8, &chunk);
 			return Ok(PlanOutcome::Written);
 		}
 		for i in 0 .. CHUNK_ENTRIES {
@@ -346,7 +346,7 @@ impl IndexTable {
 			if entry.is_empty() {
 				Self::write_entry(&new_entry, i, &mut chunk);
 				log::trace!(target: "parity-db", "{}: Inserted at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
-				log.insert_index(self.id, chunk_index, &chunk);
+				log.insert_index(self.id, chunk_index, i as u8, &chunk);
 				return Ok(PlanOutcome::Written);
 			}
 		}
@@ -383,7 +383,7 @@ impl IndexTable {
 		if !entry.is_empty() && entry.key_material(self.id.index_bits()) == partial_key {
 			let new_entry = Entry::empty();
 			Self::write_entry(&new_entry, i, &mut chunk);
-			log.insert_index(self.id, chunk_index, &chunk);
+			log.insert_index(self.id, chunk_index, i as u8, &chunk);
 			log::trace!(target: "parity-db", "{}: Removed at {}.{}", self.id, chunk_index, i);
 			return Ok(PlanOutcome::Written);
 		}
@@ -428,11 +428,18 @@ impl IndexTable {
 		// Nasty mutable pointer cast. We do ensure that all chunks that are being written are accessed
 		// through the overlay in other threads.
 		let ptr: *mut u8 = map.as_ptr() as *mut u8;
-		let mut chunk: &mut[u8] = unsafe {
+		let chunk: &mut[u8] = unsafe {
 			let ptr = ptr.offset(offset as isize);
 			std::slice::from_raw_parts_mut(ptr, CHUNK_LEN)
 		};
-		log.read(&mut chunk)?;
+		let mut mask_buf = [0u8; 8];
+		log.read(&mut mask_buf)?;
+		let mask = u64::from_le_bytes(mask_buf);
+		for i in 0 .. 64 {
+			if mask & (1 << i) != 0 {
+				log.read(&mut chunk[i*8 .. i*8 + 8])?;
+			}
+		}
 		log::trace!(target: "parity-db", "{}: Enacted chunk {}", self.id, index);
 		Ok(())
 	}
@@ -441,8 +448,14 @@ impl IndexTable {
 		if index >= self.id.total_entries() {
 			return Err(Error::Corruption("Bad index".into()));
 		}
-		let mut chunk = [0; CHUNK_LEN];
-		log.read(&mut chunk)?;
+		let mut buf = [0u8; 8];
+		log.read(&mut buf)?;
+		let mask = u64::from_le_bytes(buf);
+		for i in 0 .. 64 {
+			if mask & (1 << i) != 0 {
+				log.read(&mut buf[..])?;
+			}
+		}
 		log::trace!(target: "parity-db", "{}: Validated chunk {}", self.id, index);
 		Ok(())
 	}

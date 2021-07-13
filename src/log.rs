@@ -60,7 +60,7 @@ pub struct LogOverlays {
 
 impl LogQuery for RwLock<LogOverlays> {
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R> (&self, table: IndexTableId, index: u64, f: F) -> Option<R> {
-		self.read().index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| f(data)))
+		self.read().index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, _mask, data)| f(data)))
 	}
 
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut[u8]) -> bool {
@@ -238,11 +238,16 @@ impl LogChange {
 		write(&self.record_id.to_le_bytes())?;
 
 		for (id, overlay) in self.local_index.iter() {
-			for (index, (_, chunk)) in overlay.map.iter() {
+			for (index, (_, mask, chunk)) in overlay.map.iter() {
 				write(&2u8.to_le_bytes().as_ref())?;
 				write(&id.as_u16().to_le_bytes())?;
 				write(&index.to_le_bytes())?;
-				write(chunk)?;
+				write(&mask.to_le_bytes())?;
+				for i in 0 .. 64 {
+					if mask & (1 << i) != 0 {
+						write(&chunk[i*8 .. i*8 + 8])?;
+					}
+				}
 			}
 		}
 		for (id, overlay) in self.local_values.iter() {
@@ -288,8 +293,15 @@ impl<'a> LogWriter<'a> {
 		self.log.record_id
 	}
 
-	pub fn insert_index(&mut self, table: IndexTableId, index: u64, data: &IndexChunk) {
-		self.log.local_index.entry(table).or_default().map.insert(index, (self.log.record_id, data.clone()));
+	pub fn insert_index(&mut self, table: IndexTableId, index: u64, sub: u8, data: &IndexChunk) {
+		match self.log.local_index.entry(table).or_default().map.entry(index) {
+			std::collections::hash_map::Entry::Occupied(mut entry) => {
+				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), data.clone());
+			}
+			std::collections::hash_map::Entry::Vacant(entry) => {
+				entry.insert((self.log.record_id, 1 << sub, data.clone()));
+			}
+		}
 	}
 
 	pub fn insert_value(&mut self, table: ValueTableId, index: u64, data: Vec<u8>) {
@@ -307,7 +319,7 @@ impl<'a> LogWriter<'a> {
 
 impl<'a> LogQuery for LogWriter<'a> {
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R> (&self, table: IndexTableId, index: u64, f: F) -> Option<R> {
-		match self.log.local_index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data)) {
+		match self.log.local_index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, _mask, data)| data)) {
 			Some(data) => Some(f(data)),
 			None => self.overlays.with_index(table, index, f),
 		}
@@ -327,7 +339,7 @@ impl<'a> LogQuery for LogWriter<'a> {
 
 #[derive(Default)]
 pub struct IndexLogOverlay {
-	pub map: HashMap<u64, (u64, IndexChunk)>, // index -> (record_id, entry)
+	pub map: HashMap<u64, (u64, u64, IndexChunk)>, // index -> (record_id, mask, entry)
 }
 
 

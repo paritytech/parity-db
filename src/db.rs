@@ -568,12 +568,11 @@ impl DbInner {
 
 	fn cleanup_logs(&self) -> Result<bool> {
 		let num_cleanup = self.log.num_dirty_logs();
-		/*
-		for c in self.columns.iter() {
-			c.flush()?;
-		}*/
-		if num_cleanup > 16 {
-			self.log.clean_logs(num_cleanup - 16)
+		if num_cleanup > 0 {
+			for c in self.columns.iter() {
+				c.flush()?;
+			}
+			self.log.clean_logs(num_cleanup)
 		} else {
 			Ok(false)
 		}
