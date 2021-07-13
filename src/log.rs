@@ -26,7 +26,6 @@ use crate::{
 	options::Options,
 };
 
-const MAX_REPLAY_LOGS: u32 = 64;
 const MAX_LOG_POOL_SIZE: usize = 16;
 
 pub struct InsertIndexAction {
@@ -382,7 +381,7 @@ pub struct Log {
 	dirty: AtomicBool,
 	log_pool: RwLock<VecDeque<(u32, std::fs::File)>>,
 	cleanup_queue: RwLock<VecDeque<(u32, std::fs::File)>>,
-	replay_queue: VecDeque<(u32, u64, std::fs::File)>,
+	replay_queue: RwLock<VecDeque<(u32, u64, std::fs::File)>>,
 	path: std::path::PathBuf,
 	next_log_id: AtomicU32,
 	sync: bool,
@@ -392,22 +391,31 @@ impl Log {
 	pub fn open(options: &Options) -> Result<Log> {
 		let path = options.path.clone();
 		let mut logs = VecDeque::new();
-		for nlog in 0 .. MAX_REPLAY_LOGS {
-			let path = Self::log_path(&path, nlog);
-			if let Ok(_) = std::fs::metadata(&path) {
-				let (file, record_id) = Self::open_log_file(&path)?;
-				if let Some(record_id) = record_id {
-					log::debug!(target: "parity-db", "Opened log {}, record {}", nlog, record_id);
-					logs.push_back((nlog, record_id, file));
-				} else {
-					log::debug!(target: "parity-db", "Removing log {}", nlog);
-					std::mem::drop(file);
-					std::fs::remove_file(&path)?;
+		let mut max_log_id = 0;
+		for entry in std::fs::read_dir(&path)? {
+			let entry = entry?;
+			if let Some(name) = entry.file_name().as_os_str().to_str() {
+				if entry.metadata()?.is_file() && name.starts_with("log") {
+					if let Ok(nlog) = std::str::FromStr::from_str(&name[3..]) {
+						let path = Self::log_path(&path, nlog);
+						let (file, record_id) = Self::open_log_file(&path)?;
+						if let Some(record_id) = record_id {
+							log::debug!(target: "parity-db", "Opened log {}, record {}", nlog, record_id);
+							logs.push_back((nlog, record_id, file));
+							if nlog > max_log_id {
+								max_log_id = nlog
+							}
+						} else {
+							log::debug!(target: "parity-db", "Removing log {}", nlog);
+							std::mem::drop(file);
+							std::fs::remove_file(&path)?;
+						}
+					}
 				}
 			}
 		}
 		logs.make_contiguous().sort_by_key(|(_id, record_id,  _)| *record_id);
-		let next_log_id = logs.back().map_or(0, |(id, _, _)| id + 1);
+		let next_log_id = if logs.is_empty() { 0 } else { max_log_id + 1 };
 
 		Ok(Log {
 			overlays: Default::default(),
@@ -420,7 +428,7 @@ impl Log {
 			next_log_id: AtomicU32::new(next_log_id),
 			dirty: AtomicBool::new(true),
 			sync: options.sync,
-			replay_queue: logs,
+			replay_queue: RwLock::new(logs),
 			cleanup_queue: RwLock::new(VecDeque::new()),
 			log_pool: RwLock::new(Default::default()),
 			path,
@@ -460,6 +468,13 @@ impl Log {
 			let id = reading.as_ref().map(|r| r.id);
 			*reading = None;
 			if let Some(id) = id {
+				self.drop_log(id)?;
+			}
+		}
+		{
+			let replay_logs = std::mem::take(&mut *self.replay_queue.write());
+			for (id, _, file) in replay_logs {
+				std::mem::drop(file);
 				self.drop_log(id)?;
 			}
 		}
@@ -637,7 +652,7 @@ impl Log {
 				self.cleanup_queue.write().push_back((reading.id, file));
 			}
 		}
-		if let Some((id, _record_id, file)) = self.replay_queue.pop_front() {
+		if let Some((id, _record_id, file)) = self.replay_queue.write().pop_front() {
 			log::debug!(target: "parity-db", "Replay: Activated log reader {}", id);
 			*reading = Some(Reading {
 				id,

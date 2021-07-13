@@ -444,7 +444,16 @@ impl DbInner {
 				if validation_mode {
 					// Validate all records before applying anything
 					loop {
-						match reader.next()? {
+						let next = match reader.next() {
+							Ok(next) => next,
+							Err(e) => {
+								log::debug!(target: "parity-db", "Error reading log: {:?}", e);
+								std::mem::drop(reader);
+								self.log.clear_replay_logs()?;
+								return Ok(false);
+							}
+						};
+						match next {
 							LogAction::BeginRecord(_) => {
 								log::debug!(target: "parity-db", "Unexpected log header");
 								std::mem::drop(reader);
@@ -612,14 +621,14 @@ impl DbInner {
 
 	fn kill_logs(&self) -> Result<()> {
 		log::debug!(target: "parity-db", "Processing leftover commits");
-		while self.enact_logs(true)? {};
+		while self.enact_logs(false)? {};
 		self.log.flush_one(0)?;
 		while self.process_commits(true)? {};
-		while self.enact_logs(true)? {};
+		while self.enact_logs(false)? {};
 		self.log.flush_one(0)?;
-		while self.enact_logs(true)? {};
+		while self.enact_logs(false)? {};
 		self.log.flush_one(0)?;
-		while self.enact_logs(true)? {};
+		while self.enact_logs(false)? {};
 		self.clean_all_logs()?;
 		self.log.kill_logs();
 		if self.collect_stats {
