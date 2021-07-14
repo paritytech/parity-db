@@ -47,8 +47,9 @@ use crate::{
 // These are in memory, so we use usize
 const MAX_COMMIT_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 // These are disk-backed, so we use u64
-const MAX_LOG_QUEUE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_LOG_QUEUE_BYTES: i64 = 128 * 1024 * 1024;
 const MIN_LOG_SIZE: u64 = 64 * 1024 * 1024;
+const KEEP_LOGS: usize = 16;
 
 /// Value is just a vector of bytes. Value sizes up to 4Gb are allowed.
 pub type Value = Vec<u8>;
@@ -106,7 +107,7 @@ struct DbInner {
 	// Overlay of most recent values int the commit queue. ColumnId -> (Key -> (RecordId, Value)).
 	commit_overlay: RwLock<Vec<HashMap<Key, (u64, Option<Value>), IdentityBuildHasher>>>,
 	log_cv: Condvar,
-	log_queue_bytes: Mutex<u64>,
+	log_queue_bytes: Mutex<i64>, // This may undeflow occasionally, but is bound for 0 eventually
 	flush_worker_cv: Condvar,
 	flush_work: Mutex<bool>,
 	cleanup_worker_cv: Condvar,
@@ -272,7 +273,7 @@ impl DbInner {
 		Ok(())
 	}
 
-	fn process_commits(&self, _force: bool) -> Result<bool> {
+	fn process_commits(&self) -> Result<bool> {
 		{
 			// Wait if the queue is too big.
 			let mut queue = self.log_queue_bytes.lock();
@@ -336,7 +337,7 @@ impl DbInner {
 			let bytes = {
 				let bytes = self.log.end_record(l)?;
 				let mut logged_bytes = self.log_queue_bytes.lock();
-				*logged_bytes += bytes;
+				*logged_bytes += bytes as i64;
 				self.signal_flush_worker();
 				bytes
 			};
@@ -414,7 +415,7 @@ impl DbInner {
 					record_id,
 					bytes,
 				);
-				*logged_bytes += bytes;
+				*logged_bytes += bytes as i64;
 				if next_reindex {
 					self.start_reindex(record_id);
 				}
@@ -554,7 +555,7 @@ impl DbInner {
 			{
 				if !validation_mode {
 					let mut queue = self.log_queue_bytes.lock();
-					if *queue < bytes {
+					if *queue < bytes as i64 {
 						log::warn!(
 							target: "parity-db",
 							"Detected log undeflow record {}, {} bytes, {} queued, reindex = {}",
@@ -564,8 +565,8 @@ impl DbInner {
 							self.next_reindex.load(Ordering::SeqCst),
 						);
 					}
-					*queue -= bytes;
-					if *queue <= MAX_LOG_QUEUE_BYTES && (*queue + bytes) > MAX_LOG_QUEUE_BYTES {
+					*queue -= bytes as i64;
+					if *queue <= MAX_LOG_QUEUE_BYTES && (*queue + bytes as i64) > MAX_LOG_QUEUE_BYTES {
 						self.log_cv.notify_all();
 					}
 					log::debug!(target: "parity-db", "Log queue size: {} bytes", *queue);
@@ -589,12 +590,15 @@ impl DbInner {
 	}
 
 	fn cleanup_logs(&self) -> Result<bool> {
+		let keep_logs = if self.options.sync_data { KEEP_LOGS } else { 0 };
 		let num_cleanup = self.log.num_dirty_logs();
-		if num_cleanup > 0 {
-			for c in self.columns.iter() {
-				c.flush()?;
+		if num_cleanup > keep_logs {
+			if self.options.sync_data {
+				for c in self.columns.iter() {
+					c.flush()?;
+				}
 			}
-			self.log.clean_logs(num_cleanup)
+			self.log.clean_logs(num_cleanup - keep_logs)
 		} else {
 			Ok(false)
 		}
@@ -634,11 +638,10 @@ impl DbInner {
 
 	fn kill_logs(&self) -> Result<()> {
 		log::debug!(target: "parity-db", "Processing leftover commits");
+		// Finish logged records and proceed to log and enact queued commits.
 		while self.enact_logs(false)? {};
 		self.log.flush_one(0)?;
-		while self.process_commits(true)? {};
-		while self.enact_logs(false)? {};
-		self.log.flush_one(0)?;
+		while self.process_commits()? {};
 		while self.enact_logs(false)? {};
 		self.log.flush_one(0)?;
 		while self.enact_logs(false)? {};
@@ -766,7 +769,7 @@ impl Db {
 				*work = false;
 			}
 
-			let more_commits = db.process_commits(false)?;
+			let more_commits = db.process_commits()?;
 			let more_reindex = db.process_reindex()?;
 			more_work = more_commits || more_reindex;
 		}
@@ -791,7 +794,6 @@ impl Db {
 	}
 
 	fn cleanup_worker(db: Arc<DbInner>) -> Result<()> {
-		// Start with pending reindex.
 		let mut more_work = true;
 		while !db.shutdown.load(Ordering::SeqCst) || more_work {
 			if !more_work {

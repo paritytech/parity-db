@@ -256,10 +256,9 @@ impl Column {
 	pub fn write_reindex_plan(&self, key: &Key, address: Address, log: &mut LogWriter) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
-		/*
 		if Self::search_index(key, &tables.index, &*tables, log)?.is_some() {
 			return Ok(PlanOutcome::Skipped);
-		} */
+		}
 		match tables.index.write_insert_plan(key, address, None, log)? {
 			PlanOutcome::NeedReindex => {
 				log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
@@ -519,7 +518,7 @@ impl Column {
 			if progress != source.id.total_chunks() {
 				let mut source_index = progress;
 				let mut count = 0;
-				if source_index % 50 == 0 {
+				if source_index % 500 == 0 {
 					log::debug!(target: "parity-db", "{}: Reindexing at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				}
 				log::debug!(target: "parity-db", "{}: Continue reindex at {}/{}", tables.index.id, source_index, source.id.total_chunks());

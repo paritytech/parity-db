@@ -22,7 +22,7 @@ use parking_lot::{Condvar, Mutex, RwLock, RwLockWriteGuard, MappedRwLockWriteGua
 use crate::{
 	error::{Error, Result},
 	table::TableId as ValueTableId,
-	index::{TableId as IndexTableId, Chunk as IndexChunk},
+	index::{TableId as IndexTableId, Chunk as IndexChunk, ENTRY_BYTES},
 	options::Options,
 };
 
@@ -242,10 +242,11 @@ impl LogChange {
 				write(&id.as_u16().to_le_bytes())?;
 				write(&index.to_le_bytes())?;
 				write(&mask.to_le_bytes())?;
-				for i in 0 .. 64 {
-					if mask & (1 << i) != 0 {
-						write(&chunk[i*8 .. i*8 + 8])?;
-					}
+				let mut mask = *mask;
+				while mask != 0 {
+					let i = mask.trailing_zeros();
+					mask = mask & !(1 << i);
+					write(&chunk[i as usize *ENTRY_BYTES .. (i as usize + 1)*ENTRY_BYTES])?;
 				}
 			}
 		}
@@ -427,7 +428,7 @@ impl Log {
 			next_record_id: AtomicU64::new(1),
 			next_log_id: AtomicU32::new(next_log_id),
 			dirty: AtomicBool::new(true),
-			sync: options.sync,
+			sync: options.sync_wal,
 			replay_queue: RwLock::new(logs),
 			cleanup_queue: RwLock::new(VecDeque::new()),
 			log_pool: RwLock::new(Default::default()),

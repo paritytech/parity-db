@@ -24,13 +24,14 @@ use crate::{
 	stats::{self, ColumnStats},
 };
 
-const CHUNK_LEN: usize = CHUNK_ENTRIES  * ENTRY_LEN as usize / 8; // 512 bytes
+const CHUNK_LEN: usize = CHUNK_ENTRIES * ENTRY_BYTES; // 512 bytes
 const CHUNK_ENTRIES: usize = 1 << CHUNK_ENTRIES_BITS;
 const CHUNK_ENTRIES_BITS: u8 = 6;
 const HEADER_SIZE: usize = 512;
 const META_SIZE: usize = crate::table::SIZE_TIERS * 1024; // Contains header and column stats
 const KEY_LEN: usize = 32;
 const ENTRY_LEN: u8 = 64;
+pub const ENTRY_BYTES: usize = ENTRY_LEN as usize / 8;
 
 const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
 
@@ -416,9 +417,7 @@ impl IndexTable {
 			//TODO: check for potential overflows on 32-bit platforms
 			file.set_len(file_size(self.id.index_bits()))?;
 			let mut mmap = unsafe { memmap2::MmapMut::map_mut(&file)? };
-			unsafe {
-				libc::madvise(mmap.as_mut_ptr() as _, file_size(self.id.index_bits()) as usize, libc::MADV_RANDOM);
-			}
+			self.madvise_random(&mut mmap);
 			*wmap = Some(mmap);
 			map = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wmap);
 		}
@@ -434,11 +433,11 @@ impl IndexTable {
 		};
 		let mut mask_buf = [0u8; 8];
 		log.read(&mut mask_buf)?;
-		let mask = u64::from_le_bytes(mask_buf);
-		for i in 0 .. 64 {
-			if mask & (1 << i) != 0 {
-				log.read(&mut chunk[i*8 .. i*8 + 8])?;
-			}
+		let mut mask = u64::from_le_bytes(mask_buf);
+		while mask != 0 {
+			let i = mask.trailing_zeros();
+			mask = mask & !(1 << i);
+			log.read(&mut chunk[i as usize *ENTRY_BYTES .. (i as usize + 1)*ENTRY_BYTES])?;
 		}
 		log::trace!(target: "parity-db", "{}: Enacted chunk {}", self.id, index);
 		Ok(())
@@ -450,11 +449,11 @@ impl IndexTable {
 		}
 		let mut buf = [0u8; 8];
 		log.read(&mut buf)?;
-		let mask = u64::from_le_bytes(buf);
-		for i in 0 .. 64 {
-			if mask & (1 << i) != 0 {
-				log.read(&mut buf[..])?;
-			}
+		let mut mask = u64::from_le_bytes(buf);
+		while mask != 0 {
+			let i = mask.trailing_zeros();
+			mask = mask & !(1 << i);
+			log.read(&mut buf[..])?;
 		}
 		log::trace!(target: "parity-db", "{}: Validated chunk {}", self.id, index);
 		Ok(())
@@ -471,6 +470,18 @@ impl IndexTable {
 		if let Some(map) = &*self.map.read() {
 			map.flush()?;
 		}
+		Ok(())
+	}
+
+	#[cfg(unix)]
+	fn madvise_random(&self, map: &mut memmap2::MmapMut) {
+		unsafe {
+			libc::madvise(map.as_mut_ptr() as _, file_size(self.id.index_bits()) as usize, libc::MADV_RANDOM);
+		}
+	}
+
+	#[cfg(not(unix))]
+	fn madvise_random(&self, _map: &mut memmap2::MmapMut) {
 		Ok(())
 	}
 }
