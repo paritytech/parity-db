@@ -468,7 +468,7 @@ impl DbInner {
 							}
 						};
 						match next {
-							LogAction::BeginRecord(_) => {
+							LogAction::BeginRecord => {
 								log::debug!(target: "parity-db", "Unexpected log header");
 								std::mem::drop(reader);
 								self.log.clear_replay_logs()?;
@@ -505,7 +505,7 @@ impl DbInner {
 				}
 				loop {
 					match reader.next()? {
-						LogAction::BeginRecord(_) => {
+						LogAction::BeginRecord => {
 							return Err(Error::Corruption("Bad log record".into()));
 						},
 						LogAction::EndRecord => {

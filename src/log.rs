@@ -39,11 +39,11 @@ pub struct InsertValueAction {
 }
 
 pub enum LogAction {
-	BeginRecord(u64),
+	BeginRecord,
 	InsertIndex(InsertIndexAction),
 	InsertValue(InsertValueAction),
 	DropTable(IndexTableId),
-	EndRecord, // TODO: crc32
+	EndRecord,
 }
 
 pub trait LogQuery {
@@ -135,7 +135,7 @@ impl<'a> LogReader<'a> {
 				read_buf(8, &mut buf)?;
 				let record_id = u64::from_le_bytes(buf);
 				self.record_id = record_id;
-				Ok(LogAction::BeginRecord(record_id))
+				Ok(LogAction::BeginRecord)
 			},
 			2 => { // InsertIndex
 				read_buf(2, &mut buf)?;
@@ -237,12 +237,12 @@ impl LogChange {
 		write(&self.record_id.to_le_bytes())?;
 
 		for (id, overlay) in self.local_index.iter() {
-			for (index, (_, mask, chunk)) in overlay.map.iter() {
+			for (index, (_, modified_entries_mask, chunk)) in overlay.map.iter() {
 				write(&2u8.to_le_bytes().as_ref())?;
 				write(&id.as_u16().to_le_bytes())?;
 				write(&index.to_le_bytes())?;
-				write(&mask.to_le_bytes())?;
-				let mut mask = *mask;
+				write(&modified_entries_mask.to_le_bytes())?;
+				let mut mask = *modified_entries_mask;
 				while mask != 0 {
 					let i = mask.trailing_zeros();
 					mask = mask & !(1 << i);
@@ -720,7 +720,7 @@ impl Log {
 		let reading = RwLockWriteGuard::map(reading, |r| &mut r.as_mut().unwrap().file);
 		let mut reader = LogReader::new(reading, validate);
 		match reader.next() {
-			Ok(LogAction::BeginRecord(_)) => {
+			Ok(LogAction::BeginRecord) => {
 				return Ok(Some(reader));
 			}
 			Ok(_) => return Err(Error::Corruption("Bad log record structure".into())),
