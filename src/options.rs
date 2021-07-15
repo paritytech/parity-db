@@ -30,8 +30,11 @@ pub struct Options {
 	/// Column settings
 	pub columns: Vec<ColumnOptions>,
 	/// fsync WAL to disk before commiting any changes. Provides extra consistency
-	/// guarantees. Off by default.
-	pub sync: bool,
+	/// guarantees. On by default.
+	pub sync_wal: bool,
+	/// fsync/msync data to disk before removing logs. Provides crash resistance guarantee.
+	/// On by default.
+	pub sync_data: bool,
 	/// Collect database statistics. May have effect on performance.
 	pub stats: bool,
 }
@@ -91,7 +94,8 @@ impl Options {
 	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Options {
 		Options {
 			path: path.into(),
-			sync: true,
+			sync_wal: true,
+			sync_data: true,
 			stats: true,
 			columns: (0..num_columns).map(|_| Default::default()).collect(),
 		}

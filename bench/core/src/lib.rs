@@ -279,4 +279,3 @@ pub fn run<D: Db>() {
 		queries as f64  / elapsed
 	);
 }
-

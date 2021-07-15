@@ -518,7 +518,7 @@ impl Column {
 			if progress != source.id.total_chunks() {
 				let mut source_index = progress;
 				let mut count = 0;
-				if source_index % 50 == 0 {
+				if source_index % 500 == 0 {
 					log::debug!(target: "parity-db", "{}: Reindexing at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				}
 				log::debug!(target: "parity-db", "{}: Continue reindex at {}/{}", tables.index.id, source_index, source.id.total_chunks());

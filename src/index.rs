@@ -24,13 +24,14 @@ use crate::{
 	stats::{self, ColumnStats},
 };
 
-const CHUNK_LEN: usize = CHUNK_ENTRIES  * ENTRY_LEN as usize / 8; // 512 bytes
+const CHUNK_LEN: usize = CHUNK_ENTRIES * ENTRY_BYTES; // 512 bytes
 const CHUNK_ENTRIES: usize = 1 << CHUNK_ENTRIES_BITS;
 const CHUNK_ENTRIES_BITS: u8 = 6;
 const HEADER_SIZE: usize = 512;
 const META_SIZE: usize = crate::table::SIZE_TIERS * 1024; // Contains header and column stats
 const KEY_LEN: usize = 32;
 const ENTRY_LEN: u8 = 64;
+pub const ENTRY_BYTES: usize = ENTRY_LEN as usize / 8;
 
 const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
 
@@ -338,7 +339,7 @@ impl IndexTable {
 			assert!(entry.key_material(self.id.index_bits()) == new_entry.key_material(self.id.index_bits()));
 			Self::write_entry(&new_entry, i, &mut chunk);
 			log::trace!(target: "parity-db", "{}: Replaced at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
-			log.insert_index(self.id, chunk_index, &chunk);
+			log.insert_index(self.id, chunk_index, i as u8, &chunk);
 			return Ok(PlanOutcome::Written);
 		}
 		for i in 0 .. CHUNK_ENTRIES {
@@ -346,7 +347,7 @@ impl IndexTable {
 			if entry.is_empty() {
 				Self::write_entry(&new_entry, i, &mut chunk);
 				log::trace!(target: "parity-db", "{}: Inserted at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
-				log.insert_index(self.id, chunk_index, &chunk);
+				log.insert_index(self.id, chunk_index, i as u8, &chunk);
 				return Ok(PlanOutcome::Written);
 			}
 		}
@@ -383,7 +384,7 @@ impl IndexTable {
 		if !entry.is_empty() && entry.key_material(self.id.index_bits()) == partial_key {
 			let new_entry = Entry::empty();
 			Self::write_entry(&new_entry, i, &mut chunk);
-			log.insert_index(self.id, chunk_index, &chunk);
+			log.insert_index(self.id, chunk_index, i as u8, &chunk);
 			log::trace!(target: "parity-db", "{}: Removed at {}.{}", self.id, chunk_index, i);
 			return Ok(PlanOutcome::Written);
 		}
@@ -415,7 +416,9 @@ impl IndexTable {
 			log::debug!(target: "parity-db", "Created new index {}", self.id);
 			//TODO: check for potential overflows on 32-bit platforms
 			file.set_len(file_size(self.id.index_bits()))?;
-			*wmap = Some(unsafe { memmap2::MmapMut::map_mut(&file)? });
+			let mut mmap = unsafe { memmap2::MmapMut::map_mut(&file)? };
+			self.madvise_random(&mut mmap);
+			*wmap = Some(mmap);
 			map = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wmap);
 		}
 
@@ -424,11 +427,18 @@ impl IndexTable {
 		// Nasty mutable pointer cast. We do ensure that all chunks that are being written are accessed
 		// through the overlay in other threads.
 		let ptr: *mut u8 = map.as_ptr() as *mut u8;
-		let mut chunk: &mut[u8] = unsafe {
+		let chunk: &mut[u8] = unsafe {
 			let ptr = ptr.offset(offset as isize);
 			std::slice::from_raw_parts_mut(ptr, CHUNK_LEN)
 		};
-		log.read(&mut chunk)?;
+		let mut mask_buf = [0u8; 8];
+		log.read(&mut mask_buf)?;
+		let mut mask = u64::from_le_bytes(mask_buf);
+		while mask != 0 {
+			let i = mask.trailing_zeros();
+			mask = mask & !(1 << i);
+			log.read(&mut chunk[i as usize *ENTRY_BYTES .. (i as usize + 1)*ENTRY_BYTES])?;
+		}
 		log::trace!(target: "parity-db", "{}: Enacted chunk {}", self.id, index);
 		Ok(())
 	}
@@ -437,8 +447,14 @@ impl IndexTable {
 		if index >= self.id.total_entries() {
 			return Err(Error::Corruption("Bad index".into()));
 		}
-		let mut chunk = [0; CHUNK_LEN];
-		log.read(&mut chunk)?;
+		let mut buf = [0u8; 8];
+		log.read(&mut buf)?;
+		let mut mask = u64::from_le_bytes(buf);
+		while mask != 0 {
+			let i = mask.trailing_zeros();
+			mask = mask & !(1 << i);
+			log.read(&mut buf[..])?;
+		}
 		log::trace!(target: "parity-db", "{}: Validated chunk {}", self.id, index);
 		Ok(())
 	}
@@ -454,6 +470,18 @@ impl IndexTable {
 		if let Some(map) = &*self.map.read() {
 			map.flush()?;
 		}
+		Ok(())
+	}
+
+	#[cfg(unix)]
+	fn madvise_random(&self, map: &mut memmap2::MmapMut) {
+		unsafe {
+			libc::madvise(map.as_mut_ptr() as _, file_size(self.id.index_bits()) as usize, libc::MADV_RANDOM);
+		}
+	}
+
+	#[cfg(not(unix))]
+	fn madvise_random(&self, _map: &mut memmap2::MmapMut) {
 		Ok(())
 	}
 }
