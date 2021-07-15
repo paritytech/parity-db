@@ -85,7 +85,7 @@ const LOCKED_REF: u32 = 0x7fff_ffff;
 pub type Key = [u8; KEY_LEN];
 pub type Value = Vec<u8>;
 
-fn table_slice(hash: &Key) -> &[u8] {
+fn partial_key(hash: &Key) -> &[u8] {
 	&hash[6..]
 }
 
@@ -176,7 +176,7 @@ type PartialKeyEntry = Entry<[u8; 40]>;
 
 impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	#[inline(always)]
-	fn new() -> Self {
+	fn new_uninit() -> Self {
 		Entry(0, unsafe { MaybeUninit::uninit().assume_init() })
 	}
 
@@ -249,6 +249,32 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 
 	fn remaining_to(&self, end: usize) -> &[u8] {
 		&self.1.as_ref()[self.0..end]
+	}
+}
+
+impl<B: AsRef<[u8]> + AsMut<[u8]>> AsMut<[u8]> for Entry<B> {
+	fn as_mut(&mut self) -> &mut [u8] {
+		self.1.as_mut()
+	}
+}
+
+impl<B: AsRef<[u8]> + AsMut<[u8]>> AsRef<[u8]> for Entry<B> {
+	fn as_ref(&self) -> &[u8] {
+		self.1.as_ref()
+	}
+}
+
+impl<B: AsRef<[u8]> + AsMut<[u8]>> std::ops::Index<std::ops::Range<usize>> for Entry<B> {
+	type Output = [u8];
+
+	fn index(&self, index: std::ops::Range<usize>) -> &[u8] {
+		&self.1.as_ref()[index]
+	}
+}
+
+impl<B: AsRef<[u8]> + AsMut<[u8]>> std::ops::IndexMut<std::ops::Range<usize>> for Entry<B> {
+	fn index_mut(&mut self, index: std::ops::Range<usize>) -> &mut [u8] {
+		&mut self.1.as_mut()[index]
 	}
 }
 
@@ -343,13 +369,13 @@ impl ValueTable {
 		log: &Q,
 		mut f: F,
 	) -> Result<(bool, bool)> {
-		let mut buf = FullEntry::new();
+		let mut buf = FullEntry::new_uninit();
 
 		let mut part = 0;
 		let mut compressed = false;
 		let entry_size = self.entry_size as usize;
 		loop {
-			let buf = if log.value(self.id, index, &mut buf.1) {
+			let buf = if log.value(self.id, index, buf.as_mut()) {
 				&mut buf
 			} else {
 				log::trace!(
@@ -358,7 +384,7 @@ impl ValueTable {
 					self.id,
 					index,
 				);
-				self.read_at(&mut buf.1[0..entry_size], index * self.entry_size as u64)?;
+				self.read_at(&mut buf[0..entry_size], index * self.entry_size as u64)?;
 				&mut buf
 			};
 
@@ -369,7 +395,7 @@ impl ValueTable {
 				return Ok((false, false));
 			}
 
-			let (end_entry, next) = if buf.is_multipart() {
+			let (entry_end, next) = if buf.is_multipart() {
 				let next = buf.read_next();
 				(entry_size, next)
 			} else {
@@ -381,20 +407,20 @@ impl ValueTable {
 				let rc = buf.read_rc();
 				compressed = rc & COMPRESSED_MASK > 0;
 				let key_partial = buf.read_partial();
-				if table_slice(key) != key_partial {
+				if partial_key(key) != key_partial {
 					log::debug!(
 						target: "parity-db",
 						"{}: Key mismatch at {}. Expected {}, got {}",
 						self.id,
 						index,
-						hex(table_slice(key)),
+						hex(partial_key(key)),
 						hex(key_partial),
 					);
 					return Ok((false, false));
 				}
-				f(buf.remaining_to(end_entry))
+				f(buf.remaining_to(entry_end))
 			} else {
-				f(buf.remaining_to(end_entry))
+				f(buf.remaining_to(entry_end))
 			}
 			if next == 0 {
 				break;
@@ -425,18 +451,18 @@ impl ValueTable {
 
 	pub fn has_key_at(&self, index: u64, key: &Key, log: &LogWriter) -> Result<bool> {
 		Ok(match self.partial_key_at(index, log)? {
-			Some(existing_key) => &existing_key[..] == table_slice(key),
+			Some(existing_key) => &existing_key[..] == partial_key(key),
 			None => false,
 		})
 	}
 
 	pub fn partial_key_at<Q: LogQuery>(&self, index: u64, log: &Q) -> Result<Option<[u8; PARTIAL_SIZE]>> {
-		let mut buf = PartialKeyEntry::new();
+		let mut buf = PartialKeyEntry::new_uninit();
 		let mut result = [0u8; PARTIAL_SIZE];
-		let buf = if log.value(self.id, index, &mut buf.1) {
+		let buf = if log.value(self.id, index, buf.as_mut()) {
 			&mut buf
 		} else {
-			self.read_at(&mut buf.1[..], index * self.entry_size as u64)?;
+			self.read_at(buf.as_mut(), index * self.entry_size as u64)?;
 			&mut buf
 		};
 		if buf.is_tombstone() {
@@ -456,9 +482,9 @@ impl ValueTable {
 	}
 
 	pub fn read_next_free(&self, index: u64, log: &LogWriter) -> Result<u64> {
-		let mut buf = PartialEntry::new();
-		if !log.value(self.id, index, &mut buf.1) {
-			self.read_at(&mut buf.1, index * self.entry_size as u64)?;
+		let mut buf = PartialEntry::new_uninit();
+		if !log.value(self.id, index, buf.as_mut()) {
+			self.read_at(buf.as_mut(), index * self.entry_size as u64)?;
 		}
 		buf.skip_size();
 		let next = buf.read_next();
@@ -466,9 +492,9 @@ impl ValueTable {
 	}
 
 	pub fn read_next_part(&self, index: u64, log: &LogWriter) -> Result<Option<u64>> {
-		let mut buf = PartialEntry::new();
-		if !log.value(self.id, index, &mut buf.1) {
-			self.read_at(&mut buf.1, index * self.entry_size as u64)?;
+		let mut buf = PartialEntry::new_uninit();
+		if !log.value(self.id, index, buf.as_mut()) {
+			self.read_at(buf.as_mut(), index * self.entry_size as u64)?;
 		}
 		if buf.is_multipart() {
 			buf.skip_size();
@@ -538,7 +564,7 @@ impl ValueTable {
 				index,
 				hex(key),
 			);
-			let mut buf = FullEntry::new();
+			let mut buf = FullEntry::new_uninit();
 			let free_space = self.entry_size as usize - SIZE_SIZE;
 			let value_len = if remainder > free_space {
 				if !follow {
@@ -560,12 +586,12 @@ impl ValueTable {
 					1u32
 				};
 				buf.write_rc(rc);
-				buf.write_slice(table_slice(key));
+				buf.write_slice(partial_key(key));
 			}
 			let written = buf.offset() - init_offset;
 			buf.write_slice(&value[offset..offset + value_len - written]);
 			offset += value_len - written;
-			log.insert_value(self.id, index, buf.1[..buf.offset()].to_vec());
+			log.insert_value(self.id, index, buf[0..buf.offset()].to_vec());
 			remainder -= value_len;
 			index = next_index;
 			if remainder == 0 {
@@ -604,11 +630,11 @@ impl ValueTable {
 			index,
 		);
 
-		let mut buf = PartialEntry::new();
+		let mut buf = PartialEntry::new_uninit();
 		buf.write_tombstone();
 		buf.write_next(last_removed);
 
-		log.insert_value(self.id, index, buf.1[..buf.offset()].to_vec());
+		log.insert_value(self.id, index, buf[0..buf.offset()].to_vec());
 		self.last_removed.store(index, Ordering::Relaxed);
 		self.dirty_header.store(true, Ordering::Relaxed);
 		Ok(())
@@ -646,19 +672,19 @@ impl ValueTable {
 	}
 
 	pub fn change_ref(&self, index: u64, delta: i32, log: &mut LogWriter, compressed: Option<bool>) -> Result<bool> {
-		let mut buf = FullEntry::new();
-		let buf = if log.value(self.id, index, &mut buf.1) {
+		let mut buf = FullEntry::new_uninit();
+		let buf = if log.value(self.id, index, buf.as_mut()) {
 			&mut buf
 		} else {
-			self.read_at(&mut buf.1[..self.entry_size as usize], index * self.entry_size as u64)?;
+			self.read_at(&mut buf[0..self.entry_size as usize], index * self.entry_size as u64)?;
 			&mut buf
 		};
 
-		let size = buf.read_size();
 		if buf.is_tombstone() {
 			return Ok(false);
 		}
 
+		let size = buf.read_size();
 		let size = if buf.is_multipart() {
 			buf.skip_next();
 			self.entry_size as usize
@@ -701,7 +727,7 @@ impl ValueTable {
 		buf.set_offset(rc_offset);
 		buf.write_rc(counter);
 		// TODO: optimize actual buf size
-		log.insert_value(self.id, index, buf.1[0..size].to_vec());
+		log.insert_value(self.id, index, buf[0..size].to_vec());
 		return Ok(true);
 	}
 
@@ -716,21 +742,21 @@ impl ValueTable {
 			return Ok(());
 		}
 
-		let mut buf = FullEntry::new();
-		log.read(&mut buf.1[0..SIZE_SIZE])?;
+		let mut buf = FullEntry::new_uninit();
+		log.read(&mut buf[0..SIZE_SIZE])?;
 		if buf.is_tombstone() {
-			log.read(&mut buf.1[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
-			self.write_at(&buf.1[0..SIZE_SIZE + INDEX_SIZE], index * (self.entry_size as u64))?;
+			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
+			self.write_at(&buf[0..SIZE_SIZE + INDEX_SIZE], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted tombstone in slot {}", self.id, index);
 		} else if buf.is_multipart() {
 				let entry_size = self.entry_size as usize;
-				log.read(&mut buf.1[SIZE_SIZE..entry_size])?;
-				self.write_at(&buf.1[0..entry_size], index * (entry_size as u64))?;
+				log.read(&mut buf[SIZE_SIZE..entry_size])?;
+				self.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
 				log::trace!(target: "parity-db", "{}: Enacted multipart in slot {}", self.id, index);
 		} else {
 			let len = buf.read_size();
-			log.read(&mut buf.1[SIZE_SIZE..SIZE_SIZE + len as usize])?;
-			self.write_at(&buf.1[0..(SIZE_SIZE + len as usize)], index * (self.entry_size as u64))?;
+			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + len as usize])?;
+			self.write_at(&buf[0..(SIZE_SIZE + len as usize)], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted {}: {}, {} bytes", self.id, index, hex(&buf.1[6..32]), len);
 		}
 		Ok(())
@@ -743,21 +769,21 @@ impl ValueTable {
 			// TODO: sanity check last_removed and filled
 			return Ok(());
 		}
-		let mut buf = FullEntry::new();
-		log.read(&mut buf.1[0..SIZE_SIZE])?;
+		let mut buf = FullEntry::new_uninit();
+		log.read(&mut buf[0..SIZE_SIZE])?;
 		if buf.is_tombstone() {
-			log.read(&mut buf.1[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
+			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
 			log::trace!(target: "parity-db", "{}: Validated tombstone in slot {}", self.id, index);
 		}
 		else if buf.is_multipart() {
 			let entry_size = self.entry_size as usize;
-			log.read(&mut buf.1[SIZE_SIZE..entry_size])?;
+			log.read(&mut buf[SIZE_SIZE..entry_size])?;
 			log::trace!(target: "parity-db", "{}: Validated multipart in slot {}", self.id, index);
 		} else {
 			// TODO: check len
 			let len = buf.read_size();
-			log.read(&mut buf.1[SIZE_SIZE..SIZE_SIZE + len as usize])?;
-			log::trace!(target: "parity-db", "{}: Validated {}: {}, {} bytes", self.id, index, hex(&buf.1[SIZE_SIZE..32]), len);
+			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + len as usize])?;
+			log::trace!(target: "parity-db", "{}: Validated {}: {}, {} bytes", self.id, index, hex(&buf[SIZE_SIZE..32]), len);
 		}
 		Ok(())
 	}
