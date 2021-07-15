@@ -339,7 +339,7 @@ impl<'a> LogQuery for LogWriter<'a> {
 
 #[derive(Default)]
 pub struct IndexLogOverlay {
-	pub map: HashMap<u64, (u64, u64, IndexChunk)>, // index -> (record_id, mask, entry)
+	pub map: HashMap<u64, (u64, u64, IndexChunk)>, // index -> (record_id, modified_mask, entry)
 }
 
 
@@ -683,7 +683,7 @@ impl Log {
 		// Move cleaned logs back to the pool
 		let mut pool = self.log_pool.write();
 		pool.extend(cleaned);
-		// Sort to resue lower IDs an prevent IDs from growing.
+		// Sort to reuse lower IDs an prevent IDs from growing.
 		pool.make_contiguous().sort_by_key(|(id, _)| *id);
 		if pool.len() > MAX_LOG_POOL_SIZE {
 			let removed = pool.drain(MAX_LOG_POOL_SIZE..);

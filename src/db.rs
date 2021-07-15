@@ -107,7 +107,7 @@ struct DbInner {
 	// Overlay of most recent values int the commit queue. ColumnId -> (Key -> (RecordId, Value)).
 	commit_overlay: RwLock<Vec<HashMap<Key, (u64, Option<Value>), IdentityBuildHasher>>>,
 	log_cv: Condvar,
-	log_queue_bytes: Mutex<i64>, // This may undeflow occasionally, but is bound for 0 eventually
+	log_queue_bytes: Mutex<i64>, // This may underflow occasionally, but is bound for 0 eventually
 	flush_worker_cv: Condvar,
 	flush_work: Mutex<bool>,
 	cleanup_worker_cv: Condvar,
