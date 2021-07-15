@@ -646,7 +646,7 @@ impl DbInner {
 		self.log.flush_one(0)?;
 		while self.enact_logs(false)? {};
 		self.clean_all_logs()?;
-		self.log.kill_logs();
+		self.log.kill_logs()?;
 		if self.collect_stats {
 			let mut path = self.options.path.clone();
 			path.push("stats.txt");

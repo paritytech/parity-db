@@ -738,19 +738,16 @@ impl Log {
 		&self.overlays
 	}
 
-	pub fn kill_logs(&self) {
+	pub fn kill_logs(&self) -> Result<()> {
 		let mut log_pool = self.log_pool.write();
 		for (id, file) in log_pool.drain(..) {
 			std::mem::drop(file);
-			if let Err(e) = self.drop_log(id) {
-				log::warn!(target: "parity-db", "Error removing log file {:?}", e);
-			}
+			self.drop_log(id)?;
 		}
 		if let Some(reading) = self.reading.write().take() {
 			std::mem::drop(reading.file);
-			if let Err(e) = self.drop_log(reading.id) {
-				log::warn!(target: "parity-db", "Error removing log file {:?}", e);
-			}
+			self.drop_log(reading.id)?;
 		}
+		Ok(())
 	}
 }
