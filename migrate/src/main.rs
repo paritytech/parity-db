@@ -18,26 +18,21 @@
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
-pub use parity_db::Db;
+pub use parity_db::{Options, Db};
 
 const USAGE: &str = "
-Usage: migrate source_dir dest_meta
+Usage: migrate source_dir dest_meta dest_path [options]
 
 Options:
-	--clear-dest           Clear dest dir befoe attemtimg migration.
+	--clear-dest           Clear dest dir before attempting migration.
 ";
 
 #[derive(Clone)]
 struct Args {
+	source: String,
+	dest: String,
+	dest_meta: String,
 	clear_dest: bool,
-}
-
-impl Default for Args {
-	fn default() -> Args {
-		Args {
-			clear_dest: false,
-		}
-	}
 }
 
 fn parse<'a, I, T>(mut iter: I) -> T
@@ -51,8 +46,17 @@ where
 
 impl Args {
 	fn parse() -> Args {
-		let mut args = Args::default();
-		for raw_arg in std::env::args().skip(1) {
+		let mut raw_args = std::env::args().skip(1);
+		let source = raw_args.next().expect(&format!("Source is not specified. {}", USAGE));
+		let dest_meta = raw_args.next().expect(&format!("Destination metadata is not specified. {}", USAGE));
+		let dest = raw_args.next().expect(&format!("Destination dir is not specified. {}", USAGE));
+		let mut args = Args {
+			source,
+			dest_meta,
+			dest,
+			clear_dest: false,
+		};
+		for raw_arg in raw_args {
 			let mut splits = raw_arg[2..].split('=');
 			match splits.next().unwrap() {
 				"clear-dest" => args.clear_dest = parse(&mut splits),
@@ -63,13 +67,35 @@ impl Args {
 	}
 }
 
-pub fn run() {
+pub fn run() -> Result<(), String>{
 	env_logger::try_init().unwrap();
 	let args = Args::parse();
+
+	let source_path = std::path::Path::new(&args.source);
+	let dest_meta = std::path::Path::new(&args.dest_meta);
+	let dest_path = std::path::Path::new(&args.dest);
+
+	let (dest_columns, _) = Options::load_metadata(dest_meta)
+		.map_err(|e| format!("Error loading dest metadata: {:?}", e))?;
+
+	let dest_columns = dest_columns.unwrap();
+
+	if args.clear_dest && std::fs::metadata(dest_path).is_ok() {
+		std::fs::remove_dir_all(dest_path).map_err(|e| format!("Error removing dest dir: {:?}", e))?;
+	}
+	std::fs::create_dir_all(dest_path).map_err(|e| format!("Error creating dest dir: {:?}", e))?;
+	let mut dest_options = Options::with_columns(dest_path, dest_columns.len() as u8);
+	dest_options.sync_wal = false;
+	dest_options.sync_data = false;
+
+	parity_db::migrate(source_path, &dest_options)
+		.map_err(|e| format!("Migration error: {:?}", e))?;
+	Ok(())
 }
 
 fn main() {
-	run()
+	fdlimit::raise_fd_limit();
+	run().unwrap();
 }
 
 

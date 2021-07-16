@@ -33,7 +33,7 @@ pub struct Options {
 	pub path: std::path::PathBuf,
 	/// Column settings
 	pub columns: Vec<ColumnOptions>,
-	/// fsync WAL to disk before commiting any changes. Provides extra consistency
+	/// fsync WAL to disk before committing any changes. Provides extra consistency
 	/// guarantees. On by default.
 	pub sync_wal: bool,
 	/// fsync/msync data to disk before removing logs. Provides crash resistance guarantee.
@@ -59,7 +59,7 @@ pub struct ColumnOptions {
 	pub ref_counted: bool,
 	/// Compression to use for this column.
 	pub compression: CompressionType,
-	/// Minimal value size treshold to attempt compressing a value.
+	/// Minimal value size threshold to attempt compressing a value.
 	pub compression_treshold: u32,
 }
 
@@ -93,11 +93,12 @@ impl ColumnOptions {
 		let mut split = s.split("sizes: ");
 		let vals = split.next()?;
 		let sizes = split.next()?;
-		let sizes: Vec<u16> = sizes.split(",").filter_map(|v| v.parse().ok()).collect();
+		let sizes = &sizes[1..sizes.len() - 1];
+		let sizes: Vec<u16> = sizes.split(",").filter_map(|v| v.trim().parse().ok()).collect();
 		let sizes: [u16; 15] = sizes.try_into().ok()?;
 
-		let vals: HashMap<&str, &str> = vals.split(",").filter_map(|s| {
-			let mut pair = s.split("=");
+		let vals: HashMap<&str, &str> = vals.split(", ").filter_map(|s| {
+			let mut pair = s.split(": ");
 			Some((pair.next()?, pair.next()?))
 		}).collect();
 
@@ -152,7 +153,9 @@ impl Options {
 	}
 
 	pub fn load_and_validate_metadata(&self) -> Result<Option<Salt>> {
-		let (cols, mut salt) = Self::load_metadata(&self.path)?;
+		let mut path: PathBuf = self.path.clone();
+		path.push("metadata");
+		let (cols, mut salt) = Self::load_metadata(&path)?;
 
 		if let Some(mut cols) = cols {
 			if cols.len() != self.columns.len() {
@@ -169,7 +172,7 @@ impl Options {
 			}
 		} else {
 			let s: Salt = rand::thread_rng().gen();
-			self.write_metadata(&self.path, &s)?;
+			self.write_metadata(&path, &s)?;
 			salt = Some(s);
 		}
 		Ok(salt)
@@ -179,8 +182,6 @@ impl Options {
 		use std::io::BufRead;
 		use std::str::FromStr;
 
-		let mut path: PathBuf = path.into();
-		path.push("metadata");
 		if !path.exists() {
 			return Ok((None, None))
 		}

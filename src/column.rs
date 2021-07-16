@@ -534,7 +534,7 @@ impl Column {
 				let value_key = tables.value[address.size_tier() as usize]
 					.partial_key_at(address.offset(), &*log.overlays())?;
 				let value_key = value_key.ok_or_else(|| Error::Corruption("Missing indexed value".into()))?;
-				&mut key[8..].copy_from_slice(&value_key[8..]);
+				&mut key[6..].copy_from_slice(&value_key);
 				let value = tables.value[address.size_tier() as usize].get_rc(&key, address.offset(), &*log.overlays())?;
 				let (value, rc, compressed) = value.ok_or_else(|| Error::Corruption("Missing indexed value".into()))?;
 				let value = if compressed {

@@ -303,10 +303,10 @@ impl ValueTable {
 		path.push(id.file_name());
 
 		let mut file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?;
-		disable_read_ahead(&file)?;
+		//disable_read_ahead(&file)?;
 		let mut file_len = file.metadata()?.len();
 		if file_len == 0 {
-			// Prealocate a single entry that contains metadata
+			// Preallocate a single entry that contains metadata
 			file.set_len(entry_size as u64)?;
 			file_len = entry_size as u64;
 		}
@@ -385,7 +385,7 @@ impl ValueTable {
 		let mut buf = FullEntry::new_uninit();
 		let mut part = 0;
 		let mut compressed = false;
-		let mut rc = 0;
+		let mut rc = 1;
 		let entry_size = self.entry_size as usize;
 		loop {
 			let buf = if log.value(self.id, index, buf.as_mut()) {
@@ -420,7 +420,7 @@ impl ValueTable {
 			if part == 0 {
 				if self.ref_counted {
 					rc = buf.read_rc();
-				}
+				} 
 				let key_partial = buf.read_partial();
 				if partial_key(key) != key_partial {
 					log::debug!(

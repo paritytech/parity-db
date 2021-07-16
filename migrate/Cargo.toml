@@ -8,6 +8,7 @@ edition = "2018"
 [dependencies]
 parity-db = { path = ".." }
 log = { version = "0.4.8" }
+fdlimit = "0.2.1"
 
 [dependencies.env_logger]
 version = "0.7.1"
