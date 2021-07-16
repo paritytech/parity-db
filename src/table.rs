@@ -23,10 +23,10 @@
 //
 // Complete entry:
 // [SIZE: 2][REFS: 4][KEY: 26][VALUE: SIZE - 30]
-// SIZE: 16-bit value size. Sizes up to 0xfffd are allowed.
-// This includes size of REFS and KEY
-// REF: 31-bit reference counter, first bit reserved to flag an applied compression
-// when needed (32-bit counter otherwhise).
+// SIZE: 15-bit value size. Sizes up to 0x7ffd are allowed.
+// This includes size of REFS and KEY.
+// The first bit is reserved to indicate if compression is applied.
+// REF: 32-bit reference counter.
 // If collection is not ref counted, a single bit is used to indicate
 // if compression is needed.
 // this is removed or replaced by one byte for applied compression when need.
@@ -38,8 +38,7 @@
 // MULTIPART - Split entry marker. 0xfffe.
 // NEXT - 64-bit index of the entry that holds the next part.
 // take all available space in this entry.
-// REF: 31-bit reference counter, first bit reserved to flag an applied compression.
-// Same behavior as for complete entry.
+// REF: 32-bit reference counter.
 // KEY: lower 26 bytes of the key.
 // VALUE: The rest of the entry is filled with payload bytes.
 //
@@ -51,7 +50,8 @@
 //
 // Partial entry (last part):
 // [SIZE: 2][VALUE: SIZE]
-// SIZE: 16-bit size of the remaining payload.
+// SIZE: 15-bit size of the remaining payload, also indicate
+// if value is compressed.
 // VALUE: SIZE payload bytes.
 //
 // Deleted entry
@@ -75,18 +75,17 @@ use crate::{
 pub const KEY_LEN: usize = 32;
 pub const SIZE_TIERS: usize = 16;
 pub const SIZE_TIERS_BITS: u8 = 4;
+pub const COMPRESSED_MASK: u16 = 0xa0_00;
 const MAX_ENTRY_SIZE: usize = 0xfffd;
 const REFS_SIZE: usize = 4;
-const COMPRESS_SIZE: usize = 1;
 const SIZE_SIZE: usize = 2;
 const PARTIAL_SIZE: usize = 26;
 const INDEX_SIZE: usize = 8;
 
 const TOMBSTONE: &[u8] = &[0xff, 0xff];
 const MULTIPART: &[u8] = &[0xff, 0xfe];
-const COMPRESSED_MASK: u32 = 0xa0_00_00_00;
 // When a rc reach locked ref, it is locked in db.
-const LOCKED_REF: u32 = 0x7fff_ffff;
+const LOCKED_REF: u32 = u32::MAX;
 
 
 pub type Key = [u8; KEY_LEN];
@@ -221,13 +220,18 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 		self.write_slice(&MULTIPART);
 	}
 
-	fn read_size(&mut self) -> u16 {
-		u16::from_le_bytes(self.read_slice(SIZE_SIZE).try_into().unwrap())
+	fn read_size(&mut self) -> (u16, bool) {
+		let size = u16::from_le_bytes(self.read_slice(SIZE_SIZE).try_into().unwrap());
+		let compressed = (size & COMPRESSED_MASK) > 0;
+		(size & !COMPRESSED_MASK, compressed)
 	}
 	fn skip_size(&mut self) {
 		self.0 += SIZE_SIZE;
 	}
-	fn write_size(&mut self, size: u16) {
+	fn write_size(&mut self, mut size: u16, compressed: bool) {
+		if compressed {
+			size |= COMPRESSED_MASK;
+		}
 		self.write_slice(&size.to_le_bytes());
 	}
 
@@ -249,17 +253,6 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	}
 	fn write_rc(&mut self, rc: u32) {
 		self.write_slice(&rc.to_le_bytes());
-	}
-
-	fn skip_compressed(&mut self) {
-		self.0 += COMPRESS_SIZE;
-	}
-	fn read_compressed(&mut self) -> bool {
-		self.0 += COMPRESS_SIZE;
-		self.1.as_ref()[self.0 - 1] > 0
-	}
-	fn write_compressed(&mut self, compressed: bool) {
-		self.write_slice(&[compressed as u8]);
 	}
 
 	fn read_partial(&mut self) -> &[u8] {
@@ -342,7 +335,7 @@ impl ValueTable {
 	}
 
 	pub fn value_size(&self) -> u16 {
-		self.entry_size - SIZE_SIZE as u16 - self.ref_compress_size() as u16 - PARTIAL_SIZE as u16
+		self.entry_size - SIZE_SIZE as u16 - self.ref_size() as u16 - PARTIAL_SIZE as u16
 	}
 
 	#[cfg(unix)]
@@ -409,27 +402,25 @@ impl ValueTable {
 			};
 
 			buf.set_offset(0);
-			let size = buf.read_size();
 
 			if buf.is_tombstone() {
 				return Ok((false, false));
 			}
 
 			let (entry_end, next) = if buf.is_multipart() {
+				buf.skip_size();
 				let next = buf.read_next();
 				(entry_size, next)
 			} else {
+				let (size, read_compressed) = buf.read_size();
+				compressed = read_compressed;
 				(buf.offset() + size as usize, 0)
 			};
 
-
 			if part == 0 {
-				compressed = if self.ref_counted {
-					let rc = buf.read_rc();
-					rc & COMPRESSED_MASK > 0
-				} else {
-					buf.read_compressed()
-				};
+				if self.ref_counted {
+					buf.skip_rc();
+				}
 				let key_partial = buf.read_partial();
 				if partial_key(key) != key_partial {
 					log::debug!(
@@ -498,8 +489,6 @@ impl ValueTable {
 		}
 		if self.ref_counted {
 			buf.skip_rc();
-		} else {
-			buf.skip_compressed();
 		}
 		result[..].copy_from_slice(buf.read_partial());
 
@@ -557,7 +546,7 @@ impl ValueTable {
 	}
 
 	fn overwrite_chain(&self, key: &Key, value: &[u8], log: &mut LogWriter, at: Option<u64>, compressed: bool) -> Result<u64> {
-		let mut remainder = value.len() + self.ref_compress_size() + PARTIAL_SIZE;
+		let mut remainder = value.len() + self.ref_size() + PARTIAL_SIZE;
 		let mut offset = 0;
 		let mut start = 0;
 		assert!(self.multipart || value.len() <= self.value_size() as usize);
@@ -599,21 +588,14 @@ impl ValueTable {
 				buf.write_next(next_index);
 				free_space - INDEX_SIZE
 			} else {
-				buf.write_size(remainder as u16);
+				buf.write_size(remainder as u16, compressed);
 				remainder
 			};
 			let init_offset = buf.offset();
 			if offset == 0 {
 				if self.ref_counted {
 					// first rc.
-					let rc = if compressed {
-						1u32 | COMPRESSED_MASK
-					} else {
-						1u32
-					};
-					buf.write_rc(rc);
-				} else {
-					buf.write_compressed(compressed);
+					buf.write_rc(1u32);
 				}
 				buf.write_slice(partial_key(key));
 			}
@@ -713,26 +695,20 @@ impl ValueTable {
 			return Ok(false);
 		}
 
-		let size = buf.read_size();
 		let size = if buf.is_multipart() {
+			buf.skip_size();
 			buf.skip_next();
 			self.entry_size as usize
 		} else {
+			let (size, read_compressed) = buf.read_size();
+			debug_assert!(
+				compressed.map(|compressed| compressed == read_compressed).unwrap_or(true)
+			);
 			buf.offset() + size as usize
 		};
 
 		let rc_offset = buf.offset();
-
 		let mut counter = buf.read_rc();
-		debug_assert!(compressed.map(|compressed| if counter & COMPRESSED_MASK > 0 {
-				compressed == true
-			} else {
-				compressed == false
-			}).unwrap_or(true)
-		);
-
-		let compressed = counter & COMPRESSED_MASK > 0;
-		counter = counter & !COMPRESSED_MASK;
 		if delta > 0 {
 			if counter >= LOCKED_REF - delta as u32 {
 				counter = LOCKED_REF
@@ -747,11 +723,6 @@ impl ValueTable {
 				}
 			}
 		}
-		counter = if compressed {
-			counter | COMPRESSED_MASK
-		} else {
-			counter
-		};
 
 		buf.set_offset(rc_offset);
 		buf.write_rc(counter);
@@ -783,7 +754,7 @@ impl ValueTable {
 				self.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
 				log::trace!(target: "parity-db", "{}: Enacted multipart in slot {}", self.id, index);
 		} else {
-			let len = buf.read_size();
+			let (len, _compressed) = buf.read_size();
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + len as usize])?;
 			self.write_at(&buf[0..(SIZE_SIZE + len as usize)], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted {}: {}, {} bytes", self.id, index, hex(&buf.1[6..32]), len);
@@ -810,7 +781,7 @@ impl ValueTable {
 			log::trace!(target: "parity-db", "{}: Validated multipart in slot {}", self.id, index);
 		} else {
 			// TODO: check len
-			let len = buf.read_size();
+			let (len, _compressed) = buf.read_size();
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + len as usize])?;
 			log::trace!(target: "parity-db", "{}: Validated {}: {}, {} bytes", self.id, index, hex(&buf[SIZE_SIZE..32]), len);
 		}
@@ -850,11 +821,11 @@ impl ValueTable {
 		Ok(())
 	}
 
-	fn ref_compress_size(&self) -> usize {
+	fn ref_size(&self) -> usize {
 		if self.ref_counted {
 			REFS_SIZE
 		} else {
-			COMPRESS_SIZE
+			0
 		}
 	}
 }

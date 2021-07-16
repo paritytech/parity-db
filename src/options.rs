@@ -76,6 +76,15 @@ impl ColumnOptions {
 			})
 		)
 	}
+
+	pub fn is_valid(&self) -> bool {
+		for size in self.sizes {
+			if size >= crate::table::COMPRESSED_MASK {
+				return false;
+			}
+		}
+		true
+	}
 }
 
 impl Default for ColumnOptions {
@@ -86,7 +95,7 @@ impl Default for ColumnOptions {
 			ref_counted: false,
 			compression: CompressionType::NoCompression,
 			compression_treshold: 4096,
-			sizes: [96, 128, 192, 256, 320, 512, 768, 1024, 1536, 2048, 3072, 4096, 8192, 16384, 32768],
+			sizes: [96, 128, 192, 256, 320, 512, 768, 1024, 1536, 2048, 3072, 4096, 8192, 16384, 32760],
 		}
 	}
 }
@@ -155,5 +164,14 @@ impl Options {
 			}
 		}
 		Ok(salt)
+	}
+
+	pub fn is_valid(&self) -> bool {
+		for option in self.columns.iter() {
+			if !option.is_valid() {
+				return false;
+			}
+		}
+		true
 	}
 }
