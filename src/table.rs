@@ -75,7 +75,7 @@ use crate::{
 pub const KEY_LEN: usize = 32;
 pub const SIZE_TIERS: usize = 16;
 pub const SIZE_TIERS_BITS: u8 = 4;
-pub const COMPRESSED_MASK: u16 = 0xa0_00;
+pub const COMPRESSED_MASK: u16 = 0x80_00;
 const MAX_ENTRY_SIZE: usize = 0xfffd;
 const REFS_SIZE: usize = 4;
 const SIZE_SIZE: usize = 2;
