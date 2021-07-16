@@ -26,7 +26,9 @@
 // SIZE: 16-bit value size. Sizes up to 0xfffd are allowed.
 // This includes size of REFS and KEY
 // REF: 31-bit reference counter, first bit reserved to flag an applied compression
-// when needed (32-bit counter otherwhise). If collection is not ref counted,
+// when needed (32-bit counter otherwhise).
+// If collection is not ref counted, a single bit is used to indicate
+// if compression is needed.
 // this is removed or replaced by one byte for applied compression when need.
 // KEY: lower 26 bytes of the key.
 // VALUE: SIZE-30  payload bytes.
@@ -139,7 +141,6 @@ pub struct ValueTable {
 	dirty_header: AtomicBool,
 	dirty: AtomicBool,
 	multipart: bool,
-	compress: bool,
 	ref_counted: bool,
 }
 
@@ -326,8 +327,6 @@ impl ValueTable {
 			filled = 1;
 		}
 		log::debug!(target: "parity-db", "Opened value table {} with {} entries", id, filled);
-		let compress = options.compression != crate::compress::CompressionType::NoCompression
-			&& (multipart || entry_size as u32 > options.compression_treshold);
 		Ok(ValueTable {
 			id,
 			entry_size,
@@ -339,7 +338,6 @@ impl ValueTable {
 			dirty: AtomicBool::new(false),
 			multipart,
 			ref_counted: options.ref_counted,
-			compress,
 		})
 	}
 
@@ -429,10 +427,8 @@ impl ValueTable {
 				compressed = if self.ref_counted {
 					let rc = buf.read_rc();
 					rc & COMPRESSED_MASK > 0
-				} else if self.compress {
-					buf.read_compressed()
 				} else {
-					false
+					buf.read_compressed()
 				};
 				let key_partial = buf.read_partial();
 				if partial_key(key) != key_partial {
@@ -502,7 +498,7 @@ impl ValueTable {
 		}
 		if self.ref_counted {
 			buf.skip_rc();
-		} else if self.compress {
+		} else {
 			buf.skip_compressed();
 		}
 		result[..].copy_from_slice(buf.read_partial());
@@ -616,7 +612,7 @@ impl ValueTable {
 						1u32
 					};
 					buf.write_rc(rc);
-				} else if self.compress {
+				} else {
 					buf.write_compressed(compressed);
 				}
 				buf.write_slice(partial_key(key));
@@ -735,21 +731,16 @@ impl ValueTable {
 			}).unwrap_or(true)
 		);
 
-		let (locked_ref, compressed) = if self.compress {
-			let compressed = counter & COMPRESSED_MASK > 0;
-			counter = counter & !COMPRESSED_MASK;
-			(LOCKED_REF, compressed)
-		} else {
-			(u32::MAX, false)
-		};
+		let compressed = counter & COMPRESSED_MASK > 0;
+		counter = counter & !COMPRESSED_MASK;
 		if delta > 0 {
-			if counter >= locked_ref - delta as u32 {
-				counter = locked_ref
+			if counter >= LOCKED_REF - delta as u32 {
+				counter = LOCKED_REF
 			} else {
 				counter = counter + delta as u32;
 			}
 		} else {
-			if counter != locked_ref {
+			if counter != LOCKED_REF {
 				counter = counter.saturating_sub(-delta as u32);
 				if counter == 0 {
 					return Ok(false);
@@ -862,10 +853,8 @@ impl ValueTable {
 	fn ref_compress_size(&self) -> usize {
 		if self.ref_counted {
 			REFS_SIZE
-		} else if self.compress {
-			COMPRESS_SIZE
 		} else {
-			0
+			COMPRESS_SIZE
 		}
 	}
 }
@@ -875,7 +864,6 @@ mod test {
 	const ENTRY_SIZE: u16 = 64;
 	use super::{ValueTable, TableId, Key, Value};
 	use crate::{log::{Log, LogWriter, LogAction}, options::{Options, ColumnOptions}};
-	use crate::compress::CompressionType;
 
 	struct TempDir(std::path::PathBuf);
 
@@ -954,24 +942,16 @@ mod test {
 		result
 	}
 
-	fn rc_compressed() -> ColumnOptions {
-		let mut result = compressed();
-		result.ref_counted = true;
-		result
-	}
-
-	fn compressed() -> ColumnOptions {
+	fn rc_options() -> ColumnOptions {
 		let mut result = ColumnOptions::default();
-		result.compression = CompressionType::Lz4;
-		result.compression_treshold = 0;
+		result.ref_counted = true;
 		result
 	}
 
 	#[test]
 	fn insert_simple() {
 		insert_simple_inner(&Default::default());
-		insert_simple_inner(&rc_compressed());
-		insert_simple_inner(&compressed());
+		insert_simple_inner(&rc_options());
 	}
 	fn insert_simple_inner(options: &ColumnOptions) {
 		let dir = TempDir::new("insert_simple");
@@ -980,7 +960,7 @@ mod test {
 
 		let key = key(1);
 		let val = value(19);
-		let compressed = options.compression != CompressionType::NoCompression;
+		let compressed = true;
 
 		write_ops(&table, &log, |writer| {
 			table.write_insert_plan(&key, &val, writer, compressed).unwrap();
@@ -1001,8 +981,7 @@ mod test {
 	#[test]
 	fn remove_simple() {
 		remove_simple_inner(&Default::default());
-		remove_simple_inner(&rc_compressed());
-		remove_simple_inner(&compressed());
+		remove_simple_inner(&rc_options());
 	}
 	fn remove_simple_inner(options: &ColumnOptions) {
 		let dir = TempDir::new("remove_simple");
@@ -1013,7 +992,7 @@ mod test {
 		let key2 = key(2);
 		let val1 = value(11);
 		let val2 = value(21);
-		let compressed = options.compression != CompressionType::NoCompression;
+		let compressed = false;
 
 		write_ops(&table, &log, |writer| {
 			table.write_insert_plan(&key1, &val1, writer, compressed).unwrap();
@@ -1037,8 +1016,7 @@ mod test {
 	#[test]
 	fn replace_simple() {
 		replace_simple_inner(&Default::default());
-		replace_simple_inner(&rc_compressed());
-		replace_simple_inner(&compressed());
+		replace_simple_inner(&rc_options());
 	}
 	fn replace_simple_inner(options: &ColumnOptions) {
 		let dir = TempDir::new("replace_simple");
@@ -1051,7 +1029,7 @@ mod test {
 		let val1 = value(11);
 		let val2 = value(21);
 		let val3 = value(31);
-		let compressed = options.compression != CompressionType::NoCompression;
+		let compressed = true;
 
 		write_ops(&table, &log, |writer| {
 			table.write_insert_plan(&key1, &val1, writer, compressed).unwrap();
@@ -1069,8 +1047,7 @@ mod test {
 	#[test]
 	fn replace_multipart_shorter() {
 		replace_multipart_shorter_inner(&Default::default());
-		replace_multipart_shorter_inner(&rc_compressed());
-		replace_multipart_shorter_inner(&compressed());
+		replace_multipart_shorter_inner(&rc_options());
 	}
 	fn replace_multipart_shorter_inner(options: &ColumnOptions) {
 		let dir = TempDir::new("replace_multipart_shorter");
@@ -1108,8 +1085,7 @@ mod test {
 	#[test]
 	fn replace_multipart_longer() {
 		replace_multipart_longer_inner(&Default::default());
-		replace_multipart_longer_inner(&rc_compressed());
-		replace_multipart_longer_inner(&compressed());
+		replace_multipart_longer_inner(&rc_options());
 	}
 	fn replace_multipart_longer_inner(options: &ColumnOptions) {
 		let dir = TempDir::new("replace_multipart_longer");
@@ -1144,7 +1120,7 @@ mod test {
 	fn ref_counting() {
 		for compressed in [false, true] {
 			let dir = TempDir::new("ref_counting");
-			let table = dir.table(None, &rc_compressed());
+			let table = dir.table(None, &rc_options());
 			let log = dir.log();
 
 			let key = key(1);
@@ -1169,7 +1145,7 @@ mod test {
 	#[test]
 	fn ref_underflow() {
 		let dir = TempDir::new("ref_underflow");
-		let table = dir.table(None, &rc_compressed());
+		let table = dir.table(None, &rc_options());
 		let log = dir.log();
 
 		let key = key(1);
