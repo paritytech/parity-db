@@ -17,6 +17,7 @@
 use std::io::Write;
 use crate::error::{Error, Result};
 use crate::column::Salt;
+use crate::compress::CompressionType;
 use rand::Rng;
 
 const CURRENT_VERSION: u32 = 3;
@@ -51,10 +52,10 @@ pub struct ColumnOptions {
 	pub uniform: bool,
 	/// Value size tiers.
 	pub sizes: [u16; 15],
-	/// Use referece counting for values.
+	/// Use reference counting for values.
 	pub ref_counted: bool,
 	/// Compression to use for this column.
-	pub compression: crate::compress::CompressionType,
+	pub compression: CompressionType,
 	/// Minimal value size treshold to attempt compressing a value.
 	pub compression_treshold: u32,
 }
@@ -83,7 +84,7 @@ impl Default for ColumnOptions {
 			preimage: false,
 			uniform: false,
 			ref_counted: false,
-			compression: crate::compress::CompressionType::NoCompression,
+			compression: CompressionType::NoCompression,
 			compression_treshold: 4096,
 			sizes: [96, 128, 192, 256, 320, 512, 768, 1024, 1536, 2048, 3072, 4096, 8192, 16384, 32768],
 		}
