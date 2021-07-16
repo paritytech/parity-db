@@ -27,7 +27,7 @@
 // This includes size of REFS and KEY
 // REF: 31-bit reference counter, first bit reserved to flag an applied compression
 // when needed (32-bit counter otherwhise). If collection is not ref counted,
-// this is removed or replaced by one byte for applied compression when need.
+// this is removed or replaced by one byte to apply compression when needed.
 // KEY: lower 26 bytes of the key.
 // VALUE: SIZE-30  payload bytes.
 //
