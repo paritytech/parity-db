@@ -116,6 +116,10 @@ impl TableId {
 	}
 
 	pub fn file_name(&self) -> String {
+		format!("table_{:02}_{:02}", self.col(), self.size_tier())
+	}
+
+	pub fn legacy_file_name(&self) -> String {
 		format!("table_{:02}_{}", self.col(), self.size_tier())
 	}
 
@@ -126,7 +130,7 @@ impl TableId {
 
 impl std::fmt::Display for TableId {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "table {:02}_{}", self.col(), self.size_tier())
+		write!(f, "table {:02}_{:02}", self.col(), self.size_tier())
 	}
 }
 
@@ -296,14 +300,22 @@ impl ValueTable {
 			Some(s) => (false, s),
 			None => (true, 4096),
 		};
-		assert!(entry_size >= 64);
+		assert!(entry_size >= 32);
 		assert!(entry_size <= MAX_ENTRY_SIZE as u16);
-		// TODO: posix_fadvise
-		let mut path: std::path::PathBuf = path.into();
-		path.push(id.file_name());
 
-		let mut file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?;
-		//disable_read_ahead(&file)?;
+		let mut path: std::path::PathBuf = path.into();
+		// Check for old file name format
+		path.push(id.legacy_file_name());
+		let mut file = if std::fs::metadata(&path).is_ok() {
+			std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?
+		} else {
+			path.pop();
+			path.push(id.file_name());
+			std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?
+		};
+
+		// TODO: posix_fadvise
+		disable_read_ahead(&file)?;
 		let mut file_len = file.metadata()?.len();
 		if file_len == 0 {
 			// Preallocate a single entry that contains metadata
@@ -375,17 +387,19 @@ impl ValueTable {
 	}
 
 	// Return ref counter, and if it was compressed.
+	#[inline(always)]
 	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8])>(
 		&self,
-		key: &Key,
+		key: Option<&Key>,
 		mut index: u64,
 		log: &Q,
 		mut f: F,
-	) -> Result<(u32, bool)> {
+	) -> Result<(u32, [u8; PARTIAL_SIZE], bool)> {
 		let mut buf = FullEntry::new_uninit();
 		let mut part = 0;
 		let mut compressed = false;
 		let mut rc = 1;
+		let mut pk = [0u8; PARTIAL_SIZE];
 		let entry_size = self.entry_size as usize;
 		loop {
 			let buf = if log.value(self.id, index, buf.as_mut()) {
@@ -404,7 +418,7 @@ impl ValueTable {
 			buf.set_offset(0);
 
 			if buf.is_tombstone() {
-				return Ok((0, false));
+				return Ok((0, Default::default(), false));
 			}
 
 			let (entry_end, next) = if buf.is_multipart() {
@@ -421,17 +435,18 @@ impl ValueTable {
 				if self.ref_counted {
 					rc = buf.read_rc();
 				} 
-				let key_partial = buf.read_partial();
-				if partial_key(key) != key_partial {
+				let pks = buf.read_partial();
+				pk.copy_from_slice(&pks);
+				if key.map_or(false, |k| partial_key(k) != pk) {
 					log::debug!(
 						target: "parity-db",
-						"{}: Key mismatch at {}. Expected {}, got {}",
+						"{}: Key mismatch at {}. Expected {:?}, got {}",
 						self.id,
 						index,
-						hex(partial_key(key)),
-						hex(key_partial),
+						key.map(|k| hex(partial_key(k))),
+						hex(&pk),
 					);
-					return Ok((0, false));
+					return Ok((0, Default::default(), false));
 				}
 				f(buf.remaining_to(entry_end))
 			} else {
@@ -443,23 +458,23 @@ impl ValueTable {
 			part += 1;
 			index = next;
 		}
-		Ok((rc, compressed))
+		Ok((rc, pk, compressed))
 	}
 
 	pub fn get(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool)>> {
 		let mut result = Vec::new();
-		let (rc, compressed) = self.for_parts(key, index, log, |buf| result.extend_from_slice(buf))?;
+		let (rc, _, compressed) = self.for_parts(Some(key), index, log, |buf| result.extend_from_slice(buf))?;
 		if rc > 0 {
 			return Ok(Some((result, compressed)));
 		}
 		Ok(None)
 	}
 
-	pub fn get_rc(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<(Value, u32, bool)>> {
+	pub fn get_rc(&self, index: u64, log: &impl LogQuery) -> Result<Option<(Value, u32, [u8; PARTIAL_SIZE], bool)>> {
 		let mut result = Vec::new();
-		let (rc, compressed) = self.for_parts(key, index, log, |buf| result.extend_from_slice(buf))?;
+		let (rc, pkey, compressed) = self.for_parts(None, index, log, |buf| result.extend_from_slice(buf))?;
 		if rc > 0 {
-			return Ok(Some((result, rc, compressed)));
+			return Ok(Some((result, rc, pkey, compressed)));
 		}
 		Ok(None)
 	}
@@ -467,7 +482,7 @@ impl ValueTable {
 
 	pub fn size(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<(u32, bool)>> {
 		let mut result = 0;
-		let (rc, compressed) = self.for_parts(key, index, log, |buf| result += buf.len() as u32)? ;
+		let (rc, _, compressed) = self.for_parts(Some(key), index, log, |buf| result += buf.len() as u32)? ;
 		if rc > 0 {
 			return Ok(Some((result, compressed)));
 		}
@@ -837,6 +852,20 @@ impl ValueTable {
 		} else {
 			0
 		}
+	}
+
+	pub fn iter_while(&self, log: &impl LogQuery, mut f: impl FnMut (u64, u32, Vec<u8>, bool) -> bool) -> Result<()> {
+		let filled = self.filled.load(Ordering::Relaxed);
+		for index in 1 .. filled {
+			let mut result = Vec::new();
+			let (rc, _, compressed) = self.for_parts(None, index, log, |buf| result.extend_from_slice(buf))?;
+			if rc > 0 {
+				if !f(index, rc, result, compressed) {
+					break;
+				}
+			}
+		}
+		Ok(())
 	}
 }
 

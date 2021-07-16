@@ -23,8 +23,8 @@ use crate::column::Salt;
 use crate::compress::CompressionType;
 use rand::Rng;
 
-const CURRENT_VERSION: u32 = 3;
-const LAST_SUPPORTED_VERSION: u32 = 2;
+const CURRENT_VERSION: u32 = 4;
+const LAST_SUPPORTED_VERSION: u32 = 3;
 
 /// Database configuration.
 #[derive(Clone, Debug)]
@@ -41,6 +41,9 @@ pub struct Options {
 	pub sync_data: bool,
 	/// Collect database statistics. May have effect on performance.
 	pub stats: bool,
+	/// Override salt value. If `None` is specified salt is loaded from metadata
+	/// or randomly generated when creating a new database.
+	pub salt: Option<Salt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,7 +108,7 @@ impl ColumnOptions {
 		let preimage = vals.get("preimage")?.parse().ok()?;
 		let uniform = vals.get("uniform")?.parse().ok()?;
 		let ref_counted = vals.get("refc")?.parse().ok()?;
-		let compression: u8 = vals.get("compression")?.parse().ok()?;
+		let compression: u8 = vals.get("compression").and_then(|c| c.parse().ok()).unwrap_or(0);
 
 		Some(ColumnOptions {
 			preimage,
@@ -113,7 +116,7 @@ impl ColumnOptions {
 			ref_counted,
 			compression: compression.into(),
 			sizes,
-			compression_treshold: 4096,
+			compression_treshold: ColumnOptions::default().compression_treshold,
 		})
 	}
 }
@@ -138,6 +141,7 @@ impl Options {
 			sync_wal: true,
 			sync_data: true,
 			stats: true,
+			salt: None,
 			columns: (0..num_columns).map(|_| Default::default()).collect(),
 		}
 	}
@@ -171,7 +175,7 @@ impl Options {
 				}
 			}
 		} else {
-			let s: Salt = rand::thread_rng().gen();
+			let s: Salt = self.salt.unwrap_or(rand::thread_rng().gen());
 			self.write_metadata(&path, &s)?;
 			salt = Some(s);
 		}
@@ -188,6 +192,7 @@ impl Options {
 		let file = std::io::BufReader::new(std::fs::File::open(path)?);
 		let mut salt = None;
 		let mut columns = Vec::new();
+		let mut force_rc = false;
 		for l in file.lines() {
 			let l = l?;
 			let mut vals = l.split("=");
@@ -199,6 +204,10 @@ impl Options {
 					return Err(Error::InvalidConfiguration(format!(
 						"Unsupported database version {}. Expected {}", version, CURRENT_VERSION)));
 				}
+				if version == 3 {
+					//Treat all tables as ref counted.
+					force_rc = true;
+				}
 			} else if k == "salt" {
 					let salt_slice = hex::decode(v).map_err(|_| Error::Corruption("Bad salt string".into()))?;
 					let mut s = Salt::default();
@@ -207,6 +216,11 @@ impl Options {
 			} else if k.starts_with("col") {
 				let col = ColumnOptions::from_string(v).ok_or_else(|| Error::Corruption("Bad column metadata".into()))?;
 				columns.push(col);
+			}
+		}
+		if force_rc {
+			for mut col in &mut columns {
+				col.ref_counted = true;
 			}
 		}
 		Ok((Some(columns), salt))

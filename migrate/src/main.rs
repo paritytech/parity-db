@@ -85,10 +85,11 @@ pub fn run() -> Result<(), String>{
 	}
 	std::fs::create_dir_all(dest_path).map_err(|e| format!("Error creating dest dir: {:?}", e))?;
 	let mut dest_options = Options::with_columns(dest_path, dest_columns.len() as u8);
+	dest_options.columns = dest_columns;
 	dest_options.sync_wal = false;
 	dest_options.sync_data = false;
 
-	parity_db::migrate(source_path, &dest_options)
+	parity_db::migrate(source_path, dest_options)
 		.map_err(|e| format!("Migration error: {:?}", e))?;
 	Ok(())
 }

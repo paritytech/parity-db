@@ -29,7 +29,7 @@ use crate::{
 use crate::compress::Compress;
 
 const START_BITS: u8 = 16;
-const MAX_REBALANCE_BATCH: u32 = 1024;
+const MAX_REBALANCE_BATCH: usize = 8192;
 
 pub type ColId = u8;
 pub type Salt = [u8; 32];
@@ -167,7 +167,6 @@ impl Column {
 				Self::open_table(path, col, 15, &options)?,
 			],
 		};
-
 		Ok(Column {
 			tables: RwLock::new(tables),
 			reindex: RwLock::new(Reindex {
@@ -333,7 +332,7 @@ impl Column {
 
 			if let Some((table, sub_index, existing_tier, existing_address)) = existing {
 				let existing_tier = existing_tier as usize;
-				if self.collect_stats {
+				if self.collect_stats && !self.ref_counted {
 					let (cur_size, compressed) = tables.value[existing_tier].size(&key, existing_address.offset(), log)?
 						.unwrap_or((0, false));
 					if compressed {
@@ -349,7 +348,7 @@ impl Column {
 				}
 				if self.ref_counted {
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.index.id, hex(key));
-					tables.value[target_tier].write_inc_ref(existing_address.offset(), log, compressed)?;
+					tables.value[existing_tier].write_inc_ref(existing_address.offset(), log, compressed)?;
 					return Ok(PlanOutcome::Written);
 				}
 				if self.preimage {
@@ -518,6 +517,25 @@ impl Column {
 	pub fn iter_while(&self, log: &Log, mut f: impl FnMut (u64, Key, u32, Vec<u8>) -> bool) -> Result<()> {
 		let tables = self.tables.read();
 		let source = &tables.index;
+
+		if self.preimage {
+			for table in &tables.value[..tables.value.len() - 1] {
+				table.iter_while(&*log.overlays(), |index, rc, value, compressed| {
+					let value = if compressed {
+						self.decompress(&value)
+					} else {
+						value
+					};
+					let key = blake2_rfc::blake2b::blake2b(32, &[], &value);
+					let key = self.hash(key.as_bytes());
+					if !f(index, key, rc, value) {
+						return false;
+					}
+					true
+				})?;
+			}
+		}
+
 		for c in 0 .. source.id.total_chunks() {
 			let entries = source.entries(c, &*log.overlays());
 			for entry in entries.iter() {
@@ -530,18 +548,27 @@ impl Column {
 					(partial_key << (64 - k - source.id.index_bits()));
 				let mut key = Key::default();
 				let address = entry.address(source.id.index_bits());
+				if self.preimage && address.size_tier() != 15 {
+					continue;
+				}
 				&mut key[0..8].copy_from_slice(&index_key.to_be_bytes());
-				let value_key = tables.value[address.size_tier() as usize]
-					.partial_key_at(address.offset(), &*log.overlays())?;
-				let value_key = value_key.ok_or_else(|| Error::Corruption("Missing indexed value".into()))?;
-				&mut key[6..].copy_from_slice(&value_key);
-				let value = tables.value[address.size_tier() as usize].get_rc(&key, address.offset(), &*log.overlays())?;
-				let (value, rc, compressed) = value.ok_or_else(|| Error::Corruption("Missing indexed value".into()))?;
+				let value = tables.value[address.size_tier() as usize].get_rc(address.offset(), &*log.overlays())?;
+				let (value, rc, pk, compressed) = value.ok_or_else(|| Error::Corruption("Missing indexed value".into()))?;
+				&mut key[6..].copy_from_slice(&pk);
 				let value = if compressed {
 						self.decompress(&value)
 				} else {
 					value
 				};
+				log::trace!(
+					target: "parity-db",
+					"{}: Iterating at {}/{}, key={:?}, pk={:?}",
+					source.id,
+					c,
+					source.id.total_chunks(),
+					hex(&key),
+					hex(&pk),
+				);
 				if !f(c, key, rc, value) {
 					return Ok(())
 				}
@@ -560,12 +587,11 @@ impl Column {
 			let progress = reindex.progress.load(Ordering::Relaxed);
 			if progress != source.id.total_chunks() {
 				let mut source_index = progress;
-				let mut count = 0;
 				if source_index % 500 == 0 {
 					log::debug!(target: "parity-db", "{}: Reindexing at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				}
 				log::debug!(target: "parity-db", "{}: Continue reindex at {}/{}", tables.index.id, source_index, source.id.total_chunks());
-				while source_index < source.id.total_chunks() && count < MAX_REBALANCE_BATCH {
+				while source_index < source.id.total_chunks() && plan.len() < MAX_REBALANCE_BATCH {
 					log::trace!(target: "parity-db", "{}: Reindexing {}", source.id, source_index);
 					let entries = source.entries(source_index, &*log.overlays());
 					for entry in entries.iter() {
@@ -582,10 +608,9 @@ impl Column {
 						&mut key[0..8].copy_from_slice(&index_key.to_be_bytes());
 						plan.push((key, entry.address(source.id.index_bits())))
 					}
-					count += 1;
 					source_index += 1;
 				}
-				log::trace!(target: "parity-db", "{}: End reindex batch {} ({})", tables.index.id, source_index, count);
+				log::debug!(target: "parity-db", "{}: End reindex batch {} ({})", tables.index.id, source_index, plan.len());
 				reindex.progress.store(source_index, Ordering::Relaxed);
 				if source_index == source.id.total_chunks() {
 					log::info!(target: "parity-db", "Completed reindex into {}", tables.index.id);

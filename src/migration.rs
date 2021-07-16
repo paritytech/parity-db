@@ -19,12 +19,12 @@
 use std::path::Path;
 use crate::{options::Options, db::Db, Error, Result, column::ColId};
 
-const COMMIT_SIZE: usize = 1024;
+const COMMIT_SIZE: usize = 10240;
 
-pub fn migrate(from: &Path, to: &Options) -> Result<()> {
+pub fn migrate(from: &Path, mut to: Options) -> Result<()> {
 	let mut path: std::path::PathBuf = from.into();
 	path.push("metadata");
-	let (source_cols, _) = Options::load_metadata(&path)?;
+	let (source_cols, salt) = Options::load_metadata(&path)?;
 	let source_cols = source_cols.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;
 	if source_cols.len() != to.columns.len() {
 		return Err(Error::Migration("Source and dest columns mismatch".into()));
@@ -33,19 +33,19 @@ pub fn migrate(from: &Path, to: &Options) -> Result<()> {
 	let mut source_options = Options::with_columns(from, source_cols.len() as u8);
 	source_options.columns = source_cols;
 
+	// Make sure we are using the same salt value.
+	to.salt = salt;
+
 	let source = Db::open(&source_options)?;
-	let dest = Db::open(to)?;
+	let dest = Db::open(&to)?;
 
 	let mut ncommits: u64 = 0;
 	let mut commit = Vec::with_capacity(COMMIT_SIZE);
+	let mut last_time = std::time::Instant::now();
 	for c in 0 .. source_options.columns.len() as ColId {
 		log::info!("Migrating col {}", c);
-		let mut last_index = 0;
 		source.iter_column_while(c, |index, key, rc, mut value| {
 			//TODO: more efficient ref migration
-			if rc > 1 {
-				log::info!("Migrating rc {}", rc);
-			}
 			for _ in 0 .. rc {
 				let value = std::mem::take(&mut value);
 				commit.push((c, key.clone(), Some(value)));
@@ -56,11 +56,12 @@ pub fn migrate(from: &Path, to: &Options) -> Result<()> {
 						return false;
 					}
 					commit.reserve(COMMIT_SIZE);
+
+					if last_time.elapsed() > std::time::Duration::from_secs(3) {
+						last_time = std::time::Instant::now();
+						log::info!("Migrating {} #{}, commit {}", c, index, ncommits);
+					}
 				}
-			}
-			if index - last_index >= 10000 {
-				log::info!("Migrating {} #{}, commit {}", c, index, ncommits);
-				last_index = index;
 			}
 			true
 		})?;
@@ -68,3 +69,58 @@ pub fn migrate(from: &Path, to: &Options) -> Result<()> {
 	dest.commit_raw(commit)?;
 	Ok(())
 }
+
+#[cfg(test)]
+mod test {
+	use crate::{Db, Options, migration::migrate};
+
+	struct TempDir(std::path::PathBuf);
+
+	impl TempDir {
+		fn new(name: &'static str) -> TempDir {
+			env_logger::try_init().ok();
+			let mut path = std::env::temp_dir();
+			path.push("parity-db-test");
+			path.push("migration");
+			path.push(name);
+
+			if path.exists() {
+				std::fs::remove_dir_all(&path).unwrap();
+			}
+			std::fs::create_dir_all(&path).unwrap();
+			TempDir(path)
+		}
+
+		fn path(&self, sub: &str) -> std::path::PathBuf {
+			let mut path = self.0.clone();
+			path.push(sub);
+			path
+		}
+	}
+
+	impl Drop for TempDir {
+		fn drop(&mut self) {
+			if self.0.exists() {
+				std::fs::remove_dir_all(&self.0).unwrap();
+			}
+		}
+	}
+
+	#[test]
+	fn migrate_simple() {
+		let dir = TempDir::new("migrate_simple");
+		let source_dir = dir.path("source");
+		let dest_dir = dir.path("dest");
+		{
+			let source = Db::with_columns(&source_dir, 1).unwrap();
+			source.commit([(0, b"1".to_vec(), Some(b"value".to_vec()))]).unwrap();
+		}
+
+		let dest_opts = Options::with_columns(&dest_dir, 1);
+
+		migrate(&source_dir, dest_opts).unwrap();
+		let dest = Db::with_columns(&dest_dir, 1).unwrap();
+		assert_eq!(dest.get(0, b"1").unwrap(), Some("value".as_bytes().to_vec()));
+	}
+}
+
