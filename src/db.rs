@@ -685,6 +685,8 @@ pub struct Db {
 impl Db {
 	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Result<Db> {
 		let options = Options::with_columns(path, num_columns);
+
+		assert!(options.is_valid());
 		Self::open(&options)
 	}
 

@@ -23,7 +23,7 @@ use crate::{
 	log::{Log, LogOverlays, LogReader, LogWriter, LogAction},
 	display::hex,
 	index::{IndexTable, TableId as IndexTableId, PlanOutcome, Address},
-	options::Options,
+	options::{Options, ColumnOptions},
 	stats::ColumnStats,
 };
 use crate::compress::Compress;
@@ -115,7 +115,7 @@ impl Column {
 	fn compress_internal(compression: &Compress, key: &Key, value: &[u8], tables: &Tables) -> (Option<Vec<u8>>, usize) {
 		let (len, result) = if value.len() > compression.treshold as usize {
 			let cvalue = compression.compress(value);
-			if cvalue.len() <= value.len() {
+			if cvalue.len() < value.len() {
 				(cvalue.len(), Some(cvalue))
 			} else {
 				(value.len(), None)
@@ -147,22 +147,22 @@ impl Column {
 		let tables = Tables {
 			index,
 			value: [
-				Self::open_table(path, col, 0, Some(options.sizes[0]))?,
-				Self::open_table(path, col, 1, Some(options.sizes[1]))?,
-				Self::open_table(path, col, 2, Some(options.sizes[2]))?,
-				Self::open_table(path, col, 3, Some(options.sizes[3]))?,
-				Self::open_table(path, col, 4, Some(options.sizes[4]))?,
-				Self::open_table(path, col, 5, Some(options.sizes[5]))?,
-				Self::open_table(path, col, 6, Some(options.sizes[6]))?,
-				Self::open_table(path, col, 7, Some(options.sizes[7]))?,
-				Self::open_table(path, col, 8, Some(options.sizes[8]))?,
-				Self::open_table(path, col, 9, Some(options.sizes[9]))?,
-				Self::open_table(path, col, 10, Some(options.sizes[10]))?,
-				Self::open_table(path, col, 11, Some(options.sizes[11]))?,
-				Self::open_table(path, col, 12, Some(options.sizes[12]))?,
-				Self::open_table(path, col, 13, Some(options.sizes[13]))?,
-				Self::open_table(path, col, 14, Some(options.sizes[14]))?,
-				Self::open_table(path, col, 15, None)?,
+				Self::open_table(path, col, 0, &options)?,
+				Self::open_table(path, col, 1, &options)?,
+				Self::open_table(path, col, 2, &options)?,
+				Self::open_table(path, col, 3, &options)?,
+				Self::open_table(path, col, 4, &options)?,
+				Self::open_table(path, col, 5, &options)?,
+				Self::open_table(path, col, 6, &options)?,
+				Self::open_table(path, col, 7, &options)?,
+				Self::open_table(path, col, 8, &options)?,
+				Self::open_table(path, col, 9, &options)?,
+				Self::open_table(path, col, 10, &options)?,
+				Self::open_table(path, col, 11, &options)?,
+				Self::open_table(path, col, 12, &options)?,
+				Self::open_table(path, col, 13, &options)?,
+				Self::open_table(path, col, 14, &options)?,
+				Self::open_table(path, col, 15, &options)?,
 			],
 		};
 
@@ -226,9 +226,15 @@ impl Column {
 		Ok((table, reindexing, stats))
 	}
 
-	fn open_table(path: &std::path::Path, col: ColId, tier: u8, entry_size: Option<u16>) -> Result<ValueTable> {
+	fn open_table(
+		path: &std::path::Path,
+		col: ColId,
+		tier: u8,
+		options: &ColumnOptions,
+	) -> Result<ValueTable> {
 		let id = ValueTableId::new(col, tier);
-		ValueTable::open(path, id, entry_size)
+		let entry_size = options.sizes.get(tier as usize).cloned();
+		ValueTable::open(path, id, entry_size, options)
 	}
 
 	fn trigger_reindex(

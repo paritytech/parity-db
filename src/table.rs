@@ -23,9 +23,13 @@
 //
 // Complete entry:
 // [SIZE: 2][REFS: 4][KEY: 26][VALUE: SIZE - 30]
-// SIZE: 16-bit value size. Sizes up to 0xfffd are allowed.
-// This includes size of REFS and KEY
-// REF: 31-bit reference counter, first bit reserved to flag an applied compression.
+// SIZE: 15-bit value size. Sizes up to 0x7ffd are allowed.
+// This includes size of REFS and KEY.
+// The first bit is reserved to indicate if compression is applied.
+// REF: 32-bit reference counter.
+// If collection is not ref counted, a single bit is used to indicate
+// if compression is needed.
+// this is removed or replaced by one byte for applied compression when need.
 // KEY: lower 26 bytes of the key.
 // VALUE: SIZE-30  payload bytes.
 //
@@ -34,7 +38,7 @@
 // MULTIPART - Split entry marker. 0xfffe.
 // NEXT - 64-bit index of the entry that holds the next part.
 // take all available space in this entry.
-// REF: 31-bit reference counter, first bit reserved to flag an applied compression.
+// REF: 32-bit reference counter.
 // KEY: lower 26 bytes of the key.
 // VALUE: The rest of the entry is filled with payload bytes.
 //
@@ -46,7 +50,8 @@
 //
 // Partial entry (last part):
 // [SIZE: 2][VALUE: SIZE]
-// SIZE: 16-bit size of the remaining payload.
+// SIZE: 15-bit size of the remaining payload, also indicate
+// if value is compressed.
 // VALUE: SIZE payload bytes.
 //
 // Deleted entry
@@ -64,11 +69,13 @@ use crate::{
 	column::ColId,
 	log::{LogQuery, LogReader, LogWriter},
 	display::hex,
+	options::ColumnOptions as Options,
 };
 
 pub const KEY_LEN: usize = 32;
 pub const SIZE_TIERS: usize = 16;
 pub const SIZE_TIERS_BITS: u8 = 4;
+pub const COMPRESSED_MASK: u16 = 0x80_00;
 const MAX_ENTRY_SIZE: usize = 0xfffd;
 const REFS_SIZE: usize = 4;
 const SIZE_SIZE: usize = 2;
@@ -77,9 +84,8 @@ const INDEX_SIZE: usize = 8;
 
 const TOMBSTONE: &[u8] = &[0xff, 0xff];
 const MULTIPART: &[u8] = &[0xff, 0xfe];
-const COMPRESSED_MASK: u32 = 0xa0_00_00_00;
 // When a rc reach locked ref, it is locked in db.
-const LOCKED_REF: u32 = 0x7fff_ffff;
+const LOCKED_REF: u32 = u32::MAX;
 
 
 pub type Key = [u8; KEY_LEN];
@@ -134,6 +140,7 @@ pub struct ValueTable {
 	dirty_header: AtomicBool,
 	dirty: AtomicBool,
 	multipart: bool,
+	ref_counted: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -213,13 +220,18 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 		self.write_slice(&MULTIPART);
 	}
 
-	fn read_size(&mut self) -> u16 {
-		u16::from_le_bytes(self.read_slice(SIZE_SIZE).try_into().unwrap())
+	fn read_size(&mut self) -> (u16, bool) {
+		let size = u16::from_le_bytes(self.read_slice(SIZE_SIZE).try_into().unwrap());
+		let compressed = (size & COMPRESSED_MASK) > 0;
+		(size & !COMPRESSED_MASK, compressed)
 	}
 	fn skip_size(&mut self) {
 		self.0 += SIZE_SIZE;
 	}
-	fn write_size(&mut self, size: u16) {
+	fn write_size(&mut self, mut size: u16, compressed: bool) {
+		if compressed {
+			size |= COMPRESSED_MASK;
+		}
 		self.write_slice(&size.to_le_bytes());
 	}
 
@@ -279,7 +291,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> std::ops::IndexMut<std::ops::Range<usize>> fo
 }
 
 impl ValueTable {
-	pub fn open(path: &std::path::Path, id: TableId, entry_size: Option<u16>) -> Result<ValueTable> {
+	pub fn open(path: &std::path::Path, id: TableId, entry_size: Option<u16>, options: &Options) -> Result<ValueTable> {
 		let (multipart, entry_size) = match entry_size {
 			Some(s) => (false, s),
 			None => (true, 4096),
@@ -318,11 +330,12 @@ impl ValueTable {
 			dirty_header: AtomicBool::new(false),
 			dirty: AtomicBool::new(false),
 			multipart,
+			ref_counted: options.ref_counted,
 		})
 	}
 
 	pub fn value_size(&self) -> u16 {
-		self.entry_size - SIZE_SIZE as u16 - REFS_SIZE as u16 - PARTIAL_SIZE as u16
+		self.entry_size - SIZE_SIZE as u16 - self.ref_size() as u16 - PARTIAL_SIZE as u16
 	}
 
 	#[cfg(unix)]
@@ -389,23 +402,25 @@ impl ValueTable {
 			};
 
 			buf.set_offset(0);
-			let size = buf.read_size();
 
 			if buf.is_tombstone() {
 				return Ok((false, false));
 			}
 
 			let (entry_end, next) = if buf.is_multipart() {
+				buf.skip_size();
 				let next = buf.read_next();
 				(entry_size, next)
 			} else {
+				let (size, read_compressed) = buf.read_size();
+				compressed = read_compressed;
 				(buf.offset() + size as usize, 0)
 			};
 
-
 			if part == 0 {
-				let rc = buf.read_rc();
-				compressed = rc & COMPRESSED_MASK > 0;
+				if self.ref_counted {
+					buf.skip_rc();
+				}
 				let key_partial = buf.read_partial();
 				if partial_key(key) != key_partial {
 					log::debug!(
@@ -468,16 +483,15 @@ impl ValueTable {
 		if buf.is_tombstone() {
 			return Ok(None);
 		}
+		buf.skip_size();
 		if buf.is_multipart() {
-			buf.skip_size();
 			buf.skip_next();
-			buf.skip_rc();
-			result[..].copy_from_slice(buf.read_partial());
-		} else {
-			buf.skip_size();
-			buf.skip_rc();
-			result[..].copy_from_slice(buf.read_partial());
 		}
+		if self.ref_counted {
+			buf.skip_rc();
+		}
+		result[..].copy_from_slice(buf.read_partial());
+
 		Ok(Some(result))
 	}
 
@@ -532,7 +546,7 @@ impl ValueTable {
 	}
 
 	fn overwrite_chain(&self, key: &Key, value: &[u8], log: &mut LogWriter, at: Option<u64>, compressed: bool) -> Result<u64> {
-		let mut remainder = value.len() + REFS_SIZE + PARTIAL_SIZE;
+		let mut remainder = value.len() + self.ref_size() + PARTIAL_SIZE;
 		let mut offset = 0;
 		let mut start = 0;
 		assert!(self.multipart || value.len() <= self.value_size() as usize);
@@ -574,18 +588,15 @@ impl ValueTable {
 				buf.write_next(next_index);
 				free_space - INDEX_SIZE
 			} else {
-				buf.write_size(remainder as u16);
+				buf.write_size(remainder as u16, compressed);
 				remainder
 			};
 			let init_offset = buf.offset();
 			if offset == 0 {
-				// first rc.
-				let rc = if compressed {
-					1u32 | COMPRESSED_MASK
-				} else {
-					1u32
-				};
-				buf.write_rc(rc);
+				if self.ref_counted {
+					// first rc.
+					buf.write_rc(1u32);
+				}
 				buf.write_slice(partial_key(key));
 			}
 			let written = buf.offset() - init_offset;
@@ -684,26 +695,20 @@ impl ValueTable {
 			return Ok(false);
 		}
 
-		let size = buf.read_size();
 		let size = if buf.is_multipart() {
+			buf.skip_size();
 			buf.skip_next();
 			self.entry_size as usize
 		} else {
+			let (size, read_compressed) = buf.read_size();
+			debug_assert!(
+				compressed.map(|compressed| compressed == read_compressed).unwrap_or(true)
+			);
 			buf.offset() + size as usize
 		};
 
 		let rc_offset = buf.offset();
-
 		let mut counter = buf.read_rc();
-		debug_assert!(compressed.map(|compressed| if counter & COMPRESSED_MASK > 0 {
-				compressed == true
-			} else {
-				compressed == false
-			}).unwrap_or(true)
-		);
-
-		let compressed = counter & COMPRESSED_MASK > 0;
-		counter = counter & !COMPRESSED_MASK;
 		if delta > 0 {
 			if counter >= LOCKED_REF - delta as u32 {
 				counter = LOCKED_REF
@@ -718,11 +723,6 @@ impl ValueTable {
 				}
 			}
 		}
-		counter = if compressed {
-			counter | COMPRESSED_MASK
-		} else {
-			counter
-		};
 
 		buf.set_offset(rc_offset);
 		buf.write_rc(counter);
@@ -754,7 +754,7 @@ impl ValueTable {
 				self.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
 				log::trace!(target: "parity-db", "{}: Enacted multipart in slot {}", self.id, index);
 		} else {
-			let len = buf.read_size();
+			let (len, _compressed) = buf.read_size();
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + len as usize])?;
 			self.write_at(&buf[0..(SIZE_SIZE + len as usize)], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted {}: {}, {} bytes", self.id, index, hex(&buf.1[6..32]), len);
@@ -781,7 +781,7 @@ impl ValueTable {
 			log::trace!(target: "parity-db", "{}: Validated multipart in slot {}", self.id, index);
 		} else {
 			// TODO: check len
-			let len = buf.read_size();
+			let (len, _compressed) = buf.read_size();
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + len as usize])?;
 			log::trace!(target: "parity-db", "{}: Validated {}: {}, {} bytes", self.id, index, hex(&buf[SIZE_SIZE..32]), len);
 		}
@@ -820,13 +820,21 @@ impl ValueTable {
 		}
 		Ok(())
 	}
+
+	fn ref_size(&self) -> usize {
+		if self.ref_counted {
+			REFS_SIZE
+		} else {
+			0
+		}
+	}
 }
 
 #[cfg(test)]
 mod test {
 	const ENTRY_SIZE: u16 = 64;
 	use super::{ValueTable, TableId, Key, Value};
-	use crate::{log::{Log, LogWriter, LogAction}, options::Options};
+	use crate::{log::{Log, LogWriter, LogAction}, options::{Options, ColumnOptions}};
 
 	struct TempDir(std::path::PathBuf);
 
@@ -845,9 +853,9 @@ mod test {
 			TempDir(path)
 		}
 
-		fn table(&self, size: Option<u16>) -> ValueTable {
+		fn table(&self, size: Option<u16>, options: &ColumnOptions) -> ValueTable {
 			let id = TableId::new(0, 0);
-			ValueTable::open(&self.0, id, size).unwrap()
+			ValueTable::open(&self.0, id, size, options).unwrap()
 		}
 
 		fn log(&self) -> Log {
@@ -876,7 +884,7 @@ mod test {
 		let mut reader = log.read_next(false).unwrap().unwrap();
 		loop {
 			match reader.next().unwrap() {
-				LogAction::BeginRecord(_) | LogAction::InsertIndex { .. } | LogAction::DropTable { .. } => {
+				LogAction::BeginRecord | LogAction::InsertIndex { .. } | LogAction::DropTable { .. } => {
 					panic!("Unexpected log entry");
 				},
 				LogAction::EndRecord => {
@@ -905,10 +913,20 @@ mod test {
 		result
 	}
 
+	fn rc_options() -> ColumnOptions {
+		let mut result = ColumnOptions::default();
+		result.ref_counted = true;
+		result
+	}
+
 	#[test]
 	fn insert_simple() {
+		insert_simple_inner(&Default::default());
+		insert_simple_inner(&rc_options());
+	}
+	fn insert_simple_inner(options: &ColumnOptions) {
 		let dir = TempDir::new("insert_simple");
-		let table = dir.table(Some(ENTRY_SIZE));
+		let table = dir.table(Some(ENTRY_SIZE), options);
 		let log = dir.log();
 
 		let key = key(1);
@@ -928,13 +946,17 @@ mod test {
 	#[should_panic(expected = "assertion failed: entry_size <= MAX_ENTRY_SIZE as u16")]
 	fn oversized_into_fixed_panics() {
 		let dir = TempDir::new("oversized_into_fixed_panics");
-		let _table = dir.table(Some(65534));
+		let _table = dir.table(Some(65534), &Default::default());
 	}
 
 	#[test]
 	fn remove_simple() {
+		remove_simple_inner(&Default::default());
+		remove_simple_inner(&rc_options());
+	}
+	fn remove_simple_inner(options: &ColumnOptions) {
 		let dir = TempDir::new("remove_simple");
-		let table = dir.table(Some(ENTRY_SIZE));
+		let table = dir.table(Some(ENTRY_SIZE), options);
 		let log = dir.log();
 
 		let key1 = key(1);
@@ -964,8 +986,12 @@ mod test {
 
 	#[test]
 	fn replace_simple() {
+		replace_simple_inner(&Default::default());
+		replace_simple_inner(&rc_options());
+	}
+	fn replace_simple_inner(options: &ColumnOptions) {
 		let dir = TempDir::new("replace_simple");
-		let table = dir.table(Some(ENTRY_SIZE));
+		let table = dir.table(Some(ENTRY_SIZE), options);
 		let log = dir.log();
 
 		let key1 = key(1);
@@ -991,8 +1017,12 @@ mod test {
 
 	#[test]
 	fn replace_multipart_shorter() {
+		replace_multipart_shorter_inner(&Default::default());
+		replace_multipart_shorter_inner(&rc_options());
+	}
+	fn replace_multipart_shorter_inner(options: &ColumnOptions) {
 		let dir = TempDir::new("replace_multipart_shorter");
-		let table = dir.table(None);
+		let table = dir.table(None, options);
 		let log = dir.log();
 
 		let key1 = key(1);
@@ -1025,8 +1055,12 @@ mod test {
 
 	#[test]
 	fn replace_multipart_longer() {
+		replace_multipart_longer_inner(&Default::default());
+		replace_multipart_longer_inner(&rc_options());
+	}
+	fn replace_multipart_longer_inner(options: &ColumnOptions) {
 		let dir = TempDir::new("replace_multipart_longer");
-		let table = dir.table(None);
+		let table = dir.table(None, options);
 		let log = dir.log();
 
 		let key1 = key(1);
@@ -1057,7 +1091,7 @@ mod test {
 	fn ref_counting() {
 		for compressed in [false, true] {
 			let dir = TempDir::new("ref_counting");
-			let table = dir.table(None);
+			let table = dir.table(None, &rc_options());
 			let log = dir.log();
 
 			let key = key(1);
@@ -1082,7 +1116,7 @@ mod test {
 	#[test]
 	fn ref_underflow() {
 		let dir = TempDir::new("ref_underflow");
-		let table = dir.table(None);
+		let table = dir.table(None, &rc_options());
 		let log = dir.log();
 
 		let key = key(1);
