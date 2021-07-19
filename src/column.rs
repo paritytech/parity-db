@@ -107,8 +107,6 @@ impl Column {
 		Ok(None)
 	}
 
-
-
 	/// Compress if needed and return the target tier to use.
 	fn compress(&self, key: &Key, value: &[u8], tables: &Tables) -> (Option<Vec<u8>>, usize) {
 		Self::compress_internal(&self.compression, key, value, tables)
@@ -167,6 +165,7 @@ impl Column {
 				Self::open_table(path, col, 15, &options)?,
 			],
 		};
+
 		Ok(Column {
 			tables: RwLock::new(tables),
 			reindex: RwLock::new(Reindex {
