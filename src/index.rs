@@ -38,7 +38,7 @@ const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
 pub type Key = [u8; KEY_LEN];
 pub type Chunk = [u8; CHUNK_LEN];
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub struct Entry(u64);
 
 impl Entry {
@@ -253,6 +253,18 @@ impl IndexTable {
 			}
 		}
 		return (Entry::empty(), 0)
+	}
+
+	// Only returns 54 bits of the actual key.
+	pub fn recover_key_prefix(&self, chunk: u64, entry: Entry) -> Key {
+		// Restore first 54 bits of the key.
+		let partial_key = entry.key_material(self.id.index_bits());
+		let k = 64 - Entry::address_bits(self.id.index_bits());
+		let index_key = (chunk << 64 - self.id.index_bits()) |
+			(partial_key << (64 - k - self.id.index_bits()));
+		let mut key = Key::default();
+		&mut key[0..8].copy_from_slice(&index_key.to_be_bytes());
+		key
 	}
 
 	pub fn get(&self, key: &Key, sub_index: usize, log: &impl LogQuery) -> (Entry, usize) {

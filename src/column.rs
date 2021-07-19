@@ -519,6 +519,8 @@ impl Column {
 		let source = &tables.index;
 
 		if self.preimage {
+			// It is much faster to iterate over the value table than index.
+			// We have to assume hashing scheme however.
 			for table in &tables.value[..tables.value.len() - 1] {
 				table.iter_while(&*log.overlays(), |index, rc, value, compressed| {
 					let value = if compressed {
@@ -542,18 +544,13 @@ impl Column {
 				if entry.is_empty() {
 					continue;
 				}
-				let partial_key = entry.key_material(source.id.index_bits());
-				let k = 64 - crate::index::Entry::address_bits(source.id.index_bits());
-				let index_key = (c << 64 - source.id.index_bits()) |
-					(partial_key << (64 - k - source.id.index_bits()));
-				let mut key = Key::default();
 				let address = entry.address(source.id.index_bits());
 				if self.preimage && address.size_tier() != 15 {
 					continue;
 				}
-				&mut key[0..8].copy_from_slice(&index_key.to_be_bytes());
-				let value = tables.value[address.size_tier() as usize].get_rc(address.offset(), &*log.overlays())?;
+				let value = tables.value[address.size_tier() as usize].get_with_meta(address.offset(), &*log.overlays())?;
 				let (value, rc, pk, compressed) = value.ok_or_else(|| Error::Corruption("Missing indexed value".into()))?;
+				let mut key = source.recover_key_prefix(c, *entry);
 				&mut key[6..].copy_from_slice(&pk);
 				let value = if compressed {
 						self.decompress(&value)
@@ -598,14 +595,8 @@ impl Column {
 						if entry.is_empty() {
 							continue;
 						}
-						// Reconstruct as much of the original key as possible.
-						let partial_key = entry.key_material(source.id.index_bits());
-						let k = 64 - crate::index::Entry::address_bits(source.id.index_bits());
-						let index_key = (source_index << 64 - source.id.index_bits()) |
-							(partial_key << (64 - k - source.id.index_bits()));
-						let mut key = Key::default();
-						// restore 16 high bits
-						&mut key[0..8].copy_from_slice(&index_key.to_be_bytes());
+						// We only need key prefix to reindex.
+						let key = source.recover_key_prefix(source_index, *entry);
 						plan.push((key, entry.address(source.id.index_bits())))
 					}
 					source_index += 1;

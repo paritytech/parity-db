@@ -22,23 +22,20 @@
 // FILLED - highest index filled with live data
 //
 // Complete entry:
-// [SIZE: 2][REFS: 4][KEY: 26][VALUE: SIZE - 30]
-// SIZE: 15-bit value size. Sizes up to 0x7ffd are allowed.
+// [SIZE: 2][REFS: 4][KEY: 26][VALUE]
+// SIZE: 15-bit value size. Sizes up to 0x7ffc are allowed.
 // This includes size of REFS and KEY.
 // The first bit is reserved to indicate if compression is applied.
-// REF: 32-bit reference counter.
-// If collection is not ref counted, a single bit is used to indicate
-// if compression is needed.
-// this is removed or replaced by one byte for applied compression when need.
+// REF: 32-bit reference counter (optional).
 // KEY: lower 26 bytes of the key.
-// VALUE: SIZE-30  payload bytes.
+// VALUE: payload bytes.
 //
 // Partial entry (first part):
-// [MULTIPART: 2][NEXT: 8][REFS: 4][KEY: 26][VALUE]
-// MULTIPART - Split entry marker. 0xfffe.
+// [MULTIHEAD: 2][NEXT: 8][REFS: 4][KEY: 26][VALUE]
+// MULTIHEAD - Split entry head marker. 0xfffd.
 // NEXT - 64-bit index of the entry that holds the next part.
 // take all available space in this entry.
-// REF: 32-bit reference counter.
+// REF: 32-bit reference counter (optional).
 // KEY: lower 26 bytes of the key.
 // VALUE: The rest of the entry is filled with payload bytes.
 //
@@ -76,7 +73,7 @@ pub const KEY_LEN: usize = 32;
 pub const SIZE_TIERS: usize = 16;
 pub const SIZE_TIERS_BITS: u8 = 4;
 pub const COMPRESSED_MASK: u16 = 0x80_00;
-const MAX_ENTRY_SIZE: usize = 0xfffd;
+const MAX_ENTRY_SIZE: usize = 0xfffc;
 const REFS_SIZE: usize = 4;
 const SIZE_SIZE: usize = 2;
 const PARTIAL_SIZE: usize = 26;
@@ -84,6 +81,7 @@ const INDEX_SIZE: usize = 8;
 
 const TOMBSTONE: &[u8] = &[0xff, 0xff];
 const MULTIPART: &[u8] = &[0xff, 0xfe];
+const MULTIHEAD: &[u8] = &[0xff, 0xfd];
 // When a rc reach locked ref, it is locked in db.
 const LOCKED_REF: u32 = u32::MAX;
 
@@ -222,6 +220,12 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	}
 	fn write_multipart(&mut self) {
 		self.write_slice(&MULTIPART);
+	}
+	fn is_multihead(&self) -> bool {
+		&self.1.as_ref()[0..SIZE_SIZE] == MULTIHEAD
+	}
+	fn write_multihead(&mut self) {
+		self.write_slice(&MULTIHEAD);
 	}
 
 	fn read_size(&mut self) -> (u16, bool) {
@@ -421,7 +425,7 @@ impl ValueTable {
 				return Ok((0, Default::default(), false));
 			}
 
-			let (entry_end, next) = if buf.is_multipart() {
+			let (entry_end, next) = if buf.is_multipart() || buf.is_multihead() {
 				buf.skip_size();
 				let next = buf.read_next();
 				(entry_size, next)
@@ -434,7 +438,7 @@ impl ValueTable {
 			if part == 0 {
 				if self.ref_counted {
 					rc = buf.read_rc();
-				} 
+				}
 				let pks = buf.read_partial();
 				pk.copy_from_slice(&pks);
 				if key.map_or(false, |k| partial_key(k) != pk) {
@@ -470,7 +474,7 @@ impl ValueTable {
 		Ok(None)
 	}
 
-	pub fn get_rc(&self, index: u64, log: &impl LogQuery) -> Result<Option<(Value, u32, [u8; PARTIAL_SIZE], bool)>> {
+	pub fn get_with_meta(&self, index: u64, log: &impl LogQuery) -> Result<Option<(Value, u32, [u8; PARTIAL_SIZE], bool)>> {
 		let mut result = Vec::new();
 		let (rc, pkey, compressed) = self.for_parts(None, index, log, |buf| result.extend_from_slice(buf))?;
 		if rc > 0 {
@@ -509,7 +513,7 @@ impl ValueTable {
 			return Ok(None);
 		}
 		buf.skip_size();
-		if buf.is_multipart() {
+		if buf.is_multipart() || buf.is_multihead() {
 			buf.skip_next();
 		}
 		if self.ref_counted {
@@ -535,7 +539,7 @@ impl ValueTable {
 		if !log.value(self.id, index, buf.as_mut()) {
 			self.read_at(buf.as_mut(), index * self.entry_size as u64)?;
 		}
-		if buf.is_multipart() {
+		if buf.is_multipart() || buf.is_multihead() {
 			buf.skip_size();
 			let next = buf.read_next();
 			return Ok(Some(next));
@@ -580,10 +584,6 @@ impl ValueTable {
 			None => (self.next_free(log)?, false)
 		};
 		loop {
-			if start == 0 {
-				start = index;
-			}
-
 			let mut next_index = 0;
 			if follow {
 				// check existing link
@@ -609,7 +609,11 @@ impl ValueTable {
 				if !follow {
 					next_index = self.next_free(log)?
 				}
-				buf.write_multipart();
+				if start == 0 {
+					buf.write_multihead();
+				} else {
+					buf.write_multipart();
+				}
 				buf.write_next(next_index);
 				free_space - INDEX_SIZE
 			} else {
@@ -629,6 +633,9 @@ impl ValueTable {
 			offset += value_len - written;
 			log.insert_value(self.id, index, buf[0..buf.offset()].to_vec());
 			remainder -= value_len;
+			if start == 0 {
+				start = index;
+			}
 			index = next_index;
 			if remainder == 0 {
 				if index != 0 {
@@ -720,7 +727,7 @@ impl ValueTable {
 			return Ok(false);
 		}
 
-		let size = if buf.is_multipart() {
+		let size = if buf.is_multipart() || buf.is_multihead() {
 			buf.skip_size();
 			buf.skip_next();
 			self.entry_size as usize
@@ -773,7 +780,7 @@ impl ValueTable {
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
 			self.write_at(&buf[0..SIZE_SIZE + INDEX_SIZE], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted tombstone in slot {}", self.id, index);
-		} else if buf.is_multipart() {
+		} else if buf.is_multipart() || buf.is_multihead() {
 				let entry_size = self.entry_size as usize;
 				log.read(&mut buf[SIZE_SIZE..entry_size])?;
 				self.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
@@ -800,7 +807,7 @@ impl ValueTable {
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
 			log::trace!(target: "parity-db", "{}: Validated tombstone in slot {}", self.id, index);
 		}
-		else if buf.is_multipart() {
+		else if buf.is_multipart() || buf.is_multihead() {
 			let entry_size = self.entry_size as usize;
 			log.read(&mut buf[SIZE_SIZE..entry_size])?;
 			log::trace!(target: "parity-db", "{}: Validated multipart in slot {}", self.id, index);
