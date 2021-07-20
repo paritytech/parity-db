@@ -24,6 +24,7 @@ use crate::compress::CompressionType;
 use rand::Rng;
 
 pub const CURRENT_VERSION: u32 = 4;
+// TODO on last supported 4, remove `ValueTable` `no_compression` field.
 const LAST_SUPPORTED_VERSION: u32 = 3;
 
 /// Database configuration.
