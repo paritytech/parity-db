@@ -701,20 +701,20 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn write_inc_ref(&self, index: u64, log: &mut LogWriter, compressed: bool) -> Result<()> {
-		self.change_ref(index, 1, log, Some(compressed))?;
+	pub fn write_inc_ref(&self, index: u64, log: &mut LogWriter) -> Result<()> {
+		self.change_ref(index, 1, log)?;
 		Ok(())
 	}
 
 	pub fn write_dec_ref(&self, index: u64, log: &mut LogWriter) -> Result<bool> {
-		if self.change_ref(index, -1, log, None)? {
+		if self.change_ref(index, -1, log)? {
 			return Ok(true);
 		}
 		self.write_remove_plan(index, log)?;
 		Ok(false)
 	}
 
-	pub fn change_ref(&self, index: u64, delta: i32, log: &mut LogWriter, compressed: Option<bool>) -> Result<bool> {
+	pub fn change_ref(&self, index: u64, delta: i32, log: &mut LogWriter) -> Result<bool> {
 		let mut buf = FullEntry::new_uninit();
 		let buf = if log.value(self.id, index, buf.as_mut()) {
 			&mut buf
@@ -732,10 +732,7 @@ impl ValueTable {
 			buf.skip_next();
 			self.entry_size as usize
 		} else {
-			let (size, read_compressed) = buf.read_size();
-			debug_assert!(
-				compressed.map(|compressed| compressed == read_compressed).unwrap_or(true)
-			);
+			let (size, _compressed) = buf.read_size();
 			buf.offset() + size as usize
 		};
 
@@ -1145,7 +1142,7 @@ mod test {
 
 			write_ops(&table, &log, |writer| {
 				table.write_insert_plan(&key, &val, writer, compressed).unwrap();
-				table.write_inc_ref(1, writer, compressed).unwrap();
+				table.write_inc_ref(1, writer).unwrap();
 			});
 			assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some((val.clone(), compressed)));
 			write_ops(&table, &log, |writer| {
@@ -1171,7 +1168,7 @@ mod test {
 		let compressed = false;
 		write_ops(&table, &log, |writer| {
 			table.write_insert_plan(&key, &val, writer, compressed).unwrap();
-			table.write_inc_ref(1, writer, compressed).unwrap();
+			table.write_inc_ref(1, writer).unwrap();
 		});
 		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some((val.clone(), compressed)));
 		write_ops(&table, &log, |writer| {

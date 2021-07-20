@@ -324,14 +324,23 @@ impl Column {
 		let reindex = self.reindex.upgradable_read();
 		let existing = Self::search_all_indexes(key, &*tables, &*reindex, log)?;
 		if let &Some(ref val) = value {
-			let (cval, target_tier) = self.compress(&key, &val, &*tables);
-			let (cval, compressed) = cval.as_ref()
-				.map(|cval| (cval.as_slice(), true))
-				.unwrap_or((val.as_slice(), false));
-
 			if let Some((table, sub_index, existing_tier, existing_address)) = existing {
 				let existing_tier = existing_tier as usize;
-				if self.collect_stats && !self.ref_counted {
+				if self.ref_counted {
+					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.index.id, hex(key));
+					tables.value[existing_tier].write_inc_ref(existing_address.offset(), log)?;
+					return Ok(PlanOutcome::Written);
+				}
+				if self.preimage {
+					// Replace is not supported
+					return Ok(PlanOutcome::Skipped);
+				}
+				let (cval, target_tier) = self.compress(&key, &val, &*tables);
+				let (cval, compressed) = cval.as_ref()
+					.map(|cval| (cval.as_slice(), true))
+					.unwrap_or((val.as_slice(), false));
+
+				if self.collect_stats {
 					let (cur_size, compressed) = tables.value[existing_tier].size(&key, existing_address.offset(), log)?
 						.unwrap_or((0, false));
 					if compressed {
@@ -344,15 +353,6 @@ impl Column {
 					} else {
 						self.stats.replace_val(cur_size, cur_size, val.len() as u32, cval.len() as u32);
 					}
-				}
-				if self.ref_counted {
-					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.index.id, hex(key));
-					tables.value[existing_tier].write_inc_ref(existing_address.offset(), log, compressed)?;
-					return Ok(PlanOutcome::Written);
-				}
-				if self.preimage {
-					// Replace is not supported
-					return Ok(PlanOutcome::Skipped);
 				}
 				if existing_tier == target_tier {
 					log::trace!(target: "parity-db", "{}: Replacing {}", tables.index.id, hex(key));
@@ -369,6 +369,11 @@ impl Column {
 				}
 			} else {
 				log::trace!(target: "parity-db", "{}: Inserting new index {}", tables.index.id, hex(key));
+				let (cval, target_tier) = self.compress(&key, &val, &*tables);
+				let (cval, compressed) = cval.as_ref()
+					.map(|cval| (cval.as_slice(), true))
+					.unwrap_or((val.as_slice(), false));
+
 				let offset = tables.value[target_tier].write_insert_plan(key, &cval, log, compressed)?;
 				let address = Address::new(offset, target_tier as u8);
 				match tables.index.write_insert_plan(key, address, None, log)? {
@@ -600,7 +605,7 @@ impl Column {
 					}
 					source_index += 1;
 				}
-				log::debug!(target: "parity-db", "{}: End reindex batch {} ({})", tables.index.id, source_index, plan.len());
+				log::trace!(target: "parity-db", "{}: End reindex batch {} ({})", tables.index.id, source_index, plan.len());
 				reindex.progress.store(source_index, Ordering::Relaxed);
 				if source_index == source.id.total_chunks() {
 					log::info!(target: "parity-db", "Completed reindex into {}", tables.index.id);
