@@ -33,6 +33,6 @@ debug = true
 [workspace]
 members = [
 	".",
-	"bench/core",
-	"bench/bin",
+	"bench",
+	"migrate",
 ]

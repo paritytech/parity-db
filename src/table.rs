@@ -22,23 +22,20 @@
 // FILLED - highest index filled with live data
 //
 // Complete entry:
-// [SIZE: 2][REFS: 4][KEY: 26][VALUE: SIZE - 30]
-// SIZE: 15-bit value size. Sizes up to 0x7ffd are allowed.
+// [SIZE: 2][REFS: 4][KEY: 26][VALUE]
+// SIZE: 15-bit value size. Sizes up to 0x7ffc are allowed.
 // This includes size of REFS and KEY.
 // The first bit is reserved to indicate if compression is applied.
-// REF: 32-bit reference counter.
-// If collection is not ref counted, a single bit is used to indicate
-// if compression is needed.
-// this is removed or replaced by one byte for applied compression when need.
+// REF: 32-bit reference counter (optional).
 // KEY: lower 26 bytes of the key.
-// VALUE: SIZE-30  payload bytes.
+// VALUE: payload bytes.
 //
 // Partial entry (first part):
-// [MULTIPART: 2][NEXT: 8][REFS: 4][KEY: 26][VALUE]
-// MULTIPART - Split entry marker. 0xfffe.
+// [MULTIHEAD: 2][NEXT: 8][REFS: 4][KEY: 26][VALUE]
+// MULTIHEAD - Split entry head marker. 0xfffd.
 // NEXT - 64-bit index of the entry that holds the next part.
 // take all available space in this entry.
-// REF: 32-bit reference counter.
+// REF: 32-bit reference counter (optional).
 // KEY: lower 26 bytes of the key.
 // VALUE: The rest of the entry is filled with payload bytes.
 //
@@ -76,7 +73,7 @@ pub const KEY_LEN: usize = 32;
 pub const SIZE_TIERS: usize = 16;
 pub const SIZE_TIERS_BITS: u8 = 4;
 pub const COMPRESSED_MASK: u16 = 0x80_00;
-const MAX_ENTRY_SIZE: usize = 0xfffd;
+const MAX_ENTRY_SIZE: usize = 0xfffc;
 const REFS_SIZE: usize = 4;
 const SIZE_SIZE: usize = 2;
 const PARTIAL_SIZE: usize = 26;
@@ -84,6 +81,7 @@ const INDEX_SIZE: usize = 8;
 
 const TOMBSTONE: &[u8] = &[0xff, 0xff];
 const MULTIPART: &[u8] = &[0xff, 0xfe];
+const MULTIHEAD: &[u8] = &[0xff, 0xfd];
 // When a rc reach locked ref, it is locked in db.
 const LOCKED_REF: u32 = u32::MAX;
 
@@ -116,6 +114,10 @@ impl TableId {
 	}
 
 	pub fn file_name(&self) -> String {
+		format!("table_{:02}_{:02}", self.col(), self.size_tier())
+	}
+
+	pub fn legacy_file_name(&self) -> String {
 		format!("table_{:02}_{}", self.col(), self.size_tier())
 	}
 
@@ -126,7 +128,7 @@ impl TableId {
 
 impl std::fmt::Display for TableId {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "table {:02}_{}", self.col(), self.size_tier())
+		write!(f, "table {:02}_{:02}", self.col(), self.size_tier())
 	}
 }
 
@@ -219,6 +221,12 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	fn write_multipart(&mut self) {
 		self.write_slice(&MULTIPART);
 	}
+	fn is_multihead(&self) -> bool {
+		&self.1.as_ref()[0..SIZE_SIZE] == MULTIHEAD
+	}
+	fn write_multihead(&mut self) {
+		self.write_slice(&MULTIHEAD);
+	}
 
 	fn read_size(&mut self) -> (u16, bool) {
 		let size = u16::from_le_bytes(self.read_slice(SIZE_SIZE).try_into().unwrap());
@@ -296,17 +304,25 @@ impl ValueTable {
 			Some(s) => (false, s),
 			None => (true, 4096),
 		};
-		assert!(entry_size >= 64);
+		assert!(entry_size >= 32);
 		assert!(entry_size <= MAX_ENTRY_SIZE as u16);
-		// TODO: posix_fadvise
-		let mut path: std::path::PathBuf = path.into();
-		path.push(id.file_name());
 
-		let mut file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?;
+		let mut path: std::path::PathBuf = path.into();
+		// Check for old file name format
+		path.push(id.legacy_file_name());
+		let mut file = if std::fs::metadata(&path).is_ok() {
+			std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?
+		} else {
+			path.pop();
+			path.push(id.file_name());
+			std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?
+		};
+
+		// TODO: posix_fadvise
 		disable_read_ahead(&file)?;
 		let mut file_len = file.metadata()?.len();
 		if file_len == 0 {
-			// Prealocate a single entry that contains metadata
+			// Preallocate a single entry that contains metadata
 			file.set_len(entry_size as u64)?;
 			file_len = entry_size as u64;
 		}
@@ -374,18 +390,20 @@ impl ValueTable {
 		Ok(())
 	}
 
-	// Return if there was content, and if it was compressed.
+	// Return ref counter, partial key and if it was compressed.
+	#[inline(always)]
 	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8])>(
 		&self,
-		key: &Key,
+		key: Option<&Key>,
 		mut index: u64,
 		log: &Q,
 		mut f: F,
-	) -> Result<(bool, bool)> {
+	) -> Result<(u32, [u8; PARTIAL_SIZE], bool)> {
 		let mut buf = FullEntry::new_uninit();
-
 		let mut part = 0;
 		let mut compressed = false;
+		let mut rc = 1;
+		let mut pk = [0u8; PARTIAL_SIZE];
 		let entry_size = self.entry_size as usize;
 		loop {
 			let buf = if log.value(self.id, index, buf.as_mut()) {
@@ -404,10 +422,10 @@ impl ValueTable {
 			buf.set_offset(0);
 
 			if buf.is_tombstone() {
-				return Ok((false, false));
+				return Ok((0, Default::default(), false));
 			}
 
-			let (entry_end, next) = if buf.is_multipart() {
+			let (entry_end, next) = if buf.is_multipart() || buf.is_multihead() {
 				buf.skip_size();
 				let next = buf.read_next();
 				(entry_size, next)
@@ -419,19 +437,20 @@ impl ValueTable {
 
 			if part == 0 {
 				if self.ref_counted {
-					buf.skip_rc();
+					rc = buf.read_rc();
 				}
-				let key_partial = buf.read_partial();
-				if partial_key(key) != key_partial {
+				let pks = buf.read_partial();
+				pk.copy_from_slice(&pks);
+				if key.map_or(false, |k| partial_key(k) != pk) {
 					log::debug!(
 						target: "parity-db",
-						"{}: Key mismatch at {}. Expected {}, got {}",
+						"{}: Key mismatch at {}. Expected {:?}, got {}",
 						self.id,
 						index,
-						hex(partial_key(key)),
-						hex(key_partial),
+						key.map(|k| hex(partial_key(k))),
+						hex(&pk),
 					);
-					return Ok((false, false));
+					return Ok((0, Default::default(), false));
 				}
 				f(buf.remaining_to(entry_end))
 			} else {
@@ -443,22 +462,32 @@ impl ValueTable {
 			part += 1;
 			index = next;
 		}
-		Ok((true, compressed))
+		Ok((rc, pk, compressed))
 	}
 
 	pub fn get(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool)>> {
 		let mut result = Vec::new();
-		let (success, compressed) = self.for_parts(key, index, log, |buf| result.extend_from_slice(buf))?;
-		if success {
+		let (rc, _, compressed) = self.for_parts(Some(key), index, log, |buf| result.extend_from_slice(buf))?;
+		if rc > 0 {
 			return Ok(Some((result, compressed)));
 		}
 		Ok(None)
 	}
 
+	pub fn get_with_meta(&self, index: u64, log: &impl LogQuery) -> Result<Option<(Value, u32, [u8; PARTIAL_SIZE], bool)>> {
+		let mut result = Vec::new();
+		let (rc, pkey, compressed) = self.for_parts(None, index, log, |buf| result.extend_from_slice(buf))?;
+		if rc > 0 {
+			return Ok(Some((result, rc, pkey, compressed)));
+		}
+		Ok(None)
+	}
+
+
 	pub fn size(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<(u32, bool)>> {
 		let mut result = 0;
-		let (success, compressed) = self.for_parts(key, index, log, |buf| result += buf.len() as u32)? ;
-		if success {
+		let (rc, _, compressed) = self.for_parts(Some(key), index, log, |buf| result += buf.len() as u32)? ;
+		if rc > 0 {
 			return Ok(Some((result, compressed)));
 		}
 		Ok(None)
@@ -484,7 +513,7 @@ impl ValueTable {
 			return Ok(None);
 		}
 		buf.skip_size();
-		if buf.is_multipart() {
+		if buf.is_multipart() || buf.is_multihead() {
 			buf.skip_next();
 		}
 		if self.ref_counted {
@@ -510,7 +539,7 @@ impl ValueTable {
 		if !log.value(self.id, index, buf.as_mut()) {
 			self.read_at(buf.as_mut(), index * self.entry_size as u64)?;
 		}
-		if buf.is_multipart() {
+		if buf.is_multipart() || buf.is_multihead() {
 			buf.skip_size();
 			let next = buf.read_next();
 			return Ok(Some(next));
@@ -555,10 +584,6 @@ impl ValueTable {
 			None => (self.next_free(log)?, false)
 		};
 		loop {
-			if start == 0 {
-				start = index;
-			}
-
 			let mut next_index = 0;
 			if follow {
 				// check existing link
@@ -584,7 +609,11 @@ impl ValueTable {
 				if !follow {
 					next_index = self.next_free(log)?
 				}
-				buf.write_multipart();
+				if start == 0 {
+					buf.write_multihead();
+				} else {
+					buf.write_multipart();
+				}
 				buf.write_next(next_index);
 				free_space - INDEX_SIZE
 			} else {
@@ -604,6 +633,9 @@ impl ValueTable {
 			offset += value_len - written;
 			log.insert_value(self.id, index, buf[0..buf.offset()].to_vec());
 			remainder -= value_len;
+			if start == 0 {
+				start = index;
+			}
 			index = next_index;
 			if remainder == 0 {
 				if index != 0 {
@@ -669,20 +701,20 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn write_inc_ref(&self, index: u64, log: &mut LogWriter, compressed: bool) -> Result<()> {
-		self.change_ref(index, 1, log, Some(compressed))?;
+	pub fn write_inc_ref(&self, index: u64, log: &mut LogWriter) -> Result<()> {
+		self.change_ref(index, 1, log)?;
 		Ok(())
 	}
 
 	pub fn write_dec_ref(&self, index: u64, log: &mut LogWriter) -> Result<bool> {
-		if self.change_ref(index, -1, log, None)? {
+		if self.change_ref(index, -1, log)? {
 			return Ok(true);
 		}
 		self.write_remove_plan(index, log)?;
 		Ok(false)
 	}
 
-	pub fn change_ref(&self, index: u64, delta: i32, log: &mut LogWriter, compressed: Option<bool>) -> Result<bool> {
+	pub fn change_ref(&self, index: u64, delta: i32, log: &mut LogWriter) -> Result<bool> {
 		let mut buf = FullEntry::new_uninit();
 		let buf = if log.value(self.id, index, buf.as_mut()) {
 			&mut buf
@@ -695,15 +727,12 @@ impl ValueTable {
 			return Ok(false);
 		}
 
-		let size = if buf.is_multipart() {
+		let size = if buf.is_multipart() || buf.is_multihead() {
 			buf.skip_size();
 			buf.skip_next();
 			self.entry_size as usize
 		} else {
-			let (size, read_compressed) = buf.read_size();
-			debug_assert!(
-				compressed.map(|compressed| compressed == read_compressed).unwrap_or(true)
-			);
+			let (size, _compressed) = buf.read_size();
 			buf.offset() + size as usize
 		};
 
@@ -748,7 +777,7 @@ impl ValueTable {
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
 			self.write_at(&buf[0..SIZE_SIZE + INDEX_SIZE], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted tombstone in slot {}", self.id, index);
-		} else if buf.is_multipart() {
+		} else if buf.is_multipart() || buf.is_multihead() {
 				let entry_size = self.entry_size as usize;
 				log.read(&mut buf[SIZE_SIZE..entry_size])?;
 				self.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
@@ -775,7 +804,7 @@ impl ValueTable {
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
 			log::trace!(target: "parity-db", "{}: Validated tombstone in slot {}", self.id, index);
 		}
-		else if buf.is_multipart() {
+		else if buf.is_multipart() || buf.is_multihead() {
 			let entry_size = self.entry_size as usize;
 			log.read(&mut buf[SIZE_SIZE..entry_size])?;
 			log::trace!(target: "parity-db", "{}: Validated multipart in slot {}", self.id, index);
@@ -827,6 +856,20 @@ impl ValueTable {
 		} else {
 			0
 		}
+	}
+
+	pub fn iter_while(&self, log: &impl LogQuery, mut f: impl FnMut (u64, u32, Vec<u8>, bool) -> bool) -> Result<()> {
+		let filled = self.filled.load(Ordering::Relaxed);
+		for index in 1 .. filled {
+			let mut result = Vec::new();
+			let (rc, _, compressed) = self.for_parts(None, index, log, |buf| result.extend_from_slice(buf))?;
+			if rc > 0 {
+				if !f(index, rc, result, compressed) {
+					break;
+				}
+			}
+		}
+		Ok(())
 	}
 }
 
@@ -1099,7 +1142,7 @@ mod test {
 
 			write_ops(&table, &log, |writer| {
 				table.write_insert_plan(&key, &val, writer, compressed).unwrap();
-				table.write_inc_ref(1, writer, compressed).unwrap();
+				table.write_inc_ref(1, writer).unwrap();
 			});
 			assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some((val.clone(), compressed)));
 			write_ops(&table, &log, |writer| {
@@ -1125,7 +1168,7 @@ mod test {
 		let compressed = false;
 		write_ops(&table, &log, |writer| {
 			table.write_insert_plan(&key, &val, writer, compressed).unwrap();
-			table.write_inc_ref(1, writer, compressed).unwrap();
+			table.write_inc_ref(1, writer).unwrap();
 		});
 		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some((val.clone(), compressed)));
 		write_ops(&table, &log, |writer| {

@@ -15,13 +15,16 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::io::Write;
+use std::collections::HashMap;
+use std::convert::TryInto;
+use std::path::{PathBuf, Path};
 use crate::error::{Error, Result};
 use crate::column::Salt;
 use crate::compress::CompressionType;
 use rand::Rng;
 
-const CURRENT_VERSION: u32 = 3;
-const LAST_SUPPORTED_VERSION: u32 = 2;
+const CURRENT_VERSION: u32 = 4;
+const LAST_SUPPORTED_VERSION: u32 = 3;
 
 /// Database configuration.
 #[derive(Clone, Debug)]
@@ -30,7 +33,7 @@ pub struct Options {
 	pub path: std::path::PathBuf,
 	/// Column settings
 	pub columns: Vec<ColumnOptions>,
-	/// fsync WAL to disk before commiting any changes. Provides extra consistency
+	/// fsync WAL to disk before committing any changes. Provides extra consistency
 	/// guarantees. On by default.
 	pub sync_wal: bool,
 	/// fsync/msync data to disk before removing logs. Provides crash resistance guarantee.
@@ -38,6 +41,9 @@ pub struct Options {
 	pub sync_data: bool,
 	/// Collect database statistics. May have effect on performance.
 	pub stats: bool,
+	/// Override salt value. If `None` is specified salt is loaded from metadata
+	/// or randomly generated when creating a new database.
+	pub salt: Option<Salt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,7 +62,7 @@ pub struct ColumnOptions {
 	pub ref_counted: bool,
 	/// Compression to use for this column.
 	pub compression: CompressionType,
-	/// Minimal value size treshold to attempt compressing a value.
+	/// Minimal value size threshold to attempt compressing a value.
 	pub compression_treshold: u32,
 }
 
@@ -85,6 +91,34 @@ impl ColumnOptions {
 		}
 		true
 	}
+
+	fn from_string(s: &str) -> Option<Self> {
+		let mut split = s.split("sizes: ");
+		let vals = split.next()?;
+		let sizes = split.next()?;
+		let sizes = &sizes[1..sizes.len() - 1];
+		let sizes: Vec<u16> = sizes.split(",").filter_map(|v| v.trim().parse().ok()).collect();
+		let sizes: [u16; 15] = sizes.try_into().ok()?;
+
+		let vals: HashMap<&str, &str> = vals.split(", ").filter_map(|s| {
+			let mut pair = s.split(": ");
+			Some((pair.next()?, pair.next()?))
+		}).collect();
+
+		let preimage = vals.get("preimage")?.parse().ok()?;
+		let uniform = vals.get("uniform")?.parse().ok()?;
+		let ref_counted = vals.get("refc")?.parse().ok()?;
+		let compression: u8 = vals.get("compression").and_then(|c| c.parse().ok()).unwrap_or(0);
+
+		Some(ColumnOptions {
+			preimage,
+			uniform,
+			ref_counted,
+			compression: compression.into(),
+			sizes,
+			compression_treshold: ColumnOptions::default().compression_treshold,
+		})
+	}
 }
 
 impl Default for ColumnOptions {
@@ -107,6 +141,7 @@ impl Options {
 			sync_wal: true,
 			sync_data: true,
 			stats: true,
+			salt: None,
 			columns: (0..num_columns).map(|_| Default::default()).collect(),
 		}
 	}
@@ -122,18 +157,42 @@ impl Options {
 	}
 
 	pub fn load_and_validate_metadata(&self) -> Result<Option<Salt>> {
+		let mut path: PathBuf = self.path.clone();
+		path.push("metadata");
+		let (cols, mut salt) = Self::load_metadata(&path)?;
+
+		if let Some(mut cols) = cols {
+			if cols.len() != self.columns.len() {
+				return Err(Error::InvalidConfiguration("Column config mismatch".into()));
+			}
+
+			for c in 0..cols.len() {
+				cols[c].compression_treshold = self.columns[c].compression_treshold;
+				if cols[c] != self.columns[c] {
+					return Err(Error::InvalidConfiguration(format!(
+								"Column config mismatch for column {}. Expected \"{}\", got \"{}\"",
+								c, self.columns[c].as_string(), cols[c].as_string())));
+				}
+			}
+		} else {
+			let s: Salt = self.salt.unwrap_or(rand::thread_rng().gen());
+			self.write_metadata(&path, &s)?;
+			salt = Some(s);
+		}
+		Ok(salt)
+	}
+
+	pub fn load_metadata(path: &Path) -> Result<(Option<Vec<ColumnOptions>>,  Option<Salt>)> {
 		use std::io::BufRead;
 		use std::str::FromStr;
 
-		let mut path = self.path.clone();
-		path.push("metadata");
 		if !path.exists() {
-			let salt: Salt = rand::thread_rng().gen();
-			self.write_metadata(&path, &salt)?;
-			return Ok(Some(salt))
+			return Ok((None, None))
 		}
 		let file = std::io::BufReader::new(std::fs::File::open(path)?);
 		let mut salt = None;
+		let mut columns = Vec::new();
+		let mut force_rc = false;
 		for l in file.lines() {
 			let l = l?;
 			let mut vals = l.split("=");
@@ -145,25 +204,26 @@ impl Options {
 					return Err(Error::InvalidConfiguration(format!(
 						"Unsupported database version {}. Expected {}", version, CURRENT_VERSION)));
 				}
+				if version == 3 {
+					//Treat all tables as ref counted.
+					force_rc = true;
+				}
 			} else if k == "salt" {
 					let salt_slice = hex::decode(v).map_err(|_| Error::Corruption("Bad salt string".into()))?;
 					let mut s = Salt::default();
 					s.copy_from_slice(&salt_slice);
 					salt = Some(s);
 			} else if k.starts_with("col") {
-				let col_index = u8::from_str(&k[3..]).map_err(|_| Error::Corruption("Bad metadata column index".into()))?;
-				if col_index as usize > self.columns.len() {
-					return Err(Error::InvalidConfiguration(format!("Column config mismatch. Bad metadata column index: {}", col_index)));
-				}
-				let column_meta = self.columns[col_index as usize].as_string();
-				if column_meta != v {
-					return Err(Error::InvalidConfiguration(format!(
-						"Column config mismatch for column {}. Expected \"{}\", got \"{}\"",
-						col_index, v, column_meta)));
-				}
+				let col = ColumnOptions::from_string(v).ok_or_else(|| Error::Corruption("Bad column metadata".into()))?;
+				columns.push(col);
 			}
 		}
-		Ok(salt)
+		if force_rc {
+			for mut col in &mut columns {
+				col.ref_counted = true;
+			}
+		}
+		Ok((Some(columns), salt))
 	}
 
 	pub fn is_valid(&self) -> bool {

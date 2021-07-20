@@ -24,7 +24,10 @@ mod display;
 mod options;
 mod stats;
 mod compress;
+mod migration;
 
 pub use db::Db;
 pub use error::{Error, Result};
 pub use options::{ColumnOptions, Options};
+pub use migration::migrate;
+pub use compress::CompressionType;

@@ -14,6 +14,10 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
+#[cfg_attr(any(target_os = "linux", target_os = "macos"),  global_allocator)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
+
 mod sizes;
 mod db;
 
@@ -124,6 +128,22 @@ impl Args {
 			}
 		}
 		args
+	}
+}
+
+struct BenchAdapter(parity_db::Db);
+
+impl Db for BenchAdapter {
+	fn open(path: &std::path::Path) -> Self {
+		BenchAdapter(parity_db::Db::with_columns(path, 1).unwrap())
+	}
+
+	fn get(&self, key: &Key) -> Option<Value> {
+		self.0.get(0, key).unwrap()
+	}
+
+	fn commit<I: IntoIterator<Item=(Key, Option<Value>)>>(&self, tx: I) {
+		self.0.commit(tx.into_iter().map(|(k, v)| (0, k, v))).unwrap()
 	}
 }
 
@@ -278,4 +298,8 @@ pub fn run<D: Db>() {
 		elapsed,
 		queries as f64  / elapsed
 	);
+}
+
+fn main() {
+	run::<BenchAdapter>();
 }

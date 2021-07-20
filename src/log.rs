@@ -368,7 +368,6 @@ struct Reading {
 enum ReadingState {
 	Reading,
 	Idle,
-	Shutdown,
 }
 
 pub struct Log {
@@ -594,12 +593,6 @@ impl Log {
 				self.done_reading_cv.wait(&mut reading_state)
 			}
 
-			if *reading_state == ReadingState::Shutdown {
-				*reading_state = ReadingState::Reading;
-				log::debug!(target: "parity-db", "Flush: Reader shutdown");
-				return Ok((false, false, false));
-			}
-
 			{
 				let mut reading = self.reading.write();
 				if let Some(reading) = reading.take() {
@@ -697,12 +690,6 @@ impl Log {
 
 	pub fn num_dirty_logs(&self) -> usize {
 		self.cleanup_queue.read().len()
-	}
-
-	pub fn shutdown(&self) {
-		let mut reading_state = self.reading_state.lock();
-		*reading_state = ReadingState::Shutdown;
-		self.done_reading_cv.notify_one();
 	}
 
 	pub fn read_next<'a>(&'a self, validate: bool) -> Result<Option<LogReader<'a>>> {

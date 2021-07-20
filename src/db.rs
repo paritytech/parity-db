@@ -215,30 +215,34 @@ impl DbInner {
 		self.columns[col as usize].get_size(&key, log)
 	}
 
-	// Commit is simply adds the the data to the queue and to the overlay and
+	// Commit simply adds the the data to the queue and to the overlay and
 	// exits as early as possible.
 	fn commit<I, K>(&self, tx: I) -> Result<()>
-		where
-			I: IntoIterator<Item=(ColId, K, Option<Value>)>,
-			K: AsRef<[u8]>,
+	where
+		I: IntoIterator<Item=(ColId, K, Option<Value>)>,
+		K: AsRef<[u8]>,
 	{
-		{
-			let bg_err = self.bg_err.lock();
-			if let Some(err) = &*bg_err {
-				return Err(Error::Background(err.clone()));
-			}
-		}
-
 		let commit: Vec<_> = tx.into_iter().map(
 			|(c, k, v)| (c, self.columns[c as usize].hash(k.as_ref()), v)
 		).collect();
 
+		self.commit_raw(commit)
+	}
+
+	fn commit_raw(&self, commit: Vec<(ColId, Key, Option<Value>)>) -> Result<()> {
 		{
 			let mut queue = self.commit_queue.lock();
 			if queue.bytes > MAX_COMMIT_QUEUE_BYTES {
 				log::debug!(target: "parity-db", "Waiting, qb={}", queue.bytes);
 				self.commit_queue_full_cv.wait(&mut queue);
 			}
+			{
+				let bg_err = self.bg_err.lock();
+				if let Some(err) = &*bg_err {
+					return Err(Error::Background(err.clone()));
+				}
+			}
+
 			let mut overlay = self.commit_overlay.write();
 
 			queue.record_id += 1;
@@ -385,7 +389,7 @@ impl DbInner {
 		// Process any pending reindexes
 		for column in self.columns.iter() {
 			let (drop_index, batch) = column.reindex(&self.log)?;
-			if !batch.is_empty() {
+			if !batch.is_empty() || drop_index.is_some() {
 				let mut next_reindex = false;
 				let mut writer = self.log.begin_record();
 				log::debug!(
@@ -628,7 +632,6 @@ impl DbInner {
 
 	fn shutdown(&self) {
 		self.shutdown.store(true, Ordering::SeqCst);
-		self.log.shutdown();
 		self.log_cv.notify_all();
 		self.signal_flush_worker();
 		self.signal_log_worker();
@@ -640,10 +643,10 @@ impl DbInner {
 		log::debug!(target: "parity-db", "Processing leftover commits");
 		// Finish logged records and proceed to log and enact queued commits.
 		while self.enact_logs(false)? {};
-		self.log.flush_one(0)?;
+		self.flush_logs(0)?;
 		while self.process_commits()? {};
 		while self.enact_logs(false)? {};
-		self.log.flush_one(0)?;
+		self.flush_logs(0)?;
 		while self.enact_logs(false)? {};
 		self.clean_all_logs()?;
 		self.log.kill_logs()?;
@@ -670,7 +673,12 @@ impl DbInner {
 				*err = Some(Arc::new(e));
 				self.shutdown();
 			}
+			self.commit_queue_full_cv.notify_one();
 		}
+	}
+
+	fn iter_column_while(&self, c: ColId, f: impl FnMut (u64, Key, u32, Vec<u8>) -> bool) -> Result<()> {
+		self.columns[c as usize].iter_while(&self.log, f)
 	}
 }
 
@@ -738,8 +746,16 @@ impl Db {
 		self.inner.commit(tx)
 	}
 
+	pub(crate) fn commit_raw(&self, commit: Vec<(ColId, Key, Option<Value>)>) -> Result<()> {
+		self.inner.commit_raw(commit)
+	}
+
 	pub fn num_columns(&self) -> u8 {
 		self.inner.columns.len() as u8
+	}
+
+	pub(crate) fn iter_column_while(&self, c: ColId, f: impl FnMut (u64, Key, u32, Vec<u8>) -> bool) -> Result<()> {
+		self.inner.iter_column_while(c, f)
 	}
 
 	fn commit_worker(db: Arc<DbInner>) -> Result<()> {

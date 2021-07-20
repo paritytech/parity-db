@@ -179,7 +179,7 @@ impl ColumnStats {
 		for i in 0 .. HISTOGRAM_BUCKETS {
 			let count = self.value_histogram[i].load(Ordering::Relaxed);
 			let delta = self.compression_delta[i].load(Ordering::Relaxed);
-			if count != 0 {
+			if count != 0 && delta != 0 {
 				writeln!(writer,
 					"    {}-{}: {}",
 					i << HISTOGRAM_BUCKET_BITS,
