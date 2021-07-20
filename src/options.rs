@@ -23,7 +23,7 @@ use crate::column::Salt;
 use crate::compress::CompressionType;
 use rand::Rng;
 
-const CURRENT_VERSION: u32 = 4;
+pub const CURRENT_VERSION: u32 = 4;
 const LAST_SUPPORTED_VERSION: u32 = 3;
 
 /// Database configuration.
@@ -64,6 +64,18 @@ pub struct ColumnOptions {
 	pub compression: CompressionType,
 	/// Minimal value size threshold to attempt compressing a value.
 	pub compression_treshold: u32,
+}
+
+
+/// Database metadata.
+#[derive(Clone, Debug)]
+pub struct Metadata {
+	/// Salt value. `None` only for version <= 3.
+	pub salt: Option<Salt>,
+	/// Database version.
+	pub version: u32,
+	/// Column metadata.
+	pub columns: Vec<ColumnOptions>,
 }
 
 impl ColumnOptions {
@@ -156,58 +168,53 @@ impl Options {
 		Ok(())
 	}
 
-	pub fn load_and_validate_metadata(&self) -> Result<Option<Salt>> {
+	pub fn load_and_validate_metadata(&self) -> Result<Metadata> {
 		let mut path: PathBuf = self.path.clone();
 		path.push("metadata");
-		let (cols, mut salt) = Self::load_metadata(&path)?;
+		let meta = Self::load_metadata(&path)?;
 
-		if let Some(mut cols) = cols {
-			if cols.len() != self.columns.len() {
+		if let Some(meta) = meta {
+			if meta.columns.len() != self.columns.len() {
 				return Err(Error::InvalidConfiguration("Column config mismatch".into()));
 			}
 
-			for c in 0..cols.len() {
-				cols[c].compression_treshold = self.columns[c].compression_treshold;
-				if cols[c] != self.columns[c] {
+			for c in 0..meta.columns.len() {
+				if meta.columns[c] != self.columns[c] {
 					return Err(Error::InvalidConfiguration(format!(
 								"Column config mismatch for column {}. Expected \"{}\", got \"{}\"",
-								c, self.columns[c].as_string(), cols[c].as_string())));
+								c, self.columns[c].as_string(), meta.columns[c].as_string())));
 				}
 			}
+			Ok(meta)
 		} else {
 			let s: Salt = self.salt.unwrap_or(rand::thread_rng().gen());
 			self.write_metadata(&path, &s)?;
-			salt = Some(s);
+			Ok(Metadata {
+				version: CURRENT_VERSION,
+				columns: self.columns.clone(),
+				salt: Some(s),
+			})
 		}
-		Ok(salt)
 	}
 
-	pub fn load_metadata(path: &Path) -> Result<(Option<Vec<ColumnOptions>>,  Option<Salt>)> {
+	pub fn load_metadata(path: &Path) -> Result<Option<Metadata>> {
 		use std::io::BufRead;
 		use std::str::FromStr;
 
 		if !path.exists() {
-			return Ok((None, None))
+			return Ok(None)
 		}
 		let file = std::io::BufReader::new(std::fs::File::open(path)?);
 		let mut salt = None;
 		let mut columns = Vec::new();
-		let mut force_rc = false;
+		let mut version = 0;
 		for l in file.lines() {
 			let l = l?;
 			let mut vals = l.split("=");
 			let k = vals.next().ok_or(Error::Corruption("Bad metadata".into()))?;
 			let v = vals.next().ok_or(Error::Corruption("Bad metadata".into()))?;
 			if k == "version" {
-				let version = u32::from_str(v).map_err(|_| Error::Corruption("Bad version string".into()))?;
-				if version < LAST_SUPPORTED_VERSION  {
-					return Err(Error::InvalidConfiguration(format!(
-						"Unsupported database version {}. Expected {}", version, CURRENT_VERSION)));
-				}
-				if version == 3 {
-					//Treat all tables as ref counted.
-					force_rc = true;
-				}
+				version = u32::from_str(v).map_err(|_| Error::Corruption("Bad version string".into()))?;
 			} else if k == "salt" {
 					let salt_slice = hex::decode(v).map_err(|_| Error::Corruption("Bad salt string".into()))?;
 					let mut s = Salt::default();
@@ -218,12 +225,21 @@ impl Options {
 				columns.push(col);
 			}
 		}
-		if force_rc {
+		if version < LAST_SUPPORTED_VERSION  {
+			return Err(Error::InvalidConfiguration(format!(
+						"Unsupported database version {}. Expected {}", version, CURRENT_VERSION)));
+		}
+		if version == 3 {
+			//Treat all tables as ref counted.
 			for mut col in &mut columns {
 				col.ref_counted = true;
 			}
 		}
-		Ok((Some(columns), salt))
+		Ok(Some(Metadata {
+			version,
+			columns,
+			salt,
+		}))
 	}
 
 	pub fn is_valid(&self) -> bool {

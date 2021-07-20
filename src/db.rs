@@ -41,7 +41,7 @@ use crate::{
 	column::{ColId, Column},
 	log::{Log, LogAction},
 	index::PlanOutcome,
-	options::Options,
+	options::{Metadata, Options},
 };
 
 // These are in memory, so we use usize
@@ -96,6 +96,7 @@ impl std::hash::Hasher for IdentityKeyHash {
 struct DbInner {
 	columns: Vec<Column>,
 	options: Options,
+	metadata: Metadata,
 	shutdown: AtomicBool,
 	log: Log,
 	commit_queue: Mutex<CommitQueue>,
@@ -114,7 +115,6 @@ struct DbInner {
 	cleanup_work: Mutex<bool>,
 	last_enacted: AtomicU64,
 	next_reindex: AtomicU64,
-	collect_stats: bool,
 	bg_err: Mutex<Option<Arc<Error>>>,
 	_lock_file: std::fs::File,
 }
@@ -127,21 +127,22 @@ impl DbInner {
 		let lock_file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(lock_path.as_path())?;
 		lock_file.try_lock_exclusive().map_err(|e| Error::Locked(e))?;
 
-		let salt = options.load_and_validate_metadata()?;
-		let mut columns = Vec::with_capacity(options.columns.len());
-		let mut commit_overlay = Vec::with_capacity(options.columns.len());
+		let metadata = options.load_and_validate_metadata()?;
+		let mut columns = Vec::with_capacity(metadata.columns.len());
+		let mut commit_overlay = Vec::with_capacity(metadata.columns.len());
 		let log = Log::open(&options)?;
 		let last_enacted = log.replay_record_id().unwrap_or(2) - 1;
-		for c in 0 .. options.columns.len() {
-			columns.push(Column::open(c as ColId, &options, salt.clone())?);
+		for c in 0 .. metadata.columns.len() {
+			columns.push(Column::open(c as ColId, &options, &metadata)?);
 			commit_overlay.push(
 				HashMap::with_hasher(std::hash::BuildHasherDefault::<IdentityKeyHash>::default())
 			);
 		}
-		log::debug!(target: "parity-db", "Opened db {:?}, salt={:?}", options, salt);
+		log::debug!(target: "parity-db", "Opened db {:?}, metadata={:?}", options, metadata);
 		Ok(DbInner {
 			columns,
 			options: options.clone(),
+			metadata,
 			shutdown: std::sync::atomic::AtomicBool::new(false),
 			log,
 			commit_queue: Mutex::new(Default::default()),
@@ -159,7 +160,6 @@ impl DbInner {
 			cleanup_work: Mutex::new(false),
 			next_reindex: AtomicU64::new(1),
 			last_enacted: AtomicU64::new(last_enacted),
-			collect_stats: options.stats,
 			bg_err: Mutex::new(None),
 			_lock_file: lock_file,
 		})
@@ -253,7 +253,7 @@ impl DbInner {
 				bytes += k.len();
 				bytes += v.as_ref().map_or(0, |v|v.len());
 				// Don't add removed ref-counted values to overlay.
-				if !self.options.columns[*c as usize].ref_counted || v.is_some() {
+				if !self.metadata.columns[*c as usize].ref_counted || v.is_some() {
 					overlay[*c as usize].insert(*k, (record_id, v.clone()));
 				}
 			}
@@ -650,7 +650,7 @@ impl DbInner {
 		while self.enact_logs(false)? {};
 		self.clean_all_logs()?;
 		self.log.kill_logs()?;
-		if self.collect_stats {
+		if self.options.stats {
 			let mut path = self.options.path.clone();
 			path.push("stats.txt");
 			match std::fs::File::create(path) {

@@ -143,6 +143,7 @@ pub struct ValueTable {
 	dirty: AtomicBool,
 	multipart: bool,
 	ref_counted: bool,
+	no_compression: bool, // This legacy table can't be compressed. TODO: remove this
 }
 
 #[cfg(target_os = "macos")]
@@ -228,10 +229,14 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 		self.write_slice(&MULTIHEAD);
 	}
 
-	fn read_size(&mut self) -> (u16, bool) {
+	fn read_size(&mut self, no_compression: bool) -> (u16, bool) {
 		let size = u16::from_le_bytes(self.read_slice(SIZE_SIZE).try_into().unwrap());
-		let compressed = (size & COMPRESSED_MASK) > 0;
-		(size & !COMPRESSED_MASK, compressed)
+		if !no_compression {
+			let compressed = (size & COMPRESSED_MASK) > 0;
+			(size & !COMPRESSED_MASK, compressed)
+		} else {
+			(size, false)
+		}
 	}
 	fn skip_size(&mut self) {
 		self.0 += SIZE_SIZE;
@@ -299,7 +304,13 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> std::ops::IndexMut<std::ops::Range<usize>> fo
 }
 
 impl ValueTable {
-	pub fn open(path: &std::path::Path, id: TableId, entry_size: Option<u16>, options: &Options) -> Result<ValueTable> {
+	pub fn open(
+		path: &std::path::Path,
+		id: TableId,
+		entry_size: Option<u16>,
+		options: &Options,
+		db_version: u32,
+	) -> Result<ValueTable> {
 		let (multipart, entry_size) = match entry_size {
 			Some(s) => (false, s),
 			None => (true, 4096),
@@ -347,6 +358,7 @@ impl ValueTable {
 			dirty: AtomicBool::new(false),
 			multipart,
 			ref_counted: options.ref_counted,
+			no_compression: db_version <= 3,
 		})
 	}
 
@@ -430,7 +442,7 @@ impl ValueTable {
 				let next = buf.read_next();
 				(entry_size, next)
 			} else {
-				let (size, read_compressed) = buf.read_size();
+				let (size, read_compressed) = buf.read_size(self.no_compression);
 				compressed = read_compressed;
 				(buf.offset() + size as usize, 0)
 			};
@@ -732,7 +744,7 @@ impl ValueTable {
 			buf.skip_next();
 			self.entry_size as usize
 		} else {
-			let (size, _compressed) = buf.read_size();
+			let (size, _compressed) = buf.read_size(self.no_compression);
 			buf.offset() + size as usize
 		};
 
@@ -783,7 +795,7 @@ impl ValueTable {
 				self.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
 				log::trace!(target: "parity-db", "{}: Enacted multipart in slot {}", self.id, index);
 		} else {
-			let (len, _compressed) = buf.read_size();
+			let (len, _compressed) = buf.read_size(self.no_compression);
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + len as usize])?;
 			self.write_at(&buf[0..(SIZE_SIZE + len as usize)], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted {}: {}, {} bytes", self.id, index, hex(&buf.1[6..32]), len);
@@ -810,7 +822,7 @@ impl ValueTable {
 			log::trace!(target: "parity-db", "{}: Validated multipart in slot {}", self.id, index);
 		} else {
 			// TODO: check len
-			let (len, _compressed) = buf.read_size();
+			let (len, _compressed) = buf.read_size(self.no_compression);
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + len as usize])?;
 			log::trace!(target: "parity-db", "{}: Validated {}: {}, {} bytes", self.id, index, hex(&buf[SIZE_SIZE..32]), len);
 		}
@@ -877,7 +889,7 @@ impl ValueTable {
 mod test {
 	const ENTRY_SIZE: u16 = 64;
 	use super::{ValueTable, TableId, Key, Value};
-	use crate::{log::{Log, LogWriter, LogAction}, options::{Options, ColumnOptions}};
+	use crate::{log::{Log, LogWriter, LogAction}, options::{Options, ColumnOptions, CURRENT_VERSION}};
 
 	struct TempDir(std::path::PathBuf);
 
@@ -898,7 +910,7 @@ mod test {
 
 		fn table(&self, size: Option<u16>, options: &ColumnOptions) -> ValueTable {
 			let id = TableId::new(0, 0);
-			ValueTable::open(&self.0, id, size, options).unwrap()
+			ValueTable::open(&self.0, id, size, options, CURRENT_VERSION).unwrap()
 		}
 
 		fn log(&self) -> Log {

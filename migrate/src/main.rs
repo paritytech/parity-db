@@ -75,10 +75,11 @@ pub fn run() -> Result<(), String>{
 	let dest_meta = std::path::Path::new(&args.dest_meta);
 	let dest_path = std::path::Path::new(&args.dest);
 
-	let (dest_columns, _) = Options::load_metadata(dest_meta)
-		.map_err(|e| format!("Error loading dest metadata: {:?}", e))?;
+	let dest_meta = Options::load_metadata(dest_meta)
+		.map_err(|e| format!("Error loading dest metadata: {:?}", e))?
+		.ok_or_else(|| format!("Error opening dest metadata file"))?;
 
-	let dest_columns = dest_columns.unwrap();
+	let dest_columns = dest_meta.columns;
 
 	if args.clear_dest && std::fs::metadata(dest_path).is_ok() {
 		std::fs::remove_dir_all(dest_path).map_err(|e| format!("Error removing dest dir: {:?}", e))?;
