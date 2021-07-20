@@ -390,7 +390,7 @@ impl ValueTable {
 		Ok(())
 	}
 
-	// Return ref counter, and if it was compressed.
+	// Return ref counter, partial key and if it was compressed.
 	#[inline(always)]
 	pub fn for_parts<Q: LogQuery, F: FnMut(&[u8])>(
 		&self,
