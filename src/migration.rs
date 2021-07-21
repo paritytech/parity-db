@@ -24,17 +24,18 @@ const COMMIT_SIZE: usize = 10240;
 pub fn migrate(from: &Path, mut to: Options) -> Result<()> {
 	let mut path: std::path::PathBuf = from.into();
 	path.push("metadata");
-	let (source_cols, salt) = Options::load_metadata(&path)?;
-	let source_cols = source_cols.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;
-	if source_cols.len() != to.columns.len() {
+	let source_meta = Options::load_metadata(&path)?
+		.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;
+
+	if source_meta.columns.len() != to.columns.len() {
 		return Err(Error::Migration("Source and dest columns mismatch".into()));
 	}
 
-	let mut source_options = Options::with_columns(from, source_cols.len() as u8);
-	source_options.columns = source_cols;
+	let mut source_options = Options::with_columns(from, source_meta.columns.len() as u8);
+	source_options.columns = source_meta.columns;
 
 	// Make sure we are using the same salt value.
-	to.salt = salt;
+	to.salt = source_meta.salt;
 
 	let source = Db::open(&source_options)?;
 	let dest = Db::open(&to)?;

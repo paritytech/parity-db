@@ -23,7 +23,7 @@ use crate::{
 	log::{Log, LogOverlays, LogReader, LogWriter, LogAction},
 	display::hex,
 	index::{IndexTable, TableId as IndexTableId, PlanOutcome, Address},
-	options::{Options, ColumnOptions},
+	options::{Options, ColumnOptions, Metadata},
 	stats::ColumnStats,
 };
 use crate::compress::Compress;
@@ -139,30 +139,31 @@ impl Column {
 		self.compression.decompress(buf)
 	}
 
-	pub fn open(col: ColId, options: &Options, salt: Option<Salt>) -> Result<Column> {
+	pub fn open(col: ColId, options: &Options, metadata: &Metadata) -> Result<Column> {
 		let (index, reindexing, stats) = Self::open_index(&options.path, col)?;
 		let collect_stats = options.stats;
 		let path = &options.path;
-		let options = &options.columns[col as usize];
+		let options = &metadata.columns[col as usize];
+		let db_version = metadata.version;
 		let tables = Tables {
 			index,
 			value: [
-				Self::open_table(path, col, 0, &options)?,
-				Self::open_table(path, col, 1, &options)?,
-				Self::open_table(path, col, 2, &options)?,
-				Self::open_table(path, col, 3, &options)?,
-				Self::open_table(path, col, 4, &options)?,
-				Self::open_table(path, col, 5, &options)?,
-				Self::open_table(path, col, 6, &options)?,
-				Self::open_table(path, col, 7, &options)?,
-				Self::open_table(path, col, 8, &options)?,
-				Self::open_table(path, col, 9, &options)?,
-				Self::open_table(path, col, 10, &options)?,
-				Self::open_table(path, col, 11, &options)?,
-				Self::open_table(path, col, 12, &options)?,
-				Self::open_table(path, col, 13, &options)?,
-				Self::open_table(path, col, 14, &options)?,
-				Self::open_table(path, col, 15, &options)?,
+				Self::open_table(path, col, 0, &options, db_version)?,
+				Self::open_table(path, col, 1, &options, db_version)?,
+				Self::open_table(path, col, 2, &options, db_version)?,
+				Self::open_table(path, col, 3, &options, db_version)?,
+				Self::open_table(path, col, 4, &options, db_version)?,
+				Self::open_table(path, col, 5, &options, db_version)?,
+				Self::open_table(path, col, 6, &options, db_version)?,
+				Self::open_table(path, col, 7, &options, db_version)?,
+				Self::open_table(path, col, 8, &options, db_version)?,
+				Self::open_table(path, col, 9, &options, db_version)?,
+				Self::open_table(path, col, 10, &options, db_version)?,
+				Self::open_table(path, col, 11, &options, db_version)?,
+				Self::open_table(path, col, 12, &options, db_version)?,
+				Self::open_table(path, col, 13, &options, db_version)?,
+				Self::open_table(path, col, 14, &options, db_version)?,
+				Self::open_table(path, col, 15, &options, db_version)?,
 			],
 		};
 
@@ -177,7 +178,7 @@ impl Column {
 			uniform_keys: options.uniform,
 			ref_counted: options.ref_counted,
 			collect_stats,
-			salt,
+			salt: metadata.salt.clone(),
 			stats,
 			compression: Compress::new(options.compression, options.compression_treshold),
 		})
@@ -231,10 +232,11 @@ impl Column {
 		col: ColId,
 		tier: u8,
 		options: &ColumnOptions,
+		db_version: u32,
 	) -> Result<ValueTable> {
 		let id = ValueTableId::new(col, tier);
 		let entry_size = options.sizes.get(tier as usize).cloned();
-		ValueTable::open(path, id, entry_size, options)
+		ValueTable::open(path, id, entry_size, options, db_version)
 	}
 
 	fn trigger_reindex(
