@@ -170,6 +170,10 @@ impl TableId {
 		format!("index_{:02}_{}", self.col(), self.index_bits())
 	}
 
+	pub fn is_file_name(col: ColId, name: &str) -> bool {
+		name.starts_with(&format!("index_{:02}_", col))
+	}
+
 	pub fn as_u16(&self) -> u16 {
 		self.0
 	}

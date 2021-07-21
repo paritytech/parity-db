@@ -21,29 +21,51 @@ use crate::{options::Options, db::Db, Error, Result, column::ColId};
 
 const COMMIT_SIZE: usize = 10240;
 
-pub fn migrate(from: &Path, mut to: Options) -> Result<()> {
+pub fn migrate(from: &Path, mut to: Options, keep_dest: bool, force_migrate: Vec<u8>) -> Result<()> {
 	let mut path: std::path::PathBuf = from.into();
 	path.push("metadata");
 	let source_meta = Options::load_metadata(&path)?
 		.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;
 
+	let mut to_migrate = source_meta.column_to_migrate();
+	for force in force_migrate.into_iter() {
+		to_migrate.insert(force);
+	}
 	if source_meta.columns.len() != to.columns.len() {
 		return Err(Error::Migration("Source and dest columns mismatch".into()));
 	}
 
-	let mut source_options = Options::with_columns(from, source_meta.columns.len() as u8);
-	source_options.columns = source_meta.columns;
-
 	// Make sure we are using the same salt value.
 	to.salt = source_meta.salt;
 
-	let source = Db::open(&source_options)?;
-	let dest = Db::open_or_create(&to)?;
+	if (to.salt.is_none()) && !keep_dest {
+		return Err(Error::Migration("Changing salt need to update metadata at once.".into()));
+	}
+
+	let mut source_options = Options::with_columns(from, source_meta.columns.len() as u8);
+	source_options.salt = source_meta.salt;
+	source_options.columns = source_meta.columns;
+	
+	let mut source = Db::open(&source_options)?;
+	let mut dest = Db::open_or_create(&to)?;
 
 	let mut ncommits: u64 = 0;
 	let mut commit = Vec::with_capacity(COMMIT_SIZE);
 	let mut last_time = std::time::Instant::now();
 	for c in 0 .. source_options.columns.len() as ColId {
+		if source_options.columns[c as usize] != to.columns[c as usize] {
+			to_migrate.insert(c);
+		}
+	}
+	for c in 0 .. source_options.columns.len() as ColId {
+		if !to_migrate.contains(&c) {
+			if keep_dest {
+				std::mem::drop(dest);
+				copy_collection(c, from, &to.path)?;
+				dest = Db::open_or_create(&to)?;
+			}
+			continue;
+		}
 		log::info!("Migrating col {}", c);
 		source.iter_column_while(c, |index, key, rc, mut value| {
 			//TODO: more efficient ref migration
@@ -66,8 +88,56 @@ pub fn migrate(from: &Path, mut to: Options) -> Result<()> {
 			}
 			true
 		})?;
+		if !keep_dest {
+			dest.commit_raw(commit)?;
+			commit = Vec::with_capacity(COMMIT_SIZE);
+			while !dest.all_empty_logs() {
+				std::thread::sleep(std::time::Duration::from_millis(300));
+			}
+			log::info!("Collection migrated {}, imported", c);
+
+			std::mem::drop(dest);
+			std::mem::drop(source);
+			move_collection(c, &to.path, from)?;
+			source_options.columns[c as usize] = to.columns[c as usize].clone();
+			source_options.write_metadata(&source_options.path, &to.salt.expect("Migrate requires salt"));
+			source = Db::open(&source_options)?;
+			dest = Db::open_or_create(&to)?;
+
+			log::info!("Collection migrated {}, migrated", c);
+		}
 	}
 	dest.commit_raw(commit)?;
+	Ok(())
+}
+
+fn move_collection(c: ColId, from: &Path, to: &Path) -> Result<()> {
+	deplace_collection(c, from, to, false)
+}
+
+fn copy_collection(c: ColId, from: &Path, to: &Path) -> Result<()> {
+	deplace_collection(c, from, to, true)
+}
+
+fn deplace_collection(c: ColId, from: &Path, to: &Path, copy: bool) -> Result<()> {
+	for entry in std::fs::read_dir(from)? {
+		let entry = entry?;
+		if let Some(file) = entry.path().file_name().and_then(|f| f.to_str()) {
+			if crate::index::TableId::is_file_name(c, file)
+				|| crate::table::TableId::is_file_name(c, file) {
+
+				let mut from = from.to_path_buf();
+				from.push(file);
+				let mut to = to.to_path_buf();
+				to.push(file);
+				if copy {
+					std::fs::copy(from, to)?;
+				} else {
+					std::fs::rename(from, to)?;
+				}
+			}
+		}
+	}
 	Ok(())
 }
 
@@ -119,7 +189,7 @@ mod test {
 
 		let dest_opts = Options::with_columns(&dest_dir, 1);
 
-		migrate(&source_dir, dest_opts).unwrap();
+		migrate(&source_dir, dest_opts, true, vec![0]).unwrap();
 		let dest = Db::with_columns(&dest_dir, 1).unwrap();
 		assert_eq!(dest.get(0, b"1").unwrap(), Some("value".as_bytes().to_vec()));
 	}
