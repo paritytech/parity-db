@@ -1,5 +1,5 @@
 [package]
-name = "migrate"
+name = "parity-db-admin"
 version = "0.0.1"
 authors = ["Parity Technologies <admin@parity.io>"]
 publish = false

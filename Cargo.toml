@@ -34,5 +34,5 @@ debug = true
 members = [
 	".",
 	"bench",
-	"migrate",
+	"admin",
 ]
