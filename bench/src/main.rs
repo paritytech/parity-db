@@ -53,6 +53,7 @@ struct Args {
 	seed: Option<u64>,
 	archive: bool,
 	append: bool,
+	no_sync: bool,
 }
 
 impl Default for Args {
@@ -64,6 +65,7 @@ impl Default for Args {
 			append: false,
 			seed: None,
 			archive: false,
+			no_sync: false,
 		}
 	}
 }
@@ -124,6 +126,7 @@ impl Args {
 				"seed" => args.seed = Some(parse(&mut splits)),
 				"archive" => args.archive = true,
 				"append" => args.append = true,
+				"no-sync" => args.no_sync = true,
 				other => panic!("unknown option: {}, {}", other, USAGE),
 			}
 		}
@@ -134,8 +137,13 @@ impl Args {
 struct BenchAdapter(parity_db::Db);
 
 impl Db for BenchAdapter {
-	fn open(path: &std::path::Path) -> Self {
-		BenchAdapter(parity_db::Db::with_columns(path, 1).unwrap())
+	fn open(path: &std::path::Path, no_sync: bool) -> Self {
+		let mut options = parity_db::Options::with_columns(path, 1);
+		if no_sync {
+			options.sync_data = false;
+		}
+
+		BenchAdapter(parity_db::Db::open(&options).unwrap())
 	}
 
 	fn get(&self, key: &Key) -> Option<Value> {
@@ -202,7 +210,7 @@ pub fn run<D: Db>() {
 	}
 
 	let commits = {
-		let db = Arc::new(Db::open(path.as_path())) as Arc<D>;
+		let db = Arc::new(Db::open(path.as_path(), args.no_sync)) as Arc<D>;
 		let start = std::time::Instant::now();
 
 		let mut threads = Vec::new();
@@ -260,7 +268,7 @@ pub fn run<D: Db>() {
 		commits
 	};
 
-	let db = Arc::new(Db::open(path.as_path())) as Arc<D>;
+	let db = Arc::new(Db::open(path.as_path(), args.no_sync)) as Arc<D>;
 
 	// Verify content
 	let start = std::time::Instant::now();

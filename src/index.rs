@@ -22,13 +22,14 @@ use crate::{
 	log::{LogReader, LogWriter, LogQuery},
 	display::hex,
 	stats::{self, ColumnStats},
+	table::{SIZE_TIERS_BITS},
 };
 
 const CHUNK_LEN: usize = CHUNK_ENTRIES * ENTRY_BYTES; // 512 bytes
 const CHUNK_ENTRIES: usize = 1 << CHUNK_ENTRIES_BITS;
 const CHUNK_ENTRIES_BITS: u8 = 6;
 const HEADER_SIZE: usize = 512;
-const META_SIZE: usize = crate::table::SIZE_TIERS * 1024; // Contains header and column stats
+const META_SIZE: usize = 256 * 1024; // Contains header and column stats
 const KEY_LEN: usize = 32;
 const ENTRY_LEN: u8 = 64;
 pub const ENTRY_BYTES: usize = ENTRY_LEN as usize / 8;
@@ -50,7 +51,7 @@ impl Entry {
 	#[inline]
 	pub fn address_bits(index_bits: u8) -> u8 {
 		// with n index bits there are n * 64 possible entries and 16 size tiers
-		index_bits + CHUNK_ENTRIES_BITS + crate::table::SIZE_TIERS_BITS
+		index_bits + CHUNK_ENTRIES_BITS + SIZE_TIERS_BITS
 	}
 
 	#[inline]
@@ -78,7 +79,7 @@ impl Entry {
 		self.0 == 0
 	}
 
-	fn as_u64(&self) -> u64 {
+	pub fn as_u64(&self) -> u64 {
 		self.0
 	}
 
@@ -96,7 +97,7 @@ pub struct Address(u64);
 
 impl Address {
 	pub fn new(offset: u64, size_tier: u8) -> Address {
-		Address((offset << 4) | size_tier as u64)
+		Address((offset << SIZE_TIERS_BITS) | size_tier as u64)
 	}
 
 	pub fn from_u64(a: u64) -> Address {
@@ -104,10 +105,18 @@ impl Address {
 	}
 
 	pub fn offset(&self) -> u64 {
+		self.0 >> SIZE_TIERS_BITS
+	}
+
+	pub fn offset4(&self) -> u64 {
 		self.0 >> 4
 	}
 
 	pub fn size_tier(&self) -> u8 {
+		(self.0 & ((1 << SIZE_TIERS_BITS) as u64 - 1)) as u8
+	}
+
+	pub fn size_tier4(&self) -> u8 {
 		(self.0 & 0x0f) as u8
 	}
 
@@ -118,7 +127,7 @@ impl Address {
 
 impl std::fmt::Display for Address {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "addr {:02}:{}", self.size_tier(), self.offset())
+		write!(f, "addr {:02}:{}", hex(&[self.size_tier()]), self.offset())
 	}
 }
 
@@ -250,6 +259,12 @@ impl IndexTable {
 			let entry = Self::read_entry(&chunk, i);
 			if !entry.is_empty() && entry.key_material(self.id.index_bits()) == partial_key {
 				return (entry, i);
+			} else {
+				log::trace!(target: "parity-db", "{} vs {}, entry = {}",
+					hex(&entry.key_material(self.id.index_bits()).to_be_bytes()),
+					hex(&partial_key.to_be_bytes()),
+					hex(&entry.0.to_be_bytes()),
+				);
 			}
 		}
 		return (Entry::empty(), 0)
@@ -450,8 +465,9 @@ impl IndexTable {
 			let i = mask.trailing_zeros();
 			mask = mask & !(1 << i);
 			log.read(&mut chunk[i as usize *ENTRY_BYTES .. (i as usize + 1)*ENTRY_BYTES])?;
+			log::trace!(target: "parity-db", "{}: Enacted chunk {}.{}: {}", self.id, index, i,
+				hex(&chunk[i as usize *ENTRY_BYTES .. (i as usize + 1)*ENTRY_BYTES]));
 		}
-		log::trace!(target: "parity-db", "{}: Enacted chunk {}", self.id, index);
 		Ok(())
 	}
 
