@@ -737,4 +737,10 @@ impl Log {
 		}
 		Ok(())
 	}
+
+	pub fn all_empty_logs(&self) -> bool {
+		self.appending.read().as_ref().map(|a| a.size == 0).unwrap_or(true)
+			&& self.reading.read().as_ref().map(|r| r.file.buffer().is_empty()).unwrap_or(true)
+			&& self.replay_queue.read().is_empty()
+	}
 }

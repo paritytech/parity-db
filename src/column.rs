@@ -514,10 +514,16 @@ impl Column {
 		Ok(())
 	}
 
-	pub fn write_stats(&self, file: &std::fs::File) {
+	pub fn write_stats(&self, writer: &mut impl std::io::Write) {
 		let tables = self.tables.read();
 		tables.index.write_stats(&self.stats);
-		self.stats.write_summary(file, tables.index.id.col());
+		self.stats.write_summary(writer, tables.index.id.col());
+	}
+
+	pub fn clear_stats(&self) {
+		let tables = self.tables.read();
+		let empty_stats = ColumnStats::empty();
+		tables.index.write_stats(&empty_stats);
 	}
 
 	pub fn iter_while(&self, log: &Log, mut f: impl FnMut (u64, Key, u32, Vec<u8>) -> bool) -> Result<()> {

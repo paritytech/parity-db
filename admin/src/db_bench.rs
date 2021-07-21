@@ -14,11 +14,13 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-pub type Key = [u8; 32];
-pub type Value = Vec<u8>;
-
+use parity_db::{Key, Value};
+// TODO useless??
 pub trait Db: Send + Sync + 'static {
+	type Options;
+
 	fn open(path: &std::path::Path) -> Self;
+	fn with_options(options: &Self::Options) -> Self;
 	fn get(&self, key: &Key) -> Option<Value>;
 	fn commit<I: IntoIterator<Item=(Key, Option<Value>)>>(&self, tx: I);
 }

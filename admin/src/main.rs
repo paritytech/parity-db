@@ -25,7 +25,7 @@ static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 fn main() {
 	fdlimit::raise_fd_limit();
 
-	parity_db::admin::run()
+	parity_db_admin::run()
 }
 /*
 // Copyright 2015-2020 Parity Technologies (UK) Ltd.

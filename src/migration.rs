@@ -38,7 +38,7 @@ pub fn migrate(from: &Path, mut to: Options) -> Result<()> {
 	to.salt = source_meta.salt;
 
 	let source = Db::open(&source_options)?;
-	let dest = Db::open(&to)?;
+	let dest = Db::open_or_create(&to)?;
 
 	let mut ncommits: u64 = 0;
 	let mut commit = Vec::with_capacity(COMMIT_SIZE);
