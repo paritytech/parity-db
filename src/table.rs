@@ -149,6 +149,17 @@ pub struct ValueTable {
 	no_compression: bool, // This legacy table can't be compressed. TODO: remove this
 }
 
+#[cfg(target_os = "linux")]
+fn disable_read_ahead(file: &std::fs::File) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let err = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_RANDOM) };
+    if err != 0 {
+        Err(std::io::Error::from_raw_os_error(err))?
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn disable_read_ahead(file: &std::fs::File) -> Result<()> {
 	use std::os::unix::io::AsRawFd;
@@ -159,9 +170,8 @@ fn disable_read_ahead(file: &std::fs::File) -> Result<()> {
 	}
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn disable_read_ahead(_file: &std::fs::File) -> Result<()> {
-	// TODO: posix_fadvise
 	Ok(())
 }
 

@@ -516,7 +516,7 @@ impl Column {
 			// It is much faster to iterate over the value table than index.
 			// We have to assume hashing scheme however.
 			for table in &tables.value[..tables.value.len() - 1] {
-				log::debug!( target: "parity-db", "{}: Iterating table {}", source.id, table.id);
+				log::info!( target: "parity-db", "{}: Iterating table {}", source.id, table.id);
 				table.iter_while(&*log.overlays(), |index, rc, value, compressed| {
 					let value = if compressed {
 						self.decompress(&value)
@@ -530,7 +530,7 @@ impl Column {
 					}
 					true
 				})?;
-				log::debug!( target: "parity-db", "{}: Done Iterating table {}", source.id, table.id);
+				log::info!( target: "parity-db", "{}: Done Iterating table {}", source.id, table.id);
 			}
 		}
 

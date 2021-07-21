@@ -594,7 +594,7 @@ impl DbInner {
 	}
 
 	fn cleanup_logs(&self) -> Result<bool> {
-		let keep_logs = if self.options.sync_data { KEEP_LOGS } else { 0 };
+		let keep_logs = if self.options.sync_data { KEEP_LOGS } else { KEEP_LOGS };
 		let num_cleanup = self.log.num_dirty_logs();
 		if num_cleanup > keep_logs {
 			if self.options.sync_data {
