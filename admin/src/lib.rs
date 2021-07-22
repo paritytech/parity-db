@@ -72,10 +72,10 @@ pub fn run() -> Result<(), String> {
 			let db = parity_db::Db::open_read_only(&options)
 				.map_err(|e| format!("Invalid db: {:?}", e))?;
 			if stat.clear {
-				db.do_clear_stats(stat.column.clone());
+				db.clear_stats(stat.column.clone());
 			} else {
 				let mut out = std::io::stdout();
-				db.do_collect_stats(&mut out, stat.column.clone());
+				db.collect_stats(&mut out, stat.column.clone());
 			}
 		},
 		SubCommand::Migrate(args) => {

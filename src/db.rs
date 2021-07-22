@@ -658,7 +658,7 @@ impl DbInner {
 			match std::fs::File::create(path) {
 				Ok(file) => {
 					let mut writer = std::io::BufWriter::new(file);
-					self.do_collect_stats(&mut writer, None)
+					self.collect_stats(&mut writer, None)
 				}
 				Err(e) => log::warn!(target: "parity-db", "Error creating stats file: {:?}", e),
 			}
@@ -666,7 +666,7 @@ impl DbInner {
 		Ok(())
 	}
 
-	fn do_collect_stats(&self, writer: &mut impl std::io::Write, column: Option<u8>) {
+	fn collect_stats(&self, writer: &mut impl std::io::Write, column: Option<u8>) {
 		if let Some(col) = column {
 			self.columns[col as usize].write_stats(writer);
 		} else {
@@ -676,7 +676,7 @@ impl DbInner {
 		}
 	}
 
-	fn do_clear_stats(&self, column: Option<u8>) {
+	fn clear_stats(&self, column: Option<u8>) {
 		if let Some(col) = column {
 			self.columns[col as usize].clear_stats();
 		} else {
@@ -870,12 +870,12 @@ impl Db {
 		Ok(())
 	}
 
-	pub fn do_collect_stats(&self, writer: &mut impl std::io::Write, column: Option<u8>) {
-		self.inner.do_collect_stats(writer, column)
+	pub fn collect_stats(&self, writer: &mut impl std::io::Write, column: Option<u8>) {
+		self.inner.collect_stats(writer, column)
 	}
 
-	pub fn do_clear_stats(&self, column: Option<u8>) {
-		self.inner.do_clear_stats(column)
+	pub fn clear_stats(&self, column: Option<u8>) {
+		self.inner.clear_stats(column)
 	}
 
 	pub fn check_from_index(&self, check_param: check::CheckParam) -> Result<()> {
