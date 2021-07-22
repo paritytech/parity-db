@@ -93,9 +93,9 @@ pub struct Stress {
 	#[structopt(long)]
 	pub archive: bool,
 
-	/// Do only check (requires append flag).
+	/// Do not check after writing.
 	#[structopt(long)]
-	pub check_only: bool,
+	pub no_check: bool,
 }
 
 #[derive(Clone)]
@@ -106,7 +106,7 @@ pub struct Args { // TODO remove (rendundant with Stress)
 	pub seed: Option<u64>,
 	pub archive: bool,
 	pub append: bool,
-	pub check_only: bool,
+	pub no_check: bool,
 }
 
 impl Stress {
@@ -118,7 +118,7 @@ impl Stress {
 			seed: self.seed.clone(),
 			append: self.append,
 			archive: self.archive,
-			check_only: self.check_only,
+			no_check: self.no_check,
 		}
 	}
 }
@@ -224,45 +224,43 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 
 	COMMITS.store(start_commit as usize, Ordering::SeqCst);
 
-	if !args.check_only {
-		{
-			let commits = args.commits;
-			let start = start_commit;
-			let shutdown = shutdown.clone();
-			threads.push(thread::spawn(move || informant(shutdown, commits, start)));
-		}
-
-		for i in 0 .. args.readers {
-			let db = db.clone();
-			let shutdown = shutdown.clone();
-
-			threads.push(
-				thread::Builder::new()
-				.name(format!("reader {}", i))
-				.spawn(move || reader(db, shutdown))
-				.unwrap()
-			);
-		}
-
-		for i in 0 .. args.writers {
-			let db = db.clone();
-			let shutdown = shutdown.clone();
-			let pool = pool.clone();
-			let args = args.clone();
-
-			threads.push(
-				thread::Builder::new()
-				.name(format!("writer {}", i))
-				.spawn(move || writer(db, args, pool, shutdown, start_commit))
-				.unwrap()
-			);
-		}
-
-		while COMMITS.load(Ordering::Relaxed) < start_commit + args.commits {
-			thread::sleep(std::time::Duration::from_millis(50));
-		}
-		shutdown.store(true, Ordering::SeqCst);
+	{
+		let commits = args.commits;
+		let start = start_commit;
+		let shutdown = shutdown.clone();
+		threads.push(thread::spawn(move || informant(shutdown, commits, start)));
 	}
+
+	for i in 0 .. args.readers {
+		let db = db.clone();
+		let shutdown = shutdown.clone();
+
+		threads.push(
+			thread::Builder::new()
+			.name(format!("reader {}", i))
+			.spawn(move || reader(db, shutdown))
+			.unwrap()
+		);
+	}
+
+	for i in 0 .. args.writers {
+		let db = db.clone();
+		let shutdown = shutdown.clone();
+		let pool = pool.clone();
+		let args = args.clone();
+
+		threads.push(
+			thread::Builder::new()
+			.name(format!("writer {}", i))
+			.spawn(move || writer(db, args, pool, shutdown, start_commit))
+			.unwrap()
+		);
+	}
+
+	while COMMITS.load(Ordering::Relaxed) < start_commit + args.commits {
+		thread::sleep(std::time::Duration::from_millis(50));
+	}
+	shutdown.store(true, Ordering::SeqCst);
 
 	for t in threads.into_iter() {
 		t.join().unwrap();
@@ -279,6 +277,9 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 		commits as f64  / elapsed
 	);
 
+	if !args.no_check {
+		return;
+	}
 	thread::sleep(std::time::Duration::from_secs(1));
 
 	// Verify content
