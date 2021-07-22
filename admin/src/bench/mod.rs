@@ -277,7 +277,7 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 		commits as f64  / elapsed
 	);
 
-	if !args.no_check {
+	if args.no_check {
 		return;
 	}
 	thread::sleep(std::time::Duration::from_secs(1));
