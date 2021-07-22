@@ -34,7 +34,7 @@ mod bench;
 
 /// Command line admin client entry point.
 /// Uses default column definition.
-pub fn run() {
+pub fn run() -> Result<(), String> {
 
 	let cli = Cli::from_args();
 	use env_logger::Builder;
@@ -55,7 +55,7 @@ pub fn run() {
 		p
 	});
 	let mut options = if let Some(metadata) = parity_db::Options::load_metadata(&metadata_path)
-		.expect("Error resolving metas") {
+		.map_err(|e| format!("Error resolving metas: {:?}", e))? {
 		let mut options = parity_db::Options::with_columns(db_path.as_path(), 0);
 		options.columns = metadata.columns;
 		options.salt = metadata.salt;
@@ -70,7 +70,7 @@ pub fn run() {
 	match cli.subcommand {
 		SubCommand::Stats(stat) => {
 			let db = parity_db::Db::open_read_only(&options)
-				.expect("Invalid db");
+				.map_err(|e| format!("Invalid db: {:?}", e))?;
 			if stat.clear {
 				db.do_clear_stats(stat.column.clone());
 			} else {
@@ -78,19 +78,34 @@ pub fn run() {
 				db.do_collect_stats(&mut out, stat.column.clone());
 			}
 		},
-		SubCommand::Compress(stat) => {
-			let db = parity_db::Db::open_read_only(&options)
-				.expect("Invalid db");
-			let compression_target = parity_db::CompressionType::from(stat.compression);
-			let compression_threshold = stat.compression_threshold
-				.unwrap_or(4096);
+		SubCommand::Migrate(args) => {
+			use parity_db::Options;
+			let dest_meta = Options::load_metadata(&args.dest_meta)
+				.map_err(|e| format!("Error loading dest metadata: {:?}", e))?
+				.ok_or_else(|| format!("Error opening dest metadata file"))?;
 
-// TODO			db.migrate_column(stat.column, compression_target, compression_threshold)
-//				.unwrap();
+			let dest_columns = dest_meta.columns;
+
+			if args.clear_dest && std::fs::metadata(&args.dest_path).is_ok() {
+				std::fs::remove_dir_all(&args.dest_path).map_err(|e| format!("Error removing dest dir: {:?}", e))?;
+			}
+			std::fs::create_dir_all(&args.dest_path).map_err(|e| format!("Error creating dest dir: {:?}", e))?;
+
+			let mut dest_options = Options::with_columns(&args.dest_path, dest_columns.len() as u8);
+			dest_options.columns = dest_columns;
+			dest_options.sync_wal = false;
+			dest_options.sync_data = false;
+
+			parity_db::migrate(&db_path, dest_options, !args.overwrite, &args.force_columns)
+				.map_err(|e| format!("Migration error: {:?}", e))?;
+
+			if args.overwrite && std::fs::metadata(&args.dest_path).is_ok() {
+				std::fs::remove_dir_all(&args.dest_path).map_err(|e| format!("Error removing dest dir: {:?}", e))?;
+			}
 		},
 		SubCommand::Check(check) => {
 			let db = parity_db::Db::open_read_only(&options)
-				.expect("Invalid db");
+				.map_err(|e| format!("Invalid db: {:?}", e))?;
 /* TODO
 			if !check.index_value {
 				// TODO use a enum with structopt and all...
@@ -110,7 +125,7 @@ pub fn run() {
 		},
 		SubCommand::Flush(_flush) => {
 			let db = parity_db::Db::open(&options)
-				.expect("Invalid db");
+				.map_err(|e| format!("Invalid db: {:?}", e))?;
 			while !db.all_empty_logs() {
 				std::thread::sleep(std::time::Duration::from_millis(300));
 			}
@@ -121,7 +136,8 @@ pub fn run() {
 			// avoid deleting folders by mistake.
 			options.path.push("test_db_stress");
 			if options.path.exists() && !args.append {
-				std::fs::remove_dir_all(options.path.as_path()).unwrap();
+				std::fs::remove_dir_all(options.path.as_path())
+					.map_err(|e| format!("Error clearing stress db: {:?}", e))?;
 			}
 
 			use crate::bench::BenchDb;
@@ -130,6 +146,7 @@ pub fn run() {
 			crate::bench::run_internal(args, db);
 		},
 	}
+	Ok(())
 }
 
 /// Admin cli command for parity-db.
@@ -187,8 +204,8 @@ pub struct Cli {
 pub enum SubCommand {
 	/// Show stats.
 	Stats(Stats),
-	/// Compress values.
-	Compress(Compress),
+	/// Migrate db (update version or change collection options).
+	Migrate(Migrate),
 	/// Run db until all logs are flushed.
 	Flush(Flush),
 	/// Check db content.
@@ -203,7 +220,7 @@ impl Cli {
 			SubCommand::Stats(stats) => {
 				&stats.shared
 			},
-			SubCommand::Compress(stats) => {
+			SubCommand::Migrate(stats) => {
 				&stats.shared
 			},
 			SubCommand::Flush(flush) => {
@@ -234,22 +251,35 @@ pub struct Stats {
 	pub clear: bool,
 }
 
-/// Show stats for columns.
+/// Migrate db (update version or change collection options).
 #[derive(Debug, StructOpt)]
-pub struct Compress {
+pub struct Migrate {
 	#[structopt(flatten)]
 	pub shared: Shared,
 
-	/// Only show stat for the given column.
+	/// Force migration of given columns, even if
+	/// column option are unchanged (eg to repack table).
 	#[structopt(long)]
-	pub column: Option<u8>,
+	pub force_columns: Vec<u8>,
 
-	/// Compression target number
-	/// (see enum variants in code).
+	/// Overwrite source after each
+	/// column processing.
 	#[structopt(long)]
-	pub compression: u8,
+	pub overwrite: bool,
 
-	/// Compression threshold to use.
+	/// Clear destination folder before migration.
+	#[structopt(long)]
+	pub clear_dest: bool,
+
+	/// Destination or temporary folder for migration.
+	#[structopt(long)]
+	pub dest_path: PathBuf,
+
+	/// Meta to migrate to.
+	#[structopt(long)]
+	pub dest_meta: PathBuf,
+
+	/// Destina
 	#[structopt(long)]
 	pub compression_threshold: Option<u32>,
 }
@@ -269,7 +299,7 @@ pub struct Check {
 
 	/// Only process a given column.
 	#[structopt(long)]
-	pub column: Option<u8>,
+	pub columns: Option<u8>,
 
 	/// Parse indexes and
 	/// lookup values.

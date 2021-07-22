@@ -21,15 +21,15 @@ use crate::{options::Options, db::Db, Error, Result, column::ColId};
 
 const COMMIT_SIZE: usize = 10240;
 
-pub fn migrate(from: &Path, mut to: Options, keep_dest: bool, force_migrate: Vec<u8>) -> Result<()> {
-	let mut path: std::path::PathBuf = from.into();
-	path.push("metadata");
-	let source_meta = Options::load_metadata(&path)?
+pub fn migrate(from: &Path, mut to: Options, keep_dest: bool, force_migrate: &Vec<u8>) -> Result<()> {
+	let mut metadata_path: std::path::PathBuf = from.into();
+	metadata_path.push("metadata");
+	let source_meta = Options::load_metadata(&metadata_path)?
 		.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;
 
 	let mut to_migrate = source_meta.column_to_migrate();
-	for force in force_migrate.into_iter() {
-		to_migrate.insert(force);
+	for force in force_migrate.iter() {
+		to_migrate.insert(*force);
 	}
 	if source_meta.columns.len() != to.columns.len() {
 		return Err(Error::Migration("Source and dest columns mismatch".into()));
@@ -91,6 +91,8 @@ pub fn migrate(from: &Path, mut to: Options, keep_dest: bool, force_migrate: Vec
 		if !keep_dest {
 			dest.commit_raw(commit)?;
 			commit = Vec::with_capacity(COMMIT_SIZE);
+			std::mem::drop(dest);
+			dest = Db::open_or_create(&to)?;
 			while !dest.all_empty_logs() {
 				std::thread::sleep(std::time::Duration::from_millis(300));
 			}
@@ -100,7 +102,9 @@ pub fn migrate(from: &Path, mut to: Options, keep_dest: bool, force_migrate: Vec
 			std::mem::drop(source);
 			move_collection(c, &to.path, from)?;
 			source_options.columns[c as usize] = to.columns[c as usize].clone();
-			source_options.write_metadata(&source_options.path, &to.salt.expect("Migrate requires salt"));
+			source_options.write_metadata(&metadata_path, &to.salt.expect("Migrate requires salt"))
+				.map_err(|e| Error::Migration(format!("Error {:?}\nFail updating metadata of column {:?} \
+							in source, please	update manually before restarting.", e, c)))?;
 			source = Db::open(&source_options)?;
 			dest = Db::open_or_create(&to)?;
 
