@@ -61,7 +61,7 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Ve
 		if !to_migrate.contains(&c) {
 			if !overwrite {
 				std::mem::drop(dest);
-				copy_collection(c, from, &to.path)?;
+				copy_column(c, from, &to.path)?;
 				dest = Db::open_or_create(&to)?;
 			}
 			continue;
@@ -97,7 +97,7 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Ve
 
 			std::mem::drop(dest);
 			std::mem::drop(source);
-			move_collection(c, &to.path, from)?;
+			move_column(c, &to.path, from)?;
 			source_options.columns[c as usize] = to.columns[c as usize].clone();
 			source_options.write_metadata(&metadata_path, &to.salt.expect("Migrate requires salt"))
 				.map_err(|e| Error::Migration(format!("Error {:?}\nFail updating metadata of column {:?} \
@@ -112,15 +112,15 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Ve
 	Ok(())
 }
 
-fn move_collection(c: ColId, from: &Path, to: &Path) -> Result<()> {
-	deplace_collection(c, from, to, false)
+fn move_column(c: ColId, from: &Path, to: &Path) -> Result<()> {
+	deplace_column(c, from, to, false)
 }
 
-fn copy_collection(c: ColId, from: &Path, to: &Path) -> Result<()> {
-	deplace_collection(c, from, to, true)
+fn copy_column(c: ColId, from: &Path, to: &Path) -> Result<()> {
+	deplace_column(c, from, to, true)
 }
 
-fn deplace_collection(c: ColId, from: &Path, to: &Path, copy: bool) -> Result<()> {
+fn deplace_column(c: ColId, from: &Path, to: &Path, copy: bool) -> Result<()> {
 	for entry in std::fs::read_dir(from)? {
 		let entry = entry?;
 		if let Some(file) = entry.path().file_name().and_then(|f| f.to_str()) {

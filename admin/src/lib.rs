@@ -198,7 +198,7 @@ pub struct Cli {
 pub enum SubCommand {
 	/// Show stats.
 	Stats(Stats),
-	/// Migrate db (update version or change collection options).
+	/// Migrate db (update version or change column options).
 	Migrate(Migrate),
 	/// Run db until all logs are flushed.
 	Flush(Flush),
@@ -245,7 +245,7 @@ pub struct Stats {
 	pub clear: bool,
 }
 
-/// Migrate db (update version or change collection options).
+/// Migrate db (update version or change column options).
 #[derive(Debug, StructOpt)]
 pub struct Migrate {
 	#[structopt(flatten)]
