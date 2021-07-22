@@ -280,7 +280,6 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 	if args.no_check {
 		return;
 	}
-	thread::sleep(std::time::Duration::from_secs(1));
 
 	// Verify content
 	let start = std::time::Instant::now();

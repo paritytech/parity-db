@@ -92,10 +92,7 @@ pub fn migrate(from: &Path, mut to: Options, keep_dest: bool, force_migrate: &Ve
 			dest.commit_raw(commit)?;
 			commit = Vec::with_capacity(COMMIT_SIZE);
 			std::mem::drop(dest);
-			dest = Db::open_or_create(&to)?;
-			while !dest.all_empty_logs() {
-				std::thread::sleep(std::time::Duration::from_millis(300));
-			}
+			dest = Db::open_or_create(&to)?; // This is needed to flush logs.
 			log::info!("Collection migrated {}, imported", c);
 
 			std::mem::drop(dest);

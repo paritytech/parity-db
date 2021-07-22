@@ -121,11 +121,8 @@ pub fn run() -> Result<(), String> {
 				.map_err(|e| format!("Check error: {:?}", e))?;
 		},
 		SubCommand::Flush(_flush) => {
-			let db = parity_db::Db::open(&options)
+			let _db = parity_db::Db::open(&options)
 				.map_err(|e| format!("Invalid db: {:?}", e))?;
-			while !db.all_empty_logs() {
-				std::thread::sleep(std::time::Duration::from_millis(300));
-			}
 		},
 		SubCommand::Stress(bench) => {
 

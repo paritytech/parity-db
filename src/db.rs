@@ -878,10 +878,6 @@ impl Db {
 		self.inner.do_clear_stats(column)
 	}
 
-	pub fn all_empty_logs(&self) -> bool {
-		self.inner.log.all_empty_logs()
-	}
-
 	pub fn check_from_index(&self, check_param: check::CheckParam) -> Result<()> {
 		if let Some(col) = check_param.column.clone() {
 			self.inner.columns[col as usize].check_from_index(&self.inner.log, &check_param, col)?;
