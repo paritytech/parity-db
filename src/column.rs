@@ -25,6 +25,7 @@ use crate::{
 	index::{IndexTable, TableId as IndexTableId, PlanOutcome, Address},
 	options::{Options, ColumnOptions, Metadata},
 	stats::ColumnStats,
+	db::check::CheckDisplay,
 };
 use crate::compress::Compress;
 
@@ -621,7 +622,7 @@ impl Column {
 		Ok(())
 	}
 
-	pub(crate) fn check_from_index(&self, log: &Log, check_param: &crate::CheckParam, col: ColId) -> Result<()> {
+	pub(crate) fn check_from_index(&self, log: &Log, check_param: &crate::CheckOptions, col: ColId) -> Result<()> {
 		let start_chunk = check_param.from.unwrap_or(0);
 		let end_chunk = check_param.bound;
 
@@ -638,18 +639,21 @@ impl Column {
 					log::info!(target: "parity-db", "Chunk iteration at {}", chunk_index);
 				}
 
-				if check_param.display_content {
-					log::info!("Index key: {:x?}\n \
-						\tRc: {}",
-						&key,
-						rc,
-					);
-					if let Some(t) = check_param.truncate_value_display.as_ref() {
-						log::info!("Value: {}", hex(&value[..std::cmp::min(*t as usize, value.len())]));
-						log::info!("Value len: {}", value.len());
-					} else {
+				match check_param.display {
+					CheckDisplay::Full => {
+						log::info!("Index key: {:x?}\n \
+							\tRc: {}",
+							&key,
+							rc,
+						);
 						log::info!("Value: {}", hex(&value));
-					}
+					},
+					CheckDisplay::Short(t) => {
+						log::info!("Index key: {:x?}", &key);
+						log::info!("Rc: {}, Value len: {}", rc, value.len());
+						log::info!("Value: {}", hex(&value[..std::cmp::min(t as usize, value.len())]));
+					},
+					CheckDisplay::None => (),
 				}
 				Ok(true)
 			},

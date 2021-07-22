@@ -16,17 +16,6 @@
 
 //! Experimental admin functionality for parity-db.
 
-// Note standard substrate db uses:
-// NUM_COLUMN 12
-// Column 1 (state):
-// 
-//		state_col.ref_counted = true;
-//		state_col.preimage = true;
-//		state_col.uniform = true;
-//
-// TODO Passing parameter to define this is be a bit tedious,
-// using a existing metadata file could be good.
-
 use std::path::PathBuf;
 use structopt::StructOpt;
 
@@ -48,12 +37,9 @@ pub fn run() -> Result<(), String> {
 
 	let db_path = cli.shared().base_path.clone()
 		.unwrap_or_else(|| std::env::current_dir().expect("Cannot resolve current dir"));
-	let nb_column = cli.shared().nb_columns.unwrap_or(1);
-	let metadata_path = cli.shared().use_metadata.clone().unwrap_or_else(|| {
-		let mut p = db_path.clone();
-		p.push("metadata");
-		p
-	});
+	let nb_column = cli.shared().columns.unwrap_or(1);
+	let mut metadata_path = db_path.clone();
+	metadata_path.push("metadata");
 	let mut options = if let Some(metadata) = parity_db::Options::load_metadata(&metadata_path)
 		.map_err(|e| format!("Error resolving metas: {:?}", e))? {
 		let mut options = parity_db::Options::with_columns(db_path.as_path(), 0);
@@ -110,7 +96,7 @@ pub fn run() -> Result<(), String> {
 				// Note that we should use enum parameter instead.
 				return Err("Requires one of the following check flag: --index-value".to_string());
 			}
-			let check_param = parity_db::CheckParam::new(
+			let check_param = parity_db::CheckOptions::new(
 				check.column,
 				check.range_start,
 				check.range_end,
@@ -161,11 +147,7 @@ pub struct Shared {
 	/// Indicate the number of column, when using
 	/// a new or temporary db, defaults to one.
 	#[structopt(long)]
-	pub nb_columns: Option<u8>,
-
-	/// Indicate a metadata configuration to use.
-	#[structopt(long)]
-	pub use_metadata: Option<PathBuf>,
+	pub columns: Option<u8>,
 
 	/// Sets a custom logging filter. Syntax is <target>=<level>, e.g. -lsync=debug.
 	///
@@ -272,10 +254,6 @@ pub struct Migrate {
 	/// Meta to migrate to.
 	#[structopt(long)]
 	pub dest_meta: PathBuf,
-
-	/// Destina
-	#[structopt(long)]
-	pub compression_threshold: Option<u32>,
 }
 
 /// Run db until all logs are flushed.

@@ -35,9 +35,8 @@ const COMMIT_SIZE: usize = 100;
 
 const KEY_RESTART: Key = [1u8; 32];
 
-// Note on db, this is equal to COMMIT_SIZE.
-// Having smaller allow validating a given amount
-// of keys.
+// Out of `COMMIT_SIZE` values `COMMIT_PRUNE_SIZE` will be deleted in a later commit.
+// The rest will be queried during the final check.
 const COMMIT_PRUNE_SIZE: usize = 90;
 const COMMIT_PRUNE_WINDOW: usize = 2000;
 

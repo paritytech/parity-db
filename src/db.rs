@@ -732,14 +732,14 @@ impl Db {
 		Self::open_inner(options, false, true)
 	}
 
-	pub fn open_inner(options: &Options, create: bool, no_thread: bool) -> Result<Db> {
+	pub fn open_inner(options: &Options, create: bool, read_only: bool) -> Result<Db> {
 		assert!(options.is_valid());
 		let mut db = DbInner::open(options, create)?;
 		// This needs to be call before log thread: so first reindexing
 		// will run in correct state.
 		db.replay_all_logs()?;
 		let db = Arc::new(db);
-		if no_thread {
+		if read_only {
 			return Ok(Db {
 				inner: db,
 				commit_thread: None,
@@ -878,7 +878,7 @@ impl Db {
 		self.inner.clear_stats(column)
 	}
 
-	pub fn check_from_index(&self, check_param: check::CheckParam) -> Result<()> {
+	pub fn check_from_index(&self, check_param: check::CheckOptions) -> Result<()> {
 		if let Some(col) = check_param.column.clone() {
 			self.inner.columns[col as usize].check_from_index(&self.inner.log, &check_param, col)?;
 		} else {
@@ -905,15 +905,20 @@ impl Drop for Db {
 
 /// Verification operation utilities.
 pub mod check {
-	pub struct CheckParam {
+	pub enum CheckDisplay {
+		None,
+		Full,
+		Short(u64),
+	}
+
+	pub struct CheckOptions {
 		pub column: Option<u8>,
 		pub from: Option<u64>,
 		pub bound: Option<u64>,
-		pub display_content: bool,
-		pub truncate_value_display: Option<u64>,
+		pub display: CheckDisplay,
 	}
 
-	impl CheckParam {
+	impl CheckOptions {
 		pub fn new(
 			column: Option<u8>,
 			from: Option<u64>,
@@ -921,12 +926,19 @@ pub mod check {
 			display_content: bool,
 			truncate_value_display: Option<u64>,
 		) -> Self {
-			CheckParam {
+			let display = if display_content {
+				match truncate_value_display {
+					Some(t) => CheckDisplay::Short(t),
+					None => CheckDisplay::Full,
+				}
+			} else {
+				CheckDisplay::None
+			};
+			CheckOptions {
 				column,
 				from,
 				bound,
-				display_content,
-				truncate_value_display,
+				display,
 			}
 		}
 	}
