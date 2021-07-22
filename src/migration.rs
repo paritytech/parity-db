@@ -104,7 +104,7 @@ pub fn migrate(from: &Path, mut to: Options, keep_dest: bool, force_migrate: &Ve
 			source_options.columns[c as usize] = to.columns[c as usize].clone();
 			source_options.write_metadata(&metadata_path, &to.salt.expect("Migrate requires salt"))
 				.map_err(|e| Error::Migration(format!("Error {:?}\nFail updating metadata of column {:?} \
-							in source, please	update manually before restarting.", e, c)))?;
+							in source, please update manually before restarting.", e, c)))?;
 			source = Db::open(&source_options)?;
 			dest = Db::open_or_create(&to)?;
 
@@ -193,7 +193,7 @@ mod test {
 
 		let dest_opts = Options::with_columns(&dest_dir, 1);
 
-		migrate(&source_dir, dest_opts, true, vec![0]).unwrap();
+		migrate(&source_dir, dest_opts, true, &vec![0]).unwrap();
 		let dest = Db::with_columns(&dest_dir, 1).unwrap();
 		assert_eq!(dest.get(0, b"1").unwrap(), Some("value".as_bytes().to_vec()));
 	}

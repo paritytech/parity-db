@@ -106,22 +106,19 @@ pub fn run() -> Result<(), String> {
 		SubCommand::Check(check) => {
 			let db = parity_db::Db::open_read_only(&options)
 				.map_err(|e| format!("Invalid db: {:?}", e))?;
-/* TODO
 			if !check.index_value {
-				// TODO use a enum with structopt and all...
-				println!("Require one of the following check flag: index_value");
-				return;
+				// Note that we should use enum parameter instead.
+				return Err("Requires one of the following check flag: --index-value".to_string());
 			}
-			let check_param = parity_db::db::check::CheckParam::new(
+			let check_param = parity_db::CheckParam::new(
 				check.column,
 				check.range_start,
-				check.range_len,
+				check.range_end,
 				check.display,
 				check.display_value_max,
-				check.remove_on_corrupted,
 			);
-			db.check_from_index(check_param).unwrap();
-*/
+			db.check_from_index(check_param)
+				.map_err(|e| format!("Check error: {:?}", e))?;
 		},
 		SubCommand::Flush(_flush) => {
 			let db = parity_db::Db::open(&options)
@@ -299,35 +296,28 @@ pub struct Check {
 
 	/// Only process a given column.
 	#[structopt(long)]
-	pub columns: Option<u8>,
+	pub column: Option<u8>,
 
 	/// Parse indexes and
 	/// lookup values.
 	#[structopt(long)]
 	pub index_value: bool,
 
-	/// Remove index on corrupted
-	/// value.
-	/// Db will probably be missing
-	/// data: use for debugging only.
-	#[structopt(long)]
-	pub remove_on_corrupted: bool,
-
 	/// Start range for operation.
-	/// Eg index start chunk in db.
+	/// Index start chunk in db.
 	#[structopt(long)]
 	pub range_start: Option<u64>,
 
 	/// End range for operation.
-	/// Eg number index chunk number.
+	/// Index end chunk in db.
 	#[structopt(long)]
-	pub range_len: Option<u64>,
+	pub range_end: Option<u64>,
 
 	/// When active, display parsed index and value content.
 	#[structopt(long)]
 	pub display: bool,
 
-	/// Max length for value to display.
+	/// Max length for value to display (when using --display).
 	#[structopt(long)]
 	pub display_value_max: Option<u64>,
 }

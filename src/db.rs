@@ -881,6 +881,17 @@ impl Db {
 	pub fn all_empty_logs(&self) -> bool {
 		self.inner.log.all_empty_logs()
 	}
+
+	pub fn check_from_index(&self, check_param: check::CheckParam) -> Result<()> {
+		if let Some(col) = check_param.column.clone() {
+			self.inner.columns[col as usize].check_from_index(&self.inner.log, &check_param, col)?;
+		} else {
+			for (ix, c) in self.inner.columns.iter().enumerate() {
+				c.check_from_index(&self.inner.log, &check_param, ix as ColId)?;
+			}
+		}
+		Ok(())
+	}
 }
 
 impl Drop for Db {
@@ -892,6 +903,35 @@ impl Drop for Db {
 		self.cleanup_thread.take().map(|t| t.join());
 		if let Err(e) = self.inner.kill_logs() {
 			log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
+		}
+	}
+}
+
+/// Verification operation utilities.
+pub mod check {
+	pub struct CheckParam {
+		pub column: Option<u8>,
+		pub from: Option<u64>,
+		pub bound: Option<u64>,
+		pub display_content: bool,
+		pub truncate_value_display: Option<u64>,
+	}
+
+	impl CheckParam {
+		pub fn new(
+			column: Option<u8>,
+			from: Option<u64>,
+			bound: Option<u64>,
+			display_content: bool,
+			truncate_value_display: Option<u64>,
+		) -> Self {
+			CheckParam {
+				column,
+				from,
+				bound,
+				display_content,
+				truncate_value_display,
+			}
 		}
 	}
 }

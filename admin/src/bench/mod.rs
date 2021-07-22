@@ -27,7 +27,6 @@ pub use db::Db as BenchDb;
 
 use std::{sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, }, thread};
 use rand::{SeedableRng, RngCore};
-use std::path::PathBuf;
 
 static COMMITS: AtomicUsize = AtomicUsize::new(0);
 //static QUERIES: AtomicUsize = AtomicUsize::new(0);

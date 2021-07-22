@@ -526,7 +526,18 @@ impl Column {
 		tables.index.write_stats(&empty_stats);
 	}
 
-	pub fn iter_while(&self, log: &Log, mut f: impl FnMut (u64, Key, u32, Vec<u8>) -> bool) -> Result<()> {
+	pub fn iter_while(&self, log: &Log, f: impl FnMut (u64, Key, u32, Vec<u8>) -> bool) -> Result<()> {
+		self.iter_while_inner(log, f, 0,  None, |_, _| false)
+	}
+
+	fn iter_while_inner(
+		&self,
+		log: &Log,
+		mut f: impl FnMut (u64, Key, u32, Vec<u8>) -> bool,
+		start_chunk: u64,
+		end_chunk: Option<u64>,
+		mut on_corrupted_value: impl FnMut(&crate::index::Entry, Option<&Error>) -> bool,
+	) -> Result<()> {
 		let tables = self.tables.read();
 		let source = &tables.index;
 
@@ -550,7 +561,8 @@ impl Column {
 			}
 		}
 
-		for c in 0 .. source.id.total_chunks() {
+		let end_chunk = end_chunk.unwrap_or_else(|| source.id.total_chunks());
+		for c in start_chunk .. end_chunk {
 			let entries = source.entries(c, &*log.overlays());
 			for entry in entries.iter() {
 				if entry.is_empty() {
@@ -560,8 +572,24 @@ impl Column {
 				if self.preimage && address.size_tier() != 15 {
 					continue;
 				}
-				let value = tables.value[address.size_tier() as usize].get_with_meta(address.offset(), &*log.overlays())?;
-				let (value, rc, pk, compressed) = value.ok_or_else(|| Error::Corruption("Missing indexed value".into()))?;
+				let value = tables.value[address.size_tier() as usize].get_with_meta(address.offset(), &*log.overlays());
+				let (value, rc, pk, compressed) = match value {
+					Ok(Some(v)) => v,
+					Ok(None) => {
+						if !on_corrupted_value(entry, None) {
+							return Err(Error::Corruption("Missing indexed value".into()));
+						} else {
+							continue;
+						}
+					},
+					| Err(e) => {
+						if !on_corrupted_value(entry, Some(&e)) {
+							return Err(Error::Corruption("Missing indexed value".into()));
+						} else {
+							continue;
+						}
+					},
+				};
 				let mut key = source.recover_key_prefix(c, *entry);
 				&mut key[6..].copy_from_slice(&pk);
 				let value = if compressed {
@@ -583,6 +611,42 @@ impl Column {
 				}
 			}
 		}
+		Ok(())
+	}
+
+	pub(crate) fn check_from_index(&self, log: &Log, check_param: &crate::CheckParam, col: ColId) -> Result<()> {
+		let start_chunk = check_param.from.unwrap_or(0);
+		let end_chunk = check_param.bound;
+
+		let step = 1000;
+		let start_time = std::time::Instant::now();
+		log::info!(target: "parity-db", "Starting full index iteration at {:?}", start_time);
+		log::info!(target: "parity-db", "for {} chunks of column {}", self.tables.read().index.id.total_chunks(), col);
+		self.iter_while_inner(log, |index, key, rc, value| {
+			if index % step == 0 {
+				log::info!(target: "parity-db", "Chunk iteration at {}", index);
+			}
+
+			if check_param.display_content {
+				log::info!("Index key: {:x?}\n \
+					\tRc: {}",
+					&key,
+					rc,
+				);
+				if let Some(t) = check_param.truncate_value_display.as_ref() {
+					log::info!("Value: {}", hex(&value[..std::cmp::min(*t as usize, value.len())]));
+					log::info!("Value len: {}", value.len());
+				} else {
+					log::info!("Value: {}", hex(&value));
+				}
+			}
+			true
+		}, start_chunk, end_chunk, |entry, e| {
+			log::info!("Corrupted value for index entry: {}:\n\t{:?}", entry.as_u64(), e);
+			true
+		})?;
+
+		log::info!(target: "parity-db", "Ended full index check, elapsed {:?}", start_time.elapsed());
 		Ok(())
 	}
 
