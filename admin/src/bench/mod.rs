@@ -14,12 +14,16 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
+/// Stress subcommand.
+
 use structopt::StructOpt;
 use super::*;
 
-/// Stress subcommand.
+mod db;
+mod sizes;
 
 pub use parity_db::{Key, Value, Db};
+pub use db::Db as BenchDb;
 
 use std::{sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, }, thread};
 use rand::{SeedableRng, RngCore};
@@ -37,7 +41,7 @@ const COMMIT_PRUNE_WINDOW: usize = 2000;
 
 pub(super) struct BenchAdapter(parity_db::Db);
 
-impl db_bench::Db for BenchAdapter {
+impl BenchDb for BenchAdapter {
 	type Options = parity_db::Options;
 
 	fn open(path: &std::path::Path) -> Self {
@@ -172,7 +176,7 @@ fn informant(shutdown: Arc<AtomicBool>, total: usize, start: usize) {
 	}
 }
 
-fn writer<D: db_bench::Db>(db: Arc<D>, args: Arc<Args>, pool: Arc<SizePool>, shutdown: Arc<AtomicBool>) {
+fn writer<D: BenchDb>(db: Arc<D>, args: Arc<Args>, pool: Arc<SizePool>, shutdown: Arc<AtomicBool>) {
 	// Note that multiple worker will run on same range concurrently.
 	let mut key: u64 = (args.start_commit * COMMIT_SIZE) as u64;
 	let commit_size = COMMIT_SIZE;
@@ -197,14 +201,14 @@ fn writer<D: db_bench::Db>(db: Arc<D>, args: Arc<Args>, pool: Arc<SizePool>, shu
 	}
 }
 
-fn reader<D: db_bench::Db>(_db: Arc<D>, shutdown: Arc<AtomicBool>) {
+fn reader<D: BenchDb>(_db: Arc<D>, shutdown: Arc<AtomicBool>) {
 	// Query a random  key
 	while !shutdown.load(Ordering::Relaxed) {
 		thread::sleep(std::time::Duration::from_millis(500));
 	}
 }
 
-pub fn run_internal<D: db_bench::Db>(args: Args, db: D) {
+pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 	let args = Arc::new(args);
 	let shutdown = Arc::new(AtomicBool::new(false));
 	let pool = Arc::new(SizePool::from_histogram(&sizes::KUSAMA_STATE_DISTRIBUTION));

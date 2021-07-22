@@ -31,8 +31,6 @@ use std::path::PathBuf;
 use structopt::StructOpt;
 
 mod bench;
-mod db_bench; // TODO move to bench
-mod sizes; // TODO move to bench
 
 /// Command line admin client entry point.
 /// Uses default column definition.
@@ -118,6 +116,7 @@ pub fn run() {
 			}
 		},
 		SubCommand::Stress(bench) => {
+
 			let args = bench.get_args();
 			// avoid deleting folders by mistake.
 			options.path.push("test_db_stress");
@@ -125,7 +124,7 @@ pub fn run() {
 				std::fs::remove_dir_all(options.path.as_path()).unwrap();
 			}
 
-			use crate::db_bench::Db;
+			use crate::bench::BenchDb;
 			let db = bench::BenchAdapter::with_options(&options);
 
 			crate::bench::run_internal(args, db);
