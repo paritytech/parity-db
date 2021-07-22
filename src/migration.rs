@@ -21,7 +21,7 @@ use crate::{options::Options, db::Db, Error, Result, column::{ColId, IterState}}
 
 const COMMIT_SIZE: usize = 10240;
 
-pub fn migrate(from: &Path, mut to: Options, keep_dest: bool, force_migrate: &Vec<u8>) -> Result<()> {
+pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Vec<u8>) -> Result<()> {
 	let mut metadata_path: std::path::PathBuf = from.into();
 	metadata_path.push("metadata");
 	let source_meta = Options::load_metadata(&metadata_path)?
@@ -38,7 +38,7 @@ pub fn migrate(from: &Path, mut to: Options, keep_dest: bool, force_migrate: &Ve
 	// Make sure we are using the same salt value.
 	to.salt = source_meta.salt;
 
-	if (to.salt.is_none()) && !keep_dest {
+	if (to.salt.is_none()) && overwrite {
 		return Err(Error::Migration("Changing salt need to update metadata at once.".into()));
 	}
 
@@ -59,7 +59,7 @@ pub fn migrate(from: &Path, mut to: Options, keep_dest: bool, force_migrate: &Ve
 	}
 	for c in 0 .. source_options.columns.len() as ColId {
 		if !to_migrate.contains(&c) {
-			if keep_dest {
+			if !overwrite {
 				std::mem::drop(dest);
 				copy_collection(c, from, &to.path)?;
 				dest = Db::open_or_create(&to)?;
@@ -88,7 +88,7 @@ pub fn migrate(from: &Path, mut to: Options, keep_dest: bool, force_migrate: &Ve
 			}
 			true
 		})?;
-		if !keep_dest {
+		if overwrite {
 			dest.commit_raw(commit)?;
 			commit = Vec::with_capacity(COMMIT_SIZE);
 			std::mem::drop(dest);
@@ -190,7 +190,7 @@ mod test {
 
 		let dest_opts = Options::with_columns(&dest_dir, 1);
 
-		migrate(&source_dir, dest_opts, true, &vec![0]).unwrap();
+		migrate(&source_dir, dest_opts, false, &vec![0]).unwrap();
 		let dest = Db::with_columns(&dest_dir, 1).unwrap();
 		assert_eq!(dest.get(0, b"1").unwrap(), Some("value".as_bytes().to_vec()));
 	}

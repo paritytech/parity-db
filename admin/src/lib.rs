@@ -96,7 +96,7 @@ pub fn run() -> Result<(), String> {
 			dest_options.sync_wal = false;
 			dest_options.sync_data = false;
 
-			parity_db::migrate(&db_path, dest_options, !args.overwrite, &args.force_columns)
+			parity_db::migrate(&db_path, dest_options, args.overwrite, &args.force_columns)
 				.map_err(|e| format!("Migration error: {:?}", e))?;
 
 			if args.overwrite && std::fs::metadata(&args.dest_path).is_ok() {
