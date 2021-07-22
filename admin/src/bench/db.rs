@@ -15,7 +15,7 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use parity_db::{Key, Value};
-// TODO useless??
+
 pub trait Db: Send + Sync + 'static {
 	type Options;
 

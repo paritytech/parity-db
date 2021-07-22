@@ -32,6 +32,9 @@ static COMMITS: AtomicUsize = AtomicUsize::new(0);
 //static QUERIES: AtomicUsize = AtomicUsize::new(0);
 
 const COMMIT_SIZE: usize = 100;
+
+const KEY_RESTART: Key = [1u8; 32];
+
 // Note on db, this is equal to COMMIT_SIZE.
 // Having smaller allow validating a given amount
 // of keys.
@@ -74,11 +77,6 @@ pub struct Stress {
 	#[structopt(long)]
 	pub writers: Option<usize>,
 
-	/// Start commit index.
-	#[structopt(long)]
-	pub start_commit: Option<usize>,
-
-
 	/// Total number of inserted commits.
 	#[structopt(long)]
 	pub commits: Option<usize>,
@@ -109,7 +107,6 @@ pub struct Args { // TODO remove (rendundant with Stress)
 	pub archive: bool,
 	pub append: bool,
 	pub check_only: bool,
-	pub start_commit: usize,
 }
 
 impl Stress {
@@ -122,7 +119,6 @@ impl Stress {
 			append: self.append,
 			archive: self.archive,
 			check_only: self.check_only,
-			start_commit: self.start_commit.unwrap_or(0),
 		}
 	}
 }
@@ -163,7 +159,7 @@ impl SizePool {
 }
 
 fn informant(shutdown: Arc<AtomicBool>, total: usize, start: usize) {
-	let mut last = 0;
+	let mut last = start;
 	let mut last_time = std::time::Instant::now();
 	while !shutdown.load(Ordering::Relaxed) {
 		thread::sleep(std::time::Duration::from_secs(1));
@@ -175,13 +171,13 @@ fn informant(shutdown: Arc<AtomicBool>, total: usize, start: usize) {
 	}
 }
 
-fn writer<D: BenchDb>(db: Arc<D>, args: Arc<Args>, pool: Arc<SizePool>, shutdown: Arc<AtomicBool>) {
+fn writer<D: BenchDb>(db: Arc<D>, args: Arc<Args>, pool: Arc<SizePool>, shutdown: Arc<AtomicBool>, start_commit: usize) {
 	// Note that multiple worker will run on same range concurrently.
-	let mut key: u64 = (args.start_commit * COMMIT_SIZE) as u64;
+	let mut key = start_commit as u64 * COMMIT_SIZE as u64;
 	let commit_size = COMMIT_SIZE;
 	let mut commit = Vec::with_capacity(commit_size);
 
-	for n in args.start_commit .. args.start_commit + args.commits {
+	for n in start_commit .. start_commit + args.commits {
 		if shutdown.load(Ordering::Relaxed) { break; }
 		for _ in 0 .. commit_size {
 			commit.push((pool.key(key), Some(pool.value(key))));
@@ -193,11 +189,13 @@ fn writer<D: BenchDb>(db: Arc<D>, args: Arc<Args>, pool: Arc<SizePool>, shutdown
 				commit.push((pool.key(p as u64), None));
 			}
 		}
+		commit.push((KEY_RESTART, Some((n as u64).to_be_bytes().to_vec())));
 
 		db.commit(commit.drain(..));
 		COMMITS.fetch_add(1, Ordering::Release);
 		commit.clear();
 	}
+	commit.clear();
 }
 
 fn reader<D: BenchDb>(_db: Arc<D>, shutdown: Arc<AtomicBool>) {
@@ -216,12 +214,20 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 
 	let mut threads = Vec::new();
 
-	COMMITS.store(args.start_commit, Ordering::SeqCst);
+	let start_commit = if let Some(start) = db.get(&KEY_RESTART) {
+		let mut buf = [0u8; 8];
+		buf.copy_from_slice(&start[0..8]);
+		u64::from_be_bytes(buf) as usize + 1
+	} else {
+		0
+	};
+
+	COMMITS.store(start_commit as usize, Ordering::SeqCst);
 
 	if !args.check_only {
 		{
 			let commits = args.commits;
-			let start = args.start_commit;
+			let start = start_commit;
 			let shutdown = shutdown.clone();
 			threads.push(thread::spawn(move || informant(shutdown, commits, start)));
 		}
@@ -247,12 +253,12 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 			threads.push(
 				thread::Builder::new()
 				.name(format!("writer {}", i))
-				.spawn(move || writer(db, args, pool, shutdown))
+				.spawn(move || writer(db, args, pool, shutdown, start_commit))
 				.unwrap()
 			);
 		}
 
-		while COMMITS.load(Ordering::Relaxed) < args.start_commit + args.commits {
+		while COMMITS.load(Ordering::Relaxed) < start_commit + args.commits {
 			thread::sleep(std::time::Duration::from_millis(50));
 		}
 		shutdown.store(true, Ordering::SeqCst);
@@ -263,7 +269,7 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 	}
 
 	let commits = COMMITS.load(Ordering::SeqCst);
-	let commits = commits - args.start_commit;
+	let commits = commits - start_commit;
 	let elapsed = start.elapsed().as_secs_f64();
 
 	println!(
@@ -279,8 +285,8 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 	let start = std::time::Instant::now();
 	let pruned_per_commit = if args.archive { 0u64 } else { COMMIT_PRUNE_SIZE as u64 };
 	let mut queries = 0;
-	for nc in args.start_commit as u64 .. (args.start_commit + commits) as u64 {
-		let counter = nc - args.start_commit as u64;
+	for nc in start_commit as u64 .. (start_commit + commits) as u64 {
+		let counter = nc - start_commit as u64;
 		if counter % 1000 == 0 {
 			println!(
 				"Query {}/{}",
@@ -288,7 +294,7 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 				commits,
 			);
 		}
-		let commits  = (args.start_commit + commits) as u64;
+		let commits  = (start_commit + commits) as u64;
 		let prune_window: u64 = COMMIT_PRUNE_WINDOW as u64;
 		let start = if commits > prune_window && nc < commits - prune_window {
 			let end = nc * COMMIT_SIZE as u64 + pruned_per_commit;
