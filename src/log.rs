@@ -337,6 +337,7 @@ impl<'a> LogQuery for LogWriter<'a> {
 	}
 }
 
+// Identity hash.
 #[derive(Default, Clone)]
 pub struct IdentityHash(u64);
 pub type BuildIdHash = std::hash::BuildHasherDefault<IdentityHash>;
@@ -361,6 +362,7 @@ pub struct IndexLogOverlay {
 	pub map: HashMap<u64, (u64, u64, IndexChunk)>, // index -> (record_id, modified_mask, entry)
 }
 
+// We use identity hash for value overlay/log records so that writes to value tables are in order.
 #[derive(Default)]
 pub struct ValueLogOverlay {
 	pub map: HashMap<u64, (u64, Vec<u8>), BuildIdHash>, // index -> (record_id, entry)

@@ -134,13 +134,13 @@ impl ColumnOptions {
 
 impl Default for ColumnOptions {
 	fn default() -> ColumnOptions {
-		let  start = 32.0f64;
-		let  end = 32760.0f64;
+		let  start = crate::table::MIN_ENTRY_SIZE as f64;
+		let  end = crate::table::MAX_ENTRY_SIZE as f64;
 		let  n_slices = crate::table::SIZE_TIERS - 1;
 
 		let factor = ((end.ln() - start.ln()) / (n_slices - 1) as f64).exp();
 
-		let mut sizes = Vec::new();
+		let mut sizes = Vec::with_capacity(n_slices);
 		let mut s = start;
 		for _ in 0 .. n_slices {
 			sizes.push(s.round() as u16);

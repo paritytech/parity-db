@@ -75,11 +75,13 @@ pub const KEY_LEN: usize = 32;
 pub const SIZE_TIERS: usize = 1usize << SIZE_TIERS_BITS;
 pub const SIZE_TIERS_BITS: u8 = 8;
 pub const COMPRESSED_MASK: u16 = 0x80_00;
-const MAX_ENTRY_SIZE: usize = 0xfffc;
+pub const MAX_ENTRY_SIZE: usize = 0x7ff8;
+pub const MIN_ENTRY_SIZE: usize = 32;
 const REFS_SIZE: usize = 4;
 const SIZE_SIZE: usize = 2;
 const PARTIAL_SIZE: usize = 26;
 const INDEX_SIZE: usize = 8;
+const MAX_ENTRY_BUF_SIZE: usize = 0x8000;
 
 const TOMBSTONE: &[u8] = &[0xff, 0xff];
 const MULTIPART: &[u8] = &[0xff, 0xfe];
@@ -130,7 +132,7 @@ impl TableId {
 
 impl std::fmt::Display for TableId {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "table {:02}_{:02}", self.col(), hex(&[self.size_tier()]))
+		write!(f, "{:02}-{:02}", self.col(), hex(&[self.size_tier()]))
 	}
 }
 
@@ -194,7 +196,7 @@ impl Header {
 }
 
 struct Entry<B: AsRef<[u8]> + AsMut<[u8]>>(usize, B);
-type FullEntry = Entry<[u8; MAX_ENTRY_SIZE]>;
+type FullEntry = Entry<[u8; MAX_ENTRY_BUF_SIZE]>;
 type PartialEntry = Entry<[u8; 10]>;
 type PartialKeyEntry = Entry<[u8; 40]>;
 
@@ -329,8 +331,10 @@ impl ValueTable {
 			Some(s) => (false, s),
 			None => (true, 4096),
 		};
-		assert!(entry_size >= 32);
-		assert!(entry_size <= MAX_ENTRY_SIZE as u16);
+		assert!(entry_size >= MIN_ENTRY_SIZE as u16);
+		if db_version >= 4 {
+			assert!(entry_size <= MAX_ENTRY_SIZE as u16);
+		}
 
 		let mut filepath: std::path::PathBuf = std::path::PathBuf::clone(&*path);
 		// Check for old file name format

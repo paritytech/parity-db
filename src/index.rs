@@ -186,7 +186,7 @@ impl TableId {
 
 impl std::fmt::Display for TableId {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "index {:02}_{}", self.col(), self.index_bits())
+		write!(f, "{:02}-{:02}", self.col(), self.index_bits())
 	}
 }
 
@@ -251,12 +251,6 @@ impl IndexTable {
 			let entry = Self::read_entry(&chunk, i);
 			if !entry.is_empty() && entry.key_material(self.id.index_bits()) == partial_key {
 				return (entry, i);
-			} else {
-				log::trace!(target: "parity-db", "{} vs {}, entry = {}",
-					hex(&entry.key_material(self.id.index_bits()).to_be_bytes()),
-					hex(&partial_key.to_be_bytes()),
-					hex(&entry.0.to_be_bytes()),
-				);
 			}
 		}
 		return (Entry::empty(), 0)
@@ -457,9 +451,8 @@ impl IndexTable {
 			let i = mask.trailing_zeros();
 			mask = mask & !(1 << i);
 			log.read(&mut chunk[i as usize *ENTRY_BYTES .. (i as usize + 1)*ENTRY_BYTES])?;
-			log::trace!(target: "parity-db", "{}: Enacted chunk {}.{}: {}", self.id, index, i,
-				hex(&chunk[i as usize *ENTRY_BYTES .. (i as usize + 1)*ENTRY_BYTES]));
 		}
+		log::trace!(target: "parity-db", "{}: Enacted chunk {}", self.id, index);
 		Ok(())
 	}
 
