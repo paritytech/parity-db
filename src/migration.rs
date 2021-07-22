@@ -27,7 +27,7 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Ve
 	let source_meta = Options::load_metadata(&metadata_path)?
 		.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;
 
-	let mut to_migrate = source_meta.column_to_migrate();
+	let mut to_migrate = source_meta.columns_to_migrate();
 	for force in force_migrate.iter() {
 		to_migrate.insert(*force);
 	}
