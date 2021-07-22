@@ -43,6 +43,7 @@ Options:
 	--seed=<n>         Random seed used for key generation.
 	--archive          Do not perform deletions.
 	--append           Open an existing database.
+	--no-sync          Disable data sync.
 ";
 
 #[derive(Clone)]

@@ -108,16 +108,8 @@ impl Address {
 		self.0 >> SIZE_TIERS_BITS
 	}
 
-	pub fn offset4(&self) -> u64 {
-		self.0 >> 4
-	}
-
 	pub fn size_tier(&self) -> u8 {
 		(self.0 & ((1 << SIZE_TIERS_BITS) as u64 - 1)) as u8
-	}
-
-	pub fn size_tier4(&self) -> u8 {
-		(self.0 & 0x0f) as u8
 	}
 
 	pub fn as_u64(&self) -> u64 {

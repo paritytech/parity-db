@@ -516,7 +516,7 @@ impl Column {
 			// It is much faster to iterate over the value table than index.
 			// We have to assume hashing scheme however.
 			for table in &tables.value[..tables.value.len() - 1] {
-				log::info!( target: "parity-db", "{}: Iterating table {}", source.id, table.id);
+				log::debug!( target: "parity-db", "{}: Iterating table {}", source.id, table.id);
 				table.iter_while(&*log.overlays(), |index, rc, value, compressed| {
 					let value = if compressed {
 						self.decompress(&value)
@@ -530,7 +530,7 @@ impl Column {
 					}
 					true
 				})?;
-				log::info!( target: "parity-db", "{}: Done Iterating table {}", source.id, table.id);
+				log::debug!( target: "parity-db", "{}: Done Iterating table {}", source.id, table.id);
 			}
 		}
 
@@ -549,10 +549,12 @@ impl Column {
 				} else {
 					let addr_bits = source.id.index_bits() + 10;
 					let address = Address::from_u64(entry.as_u64() & ((1u64 << addr_bits) - 1));
-					if self.preimage && address.size_tier4() as usize != 15 {
+					let size_tier = address.as_u64() & 0x0f;
+					if self.preimage && size_tier as usize != 15 {
 						continue;
 					}
-					tables.value[address.size_tier4() as usize].get_with_meta(address.offset4(), &*log.overlays())?
+					let offset = address.as_u64() >> 4;
+					tables.value[size_tier as usize].get_with_meta(offset, &*log.overlays())?
 				};
 
 				let (value, rc, pk, compressed) = value.ok_or_else(|| Error::Corruption("Missing indexed value".into()))?;

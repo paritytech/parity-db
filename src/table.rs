@@ -385,7 +385,7 @@ impl ValueTable {
 		})
 	}
 
-	fn open_file(&self) -> Result<std::fs::File> {
+	fn create_file(&self) -> Result<std::fs::File> {
 		let mut path = std::path::PathBuf::clone(&*self.path);
 		path.push(self.id.file_name());
 		let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?;
@@ -411,7 +411,7 @@ impl ValueTable {
 		let mut file = self.file.upgradable_read();
 		if file.is_none() {
 			let mut wfile = RwLockUpgradableReadGuard::upgrade(file);
-			*wfile = Some(self.open_file()?);
+			*wfile = Some(self.create_file()?);
 			file = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wfile);
 		}
 		Ok(file.as_ref().unwrap().write_all_at(buf, offset)?)
@@ -431,7 +431,7 @@ impl ValueTable {
 		let mut file = self.file.upgradable_read();
 		if file.is_none() {
 			let mut wfile = RwLockUpgradableReadGuard::upgrade(file);
-			*wfile = Some(self.open_file()?);
+			*wfile = Some(self.create_file()?);
 			file = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wfile);
 		}
 		file.as_ref().unwrap().seek_write(buf, offset)?;
@@ -445,7 +445,7 @@ impl ValueTable {
 		let mut file = self.file.upgradable_read();
 		if file.is_none() {
 			let mut wfile = RwLockUpgradableReadGuard::upgrade(file);
-			*wfile = Some(self.open_file()?);
+			*wfile = Some(self.create_file()?);
 			file = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wfile);
 		}
 		file.as_ref().unwrap().set_len(capacity * self.entry_size as u64)?;
