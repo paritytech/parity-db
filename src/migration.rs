@@ -17,7 +17,7 @@
 /// Database migration.
 
 use std::path::Path;
-use crate::{options::Options, db::Db, Error, Result, column::ColId};
+use crate::{options::Options, db::Db, Error, Result, column::{ColId, IterState}};
 
 const COMMIT_SIZE: usize = 10240;
 
@@ -67,7 +67,7 @@ pub fn migrate(from: &Path, mut to: Options, keep_dest: bool, force_migrate: &Ve
 			continue;
 		}
 		log::info!("Migrating col {}", c);
-		source.iter_column_while(c, |index, key, rc, mut value| {
+		source.iter_column_while(c, |IterState { chunk_index: index, key, rc, mut value }| {
 			//TODO: more efficient ref migration
 			for _ in 0 .. rc {
 				let value = std::mem::take(&mut value);

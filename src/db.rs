@@ -38,7 +38,7 @@ use fs2::FileExt;
 use crate::{
 	table::Key,
 	error::{Error, Result},
-	column::{ColId, Column},
+	column::{ColId, Column, IterState},
 	log::{Log, LogAction},
 	index::PlanOutcome,
 	options::{Metadata, Options},
@@ -698,7 +698,7 @@ impl DbInner {
 		}
 	}
 
-	fn iter_column_while(&self, c: ColId, f: impl FnMut (u64, Key, u32, Vec<u8>) -> bool) -> Result<()> {
+	fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
 		self.columns[c as usize].iter_while(&self.log, f)
 	}
 }
@@ -797,7 +797,7 @@ impl Db {
 		self.inner.columns.len() as u8
 	}
 
-	pub(crate) fn iter_column_while(&self, c: ColId, f: impl FnMut (u64, Key, u32, Vec<u8>) -> bool) -> Result<()> {
+	pub(crate) fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
 		self.inner.iter_column_while(c, f)
 	}
 
