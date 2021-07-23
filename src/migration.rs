@@ -20,6 +20,7 @@ use std::path::Path;
 use crate::{options::Options, db::Db, Error, Result, column::{ColId, IterState}};
 
 const COMMIT_SIZE: usize = 10240;
+const OVERWRITE_TMP_PATH: &str = "to_revert_overwrite";
 
 pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Vec<u8>) -> Result<()> {
 	let mut metadata_path: std::path::PathBuf = from.into();
@@ -97,11 +98,26 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Ve
 
 			std::mem::drop(dest);
 			std::mem::drop(source);
+			let mut tmp_dir = from.to_path_buf();
+			tmp_dir.push(OVERWRITE_TMP_PATH);
+			let remove_tmp_dir = || -> Result<()> {
+				if std::fs::metadata(&tmp_dir).is_ok() {
+					std::fs::remove_dir_all(&tmp_dir)
+						.map_err(|e| Error::Migration(format!("Error removing overwrite tmp dir: {:?}", e)))?;
+				}
+				Ok(())
+			};
+			remove_tmp_dir()?;
+			std::fs::create_dir_all(&tmp_dir)
+				.map_err(|e| Error::Migration(format!("Error creating overwrite tmp dir: {:?}", e)))?;
+
+			move_column(c, &from, &tmp_dir)?;
 			move_column(c, &to.path, from)?;
 			source_options.columns[c as usize] = to.columns[c as usize].clone();
 			source_options.write_metadata(&metadata_path, &to.salt.expect("Migrate requires salt"))
 				.map_err(|e| Error::Migration(format!("Error {:?}\nFail updating metadata of column {:?} \
-							in source, please update manually before restarting.", e, c)))?;
+							in source, please restore manually before restarting.", e, c)))?;
+			remove_tmp_dir()?;
 			source = Db::open(&source_options)?;
 			dest = Db::open_or_create(&to)?;
 
@@ -195,4 +211,3 @@ mod test {
 		assert_eq!(dest.get(0, b"1").unwrap(), Some("value".as_bytes().to_vec()));
 	}
 }
-

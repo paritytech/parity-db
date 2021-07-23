@@ -29,10 +29,11 @@ pub fn run() -> Result<(), String> {
 	use env_logger::Builder;
 
 	let mut builder = Builder::from_default_env();
-	let logs = &cli.shared().log;
-	if logs.len() > 0 {
-		builder.parse_filters(logs.as_slice().join(",").as_str());
+	let mut logs = cli.shared().log.clone();
+	if logs.len() == 0 {
+		logs.push("info".to_string());
 	}
+	builder.parse_filters(logs.as_slice().join(",").as_str());
 	builder.init();
 
 	let db_path = cli.shared().base_path.clone()
