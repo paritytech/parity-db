@@ -126,7 +126,7 @@ impl DbInner {
 		};
 		let mut lock_path: std::path::PathBuf = options.path.clone();
 		lock_path.push("lock");
-		let lock_file = std::fs::OpenOptions::new().create(create).read(true).write(true).open(lock_path.as_path())?;
+		let lock_file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(lock_path.as_path())?;
 		lock_file.try_lock_exclusive().map_err(|e| Error::Locked(e))?;
 
 		let metadata = options.load_and_validate_metadata()?;
