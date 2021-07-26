@@ -1,5 +1,5 @@
 [package]
-name = "migrate"
+name = "parity-db-admin"
 version = "0.0.1"
 authors = ["Parity Technologies <admin@parity.io>"]
 publish = false
@@ -9,10 +9,15 @@ edition = "2018"
 parity-db = { path = ".." }
 log = { version = "0.4.8" }
 fdlimit = "0.2.1"
+structopt = { version = "0.3.8" }
 
 [dependencies.env_logger]
 version = "0.7.1"
 #default-features = false
+
+[dependencies.rand]
+features = ["small_rng"]
+version = "0.7.3"
 
 [target.'cfg(all(not(windows), not(target_env = "musl")))'.dependencies]
 jemallocator = "0.3.0"

@@ -162,8 +162,7 @@ impl ColumnStats {
 		}
 	}
 
-	fn write_file(&self, file: &std::fs::File, col: ColId) -> Result<()> {
-		let mut writer = std::io::BufWriter::new(file);
+	fn write_stats(&self, writer: &mut impl std::io::Write, col: ColId) -> Result<()> {
 		writeln!(writer, "Column {}", col)?;
 		writeln!(writer, "Total values: {}", self.total_values.load(Ordering::Relaxed))?;
 		writeln!(writer, "Total bytes: {}", self.total_bytes.load(Ordering::Relaxed))?;
@@ -213,8 +212,8 @@ impl ColumnStats {
 		Ok(())
 	}
 
-	pub fn write_summary(&self, file: &std::fs::File, col: ColId) {
-		let _ = self.write_file(file, col);
+	pub fn write_summary(&self, writer: &mut impl std::io::Write, col: ColId) {
+		let _ = self.write_stats(writer, col);
 	}
 
 	pub fn query_hit(&self, size_tier: u8) {

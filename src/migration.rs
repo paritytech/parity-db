@@ -17,35 +17,58 @@
 /// Database migration.
 
 use std::path::Path;
-use crate::{options::Options, db::Db, Error, Result, column::ColId};
+use crate::{options::Options, db::Db, Error, Result, column::{ColId, IterState}};
 
 const COMMIT_SIZE: usize = 10240;
+const OVERWRITE_TMP_PATH: &str = "to_revert_overwrite";
 
-pub fn migrate(from: &Path, mut to: Options) -> Result<()> {
-	let mut path: std::path::PathBuf = from.into();
-	path.push("metadata");
-	let source_meta = Options::load_metadata(&path)?
+pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Vec<u8>) -> Result<()> {
+	let mut metadata_path: std::path::PathBuf = from.into();
+	metadata_path.push("metadata");
+	let source_meta = Options::load_metadata(&metadata_path)?
 		.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;
 
+	let mut to_migrate = source_meta.columns_to_migrate();
+	for force in force_migrate.iter() {
+		to_migrate.insert(*force);
+	}
 	if source_meta.columns.len() != to.columns.len() {
 		return Err(Error::Migration("Source and dest columns mismatch".into()));
 	}
 
-	let mut source_options = Options::with_columns(from, source_meta.columns.len() as u8);
-	source_options.columns = source_meta.columns;
-
 	// Make sure we are using the same salt value.
 	to.salt = source_meta.salt;
 
-	let source = Db::open(&source_options)?;
-	let dest = Db::open(&to)?;
+	if (to.salt.is_none()) && overwrite {
+		return Err(Error::Migration("Changing salt need to update metadata at once.".into()));
+	}
+
+	let mut source_options = Options::with_columns(from, source_meta.columns.len() as u8);
+	source_options.salt = source_meta.salt;
+	source_options.columns = source_meta.columns;
+	
+	let mut source = Db::open(&source_options)?;
+	let mut dest = Db::open_or_create(&to)?;
 
 	let mut ncommits: u64 = 0;
 	let mut commit = Vec::with_capacity(COMMIT_SIZE);
 	let mut last_time = std::time::Instant::now();
 	for c in 0 .. source_options.columns.len() as ColId {
+		if source_options.columns[c as usize] != to.columns[c as usize] {
+			to_migrate.insert(c);
+		}
+	}
+	for c in 0 .. source_options.columns.len() as ColId {
+		if !to_migrate.contains(&c) {
+			if !overwrite {
+				std::mem::drop(dest);
+				copy_column(c, from, &to.path)?;
+				dest = Db::open_or_create(&to)?;
+			}
+			continue;
+		}
 		log::info!("Migrating col {}", c);
-		source.iter_column_while(c, |index, key, rc, mut value| {
+		source.iter_column_while(c, |IterState { chunk_index: index, key, rc, mut value }| {
 			//TODO: more efficient ref migration
 			for _ in 0 .. rc {
 				let value = std::mem::take(&mut value);
@@ -66,8 +89,72 @@ pub fn migrate(from: &Path, mut to: Options) -> Result<()> {
 			}
 			true
 		})?;
+		if overwrite {
+			dest.commit_raw(commit)?;
+			commit = Vec::with_capacity(COMMIT_SIZE);
+			std::mem::drop(dest);
+			dest = Db::open_or_create(&to)?; // This is needed to flush logs.
+			log::info!("Collection migrated {}, imported", c);
+
+			std::mem::drop(dest);
+			std::mem::drop(source);
+			let mut tmp_dir = from.to_path_buf();
+			tmp_dir.push(OVERWRITE_TMP_PATH);
+			let remove_tmp_dir = || -> Result<()> {
+				if std::fs::metadata(&tmp_dir).is_ok() {
+					std::fs::remove_dir_all(&tmp_dir)
+						.map_err(|e| Error::Migration(format!("Error removing overwrite tmp dir: {:?}", e)))?;
+				}
+				Ok(())
+			};
+			remove_tmp_dir()?;
+			std::fs::create_dir_all(&tmp_dir)
+				.map_err(|e| Error::Migration(format!("Error creating overwrite tmp dir: {:?}", e)))?;
+
+			move_column(c, &from, &tmp_dir)?;
+			move_column(c, &to.path, from)?;
+			source_options.columns[c as usize] = to.columns[c as usize].clone();
+			source_options.write_metadata(&metadata_path, &to.salt.expect("Migrate requires salt"))
+				.map_err(|e| Error::Migration(format!("Error {:?}\nFail updating metadata of column {:?} \
+							in source, please restore manually before restarting.", e, c)))?;
+			remove_tmp_dir()?;
+			source = Db::open(&source_options)?;
+			dest = Db::open_or_create(&to)?;
+
+			log::info!("Collection migrated {}, migrated", c);
+		}
 	}
 	dest.commit_raw(commit)?;
+	Ok(())
+}
+
+fn move_column(c: ColId, from: &Path, to: &Path) -> Result<()> {
+	deplace_column(c, from, to, false)
+}
+
+fn copy_column(c: ColId, from: &Path, to: &Path) -> Result<()> {
+	deplace_column(c, from, to, true)
+}
+
+fn deplace_column(c: ColId, from: &Path, to: &Path, copy: bool) -> Result<()> {
+	for entry in std::fs::read_dir(from)? {
+		let entry = entry?;
+		if let Some(file) = entry.path().file_name().and_then(|f| f.to_str()) {
+			if crate::index::TableId::is_file_name(c, file)
+				|| crate::table::TableId::is_file_name(c, file) {
+
+				let mut from = from.to_path_buf();
+				from.push(file);
+				let mut to = to.to_path_buf();
+				to.push(file);
+				if copy {
+					std::fs::copy(from, to)?;
+				} else {
+					std::fs::rename(from, to)?;
+				}
+			}
+		}
+	}
 	Ok(())
 }
 
@@ -119,9 +206,8 @@ mod test {
 
 		let dest_opts = Options::with_columns(&dest_dir, 1);
 
-		migrate(&source_dir, dest_opts).unwrap();
+		migrate(&source_dir, dest_opts, false, &vec![0]).unwrap();
 		let dest = Db::with_columns(&dest_dir, 1).unwrap();
 		assert_eq!(dest.get(0, b"1").unwrap(), Some("value".as_bytes().to_vec()));
 	}
 }
-

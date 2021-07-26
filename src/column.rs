@@ -25,6 +25,7 @@ use crate::{
 	index::{IndexTable, TableId as IndexTableId, PlanOutcome, Address},
 	options::{Options, ColumnOptions, Metadata},
 	stats::ColumnStats,
+	db::check::CheckDisplay,
 };
 use crate::compress::Compress;
 
@@ -56,6 +57,18 @@ pub struct Column {
 	stats: ColumnStats,
 	compression: Compress,
 	db_version: u32,
+}
+
+pub struct IterState {
+	pub chunk_index: u64,
+	pub key: Key,
+	pub rc: u32,
+	pub value: Vec<u8>,
+}
+
+enum IterStateOrCorrupted {
+	Item(IterState),
+	Corrupted(crate::index::Entry, Option<Error>),
 }
 
 impl Column {
@@ -502,17 +515,37 @@ impl Column {
 		Ok(())
 	}
 
-	pub fn write_stats(&self, file: &std::fs::File) {
+	pub fn write_stats(&self, writer: &mut impl std::io::Write) {
 		let tables = self.tables.read();
 		tables.index.write_stats(&self.stats);
-		self.stats.write_summary(file, tables.index.id.col());
+		self.stats.write_summary(writer, tables.index.id.col());
 	}
 
-	pub fn iter_while(&self, log: &Log, mut f: impl FnMut (u64, Key, u32, Vec<u8>) -> bool) -> Result<()> {
+	pub fn clear_stats(&self) {
+		let tables = self.tables.read();
+		let empty_stats = ColumnStats::empty();
+		tables.index.write_stats(&empty_stats);
+	}
+
+	pub fn iter_while(&self, log: &Log, mut f: impl FnMut(IterState) -> bool) -> Result<()> {
+		let action = |state | match state {
+			IterStateOrCorrupted::Item(item) => Ok(f(item)),
+			IterStateOrCorrupted::Corrupted( .. ) => Err(Error::Corruption("Missing indexed value".into())),
+		};
+		self.iter_while_inner(log, action, 0, true)
+	}
+
+	fn iter_while_inner(
+		&self,
+		log: &Log,
+		mut f: impl FnMut(IterStateOrCorrupted) -> Result<bool>,
+		start_chunk: u64,
+		skip_preimage_indexes: bool,
+	) -> Result<()> {
 		let tables = self.tables.read();
 		let source = &tables.index;
 
-		if self.preimage {
+		if skip_preimage_indexes && self.preimage {
 			// It is much faster to iterate over the value table than index.
 			// We have to assume hashing scheme however.
 			for table in &tables.value[..tables.value.len() - 1] {
@@ -525,39 +558,45 @@ impl Column {
 					};
 					let key = blake2_rfc::blake2b::blake2b(32, &[], &value);
 					let key = self.hash(key.as_bytes());
-					if !f(index, key, rc, value) {
-						return false;
-					}
-					true
+					let state = IterStateOrCorrupted::Item(IterState { chunk_index: index, key, rc, value });
+					f(state).unwrap_or(false)
 				})?;
 				log::debug!( target: "parity-db", "{}: Done Iterating table {}", source.id, table.id);
 			}
 		}
 
-		for c in 0 .. source.id.total_chunks() {
+		for c in start_chunk .. source.id.total_chunks() {
 			let entries = source.entries(c, &*log.overlays());
 			for entry in entries.iter() {
 				if entry.is_empty() {
 					continue;
 				}
-				let value = if self.db_version >= 4 {
+				let (size_tier, offset) = if self.db_version >= 4 {
 					let address = entry.address(source.id.index_bits());
-					if self.preimage && address.size_tier() as usize != tables.value.len() - 1 {
-						continue;
-					}
-					tables.value[address.size_tier() as usize].get_with_meta(address.offset(), &*log.overlays())?
+					(address.size_tier(), address.offset())
 				} else {
 					let addr_bits = source.id.index_bits() + 10;
 					let address = Address::from_u64(entry.as_u64() & ((1u64 << addr_bits) - 1));
-					let size_tier = address.as_u64() & 0x0f;
-					if self.preimage && size_tier as usize != 15 {
-						continue;
-					}
+					let size_tier = (address.as_u64() & 0x0f) as u8;
 					let offset = address.as_u64() >> 4;
-					tables.value[size_tier as usize].get_with_meta(offset, &*log.overlays())?
+					(size_tier, offset)
 				};
 
-				let (value, rc, pk, compressed) = value.ok_or_else(|| Error::Corruption("Missing indexed value".into()))?;
+				if skip_preimage_indexes && self.preimage && size_tier != 15 {
+					continue;
+				}
+				let value = tables.value[size_tier as usize].get_with_meta(offset, &*log.overlays());
+				let (value, rc, pk, compressed) = match value {
+					Ok(Some(v)) => v,
+					Ok(None) => {
+						f(IterStateOrCorrupted::Corrupted(*entry, None))?;
+						continue;
+					},
+					Err(e) => {
+						f(IterStateOrCorrupted::Corrupted(*entry, Some(e)))?;
+						continue;
+					},
+				};
 				let mut key = source.recover_key_prefix(c, *entry);
 				&mut key[6..].copy_from_slice(&pk);
 				let value = if compressed {
@@ -574,11 +613,57 @@ impl Column {
 					hex(&key),
 					hex(&pk),
 				);
-				if !f(c, key, rc, value) {
+				let state = IterStateOrCorrupted::Item(IterState { chunk_index: c, key, rc, value });
+				if !f(state)? {
 					return Ok(())
 				}
 			}
 		}
+		Ok(())
+	}
+
+	pub(crate) fn check_from_index(&self, log: &Log, check_param: &crate::CheckOptions, col: ColId) -> Result<()> {
+		let start_chunk = check_param.from.unwrap_or(0);
+		let end_chunk = check_param.bound;
+
+		let step = 1000;
+		let start_time = std::time::Instant::now();
+		log::info!(target: "parity-db", "Starting full index iteration at {:?}", start_time);
+		log::info!(target: "parity-db", "for {} chunks of column {}", self.tables.read().index.id.total_chunks(), col);
+		self.iter_while_inner(log, |state| match state {
+			IterStateOrCorrupted::Item(IterState { chunk_index, key, rc, value }) => {
+				if Some(chunk_index) == end_chunk {
+					return Ok(false);
+				}
+				if chunk_index % step == 0 {
+					log::info!(target: "parity-db", "Chunk iteration at {}", chunk_index);
+				}
+
+				match check_param.display {
+					CheckDisplay::Full => {
+						log::info!("Index key: {:x?}\n \
+							\tRc: {}",
+							&key,
+							rc,
+						);
+						log::info!("Value: {}", hex(&value));
+					},
+					CheckDisplay::Short(t) => {
+						log::info!("Index key: {:x?}", &key);
+						log::info!("Rc: {}, Value len: {}", rc, value.len());
+						log::info!("Value: {}", hex(&value[..std::cmp::min(t as usize, value.len())]));
+					},
+					CheckDisplay::None => (),
+				}
+				Ok(true)
+			},
+			IterStateOrCorrupted::Corrupted(entry, e) => {
+				log::info!("Corrupted value for index entry: {}:\n\t{:?}", entry.as_u64(), e);
+				Ok(true)
+			},
+		}, start_chunk, false)?;
+
+		log::info!(target: "parity-db", "Ended full index check, elapsed {:?}", start_time.elapsed());
 		Ok(())
 	}
 

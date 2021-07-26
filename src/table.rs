@@ -125,6 +125,10 @@ impl TableId {
 		format!("table_{:02}_{}", self.col(), self.size_tier())
 	}
 
+	pub fn is_file_name(col: ColId, name: &str) -> bool {
+		name.starts_with(&format!("table_{:02}_", col))
+	}
+
 	pub fn as_u16(&self) -> u16 {
 		self.0
 	}

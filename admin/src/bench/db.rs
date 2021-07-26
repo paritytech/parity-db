@@ -14,21 +14,13 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-mod db;
-mod error;
-mod index;
-mod table;
-mod column;
-mod log;
-mod display;
-mod options;
-mod stats;
-mod compress;
-mod migration;
+use parity_db::{Key, Value};
 
-pub use db::{Db, Value, check::CheckOptions};
-pub use table::Key;
-pub use error::{Error, Result};
-pub use options::{ColumnOptions, Options};
-pub use migration::migrate;
-pub use compress::CompressionType;
+pub trait Db: Send + Sync + 'static {
+	type Options;
+
+	fn open(path: &std::path::Path) -> Self;
+	fn with_options(options: &Self::Options) -> Self;
+	fn get(&self, key: &Key) -> Option<Value>;
+	fn commit<I: IntoIterator<Item=(Key, Option<Value>)>>(&self, tx: I);
+}
