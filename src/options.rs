@@ -252,3 +252,15 @@ impl Options {
 		true
 	}
 }
+
+impl Metadata {
+	pub fn columns_to_migrate(&self) -> std::collections::BTreeSet<u8> {
+		let mut result = std::collections::BTreeSet::new();
+		if self.version == 3 {
+			for i in 0 .. self.columns.len() as u8 {
+				result.insert(i);
+			}
+		}
+		result
+	}
+}

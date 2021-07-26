@@ -38,7 +38,7 @@ use fs2::FileExt;
 use crate::{
 	table::Key,
 	error::{Error, Result},
-	column::{ColId, Column},
+	column::{ColId, Column, IterState},
 	log::{Log, LogAction},
 	index::PlanOutcome,
 	options::{Metadata, Options},
@@ -120,8 +120,10 @@ struct DbInner {
 }
 
 impl DbInner {
-	fn open(options: &Options) -> Result<DbInner> {
-		std::fs::create_dir_all(&options.path)?;
+	fn open(options: &Options, create: bool) -> Result<DbInner> {
+		if create {
+			std::fs::create_dir_all(&options.path)?
+		};
 		let mut lock_path: std::path::PathBuf = options.path.clone();
 		lock_path.push("lock");
 		let lock_file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(lock_path.as_path())?;
@@ -655,14 +657,33 @@ impl DbInner {
 			path.push("stats.txt");
 			match std::fs::File::create(path) {
 				Ok(file) => {
-					for c in self.columns.iter() {
-						c.write_stats(&file);
-					}
+					let mut writer = std::io::BufWriter::new(file);
+					self.collect_stats(&mut writer, None)
 				}
 				Err(e) => log::warn!(target: "parity-db", "Error creating stats file: {:?}", e),
 			}
 		}
 		Ok(())
+	}
+
+	fn collect_stats(&self, writer: &mut impl std::io::Write, column: Option<u8>) {
+		if let Some(col) = column {
+			self.columns[col as usize].write_stats(writer);
+		} else {
+			for c in self.columns.iter() {
+				c.write_stats(writer);
+			}
+		}
+	}
+
+	fn clear_stats(&self, column: Option<u8>) {
+		if let Some(col) = column {
+			self.columns[col as usize].clear_stats();
+		} else {
+			for c in self.columns.iter() {
+				c.clear_stats();
+			}
+		}
 	}
 
 	fn store_err(&self, result: Result<()>) {
@@ -677,7 +698,7 @@ impl DbInner {
 		}
 	}
 
-	fn iter_column_while(&self, c: ColId, f: impl FnMut (u64, Key, u32, Vec<u8>) -> bool) -> Result<()> {
+	fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
 		self.columns[c as usize].iter_while(&self.log, f)
 	}
 }
@@ -694,17 +715,39 @@ impl Db {
 	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Result<Db> {
 		let options = Options::with_columns(path, num_columns);
 
-		assert!(options.is_valid());
-		Self::open(&options)
+		Self::open_inner(&options, true, false)
 	}
 
-	/// Open the database with given
+	/// Open the database with given options.
 	pub fn open(options: &Options) -> Result<Db> {
-		let mut db = DbInner::open(options)?;
+		Self::open_inner(options, false, false)
+	}
+
+	/// Create the database using given options.
+	pub fn open_or_create(options: &Options) -> Result<Db> {
+		Self::open_inner(options, true, false)
+	}
+
+	pub fn open_read_only(options: &Options) -> Result<Db> {
+		Self::open_inner(options, false, true)
+	}
+
+	pub fn open_inner(options: &Options, create: bool, read_only: bool) -> Result<Db> {
+		assert!(options.is_valid());
+		let mut db = DbInner::open(options, create)?;
 		// This needs to be call before log thread: so first reindexing
 		// will run in correct state.
 		db.replay_all_logs()?;
 		let db = Arc::new(db);
+		if read_only {
+			return Ok(Db {
+				inner: db,
+				commit_thread: None,
+				flush_thread: None,
+				log_thread: None,
+				cleanup_thread: None,
+			})
+		}
 		let commit_worker_db = db.clone();
 		let commit_thread = std::thread::spawn(move ||
 			commit_worker_db.store_err(Self::commit_worker(commit_worker_db.clone()))
@@ -754,7 +797,7 @@ impl Db {
 		self.inner.columns.len() as u8
 	}
 
-	pub(crate) fn iter_column_while(&self, c: ColId, f: impl FnMut (u64, Key, u32, Vec<u8>) -> bool) -> Result<()> {
+	pub(crate) fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
 		self.inner.iter_column_while(c, f)
 	}
 
@@ -826,6 +869,25 @@ impl Db {
 		log::debug!(target: "parity-db", "Cleanup worker shutdown");
 		Ok(())
 	}
+
+	pub fn collect_stats(&self, writer: &mut impl std::io::Write, column: Option<u8>) {
+		self.inner.collect_stats(writer, column)
+	}
+
+	pub fn clear_stats(&self, column: Option<u8>) {
+		self.inner.clear_stats(column)
+	}
+
+	pub fn check_from_index(&self, check_param: check::CheckOptions) -> Result<()> {
+		if let Some(col) = check_param.column.clone() {
+			self.inner.columns[col as usize].check_from_index(&self.inner.log, &check_param, col)?;
+		} else {
+			for (ix, c) in self.inner.columns.iter().enumerate() {
+				c.check_from_index(&self.inner.log, &check_param, ix as ColId)?;
+			}
+		}
+		Ok(())
+	}
 }
 
 impl Drop for Db {
@@ -837,6 +899,47 @@ impl Drop for Db {
 		self.cleanup_thread.take().map(|t| t.join());
 		if let Err(e) = self.inner.kill_logs() {
 			log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
+		}
+	}
+}
+
+/// Verification operation utilities.
+pub mod check {
+	pub enum CheckDisplay {
+		None,
+		Full,
+		Short(u64),
+	}
+
+	pub struct CheckOptions {
+		pub column: Option<u8>,
+		pub from: Option<u64>,
+		pub bound: Option<u64>,
+		pub display: CheckDisplay,
+	}
+
+	impl CheckOptions {
+		pub fn new(
+			column: Option<u8>,
+			from: Option<u64>,
+			bound: Option<u64>,
+			display_content: bool,
+			truncate_value_display: Option<u64>,
+		) -> Self {
+			let display = if display_content {
+				match truncate_value_display {
+					Some(t) => CheckDisplay::Short(t),
+					None => CheckDisplay::Full,
+				}
+			} else {
+				CheckDisplay::None
+			};
+			CheckOptions {
+				column,
+				from,
+				bound,
+				display,
+			}
 		}
 	}
 }
