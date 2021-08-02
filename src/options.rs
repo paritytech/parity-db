@@ -96,7 +96,7 @@ impl ColumnOptions {
 	}
 
 	pub fn is_valid(&self) -> bool {
-		if self.sizes.len() > crate::table::SIZE_TIERS {
+		if self.sizes.len() > crate::table::SIZE_TIERS - 1 {
 			return false;
 		}
 		for size in &self.sizes {
