@@ -378,7 +378,6 @@ impl Column {
 				log::trace!(target: "parity-db", "{}: Inserting new index {}, size = {}", tables.index.id, hex(key), cval.len());
 				let offset = tables.value[target_tier].write_insert_plan(key, &cval, log, compressed)?;
 				let address = Address::new(offset, target_tier as u8);
-				assert!(address.size_tier() == target_tier as u8);
 				match tables.index.write_insert_plan(key, address, None, log)? {
 					PlanOutcome::NeedReindex => {
 						log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
@@ -582,7 +581,7 @@ impl Column {
 					(size_tier, offset)
 				};
 
-				if skip_preimage_indexes && self.preimage && size_tier != 15 {
+				if skip_preimage_indexes && self.preimage && size_tier as usize != tables.value.len() - 1 {
 					continue;
 				}
 				let value = tables.value[size_tier as usize].get_with_meta(offset, &*log.overlays());

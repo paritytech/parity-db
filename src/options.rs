@@ -96,6 +96,9 @@ impl ColumnOptions {
 	}
 
 	pub fn is_valid(&self) -> bool {
+		if self.sizes.len() > crate::table::SIZE_TIERS {
+			return false;
+		}
 		for size in &self.sizes {
 			if *size >= crate::table::COMPRESSED_MASK {
 				return false;
