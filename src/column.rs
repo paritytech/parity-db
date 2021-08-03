@@ -37,7 +37,7 @@ pub type Salt = [u8; 32];
 
 struct Tables {
 	index: IndexTable,
-	value: [ValueTable; 16],
+	value: Vec<ValueTable>,
 }
 
 struct Reindex {
@@ -56,6 +56,7 @@ pub struct Column {
 	salt: Option<Salt>,
 	stats: ColumnStats,
 	compression: Compress,
+	db_version: u32,
 }
 
 pub struct IterState {
@@ -141,7 +142,7 @@ impl Column {
 			Some(tier) => tier as usize,
 			None => {
 				log::trace!(target: "parity-db", "Using blob {}", hex(key));
-				15
+				tables.value.len() - 1
 			}
 		};
 
@@ -156,28 +157,13 @@ impl Column {
 		let (index, reindexing, stats) = Self::open_index(&options.path, col)?;
 		let collect_stats = options.stats;
 		let path = &options.path;
+		let arc_path = std::sync::Arc::new(path.clone());
 		let options = &metadata.columns[col as usize];
 		let db_version = metadata.version;
 		let tables = Tables {
 			index,
-			value: [
-				Self::open_table(path, col, 0, &options, db_version)?,
-				Self::open_table(path, col, 1, &options, db_version)?,
-				Self::open_table(path, col, 2, &options, db_version)?,
-				Self::open_table(path, col, 3, &options, db_version)?,
-				Self::open_table(path, col, 4, &options, db_version)?,
-				Self::open_table(path, col, 5, &options, db_version)?,
-				Self::open_table(path, col, 6, &options, db_version)?,
-				Self::open_table(path, col, 7, &options, db_version)?,
-				Self::open_table(path, col, 8, &options, db_version)?,
-				Self::open_table(path, col, 9, &options, db_version)?,
-				Self::open_table(path, col, 10, &options, db_version)?,
-				Self::open_table(path, col, 11, &options, db_version)?,
-				Self::open_table(path, col, 12, &options, db_version)?,
-				Self::open_table(path, col, 13, &options, db_version)?,
-				Self::open_table(path, col, 14, &options, db_version)?,
-				Self::open_table(path, col, 15, &options, db_version)?,
-			],
+			value: (0.. options.sizes.len() + 1)
+				.map(|i| Self::open_table(arc_path.clone(), col, i as u8, &options, db_version)).collect::<Result<_>>()?
 		};
 
 		Ok(Column {
@@ -194,6 +180,7 @@ impl Column {
 			salt: metadata.salt.clone(),
 			stats,
 			compression: Compress::new(options.compression, options.compression_treshold),
+			db_version,
 		})
 	}
 
@@ -241,7 +228,7 @@ impl Column {
 	}
 
 	fn open_table(
-		path: &std::path::Path,
+		path: std::sync::Arc<std::path::PathBuf>,
 		col: ColId,
 		tier: u8,
 		options: &ColumnOptions,
@@ -383,12 +370,12 @@ impl Column {
 					return tables.index.write_insert_plan(key, new_address, sub_index, log);
 				}
 			} else {
-				log::trace!(target: "parity-db", "{}: Inserting new index {}", tables.index.id, hex(key));
 				let (cval, target_tier) = self.compress(&key, &val, &*tables);
 				let (cval, compressed) = cval.as_ref()
 					.map(|cval| (cval.as_slice(), true))
 					.unwrap_or((val.as_slice(), false));
 
+				log::trace!(target: "parity-db", "{}: Inserting new index {}, size = {}", tables.index.id, hex(key), cval.len());
 				let offset = tables.value[target_tier].write_insert_plan(key, &cval, log, compressed)?;
 				let address = Address::new(offset, target_tier as u8);
 				match tables.index.write_insert_plan(key, address, None, log)? {
@@ -561,6 +548,7 @@ impl Column {
 			// It is much faster to iterate over the value table than index.
 			// We have to assume hashing scheme however.
 			for table in &tables.value[..tables.value.len() - 1] {
+				log::debug!( target: "parity-db", "{}: Iterating table {}", source.id, table.id);
 				table.iter_while(&*log.overlays(), |index, rc, value, compressed| {
 					let value = if compressed {
 						self.decompress(&value)
@@ -572,6 +560,7 @@ impl Column {
 					let state = IterStateOrCorrupted::Item(IterState { chunk_index: index, key, rc, value });
 					f(state).unwrap_or(false)
 				})?;
+				log::debug!( target: "parity-db", "{}: Done Iterating table {}", source.id, table.id);
 			}
 		}
 
@@ -581,11 +570,21 @@ impl Column {
 				if entry.is_empty() {
 					continue;
 				}
-				let address = entry.address(source.id.index_bits());
-				if skip_preimage_indexes && self.preimage && address.size_tier() != 15 {
+				let (size_tier, offset) = if self.db_version >= 4 {
+					let address = entry.address(source.id.index_bits());
+					(address.size_tier(), address.offset())
+				} else {
+					let addr_bits = source.id.index_bits() + 10;
+					let address = Address::from_u64(entry.as_u64() & ((1u64 << addr_bits) - 1));
+					let size_tier = (address.as_u64() & 0x0f) as u8;
+					let offset = address.as_u64() >> 4;
+					(size_tier, offset)
+				};
+
+				if skip_preimage_indexes && self.preimage && size_tier as usize != tables.value.len() - 1 {
 					continue;
 				}
-				let value = tables.value[address.size_tier() as usize].get_with_meta(address.offset(), &*log.overlays());
+				let value = tables.value[size_tier as usize].get_with_meta(offset, &*log.overlays());
 				let (value, rc, pk, compressed) = match value {
 					Ok(Some(v)) => v,
 					Ok(None) => {
@@ -604,7 +603,7 @@ impl Column {
 				} else {
 					value
 				};
-				log::trace!(
+				log::debug!(
 					target: "parity-db",
 					"{}: Iterating at {}/{}, key={:?}, pk={:?}",
 					source.id,
@@ -697,7 +696,7 @@ impl Column {
 				log::trace!(target: "parity-db", "{}: End reindex batch {} ({})", tables.index.id, source_index, plan.len());
 				reindex.progress.store(source_index, Ordering::Relaxed);
 				if source_index == source.id.total_chunks() {
-					log::info!(target: "parity-db", "Completed reindex into {}", tables.index.id);
+					log::info!(target: "parity-db", "Completed reindex {} into {}", source.id, tables.index.id);
 					drop_index = Some(source.id);
 				}
 			}

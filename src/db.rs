@@ -87,10 +87,17 @@ impl std::hash::Hasher for IdentityKeyHash {
 	fn write(&mut self, bytes: &[u8]) {
 		self.0 = u64::from_le_bytes((&bytes[0..8]).try_into().unwrap())
 	}
-
-	fn finish(&self) -> u64 {
-		self.0
-	}
+	fn write_u8(&mut self, _: u8)       { unreachable!() }
+	fn write_u16(&mut self, _: u16)     { unreachable!() }
+	fn write_u32(&mut self, _: u32)     { unreachable!() }
+	fn write_u64(&mut self, _: u64)     { unreachable!() }
+	fn write_usize(&mut self, _: usize) { }
+	fn write_i8(&mut self, _: i8)       { unreachable!() }
+	fn write_i16(&mut self, _: i16)     { unreachable!() }
+	fn write_i32(&mut self, _: i32)     { unreachable!() }
+	fn write_i64(&mut self, _: i64)     { unreachable!() }
+	fn write_isize(&mut self, _: isize) { unreachable!() }
+	fn finish(&self) -> u64 { self.0 }
 }
 
 struct DbInner {
@@ -596,7 +603,7 @@ impl DbInner {
 	}
 
 	fn cleanup_logs(&self) -> Result<bool> {
-		let keep_logs = if self.options.sync_data { KEEP_LOGS } else { 0 };
+		let keep_logs = if self.options.sync_data { 0 } else { KEEP_LOGS };
 		let num_cleanup = self.log.num_dirty_logs();
 		if num_cleanup > keep_logs {
 			if self.options.sync_data {

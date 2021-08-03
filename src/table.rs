@@ -61,6 +61,8 @@ use std::convert::TryInto;
 use std::mem::MaybeUninit;
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::Arc;
+use parking_lot::{RwLockUpgradableReadGuard, RwLock};
 use crate::{
 	error::Result,
 	column::ColId,
@@ -70,14 +72,16 @@ use crate::{
 };
 
 pub const KEY_LEN: usize = 32;
-pub const SIZE_TIERS: usize = 16;
-pub const SIZE_TIERS_BITS: u8 = 4;
+pub const SIZE_TIERS: usize = 1usize << SIZE_TIERS_BITS;
+pub const SIZE_TIERS_BITS: u8 = 8;
 pub const COMPRESSED_MASK: u16 = 0x80_00;
-const MAX_ENTRY_SIZE: usize = 0xfffc;
+pub const MAX_ENTRY_SIZE: usize = 0x7ff8;
+pub const MIN_ENTRY_SIZE: usize = 32;
 const REFS_SIZE: usize = 4;
 const SIZE_SIZE: usize = 2;
 const PARTIAL_SIZE: usize = 26;
 const INDEX_SIZE: usize = 8;
+const MAX_ENTRY_BUF_SIZE: usize = 0x8000;
 
 const TOMBSTONE: &[u8] = &[0xff, 0xff];
 const MULTIPART: &[u8] = &[0xff, 0xfe];
@@ -114,7 +118,7 @@ impl TableId {
 	}
 
 	pub fn file_name(&self) -> String {
-		format!("table_{:02}_{:02}", self.col(), self.size_tier())
+		format!("table_{:02}_{}", self.col(), hex(&[self.size_tier()]))
 	}
 
 	pub fn legacy_file_name(&self) -> String {
@@ -132,14 +136,15 @@ impl TableId {
 
 impl std::fmt::Display for TableId {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "table {:02}_{:02}", self.col(), self.size_tier())
+		write!(f, "{:02}-{:02}", self.col(), hex(&[self.size_tier()]))
 	}
 }
 
 pub struct ValueTable {
 	pub id: TableId,
 	pub entry_size: u16,
-	file: std::fs::File,
+	file: RwLock<Option<std::fs::File>>,
+	path: Arc<std::path::PathBuf>,
 	capacity: AtomicU64,
 	filled: AtomicU64,
 	last_removed: AtomicU64,
@@ -148,6 +153,17 @@ pub struct ValueTable {
 	multipart: bool,
 	ref_counted: bool,
 	no_compression: bool, // This legacy table can't be compressed. TODO: remove this
+}
+
+#[cfg(target_os = "linux")]
+fn disable_read_ahead(file: &std::fs::File) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let err = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_RANDOM) };
+    if err != 0 {
+        Err(std::io::Error::from_raw_os_error(err))?
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -160,7 +176,7 @@ fn disable_read_ahead(file: &std::fs::File) -> Result<()> {
 	}
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn disable_read_ahead(_file: &std::fs::File) -> Result<()> {
 	Ok(())
 }
@@ -184,7 +200,7 @@ impl Header {
 }
 
 struct Entry<B: AsRef<[u8]> + AsMut<[u8]>>(usize, B);
-type FullEntry = Entry<[u8; MAX_ENTRY_SIZE]>;
+type FullEntry = Entry<[u8; MAX_ENTRY_BUF_SIZE]>;
 type PartialEntry = Entry<[u8; 10]>;
 type PartialKeyEntry = Entry<[u8; 40]>;
 
@@ -309,7 +325,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> std::ops::IndexMut<std::ops::Range<usize>> fo
 
 impl ValueTable {
 	pub fn open(
-		path: &std::path::Path,
+		path: Arc<std::path::PathBuf>,
 		id: TableId,
 		entry_size: Option<u16>,
 		options: &Options,
@@ -319,42 +335,53 @@ impl ValueTable {
 			Some(s) => (false, s),
 			None => (true, 4096),
 		};
-		assert!(entry_size >= 32);
-		assert!(entry_size <= MAX_ENTRY_SIZE as u16);
+		assert!(entry_size >= MIN_ENTRY_SIZE as u16);
+		if db_version >= 4 {
+			assert!(entry_size <= MAX_ENTRY_SIZE as u16);
+		}
 
-		let mut path: std::path::PathBuf = path.into();
+		let mut filepath: std::path::PathBuf = std::path::PathBuf::clone(&*path);
 		// Check for old file name format
-		path.push(id.legacy_file_name());
-		let mut file = if std::fs::metadata(&path).is_ok() {
-			std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?
+		filepath.push(id.legacy_file_name());
+		let mut file = if db_version == 3 && std::fs::metadata(&filepath).is_ok() {
+			Some(std::fs::OpenOptions::new().create(true).read(true).write(true).open(filepath.as_path())?)
 		} else {
-			path.pop();
-			path.push(id.file_name());
-			std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?
+			filepath.pop();
+			filepath.push(id.file_name());
+			if std::fs::metadata(&filepath).is_ok() {
+				Some(std::fs::OpenOptions::new().create(true).read(true).write(true).open(filepath.as_path())?)
+			} else {
+				None
+			}
 		};
+		let mut filled = 1;
+		let mut capacity = 1;
+		let mut last_removed = 0;
+		if let Some(file) = &mut file {
+			disable_read_ahead(file)?;
+			let mut file_len = file.metadata()?.len();
+			if file_len == 0 {
+				// Preallocate a single entry that contains metadata
+				file.set_len(entry_size as u64)?;
+				file_len = entry_size as u64;
+			}
 
-		// TODO: posix_fadvise
-		disable_read_ahead(&file)?;
-		let mut file_len = file.metadata()?.len();
-		if file_len == 0 {
-			// Preallocate a single entry that contains metadata
-			file.set_len(entry_size as u64)?;
-			file_len = entry_size as u64;
+			capacity = file_len / entry_size as u64;
+			let mut header = Header::default();
+			file.read_exact(&mut header.0)?;
+			last_removed = header.last_removed();
+			filled = header.filled();
+			if filled == 0 {
+				filled = 1;
+			}
+			log::debug!(target: "parity-db", "Opened value table {} with {} entries, entry_size={}", id, filled, entry_size);
 		}
 
-		let capacity = file_len / entry_size as u64;
-		let mut header = Header::default();
-		file.read_exact(&mut header.0)?;
-		let last_removed = header.last_removed();
-		let mut filled = header.filled();
-		if filled == 0 {
-			filled = 1;
-		}
-		log::debug!(target: "parity-db", "Opened value table {} with {} entries", id, filled);
 		Ok(ValueTable {
 			id,
 			entry_size,
-			file,
+			path,
+			file: RwLock::new(file),
 			capacity: AtomicU64::new(capacity),
 			filled: AtomicU64::new(filled),
 			last_removed: AtomicU64::new(last_removed),
@@ -366,6 +393,15 @@ impl ValueTable {
 		})
 	}
 
+	fn create_file(&self) -> Result<std::fs::File> {
+		let mut path = std::path::PathBuf::clone(&*self.path);
+		path.push(self.id.file_name());
+		let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?;
+		disable_read_ahead(&file)?;
+		log::debug!(target: "parity-db", "Created value table {}", self.id);
+		Ok(file)
+	}
+
 	pub fn value_size(&self) -> u16 {
 		self.entry_size - SIZE_SIZE as u16 - self.ref_size() as u16 - PARTIAL_SIZE as u16
 	}
@@ -373,20 +409,26 @@ impl ValueTable {
 	#[cfg(unix)]
 	fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
 		use std::os::unix::fs::FileExt;
-		Ok(self.file.read_exact_at(buf, offset)?)
+		Ok(self.file.read().as_ref().unwrap().read_exact_at(buf, offset)?)
 	}
 
 	#[cfg(unix)]
 	fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
 		use std::os::unix::fs::FileExt;
 		self.dirty.store(true, Ordering::Relaxed);
-		Ok(self.file.write_all_at(buf, offset)?)
+		let mut file = self.file.upgradable_read();
+		if file.is_none() {
+			let mut wfile = RwLockUpgradableReadGuard::upgrade(file);
+			*wfile = Some(self.create_file()?);
+			file = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wfile);
+		}
+		Ok(file.as_ref().unwrap().write_all_at(buf, offset)?)
 	}
 
 	#[cfg(windows)]
 	fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
 		use std::os::windows::fs::FileExt;
-		self.file.seek_read(buf, offset)?;
+		self.file.read().as_ref().unwrap().seek_read(buf, offset)?;
 		Ok(())
 	}
 
@@ -394,7 +436,13 @@ impl ValueTable {
 	fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
 		use std::os::windows::fs::FileExt;
 		self.dirty.store(true, Ordering::Relaxed);
-		self.file.seek_write(buf, offset)?;
+		let mut file = self.file.upgradable_read();
+		if file.is_none() {
+			let mut wfile = RwLockUpgradableReadGuard::upgrade(file);
+			*wfile = Some(self.create_file()?);
+			file = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wfile);
+		}
+		file.as_ref().unwrap().seek_write(buf, offset)?;
 		Ok(())
 	}
 
@@ -402,7 +450,13 @@ impl ValueTable {
 		let mut capacity = self.capacity.load(Ordering::Relaxed);
 		capacity += (256 * 1024) / self.entry_size as u64;
 		self.capacity.store(capacity, Ordering::Relaxed);
-		self.file.set_len(capacity * self.entry_size as u64)?;
+		let mut file = self.file.upgradable_read();
+		if file.is_none() {
+			let mut wfile = RwLockUpgradableReadGuard::upgrade(file);
+			*wfile = Some(self.create_file()?);
+			file = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wfile);
+		}
+		file.as_ref().unwrap().set_len(capacity * self.entry_size as u64)?;
 		Ok(())
 	}
 
@@ -460,11 +514,12 @@ impl ValueTable {
 				if key.map_or(false, |k| partial_key(k) != pk) {
 					log::debug!(
 						target: "parity-db",
-						"{}: Key mismatch at {}. Expected {:?}, got {}",
+						"{}: Key mismatch at {}. Expected {:?}, got {}, size = {}",
 						self.id,
 						index,
 						key.map(|k| hex(partial_key(k))),
 						hex(&pk),
+						self.entry_size,
 					);
 					return Ok((0, Default::default(), false));
 				}
@@ -834,6 +889,9 @@ impl ValueTable {
 	}
 
 	pub fn refresh_metadata(&self) -> Result<()> {
+		if self.file.read().is_none() {
+			return Ok(());
+		}
 		let mut header = Header::default();
 		self.read_at(&mut header.0, 0)?;
 		let last_removed = header.last_removed();
@@ -861,7 +919,9 @@ impl ValueTable {
 
 	pub fn flush(&self) -> Result<()> {
 		if let Ok(true) = self.dirty.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed) {
-			self.file.sync_data()?;
+			if let Some(file) = self.file.read().as_ref() {
+				file.sync_data()?;
+			}
 		}
 		Ok(())
 	}
@@ -895,7 +955,7 @@ mod test {
 	use super::{ValueTable, TableId, Key, Value};
 	use crate::{log::{Log, LogWriter, LogAction}, options::{Options, ColumnOptions, CURRENT_VERSION}};
 
-	struct TempDir(std::path::PathBuf);
+	struct TempDir(std::sync::Arc<std::path::PathBuf>);
 
 	impl TempDir {
 		fn new(name: &'static str) -> TempDir {
@@ -909,16 +969,16 @@ mod test {
 				std::fs::remove_dir_all(&path).unwrap();
 			}
 			std::fs::create_dir_all(&path).unwrap();
-			TempDir(path)
+			TempDir(std::sync::Arc::new(path))
 		}
 
 		fn table(&self, size: Option<u16>, options: &ColumnOptions) -> ValueTable {
 			let id = TableId::new(0, 0);
-			ValueTable::open(&self.0, id, size, options, CURRENT_VERSION).unwrap()
+			ValueTable::open(self.0.clone(), id, size, options, CURRENT_VERSION).unwrap()
 		}
 
 		fn log(&self) -> Log {
-			let options = Options::with_columns(&self.0, 1);
+			let options = Options::with_columns(&*self.0, 1);
 			Log::open(&options).unwrap()
 		}
 	}
@@ -926,7 +986,7 @@ mod test {
 	impl Drop for TempDir {
 		fn drop(&mut self) {
 			if self.0.exists() {
-				std::fs::remove_dir_all(&self.0).unwrap();
+				std::fs::remove_dir_all(&*self.0).unwrap();
 			}
 		}
 	}

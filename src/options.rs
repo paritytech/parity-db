@@ -16,7 +16,6 @@
 
 use std::io::Write;
 use std::collections::HashMap;
-use std::convert::TryInto;
 use std::path::{PathBuf, Path};
 use crate::error::{Error, Result};
 use crate::column::Salt;
@@ -58,7 +57,7 @@ pub struct ColumnOptions {
 	/// Allows for skipping additional key hashing.
 	pub uniform: bool,
 	/// Value size tiers.
-	pub sizes: [u16; 15],
+	pub sizes: Vec<u16>,
 	/// Use reference counting for values.
 	pub ref_counted: bool,
 	/// Compression to use for this column.
@@ -97,8 +96,11 @@ impl ColumnOptions {
 	}
 
 	pub fn is_valid(&self) -> bool {
-		for size in self.sizes {
-			if size >= crate::table::COMPRESSED_MASK {
+		if self.sizes.len() > crate::table::SIZE_TIERS - 1 {
+			return false;
+		}
+		for size in &self.sizes {
+			if *size >= crate::table::COMPRESSED_MASK {
 				return false;
 			}
 		}
@@ -111,7 +113,6 @@ impl ColumnOptions {
 		let sizes = split.next()?;
 		let sizes = &sizes[1..sizes.len() - 1];
 		let sizes: Vec<u16> = sizes.split(",").filter_map(|v| v.trim().parse().ok()).collect();
-		let sizes: [u16; 15] = sizes.try_into().ok()?;
 
 		let vals: HashMap<&str, &str> = vals.split(", ").filter_map(|s| {
 			let mut pair = s.split(": ");
@@ -136,13 +137,26 @@ impl ColumnOptions {
 
 impl Default for ColumnOptions {
 	fn default() -> ColumnOptions {
+		let  start = crate::table::MIN_ENTRY_SIZE as f64;
+		let  end = crate::table::MAX_ENTRY_SIZE as f64;
+		let  n_slices = crate::table::SIZE_TIERS - 1;
+
+		let factor = ((end.ln() - start.ln()) / (n_slices - 1) as f64).exp();
+
+		let mut sizes = Vec::with_capacity(n_slices);
+		let mut s = start;
+		for _ in 0 .. n_slices {
+			sizes.push(s.round() as u16);
+			s = s * factor;
+		}
+
 		ColumnOptions {
 			preimage: false,
 			uniform: false,
 			ref_counted: false,
 			compression: CompressionType::NoCompression,
 			compression_treshold: 4096,
-			sizes: [96, 128, 192, 256, 320, 512, 768, 1024, 1536, 2048, 3072, 4096, 8192, 16384, 32760],
+			sizes,
 		}
 	}
 }

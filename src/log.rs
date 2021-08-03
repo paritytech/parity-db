@@ -337,15 +337,35 @@ impl<'a> LogQuery for LogWriter<'a> {
 	}
 }
 
+// Identity hash.
+#[derive(Default, Clone)]
+pub struct IdentityHash(u64);
+pub type BuildIdHash = std::hash::BuildHasherDefault<IdentityHash>;
+
+impl std::hash::Hasher for IdentityHash {
+    fn write(&mut self, _: &[u8]) { unreachable!() }
+    fn write_u8(&mut self, _: u8)       { unreachable!() }
+    fn write_u16(&mut self, _: u16)     { unreachable!() }
+    fn write_u32(&mut self, _: u32)     { unreachable!() }
+    fn write_u64(&mut self, n: u64)     { self.0 = n }
+    fn write_usize(&mut self, _: usize) { unreachable!() }
+    fn write_i8(&mut self, _: i8)       { unreachable!() }
+    fn write_i16(&mut self, _: i16)     { unreachable!() }
+    fn write_i32(&mut self, _: i32)     { unreachable!() }
+    fn write_i64(&mut self, _: i64)     { unreachable!() }
+    fn write_isize(&mut self, _: isize) { unreachable!() }
+    fn finish(&self) -> u64 { self.0 }
+}
+
 #[derive(Default)]
 pub struct IndexLogOverlay {
 	pub map: HashMap<u64, (u64, u64, IndexChunk)>, // index -> (record_id, modified_mask, entry)
 }
 
-
+// We use identity hash for value overlay/log records so that writes to value tables are in order.
 #[derive(Default)]
 pub struct ValueLogOverlay {
-	pub map: HashMap<u64, (u64, Vec<u8>)>, // index -> (record_id, entry)
+	pub map: HashMap<u64, (u64, Vec<u8>), BuildIdHash>, // index -> (record_id, entry)
 }
 
 struct Appending {
