@@ -136,7 +136,7 @@ impl DbInner {
 		let lock_file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(lock_path.as_path())?;
 		lock_file.try_lock_exclusive().map_err(|e| Error::Locked(e))?;
 
-		let metadata = options.load_and_validate_metadata()?;
+		let metadata = options.load_and_validate_metadata(create)?;
 		let mut columns = Vec::with_capacity(metadata.columns.len());
 		let mut commit_overlay = Vec::with_capacity(metadata.columns.len());
 		let log = Log::open(&options)?;
@@ -948,5 +948,36 @@ pub mod check {
 				display,
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{Db, Options};
+	use tempfile::tempdir;
+
+	#[test]
+	fn test_db_open_should_fail() {
+		let tmp = tempdir().unwrap();
+		let options = Options::with_columns(tmp.path(), 5);
+		assert!(
+			Db::open(&options).is_err(),
+			"Database does not exist, so it should fail to open"
+		);
+		assert!(Db::open(&options).map(|_| ()).unwrap_err().to_string().contains("use open_or_create"));
+	}
+
+	#[test]
+	fn test_db_open_or_create() {
+		let tmp = tempdir().unwrap();
+		let options = Options::with_columns(tmp.path(), 5);
+		assert!(
+			Db::open_or_create(&options).is_ok(),
+			"New database should be created"
+		);
+		assert!(
+			Db::open(&options).is_ok(),
+			"Existing database should be reopened"
+		);
 	}
 }

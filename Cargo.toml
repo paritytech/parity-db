@@ -1,6 +1,6 @@
 [package]
 name = "parity-db"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["Parity Technologies <admin@parity.io>"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
@@ -23,6 +23,7 @@ snap = "1"
 
 [dev-dependencies]
 env_logger = "0.8.2"
+tempfile = "3.2"
 
 [profile.release]
 panic = "abort"
