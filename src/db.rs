@@ -133,10 +133,10 @@ impl DbInner {
 		};
 		let mut lock_path: std::path::PathBuf = options.path.clone();
 		lock_path.push("lock");
-		let lock_file = std::fs::OpenOptions::new().create(create).read(true).write(true).open(lock_path.as_path())?;
+		let lock_file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(lock_path.as_path())?;
 		lock_file.try_lock_exclusive().map_err(|e| Error::Locked(e))?;
 
-		let metadata = options.load_and_validate_metadata()?;
+		let metadata = options.load_and_validate_metadata(create)?;
 		let mut columns = Vec::with_capacity(metadata.columns.len());
 		let mut commit_overlay = Vec::with_capacity(metadata.columns.len());
 		let log = Log::open(&options)?;
@@ -964,6 +964,7 @@ mod tests {
 			Db::open(&options).is_err(),
 			"Database does not exist, so it should fail to open"
 		);
+		assert!(Db::open(&options).map(|_| ()).unwrap_err().to_string().contains("use open_or_create"));
 	}
 
 	#[test]

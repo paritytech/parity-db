@@ -183,7 +183,7 @@ impl Options {
 		Ok(())
 	}
 
-	pub fn load_and_validate_metadata(&self) -> Result<Metadata> {
+	pub fn load_and_validate_metadata(&self, create: bool) -> Result<Metadata> {
 		let mut path: PathBuf = self.path.clone();
 		path.push("metadata");
 		let meta = Self::load_metadata(&path)?;
@@ -201,7 +201,7 @@ impl Options {
 				}
 			}
 			Ok(meta)
-		} else {
+		} else if create {
 			let s: Salt = self.salt.unwrap_or(rand::thread_rng().gen());
 			self.write_metadata(&path, &s)?;
 			Ok(Metadata {
@@ -209,6 +209,8 @@ impl Options {
 				columns: self.columns.clone(),
 				salt: Some(s),
 			})
+		} else {
+			Err(Error::InvalidConfiguration("Database does not exist. To create a new one, use open_or_create".into()))
 		}
 	}
 
