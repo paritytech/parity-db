@@ -499,7 +499,7 @@ impl IndexTable {
 
 	#[cfg(not(unix))]
 	fn madvise_random(&self, _map: &mut memmap2::MmapMut) {
-		Ok(())
+		()
 	}
 }
 
