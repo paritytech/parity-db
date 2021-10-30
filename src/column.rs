@@ -597,7 +597,7 @@ impl Column {
 					},
 				};
 				let mut key = source.recover_key_prefix(c, *entry);
-				&mut key[6..].copy_from_slice(&pk);
+				key[6..].copy_from_slice(&pk);
 				let value = if compressed {
 						self.decompress(&value)
 				} else {
