@@ -123,10 +123,6 @@ impl TableId {
 		format!("table_{:02}_{}", self.col(), hex(&[self.size_tier()]))
 	}
 
-	pub fn legacy_file_name(&self) -> String {
-		format!("table_{:02}_{}", self.col(), self.size_tier())
-	}
-
 	pub fn is_file_name(col: ColId, name: &str) -> bool {
 		name.starts_with(&format!("table_{:02}_", col))
 	}
@@ -363,13 +359,8 @@ impl ValueTable {
 		}
 
 		let mut filepath: std::path::PathBuf = std::path::PathBuf::clone(&*path);
-		// Check for old file name format
-		filepath.push(id.legacy_file_name());
-		let mut file = if db_version == 3 && std::fs::metadata(&filepath).is_ok() {
-			Some(std::fs::OpenOptions::new().create(true).read(true).write(true).open(filepath.as_path())?)
-		} else {
-			filepath.pop();
-			filepath.push(id.file_name());
+		filepath.push(id.file_name());
+		let mut file = {
 			if std::fs::metadata(&filepath).is_ok() {
 				Some(std::fs::OpenOptions::new().create(true).read(true).write(true).open(filepath.as_path())?)
 			} else {

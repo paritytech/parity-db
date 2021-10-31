@@ -37,14 +37,14 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Ve
 	}
 
 	// Make sure we are using the same salt value.
-	to.salt = source_meta.salt;
+	to.salt = Some(source_meta.salt);
 
 	if (to.salt.is_none()) && overwrite {
 		return Err(Error::Migration("Changing salt need to update metadata at once.".into()));
 	}
 
 	let mut source_options = Options::with_columns(from, source_meta.columns.len() as u8);
-	source_options.salt = source_meta.salt;
+	source_options.salt = Some(source_meta.salt);
 	source_options.columns = source_meta.columns;
 	
 	let mut source = Db::open(&source_options)?;

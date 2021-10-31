@@ -70,8 +70,8 @@ pub struct ColumnOptions {
 /// Database metadata.
 #[derive(Clone, Debug)]
 pub struct Metadata {
-	/// Salt value. `None` only for version <= 3.
-	pub salt: Option<Salt>,
+	/// Salt value.
+	pub salt: Salt,
 	/// Database version.
 	pub version: u32,
 	/// Column metadata.
@@ -207,7 +207,7 @@ impl Options {
 			Ok(Metadata {
 				version: CURRENT_VERSION,
 				columns: self.columns.clone(),
-				salt: Some(s),
+				salt: s,
 			})
 		} else {
 			Err(Error::InvalidConfiguration("Database does not exist. To create a new one, use open_or_create".into()))
@@ -246,12 +246,7 @@ impl Options {
 			return Err(Error::InvalidConfiguration(format!(
 						"Unsupported database version {}. Expected {}", version, CURRENT_VERSION)));
 		}
-		if version == 3 {
-			//Treat all tables as ref counted.
-			for mut col in &mut columns {
-				col.ref_counted = true;
-			}
-		}
+		let salt = salt.ok_or_else(|| Error::InvalidConfiguration("Missing salt value".into()))?;
 		Ok(Some(Metadata {
 			version,
 			columns,
@@ -271,12 +266,6 @@ impl Options {
 
 impl Metadata {
 	pub fn columns_to_migrate(&self) -> std::collections::BTreeSet<u8> {
-		let mut result = std::collections::BTreeSet::new();
-		if self.version == 3 {
-			for i in 0 .. self.columns.len() as u8 {
-				result.insert(i);
-			}
-		}
-		result
+		std::collections::BTreeSet::new()
 	}
 }
