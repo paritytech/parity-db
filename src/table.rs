@@ -1254,4 +1254,24 @@ mod test {
 		});
 		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), None);
 	}
+
+	#[test]
+	fn multipart_collision() {
+		let dir = TempDir::new("multipart_collision");
+		let table = dir.table(Some(super::MAX_ENTRY_SIZE as u16), &rc_options());
+		let log = dir.log();
+
+		let key = key(1);
+		let val = value(32225); // This result in 0x7dff entry size, which conflicts with v4 multipart definition
+
+		let compressed = true;
+		write_ops(&table, &log, |writer| {
+			table.write_insert_plan(&key, &val, writer, compressed).unwrap();
+		});
+		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some((val.clone(), compressed)));
+		write_ops(&table, &log, |writer| {
+			table.write_dec_ref(1, writer).unwrap();
+		});
+		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 1);
+	}
 }
