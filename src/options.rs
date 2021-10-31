@@ -22,9 +22,9 @@ use crate::column::Salt;
 use crate::compress::CompressionType;
 use rand::Rng;
 
-pub const CURRENT_VERSION: u32 = 4;
-// TODO on last supported 4, remove `ValueTable` `no_compression` field.
-const LAST_SUPPORTED_VERSION: u32 = 3;
+pub const CURRENT_VERSION: u32 = 5;
+// TODO on last supported 5, remove MULTIHEAD_V4 and MULTIPART_V4
+const LAST_SUPPORTED_VERSION: u32 = 4;
 
 /// Database configuration.
 #[derive(Clone, Debug)]
