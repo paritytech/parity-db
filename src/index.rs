@@ -268,7 +268,7 @@ impl IndexTable {
 		let index_key = (chunk << 64 - self.id.index_bits()) |
 			(partial_key << (64 - k - self.id.index_bits()));
 		let mut key = Key::default();
-		&mut key[0..8].copy_from_slice(&index_key.to_be_bytes());
+		key[0..8].copy_from_slice(&index_key.to_be_bytes());
 		key
 	}
 

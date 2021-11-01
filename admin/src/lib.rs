@@ -45,7 +45,7 @@ pub fn run() -> Result<(), String> {
 		.map_err(|e| format!("Error resolving metas: {:?}", e))? {
 		let mut options = parity_db::Options::with_columns(db_path.as_path(), 0);
 		options.columns = metadata.columns;
-		options.salt = metadata.salt;
+		options.salt = Some(metadata.salt);
 		options
 	} else {
 		parity_db::Options::with_columns(db_path.as_path(), nb_column)

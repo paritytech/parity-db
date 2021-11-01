@@ -75,7 +75,7 @@ pub const KEY_LEN: usize = 32;
 pub const SIZE_TIERS: usize = 1usize << SIZE_TIERS_BITS;
 pub const SIZE_TIERS_BITS: u8 = 8;
 pub const COMPRESSED_MASK: u16 = 0x80_00;
-pub const MAX_ENTRY_SIZE: usize = 0x7ff8;
+pub const MAX_ENTRY_SIZE: usize = 0x7ff8; // Actual max size in V4 was 0x7dfe
 pub const MIN_ENTRY_SIZE: usize = 32;
 const REFS_SIZE: usize = 4;
 const SIZE_SIZE: usize = 2;
@@ -84,8 +84,10 @@ const INDEX_SIZE: usize = 8;
 const MAX_ENTRY_BUF_SIZE: usize = 0x8000;
 
 const TOMBSTONE: &[u8] = &[0xff, 0xff];
-const MULTIPART: &[u8] = &[0xff, 0xfe];
-const MULTIHEAD: &[u8] = &[0xff, 0xfd];
+const MULTIPART_V4: &[u8] = &[0xff, 0xfe];
+const MULTIHEAD_V4: &[u8] = &[0xff, 0xfd];
+const MULTIPART: &[u8] = &[0xfe, 0xff];
+const MULTIHEAD: &[u8] = &[0xfd, 0xff];
 // When a rc reach locked ref, it is locked in db.
 const LOCKED_REF: u32 = u32::MAX;
 
@@ -121,10 +123,6 @@ impl TableId {
 		format!("table_{:02}_{}", self.col(), hex(&[self.size_tier()]))
 	}
 
-	pub fn legacy_file_name(&self) -> String {
-		format!("table_{:02}_{}", self.col(), self.size_tier())
-	}
-
 	pub fn is_file_name(col: ColId, name: &str) -> bool {
 		name.starts_with(&format!("table_{:02}_", col))
 	}
@@ -152,7 +150,7 @@ pub struct ValueTable {
 	dirty: AtomicBool,
 	multipart: bool,
 	ref_counted: bool,
-	no_compression: bool, // This legacy table can't be compressed. TODO: remove this
+	db_version: u32,
 }
 
 #[cfg(target_os = "linux")]
@@ -223,6 +221,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 		self.0 += buf.len();
 		self.1.as_mut()[start..self.0].copy_from_slice(buf);
 	}
+
 	fn read_slice(&mut self, size: usize) -> &[u8] {
 		let start = self.0;
 		self.0 += size;
@@ -232,6 +231,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	fn is_tombstone(&self) -> bool {
 		&self.1.as_ref()[0..SIZE_SIZE] == TOMBSTONE
 	}
+
 	fn write_tombstone(&mut self) {
 		self.write_slice(&TOMBSTONE);
 	}
@@ -239,28 +239,42 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	fn is_multipart(&self) -> bool {
 		&self.1.as_ref()[0..SIZE_SIZE] == MULTIPART
 	}
+
+	fn is_multipart_v4(&self) -> bool {
+		&self.1.as_ref()[0..SIZE_SIZE] == MULTIPART_V4
+	}
+
 	fn write_multipart(&mut self) {
 		self.write_slice(&MULTIPART);
 	}
+
 	fn is_multihead(&self) -> bool {
 		&self.1.as_ref()[0..SIZE_SIZE] == MULTIHEAD
 	}
+
+	fn is_multihead_v4(&self) -> bool {
+		&self.1.as_ref()[0..SIZE_SIZE] == MULTIHEAD_V4
+	}
+
 	fn write_multihead(&mut self) {
 		self.write_slice(&MULTIHEAD);
 	}
 
-	fn read_size(&mut self, no_compression: bool) -> (u16, bool) {
-		let size = u16::from_le_bytes(self.read_slice(SIZE_SIZE).try_into().unwrap());
-		if !no_compression {
-			let compressed = (size & COMPRESSED_MASK) > 0;
-			(size & !COMPRESSED_MASK, compressed)
-		} else {
-			(size, false)
-		}
+	fn is_multi(&self, db_version: u32) -> bool {
+		self.is_multipart() || self.is_multihead() ||
+			(db_version <= 4 && (self.is_multipart_v4() || self.is_multihead_v4()))
 	}
+
+	fn read_size(&mut self) -> (u16, bool) {
+		let size = u16::from_le_bytes(self.read_slice(SIZE_SIZE).try_into().unwrap());
+		let compressed = (size & COMPRESSED_MASK) > 0;
+		(size & !COMPRESSED_MASK, compressed)
+	}
+
 	fn skip_size(&mut self) {
 		self.0 += SIZE_SIZE;
 	}
+
 	fn write_size(&mut self, mut size: u16, compressed: bool) {
 		if compressed {
 			size |= COMPRESSED_MASK;
@@ -271,9 +285,11 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	fn read_next(&mut self) -> u64 {
 		u64::from_le_bytes(self.read_slice(INDEX_SIZE).try_into().unwrap())
 	}
+
 	fn skip_next(&mut self) {
 		self.0 += INDEX_SIZE;
 	}
+
 	fn write_next(&mut self, next_index: u64) {
 		self.write_slice(&next_index.to_le_bytes());
 	}
@@ -281,9 +297,11 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	fn read_rc(&mut self) -> u32 {
 		u32::from_le_bytes(self.read_slice(REFS_SIZE).try_into().unwrap())
 	}
+
 	fn skip_rc(&mut self) {
 		self.0 += REFS_SIZE;
 	}
+
 	fn write_rc(&mut self, rc: u32) {
 		self.write_slice(&rc.to_le_bytes());
 	}
@@ -341,13 +359,8 @@ impl ValueTable {
 		}
 
 		let mut filepath: std::path::PathBuf = std::path::PathBuf::clone(&*path);
-		// Check for old file name format
-		filepath.push(id.legacy_file_name());
-		let mut file = if db_version == 3 && std::fs::metadata(&filepath).is_ok() {
-			Some(std::fs::OpenOptions::new().create(true).read(true).write(true).open(filepath.as_path())?)
-		} else {
-			filepath.pop();
-			filepath.push(id.file_name());
+		filepath.push(id.file_name());
+		let mut file = {
 			if std::fs::metadata(&filepath).is_ok() {
 				Some(std::fs::OpenOptions::new().create(true).read(true).write(true).open(filepath.as_path())?)
 			} else {
@@ -389,7 +402,7 @@ impl ValueTable {
 			dirty: AtomicBool::new(false),
 			multipart,
 			ref_counted: options.ref_counted,
-			no_compression: db_version <= 3,
+			db_version,
 		})
 	}
 
@@ -495,12 +508,12 @@ impl ValueTable {
 				return Ok((0, Default::default(), false));
 			}
 
-			let (entry_end, next) = if buf.is_multipart() || buf.is_multihead() {
+			let (entry_end, next) = if self.multipart && buf.is_multi(self.db_version) {
 				buf.skip_size();
 				let next = buf.read_next();
 				(entry_size, next)
 			} else {
-				let (size, read_compressed) = buf.read_size(self.no_compression);
+				let (size, read_compressed) = buf.read_size();
 				compressed = read_compressed;
 				(buf.offset() + size as usize, 0)
 			};
@@ -584,7 +597,7 @@ impl ValueTable {
 			return Ok(None);
 		}
 		buf.skip_size();
-		if buf.is_multipart() || buf.is_multihead() {
+		if self.multipart && buf.is_multi(self.db_version) {
 			buf.skip_next();
 		}
 		if self.ref_counted {
@@ -610,7 +623,7 @@ impl ValueTable {
 		if !log.value(self.id, index, buf.as_mut()) {
 			self.read_at(buf.as_mut(), index * self.entry_size as u64)?;
 		}
-		if buf.is_multipart() || buf.is_multihead() {
+		if self.multipart && buf.is_multi(self.db_version) {
 			buf.skip_size();
 			let next = buf.read_next();
 			return Ok(Some(next));
@@ -798,12 +811,12 @@ impl ValueTable {
 			return Ok(false);
 		}
 
-		let size = if buf.is_multipart() || buf.is_multihead() {
+		let size = if self.multipart && buf.is_multi(self.db_version) {
 			buf.skip_size();
 			buf.skip_next();
 			self.entry_size as usize
 		} else {
-			let (size, _compressed) = buf.read_size(self.no_compression);
+			let (size, _compressed) = buf.read_size();
 			buf.offset() + size as usize
 		};
 
@@ -848,13 +861,13 @@ impl ValueTable {
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
 			self.write_at(&buf[0..SIZE_SIZE + INDEX_SIZE], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted tombstone in slot {}", self.id, index);
-		} else if buf.is_multipart() || buf.is_multihead() {
+		} else if self.multipart && buf.is_multi(self.db_version) {
 				let entry_size = self.entry_size as usize;
 				log.read(&mut buf[SIZE_SIZE..entry_size])?;
 				self.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
 				log::trace!(target: "parity-db", "{}: Enacted multipart in slot {}", self.id, index);
 		} else {
-			let (len, _compressed) = buf.read_size(self.no_compression);
+			let (len, _compressed) = buf.read_size();
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + len as usize])?;
 			self.write_at(&buf[0..(SIZE_SIZE + len as usize)], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted {}: {}, {} bytes", self.id, index, hex(&buf.1[6..32]), len);
@@ -875,13 +888,13 @@ impl ValueTable {
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
 			log::trace!(target: "parity-db", "{}: Validated tombstone in slot {}", self.id, index);
 		}
-		else if buf.is_multipart() || buf.is_multihead() {
+		else if self.multipart && buf.is_multi(self.db_version) {
 			let entry_size = self.entry_size as usize;
 			log.read(&mut buf[SIZE_SIZE..entry_size])?;
 			log::trace!(target: "parity-db", "{}: Validated multipart in slot {}", self.id, index);
 		} else {
 			// TODO: check len
-			let (len, _compressed) = buf.read_size(self.no_compression);
+			let (len, _compressed) = buf.read_size();
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + len as usize])?;
 			log::trace!(target: "parity-db", "{}: Validated {}: {}, {} bytes", self.id, index, hex(&buf[SIZE_SIZE..32]), len);
 		}
@@ -1253,5 +1266,34 @@ mod test {
 			table.write_dec_ref(1, writer).unwrap();
 		});
 		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), None);
+	}
+
+	#[test]
+	fn multipart_collision() {
+		let dir = TempDir::new("multipart_collision");
+		let table = dir.table(Some(super::MAX_ENTRY_SIZE as u16), &rc_options());
+		let log = dir.log();
+
+		let key = key(1);
+		let val = value(32225); // This result in 0x7dff entry size, which conflicts with v4 multipart definition
+
+		let compressed = true;
+		write_ops(&table, &log, |writer| {
+			table.write_insert_plan(&key, &val, writer, compressed).unwrap();
+		});
+		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some((val.clone(), compressed)));
+		write_ops(&table, &log, |writer| {
+			table.write_dec_ref(1, writer).unwrap();
+		});
+		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+		// Check that max entry size values are OK.
+		let value_size = table.value_size();
+		assert_eq!(0x7fd8, table.value_size()); // Max value size for this configuration.
+		let val = value(value_size as usize); // This result in 0x7ff8 entry size.
+		write_ops(&table, &log, |writer| {
+			table.write_insert_plan(&key, &val, writer, compressed).unwrap();
+		});
+		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some((val.clone(), compressed)));
 	}
 }

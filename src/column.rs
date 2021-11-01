@@ -53,7 +53,7 @@ pub struct Column {
 	uniform_keys: bool,
 	collect_stats: bool,
 	ref_counted: bool,
-	salt: Option<Salt>,
+	salt: Salt,
 	stats: ColumnStats,
 	compression: Compress,
 	db_version: u32,
@@ -188,10 +188,8 @@ impl Column {
 		let mut k = Key::default();
 		if self.uniform_keys {
 			k.copy_from_slice(&key[0..32]);
-		} else if let Some(salt) = &self.salt {
-			k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &salt[..], &key).as_bytes());
 		} else {
-			k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &[], &key).as_bytes());
+			k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &self.salt, &key).as_bytes());
 		}
 		k
 	}
@@ -597,7 +595,7 @@ impl Column {
 					},
 				};
 				let mut key = source.recover_key_prefix(c, *entry);
-				&mut key[6..].copy_from_slice(&pk);
+				key[6..].copy_from_slice(&pk);
 				let value = if compressed {
 						self.decompress(&value)
 				} else {
