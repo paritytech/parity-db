@@ -1286,5 +1286,14 @@ mod test {
 			table.write_dec_ref(1, writer).unwrap();
 		});
 		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+		// Check that max entry size values are OK.
+		let value_size = table.value_size();
+		assert_eq!(0x7fd8, table.value_size()); // Max value size for this configuration.
+		let val = value(value_size as usize); // This result in 0x7ff8 entry size.
+		write_ops(&table, &log, |writer| {
+			table.write_insert_plan(&key, &val, writer, compressed).unwrap();
+		});
+		assert_eq!(table.get(&key, 1, log.overlays()).unwrap(), Some((val.clone(), compressed)));
 	}
 }
