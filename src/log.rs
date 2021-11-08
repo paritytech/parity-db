@@ -522,7 +522,8 @@ impl Log {
 	pub fn end_record(&self, log: LogChange) -> Result<u64> {
 		assert!(log.record_id + 1 == self.next_record_id.load(Ordering::Relaxed));
 		let record_id = log.record_id;
-		if self.appending.read().is_none() {
+		let mut appending = self.appending.write();
+		if appending.is_none() {
 			// Find a log file in the pool or create a new one
 			let (id, file) = if let Some((id, file)) = self.log_pool.write().pop_front() {
 				log::debug!(target: "parity-db", "Flush: Activated pool writer {}", id);
@@ -535,13 +536,12 @@ impl Log {
 				log::debug!(target: "parity-db", "Flush: Activated new writer {}", id);
 				(id, file)
 			};
-			*self.appending.write() = Some(Appending {
+			*appending = Some(Appending {
 				size: 0,
 				file: std::io::BufWriter::new(file),
 				id,
 			});
 		}
-		let mut appending = self.appending.write();
 		let appending = appending.as_mut().unwrap();
 		let (index, values, bytes) = log.to_file(&mut appending.file)?;
 		let mut overlays = self.overlays.write();
