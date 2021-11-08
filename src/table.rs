@@ -179,6 +179,29 @@ fn disable_read_ahead(_file: &std::fs::File) -> Result<()> {
 	Ok(())
 }
 
+// `File::sync_data` uses F_FULLSYNC fcntl on MacOS. It it supposed to be
+// the safest way to make sure data is fully persisted. However starting from
+// MacOS 11.0 it severely degrades parallel write performance, even when writing to
+// other files. Regular `fsync` is good enough for our use case.
+// SSDs used in modern macs seem to be able to flush data even on unexpected power loss.
+// We performed some testing with power shutdowns and kernel panics on both mac hardware
+// and VMs and in all cases `fsync` was enough to prevent data corruption.
+#[cfg(target_os = "macos")]
+fn fsync(file: &std::fs::File) -> Result<()> {
+	use std::os::unix::io::AsRawFd;
+	if unsafe { libc::fsync(file.as_raw_fd()) } != 0 {
+		Err(std::io::Error::last_os_error())?
+	} else {
+		Ok(())
+	}
+}
+
+#[cfg(not(target_os = "macos"))]
+fn fsync(file: &std::fs::File) -> Result<()> {
+	file.sync_data()?;
+	Ok(())
+}
+
 #[derive(Default, Clone, Copy)]
 struct Header([u8; 16]);
 
@@ -933,7 +956,7 @@ impl ValueTable {
 	pub fn flush(&self) -> Result<()> {
 		if let Ok(true) = self.dirty.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed) {
 			if let Some(file) = self.file.read().as_ref() {
-				file.sync_data()?;
+				fsync(&file)?;
 			}
 		}
 		Ok(())
