@@ -421,8 +421,8 @@ impl Column {
 					true
 				};
 				if remove {
-					if let Some((cur_size, compressed_size)) = cur_size {
-						self.stats.remove_val(cur_size, compressed_size);
+					if let Some((compressed_size, uncompressed_size)) = cur_size {
+						self.stats.remove_val(uncompressed_size, compressed_size);
 					}
 					table.write_remove_plan(key, sub_index, log)?;
 				}

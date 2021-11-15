@@ -122,7 +122,7 @@ pub fn run() -> Result<(), String> {
 			}
 
 			use crate::bench::BenchDb;
-			let db = bench::BenchAdapter::with_options(&options);
+			let db = bench::BenchAdapter::with_options(&(options, args.clone()));
 
 			crate::bench::run_internal(args, db);
 		},
