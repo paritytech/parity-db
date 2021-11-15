@@ -22,7 +22,7 @@ use super::*;
 mod db;
 mod sizes;
 
-pub use parity_db::{Key, Value, Db};
+pub use parity_db::{Key, Value, Db, CompressionType};
 pub use db::Db as BenchDb;
 
 use std::{sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, }, thread};
@@ -43,14 +43,20 @@ const COMMIT_PRUNE_WINDOW: usize = 2000;
 pub(super) struct BenchAdapter(parity_db::Db);
 
 impl BenchDb for BenchAdapter {
-	type Options = parity_db::Options;
+	type Options = (parity_db::Options, Args);
 
 	fn open(path: &std::path::Path) -> Self {
 		BenchAdapter(Db::with_columns(path, 1).unwrap())
 	}
 
 	fn with_options(options: &Self::Options) -> Self {
-		BenchAdapter(Db::open_or_create(options).unwrap())
+		let mut db_options = options.0.clone();
+		if options.1.compress {
+			for mut c in &mut db_options.columns {
+				c.compression = CompressionType::Lz4;
+			}
+		}
+		BenchAdapter(Db::open_or_create(&db_options).unwrap())
 	}
 
 	fn get(&self, key: &Key) -> Option<Value> {
@@ -95,6 +101,10 @@ pub struct Stress {
 	/// Do not check after writing.
 	#[structopt(long)]
 	pub no_check: bool,
+
+	/// Enable compression.
+	#[structopt(long)]
+	pub compress: bool,
 }
 
 #[derive(Clone)]
@@ -106,6 +116,7 @@ pub struct Args { // TODO remove (rendundant with Stress)
 	pub archive: bool,
 	pub append: bool,
 	pub no_check: bool,
+	pub compress: bool,
 }
 
 impl Stress {
@@ -118,6 +129,7 @@ impl Stress {
 			append: self.append,
 			archive: self.archive,
 			no_check: self.no_check,
+			compress: self.compress,
 		}
 	}
 }
@@ -138,14 +150,19 @@ impl SizePool {
 		SizePool { distribution, total }
 	}
 
-	fn value(&self, seed: u64) -> Vec<u8> {
+	fn value(&self, seed: u64, compressable: bool) -> Vec<u8> {
 		let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
 		let sr = (rng.next_u64() % self.total as u64) as u32;
 		let mut range = self.distribution.range((std::ops::Bound::Included(sr), std::ops::Bound::Unbounded));
 		let size = *range.next().unwrap().1 as usize;
 		let mut v = Vec::new();
 		v.resize(size, 0);
-		rng.fill_bytes(&mut v);
+		let fill = if !compressable {
+			size
+		} else {
+			size / 2
+		};
+		rng.fill_bytes(&mut v[..fill]);
 		v
 	}
 
@@ -179,7 +196,7 @@ fn writer<D: BenchDb>(db: Arc<D>, args: Arc<Args>, pool: Arc<SizePool>, shutdown
 	for n in start_commit .. start_commit + args.commits {
 		if shutdown.load(Ordering::Relaxed) { break; }
 		for _ in 0 .. commit_size {
-			commit.push((pool.key(key), Some(pool.value(key))));
+			commit.push((pool.key(key), Some(pool.value(key, args.compress))));
 			key += 1;
 		}
 		if !args.archive && n >= COMMIT_PRUNE_WINDOW {
@@ -309,7 +326,7 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 		};
 		for key in start .. (nc + 1) * (COMMIT_SIZE as u64) {
 			let k = pool.key(key);
-			let val = pool.value(key);
+			let val = pool.value(key, args.compress);
 			let db_val = db.get(&k);
 			queries += 1;
 			assert_eq!(Some(val), db_val);
