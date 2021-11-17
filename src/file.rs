@@ -83,7 +83,7 @@ pub struct DbFile {
 
 impl DbFile {
 	pub fn open(filepath: std::path::PathBuf, header_size: u8, entry_size: u16, origin: TableId) -> Result<Self> {
-		let mut capacity = header_size as u64;
+		let mut capacity = 0u64;
 		let file = if std::fs::metadata(&filepath).is_ok() {
 			let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(filepath.as_path())?;
 			disable_read_ahead(&file)?;
@@ -124,13 +124,8 @@ impl DbFile {
 	pub fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
 		use std::os::unix::fs::FileExt;
 		self.dirty.store(true, Ordering::Relaxed);
-		let mut file = self.file.upgradable_read();
-		if file.is_none() {
-			let mut wfile = RwLockUpgradableReadGuard::upgrade(file);
-			*wfile = Some(self.create_file()?);
-			file = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wfile);
-		}
-		Ok(file.as_ref().unwrap().write_all_at(buf, offset)?)
+		self.file.read().as_ref().unwrap().write_all_at(buf, offset)?;
+		Ok(())
 	}
 
 	#[cfg(windows)]
@@ -144,13 +139,7 @@ impl DbFile {
 	pub fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
 		use std::os::windows::fs::FileExt;
 		self.dirty.store(true, Ordering::Relaxed);
-		let mut file = self.file.upgradable_read();
-		if file.is_none() {
-			let mut wfile = RwLockUpgradableReadGuard::upgrade(file);
-			*wfile = Some(self.create_file()?);
-			file = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wfile);
-		}
-		file.as_ref().unwrap().seek_write(buf, offset)?;
+		self.file.read().as_ref().unwrap().seek_write(buf, offset)?;
 		Ok(())
 	}
 
