@@ -140,7 +140,7 @@ impl std::fmt::Display for TableId {
 pub struct ValueTable {
 	pub id: TableId,
 	pub entry_size: u16,
-	file: crate::file::DbFile,
+	file: crate::file::TableFile,
 	filled: AtomicU64,
 	last_removed: AtomicU64,
 	dirty_header: AtomicBool,
@@ -330,7 +330,7 @@ impl ValueTable {
 
 		let mut filepath: std::path::PathBuf = std::path::PathBuf::clone(&*path);
 		filepath.push(id.file_name());
-		let file = crate::file::DbFile::open(filepath, 1, entry_size, id)?;
+		let file = crate::file::TableFile::open(filepath, 1, entry_size, id)?;
 		let mut filled = 1;
 		let mut last_removed = 0;
 		if let Some(file) = &mut *file.file.write() {
