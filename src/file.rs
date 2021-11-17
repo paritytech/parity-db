@@ -87,14 +87,13 @@ impl DbFile {
 		let file = if std::fs::metadata(&filepath).is_ok() {
 			let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(filepath.as_path())?;
 			disable_read_ahead(&file)?;
-			let mut file_len = file.metadata()?.len();
-			if file_len == 0 {
-				// Preallocate header. TODO prealocate 256 * 1024 instead for better alignment.
-				file_len = header_size as u64 * entry_size as u64;
-				file.set_len(file_len)?;
+			if file.metadata()?.len() == 0 {
+				// Preallocate.
+				debug_assert!(header_size as u64 * entry_size as u64 <= GROW_SIZE);
+				file.set_len(GROW_SIZE)?;
 			}
 			// header is part of capacity.
-			capacity = file_len as u64 / entry_size as u64;
+			capacity = GROW_SIZE / entry_size as u64;
 			Some(file)
 		} else {
 			None
