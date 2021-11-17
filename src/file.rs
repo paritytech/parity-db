@@ -82,7 +82,7 @@ pub struct TableFile {
 }
 
 impl TableFile {
-	pub fn open(filepath: std::path::PathBuf, header_entries: u8, entry_size: u16, id: TableId) -> Result<Self> {
+	pub fn open(filepath: std::path::PathBuf, entry_size: u16, id: TableId) -> Result<Self> {
 		let mut capacity = 0u64;
 		let file = if std::fs::metadata(&filepath).is_ok() {
 			let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(filepath.as_path())?;
@@ -90,7 +90,6 @@ impl TableFile {
 			if file.metadata()?.len() == 0 {
 				// Preallocate.
 				capacity += GROW_SIZE_BYTES / entry_size as u64;
-				debug_assert!(header_entries as u64 <= capacity);
 				file.set_len(capacity * entry_size as u64)?;
 			}
 			Some(file)

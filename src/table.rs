@@ -330,7 +330,7 @@ impl ValueTable {
 
 		let mut filepath: std::path::PathBuf = std::path::PathBuf::clone(&*path);
 		filepath.push(id.file_name());
-		let file = crate::file::TableFile::open(filepath, 1, entry_size, id)?;
+		let file = crate::file::TableFile::open(filepath, entry_size, id)?;
 		let mut filled = 1;
 		let mut last_removed = 0;
 		if let Some(file) = &mut *file.file.write() {
