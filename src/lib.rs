@@ -19,6 +19,7 @@ mod error;
 mod index;
 mod table;
 mod column;
+mod file;
 mod log;
 mod display;
 mod options;
