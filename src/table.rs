@@ -62,7 +62,6 @@ use std::mem::MaybeUninit;
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::sync::Arc;
-use parking_lot::{RwLockUpgradableReadGuard, RwLock};
 use crate::{
 	error::Result,
 	column::ColId,
@@ -141,65 +140,13 @@ impl std::fmt::Display for TableId {
 pub struct ValueTable {
 	pub id: TableId,
 	pub entry_size: u16,
-	file: RwLock<Option<std::fs::File>>,
-	path: Arc<std::path::PathBuf>,
-	capacity: AtomicU64,
+	file: crate::file::TableFile,
 	filled: AtomicU64,
 	last_removed: AtomicU64,
 	dirty_header: AtomicBool,
-	dirty: AtomicBool,
 	multipart: bool,
 	ref_counted: bool,
 	db_version: u32,
-}
-
-#[cfg(target_os = "linux")]
-fn disable_read_ahead(file: &std::fs::File) -> Result<()> {
-    use std::os::unix::io::AsRawFd;
-    let err = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_RANDOM) };
-    if err != 0 {
-        Err(std::io::Error::from_raw_os_error(err))?
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn disable_read_ahead(file: &std::fs::File) -> Result<()> {
-	use std::os::unix::io::AsRawFd;
-	if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_RDAHEAD, 0) } != 0 {
-		Err(std::io::Error::last_os_error())?
-	} else {
-		Ok(())
-	}
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn disable_read_ahead(_file: &std::fs::File) -> Result<()> {
-	Ok(())
-}
-
-// `File::sync_data` uses F_FULLSYNC fcntl on MacOS. It it supposed to be
-// the safest way to make sure data is fully persisted. However starting from
-// MacOS 11.0 it severely degrades parallel write performance, even when writing to
-// other files. Regular `fsync` is good enough for our use case.
-// SSDs used in modern macs seem to be able to flush data even on unexpected power loss.
-// We performed some testing with power shutdowns and kernel panics on both mac hardware
-// and VMs and in all cases `fsync` was enough to prevent data corruption.
-#[cfg(target_os = "macos")]
-fn fsync(file: &std::fs::File) -> Result<()> {
-	use std::os::unix::io::AsRawFd;
-	if unsafe { libc::fsync(file.as_raw_fd()) } != 0 {
-		Err(std::io::Error::last_os_error())?
-	} else {
-		Ok(())
-	}
-}
-
-#[cfg(not(target_os = "macos"))]
-fn fsync(file: &std::fs::File) -> Result<()> {
-	file.sync_data()?;
-	Ok(())
 }
 
 #[derive(Default, Clone, Copy)]
@@ -383,26 +330,10 @@ impl ValueTable {
 
 		let mut filepath: std::path::PathBuf = std::path::PathBuf::clone(&*path);
 		filepath.push(id.file_name());
-		let mut file = {
-			if std::fs::metadata(&filepath).is_ok() {
-				Some(std::fs::OpenOptions::new().create(true).read(true).write(true).open(filepath.as_path())?)
-			} else {
-				None
-			}
-		};
+		let file = crate::file::TableFile::open(filepath, entry_size, id)?;
 		let mut filled = 1;
-		let mut capacity = 1;
 		let mut last_removed = 0;
-		if let Some(file) = &mut file {
-			disable_read_ahead(file)?;
-			let mut file_len = file.metadata()?.len();
-			if file_len == 0 {
-				// Preallocate a single entry that contains metadata
-				file.set_len(entry_size as u64)?;
-				file_len = entry_size as u64;
-			}
-
-			capacity = file_len / entry_size as u64;
+		if let Some(file) = &mut *file.file.write() {
 			let mut header = Header::default();
 			file.read_exact(&mut header.0)?;
 			last_removed = header.last_removed();
@@ -416,84 +347,18 @@ impl ValueTable {
 		Ok(ValueTable {
 			id,
 			entry_size,
-			path,
-			file: RwLock::new(file),
-			capacity: AtomicU64::new(capacity),
+			file,
 			filled: AtomicU64::new(filled),
 			last_removed: AtomicU64::new(last_removed),
 			dirty_header: AtomicBool::new(false),
-			dirty: AtomicBool::new(false),
 			multipart,
 			ref_counted: options.ref_counted,
 			db_version,
 		})
 	}
 
-	fn create_file(&self) -> Result<std::fs::File> {
-		let mut path = std::path::PathBuf::clone(&*self.path);
-		path.push(self.id.file_name());
-		let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path.as_path())?;
-		disable_read_ahead(&file)?;
-		log::debug!(target: "parity-db", "Created value table {}", self.id);
-		Ok(file)
-	}
-
 	pub fn value_size(&self) -> u16 {
 		self.entry_size - SIZE_SIZE as u16 - self.ref_size() as u16 - PARTIAL_SIZE as u16
-	}
-
-	#[cfg(unix)]
-	fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
-		use std::os::unix::fs::FileExt;
-		Ok(self.file.read().as_ref().unwrap().read_exact_at(buf, offset)?)
-	}
-
-	#[cfg(unix)]
-	fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
-		use std::os::unix::fs::FileExt;
-		self.dirty.store(true, Ordering::Relaxed);
-		let mut file = self.file.upgradable_read();
-		if file.is_none() {
-			let mut wfile = RwLockUpgradableReadGuard::upgrade(file);
-			*wfile = Some(self.create_file()?);
-			file = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wfile);
-		}
-		Ok(file.as_ref().unwrap().write_all_at(buf, offset)?)
-	}
-
-	#[cfg(windows)]
-	fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
-		use std::os::windows::fs::FileExt;
-		self.file.read().as_ref().unwrap().seek_read(buf, offset)?;
-		Ok(())
-	}
-
-	#[cfg(windows)]
-	fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
-		use std::os::windows::fs::FileExt;
-		self.dirty.store(true, Ordering::Relaxed);
-		let mut file = self.file.upgradable_read();
-		if file.is_none() {
-			let mut wfile = RwLockUpgradableReadGuard::upgrade(file);
-			*wfile = Some(self.create_file()?);
-			file = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wfile);
-		}
-		file.as_ref().unwrap().seek_write(buf, offset)?;
-		Ok(())
-	}
-
-	fn grow(&self) -> Result<()> {
-		let mut capacity = self.capacity.load(Ordering::Relaxed);
-		capacity += (256 * 1024) / self.entry_size as u64;
-		self.capacity.store(capacity, Ordering::Relaxed);
-		let mut file = self.file.upgradable_read();
-		if file.is_none() {
-			let mut wfile = RwLockUpgradableReadGuard::upgrade(file);
-			*wfile = Some(self.create_file()?);
-			file = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wfile);
-		}
-		file.as_ref().unwrap().set_len(capacity * self.entry_size as u64)?;
-		Ok(())
 	}
 
 	// Return ref counter, partial key and if it was compressed.
@@ -521,7 +386,7 @@ impl ValueTable {
 					self.id,
 					index,
 				);
-				self.read_at(&mut buf[0..entry_size], index * self.entry_size as u64)?;
+				self.file.read_at(&mut buf[0..entry_size], index * self.entry_size as u64)?;
 				&mut buf
 			};
 
@@ -613,7 +478,7 @@ impl ValueTable {
 		let buf = if log.value(self.id, index, buf.as_mut()) {
 			&mut buf
 		} else {
-			self.read_at(buf.as_mut(), index * self.entry_size as u64)?;
+			self.file.read_at(buf.as_mut(), index * self.entry_size as u64)?;
 			&mut buf
 		};
 		if buf.is_tombstone() {
@@ -634,7 +499,7 @@ impl ValueTable {
 	pub fn read_next_free(&self, index: u64, log: &LogWriter) -> Result<u64> {
 		let mut buf = PartialEntry::new_uninit();
 		if !log.value(self.id, index, buf.as_mut()) {
-			self.read_at(buf.as_mut(), index * self.entry_size as u64)?;
+			self.file.read_at(buf.as_mut(), index * self.entry_size as u64)?;
 		}
 		buf.skip_size();
 		let next = buf.read_next();
@@ -644,7 +509,7 @@ impl ValueTable {
 	pub fn read_next_part(&self, index: u64, log: &LogWriter) -> Result<Option<u64>> {
 		let mut buf = PartialEntry::new_uninit();
 		if !log.value(self.id, index, buf.as_mut()) {
-			self.read_at(buf.as_mut(), index * self.entry_size as u64)?;
+			self.file.read_at(buf.as_mut(), index * self.entry_size as u64)?;
 		}
 		if self.multipart && buf.is_multi(self.db_version) {
 			buf.skip_size();
@@ -826,7 +691,7 @@ impl ValueTable {
 		let buf = if log.value(self.id, index, buf.as_mut()) {
 			&mut buf
 		} else {
-			self.read_at(&mut buf[0..self.entry_size as usize], index * self.entry_size as u64)?;
+			self.file.read_at(&mut buf[0..self.entry_size as usize], index * self.entry_size as u64)?;
 			&mut buf
 		};
 
@@ -868,13 +733,13 @@ impl ValueTable {
 	}
 
 	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
-		while index >= self.capacity.load(Ordering::Relaxed) {
-			self.grow()?;
+		while index >= self.file.capacity.load(Ordering::Relaxed) {
+			self.file.grow(self.entry_size)?;
 		}
 		if index == 0 {
 			let mut header = Header::default();
 			log.read(&mut header.0)?;
-			self.write_at(&header.0, 0)?;
+			self.file.write_at(&header.0, 0)?;
 			return Ok(());
 		}
 
@@ -882,17 +747,17 @@ impl ValueTable {
 		log.read(&mut buf[0..SIZE_SIZE])?;
 		if buf.is_tombstone() {
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
-			self.write_at(&buf[0..SIZE_SIZE + INDEX_SIZE], index * (self.entry_size as u64))?;
+			self.file.write_at(&buf[0..SIZE_SIZE + INDEX_SIZE], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted tombstone in slot {}", self.id, index);
 		} else if self.multipart && buf.is_multi(self.db_version) {
 				let entry_size = self.entry_size as usize;
 				log.read(&mut buf[SIZE_SIZE..entry_size])?;
-				self.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
+				self.file.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
 				log::trace!(target: "parity-db", "{}: Enacted multipart in slot {}", self.id, index);
 		} else {
 			let (len, _compressed) = buf.read_size();
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + len as usize])?;
-			self.write_at(&buf[0..(SIZE_SIZE + len as usize)], index * (self.entry_size as u64))?;
+			self.file.write_at(&buf[0..(SIZE_SIZE + len as usize)], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted {}: {}, {} bytes", self.id, index, hex(&buf.1[6..32]), len);
 		}
 		Ok(())
@@ -910,8 +775,7 @@ impl ValueTable {
 		if buf.is_tombstone() {
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
 			log::trace!(target: "parity-db", "{}: Validated tombstone in slot {}", self.id, index);
-		}
-		else if self.multipart && buf.is_multi(self.db_version) {
+		} else if self.multipart && buf.is_multi(self.db_version) {
 			let entry_size = self.entry_size as usize;
 			log.read(&mut buf[SIZE_SIZE..entry_size])?;
 			log::trace!(target: "parity-db", "{}: Validated multipart in slot {}", self.id, index);
@@ -925,11 +789,11 @@ impl ValueTable {
 	}
 
 	pub fn refresh_metadata(&self) -> Result<()> {
-		if self.file.read().is_none() {
+		if self.file.file.read().is_none() {
 			return Ok(());
 		}
 		let mut header = Header::default();
-		self.read_at(&mut header.0, 0)?;
+		self.file.read_at(&mut header.0, 0)?;
 		let last_removed = header.last_removed();
 		let mut filled = header.filled();
 		if filled == 0 {
@@ -954,12 +818,7 @@ impl ValueTable {
 	}
 
 	pub fn flush(&self) -> Result<()> {
-		if let Ok(true) = self.dirty.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed) {
-			if let Some(file) = self.file.read().as_ref() {
-				fsync(&file)?;
-			}
-		}
-		Ok(())
+		self.file.flush()
 	}
 
 	fn ref_size(&self) -> usize {
