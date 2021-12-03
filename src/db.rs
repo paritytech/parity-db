@@ -127,14 +127,16 @@ struct DbInner {
 }
 
 impl DbInner {
-	fn open(options: &Options, create: bool) -> Result<DbInner> {
+	fn open(options: &Options, create: bool, skip_lock: bool) -> Result<DbInner> {
 		if create {
 			std::fs::create_dir_all(&options.path)?
 		};
 		let mut lock_path: std::path::PathBuf = options.path.clone();
 		lock_path.push("lock");
 		let lock_file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(lock_path.as_path())?;
-		lock_file.try_lock_exclusive().map_err(|e| Error::Locked(e))?;
+		if !skip_lock {
+			lock_file.try_lock_exclusive().map_err(|e| Error::Locked(e))?;
+		}
 
 		let metadata = options.load_and_validate_metadata(create)?;
 		let mut columns = Vec::with_capacity(metadata.columns.len());
@@ -286,7 +288,7 @@ impl DbInner {
 		Ok(())
 	}
 
-	fn process_commits(&self) -> Result<bool> {
+	fn process_commits(&self, test_state: &TestDbTarget) -> Result<bool> {
 		{
 			// Wait if the queue is too big.
 			let mut queue = self.log_queue_bytes.lock();
@@ -372,6 +374,12 @@ impl DbInner {
 				self.start_reindex(record_id);
 			}
 
+			match test_state {
+				TestDbTarget::LogOverlay(c) => {
+					c.notify_one();
+				},
+				_ => (),
+			}
 			log::debug!(
 				target: "parity-db",
 				"Processed commit {} (record {}), {} ops, {} bytes written",
@@ -653,7 +661,7 @@ impl DbInner {
 		// Finish logged records and proceed to log and enact queued commits.
 		while self.enact_logs(false)? {};
 		self.flush_logs(0)?;
-		while self.process_commits()? {};
+		while self.process_commits(&TestDbTarget::Standard)? {};
 		while self.enact_logs(false)? {};
 		self.flush_logs(0)?;
 		while self.enact_logs(false)? {};
@@ -716,32 +724,33 @@ pub struct Db {
 	flush_thread: Option<std::thread::JoinHandle<()>>,
 	log_thread: Option<std::thread::JoinHandle<()>>,
 	cleanup_thread: Option<std::thread::JoinHandle<()>>,
+	do_drop: bool,
 }
 
 impl Db {
 	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Result<Db> {
 		let options = Options::with_columns(path, num_columns);
 
-		Self::open_inner(&options, true, false)
+		Self::open_inner(&options, true, false, TestDbTarget::Standard, false)
 	}
 
 	/// Open the database with given options.
 	pub fn open(options: &Options) -> Result<Db> {
-		Self::open_inner(options, false, false)
+		Self::open_inner(options, false, false, TestDbTarget::Standard, false)
 	}
 
 	/// Create the database using given options.
 	pub fn open_or_create(options: &Options) -> Result<Db> {
-		Self::open_inner(options, true, false)
+		Self::open_inner(options, true, false, TestDbTarget::Standard, false)
 	}
 
 	pub fn open_read_only(options: &Options) -> Result<Db> {
-		Self::open_inner(options, false, true)
+		Self::open_inner(options, false, true, TestDbTarget::Standard, false)
 	}
 
-	pub fn open_inner(options: &Options, create: bool, read_only: bool) -> Result<Db> {
+	pub fn open_inner(options: &Options, create: bool, read_only: bool, test_state: TestDbTarget, skip_check_lock: bool) -> Result<Db> {
 		assert!(options.is_valid());
-		let mut db = DbInner::open(options, create)?;
+		let mut db = DbInner::open(options, create, skip_check_lock)?;
 		// This needs to be call before log thread: so first reindexing
 		// will run in correct state.
 		db.replay_all_logs()?;
@@ -753,19 +762,27 @@ impl Db {
 				flush_thread: None,
 				log_thread: None,
 				cleanup_thread: None,
+				do_drop: test_state.do_drop(),
 			})
 		}
 		let commit_worker_db = db.clone();
+		let commit_test_state = test_state.clone();
 		let commit_thread = std::thread::spawn(move ||
-			commit_worker_db.store_err(Self::commit_worker(commit_worker_db.clone()))
+			commit_worker_db.store_err(Self::commit_worker(commit_worker_db.clone(), commit_test_state))
 		);
 		let flush_worker_db = db.clone();
+		let min_log_size = if matches!(test_state, TestDbTarget::DbFile(_)) {
+			0
+		} else {
+			MIN_LOG_SIZE
+		};
 		let flush_thread = std::thread::spawn(move ||
-			flush_worker_db.store_err(Self::flush_worker(flush_worker_db.clone()))
+			flush_worker_db.store_err(Self::flush_worker(flush_worker_db.clone(), min_log_size))
 		);
 		let log_worker_db = db.clone();
+		let log_test_state = test_state.clone();
 		let log_thread = std::thread::spawn(move ||
-			log_worker_db.store_err(Self::log_worker(log_worker_db.clone()))
+			log_worker_db.store_err(Self::log_worker(log_worker_db.clone(), log_test_state))
 		);
 		let cleanup_worker_db = db.clone();
 		let cleanup_thread = std::thread::spawn(move ||
@@ -777,6 +794,7 @@ impl Db {
 			flush_thread: Some(flush_thread),
 			log_thread: Some(log_thread),
 			cleanup_thread: Some(cleanup_thread),
+			do_drop: test_state.do_drop(),
 		})
 	}
 
@@ -808,7 +826,7 @@ impl Db {
 		self.inner.iter_column_while(c, f)
 	}
 
-	fn commit_worker(db: Arc<DbInner>) -> Result<()> {
+	fn commit_worker(db: Arc<DbInner>, test_state: TestDbTarget) -> Result<()> {
 		let mut more_work = false;
 		while !db.shutdown.load(Ordering::SeqCst) || more_work {
 			if !more_work {
@@ -820,12 +838,21 @@ impl Db {
 			}
 
 			more_work = db.enact_logs(false)?;
+			if let TestDbTarget::DbFile(condvar) = &test_state {
+				if !more_work {
+					condvar.notify_one();
+				}
+			}
 		}
 		log::debug!(target: "parity-db", "Commit worker shutdown");
 		Ok(())
 	}
 
-	fn log_worker(db: Arc<DbInner>) -> Result<()> {
+	fn log_worker(db: Arc<DbInner>, test_state: TestDbTarget) -> Result<()> {
+		if matches!(&test_state, &TestDbTarget::CommitOverlay) {
+			return Ok(());
+		}
+
 		// Start with pending reindex.
 		let mut more_work = db.process_reindex()?;
 		while !db.shutdown.load(Ordering::SeqCst) || more_work {
@@ -837,7 +864,7 @@ impl Db {
 				*work = false;
 			}
 
-			let more_commits = db.process_commits()?;
+			let more_commits = db.process_commits(&test_state)?;
 			let more_reindex = db.process_reindex()?;
 			more_work = more_commits || more_reindex;
 		}
@@ -845,7 +872,7 @@ impl Db {
 		Ok(())
 	}
 
-	fn flush_worker(db: Arc<DbInner>) -> Result<()> {
+	fn flush_worker(db: Arc<DbInner>, min_log_size: u64) -> Result<()> {
 		let mut more_work = false;
 		while !db.shutdown.load(Ordering::SeqCst) {
 			if !more_work {
@@ -855,7 +882,7 @@ impl Db {
 				};
 				*work = false;
 			}
-			more_work = db.flush_logs(MIN_LOG_SIZE)?;
+			more_work = db.flush_logs(min_log_size)?;
 		}
 		log::debug!(target: "parity-db", "Flush worker shutdown");
 		Ok(())
@@ -899,13 +926,15 @@ impl Db {
 
 impl Drop for Db {
 	fn drop(&mut self) {
-		self.inner.shutdown();
-		self.log_thread.take().map(|t| t.join());
-		self.flush_thread.take().map(|t| t.join());
-		self.commit_thread.take().map(|t| t.join());
-		self.cleanup_thread.take().map(|t| t.join());
-		if let Err(e) = self.inner.kill_logs() {
-			log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
+		if self.do_drop {
+			self.inner.shutdown();
+			self.log_thread.take().map(|t| t.join());
+			self.flush_thread.take().map(|t| t.join());
+			self.commit_thread.take().map(|t| t.join());
+			self.cleanup_thread.take().map(|t| t.join());
+			if let Err(e) = self.inner.kill_logs() {
+				log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
+			}
 		}
 	}
 }
@@ -951,9 +980,89 @@ pub mod check {
 	}
 }
 
+#[derive(Clone)]
+pub enum TestDbTarget {
+	// no threads started, data stays in commit overlay.
+	CommitOverlay,
+	// log worker run, not the others workers.
+	LogOverlay(TestSynch), // TODO check that commit overlay is empty.
+	// runing all. // TODO check commit overlay empty and Logoverlay too.
+	DbFile(TestSynch),
+	// Default run mode
+	Standard,
+}
+
+impl TestDbTarget {
+	pub fn wait(&self) {
+		match self {
+			TestDbTarget::LogOverlay(condvar)
+				| TestDbTarget::DbFile(condvar) => {
+					condvar.wait()
+				},
+			_ => (),
+		}
+	}
+
+	pub fn notify_one(&self) {
+		match self {
+			TestDbTarget::LogOverlay(condvar)
+				| TestDbTarget::DbFile(condvar) => {
+					condvar.notify_one()
+				},
+			_ => (),
+		}
+	}
+	
+	pub fn check_overlay(&self, db: &Db, col: ColId) -> bool {
+		match self {
+			TestDbTarget::LogOverlay(_)
+			 | TestDbTarget::DbFile(_) => {
+				 if let Some(overlay) = db.inner.commit_overlay.read().get(col as usize) {
+					if !overlay.is_empty() { return false; }
+				 }
+			 }
+			_ => (),
+		}
+		true
+	}
+
+	fn do_drop(&self) -> bool {
+		matches!(self, TestDbTarget::Standard)
+	}
+}
+
+#[derive(Clone)]
+pub struct TestSynch(Arc<(Mutex<bool>, Condvar)>);
+
+impl Default for TestSynch {
+	fn default() -> Self {
+		TestSynch(Arc::new((Mutex::new(false), Condvar::new())))
+	}
+}
+
+impl TestSynch {
+	pub fn wait(&self) {
+		let mut lock = (self.0).0.lock();
+		*lock = true;
+		(self.0).1.wait(&mut lock);
+	}
+
+	pub fn notify_one(&self) {
+		loop {
+			let mut lock = (self.0).0.lock();
+			if *lock {
+				*lock = false;
+				(self.0).1.notify_one();
+				break;
+			}
+		}
+	}
+}
+
+
 #[cfg(test)]
 mod tests {
-	use super::{Db, Options};
+	use super::{Db, Options, TestDbTarget};
 	use tempfile::tempdir;
 
 	#[test]
@@ -979,5 +1088,93 @@ mod tests {
 			Db::open(&options).is_ok(),
 			"Existing database should be reopened"
 		);
+	}
+
+	#[test]
+	fn test_indexed_keyvalues() {
+		test_indexed_keyvalues_inner(TestDbTarget::CommitOverlay);
+		test_indexed_keyvalues_inner(TestDbTarget::LogOverlay(Default::default()));
+		test_indexed_keyvalues_inner(TestDbTarget::DbFile(Default::default()));
+		test_indexed_keyvalues_inner(TestDbTarget::Standard);
+	}
+	fn test_indexed_keyvalues_inner(db_test: TestDbTarget) {
+		let tmp = tempdir().unwrap();
+		let options = Options::with_columns(tmp.path(), 5);
+		let col_nb = 0;
+
+		let key1 = b"key1".to_vec();
+		let key2 = b"key2".to_vec();
+		let key3 = b"key3".to_vec();
+
+		let db = Db::open_inner(&options, true, false, db_test.clone(), false).unwrap();
+		assert!(db.inner.get(col_nb, key1.as_slice()).unwrap().is_none());
+
+		db.commit(vec![
+			(col_nb, key1.clone(), Some(b"value1".to_vec())),
+		]).unwrap();
+		db_test.wait();
+		assert!(db_test.check_overlay(&db, col_nb));
+
+		assert_eq!(db.inner.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
+
+		db.commit(vec![
+			(col_nb, key1.clone(), None),
+			(col_nb, key2.clone(), Some(b"value2".to_vec())),
+			(col_nb, key3.clone(), Some(b"value3".to_vec())),
+		]).unwrap();
+		db_test.wait();
+		assert!(db_test.check_overlay(&db, col_nb));
+
+		assert!(db.inner.get(col_nb, key1.as_slice()).unwrap().is_none());
+		assert_eq!(db.inner.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2".to_vec()));
+		assert_eq!(db.inner.get(col_nb, key3.as_slice()).unwrap(), Some(b"value3".to_vec()));
+
+		db.commit(vec![
+			(col_nb, key2.clone(), Some(b"value2b".to_vec())),
+			(col_nb, key3.clone(), None),
+		]).unwrap();
+		db_test.wait();
+		assert!(db_test.check_overlay(&db, col_nb));
+
+		assert!(db.inner.get(col_nb, key1.as_slice()).unwrap().is_none());
+		assert_eq!(db.inner.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2b".to_vec()));
+		assert_eq!(db.inner.get(col_nb, key3.as_slice()).unwrap(), None);
+	}
+
+	#[test]
+	fn test_indexed_overlay_against_backend() {
+		let tmp = tempdir().unwrap();
+		let options = Options::with_columns(tmp.path(), 5);
+		let col_nb = 0;
+
+		let key1 = b"key1".to_vec();
+		let key2 = b"key2".to_vec();
+		let key3 = b"key3".to_vec();
+
+		let db_test = TestDbTarget::DbFile(Default::default());
+		let db = Db::open_inner(&options, true, false, db_test.clone(), false).unwrap();
+
+		db.commit(vec![
+			(col_nb, key1.clone(), Some(b"value1".to_vec())),
+			(col_nb, key2.clone(), Some(b"value2".to_vec())),
+			(col_nb, key3.clone(), Some(b"value3".to_vec())),
+		]).unwrap();
+		db_test.wait();
+		std::mem::drop(db);
+
+		let db_test = TestDbTarget::CommitOverlay;
+		let db = Db::open_inner(&options, true, false, db_test.clone(), true).unwrap();
+		assert_eq!(db.inner.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
+		assert_eq!(db.inner.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2".to_vec()));
+		assert_eq!(db.inner.get(col_nb, key3.as_slice()).unwrap(), Some(b"value3".to_vec()));
+		db.commit(vec![
+			(col_nb, key2.clone(), Some(b"value2b".to_vec())),
+			(col_nb, key3.clone(), None),
+		]).unwrap();
+		db_test.wait();
+
+		assert_eq!(db.inner.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
+		assert_eq!(db.inner.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2b".to_vec()));
+		assert_eq!(db.inner.get(col_nb, key3.as_slice()).unwrap(), None);
 	}
 }
