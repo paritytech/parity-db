@@ -107,7 +107,7 @@ pub struct Stress {
 	#[structopt(long)]
 	pub compress: bool,
 
-	/// Target partial executions.
+	/// Target partial executions (unstable).
 	#[structopt(long)]
 	pub target: Option<String>,
 }
@@ -290,14 +290,15 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 		);
 	}
 
+	for _ in 0..args.commits {
+		args.target.wait();
+	}
+
 	while COMMITS.load(Ordering::Relaxed) < start_commit + args.commits {
 		thread::sleep(std::time::Duration::from_millis(50));
 	}
 	shutdown.store(true, Ordering::SeqCst);
 
-	for _ in 0..args.commits {
-		args.target.wait();
-	}
 	let commits = COMMITS.load(Ordering::SeqCst);
 	let commits = commits - start_commit;
 	let elapsed = start.elapsed().as_secs_f64();
