@@ -56,7 +56,8 @@ impl BenchDb for BenchAdapter {
 				c.compression = CompressionType::Lz4;
 			}
 		}
-		BenchAdapter(Db::open_or_create(&db_options).unwrap())
+		let db = Db::open_inner(&db_options, true, false, options.1.target.clone(), false);
+		BenchAdapter(db.unwrap())
 	}
 
 	fn get(&self, key: &Key) -> Option<Value> {
@@ -105,10 +106,24 @@ pub struct Stress {
 	/// Enable compression.
 	#[structopt(long)]
 	pub compress: bool,
+
+	/// Target partial executions.
+	#[structopt(long)]
+	pub target: Option<String>,
+}
+
+fn db_target_from_str(name: &Option<String>) -> parity_db::TestDbTarget {
+	match name.as_ref().map(|n| n.as_str()).unwrap_or("") {
+		"commit" => parity_db::TestDbTarget::CommitOverlay,
+		"log" => parity_db::TestDbTarget::LogOverlay(Default::default()),
+		"file" => parity_db::TestDbTarget::DbFile(Default::default()),
+		"" => parity_db::TestDbTarget::Standard,
+		_ => panic!("expect `commit` `log` or `file`"),
+	}
 }
 
 #[derive(Clone)]
-pub struct Args { // TODO remove (rendundant with Stress)
+pub struct Args {
 	pub readers: usize,
 	pub commits: usize,
 	pub writers: usize,
@@ -117,6 +132,7 @@ pub struct Args { // TODO remove (rendundant with Stress)
 	pub append: bool,
 	pub no_check: bool,
 	pub compress: bool,
+	pub target: parity_db::TestDbTarget,
 }
 
 impl Stress {
@@ -130,6 +146,7 @@ impl Stress {
 			archive: self.archive,
 			no_check: self.no_check,
 			compress: self.compress,
+			target: db_target_from_str(&self.target),
 		}
 	}
 }
@@ -277,6 +294,20 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 		thread::sleep(std::time::Duration::from_millis(50));
 	}
 	shutdown.store(true, Ordering::SeqCst);
+
+	for _ in 0..args.commits {
+		args.target.wait();
+	}
+	let commits = COMMITS.load(Ordering::SeqCst);
+	let commits = commits - start_commit;
+	let elapsed = start.elapsed().as_secs_f64();
+
+	println!(
+		"Completed {} targetted commits in {} seconds. {} cps",
+		commits,
+		elapsed,
+		commits as f64  / elapsed
+	);
 
 	for t in threads.into_iter() {
 		t.join().unwrap();

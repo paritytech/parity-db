@@ -827,6 +827,10 @@ impl Db {
 	}
 
 	fn commit_worker(db: Arc<DbInner>, test_state: TestDbTarget) -> Result<()> {
+		if matches!(&test_state, &TestDbTarget::CommitOverlay) {
+			return Ok(());
+		}
+
 		let mut more_work = false;
 		while !db.shutdown.load(Ordering::SeqCst) || more_work {
 			if !more_work {
@@ -839,9 +843,7 @@ impl Db {
 
 			more_work = db.enact_logs(false)?;
 			if let TestDbTarget::DbFile(condvar) = &test_state {
-				if !more_work {
-					condvar.notify_one();
-				}
+				condvar.notify_one();
 			}
 		}
 		log::debug!(target: "parity-db", "Commit worker shutdown");
@@ -980,16 +982,22 @@ pub mod check {
 	}
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum TestDbTarget {
 	// no threads started, data stays in commit overlay.
 	CommitOverlay,
 	// log worker run, not the others workers.
-	LogOverlay(TestSynch), // TODO check that commit overlay is empty.
-	// runing all. // TODO check commit overlay empty and Logoverlay too.
+	LogOverlay(TestSynch),
+	// runing all.
 	DbFile(TestSynch),
 	// Default run mode
 	Standard,
+}
+
+impl Default for TestDbTarget {
+	fn default() -> Self {
+		TestDbTarget::Standard
+	}
 }
 
 impl TestDbTarget {
@@ -1040,6 +1048,11 @@ impl Default for TestSynch {
 	}
 }
 
+impl std::fmt::Debug for TestSynch {
+	fn fmt(&self, _: &mut std::fmt::Formatter) -> std::fmt::Result {
+		Ok(())
+	}
+}
 impl TestSynch {
 	pub fn wait(&self) {
 		let mut lock = (self.0).0.lock();
