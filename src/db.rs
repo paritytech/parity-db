@@ -1012,7 +1012,7 @@ impl TestDbTarget {
 			_ => (),
 		}
 	}
-	
+
 	pub fn check_overlay(&self, db: &Db, col: ColId) -> bool {
 		match self {
 			TestDbTarget::LogOverlay(_)
