@@ -299,16 +299,18 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 	}
 	shutdown.store(true, Ordering::SeqCst);
 
-	let commits = COMMITS.load(Ordering::SeqCst);
-	let commits = commits - start_commit;
-	let elapsed = start.elapsed().as_secs_f64();
+	if !matches!(args.target, parity_db::TestDbTarget::Standard) { 
+		let commits = COMMITS.load(Ordering::SeqCst);
+		let commits = commits - start_commit;
+		let elapsed = start.elapsed().as_secs_f64();
 
-	println!(
-		"Completed {} targetted commits in {} seconds. {} cps",
-		commits,
-		elapsed,
-		commits as f64  / elapsed
-	);
+		println!(
+			"Completed {} targetted commits in {} seconds. {} cps",
+			commits,
+			elapsed,
+			commits as f64  / elapsed
+		);
+	}
 
 	for t in threads.into_iter() {
 		t.join().unwrap();
