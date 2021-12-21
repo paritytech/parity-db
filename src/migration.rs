@@ -18,6 +18,7 @@
 
 use std::path::Path;
 use crate::{options::Options, db::Db, Error, Result, column::{ColId, IterState}};
+use crate::db::{CommitChangeSet, IndexedChangeSet};
 
 const COMMIT_SIZE: usize = 10240;
 const OVERWRITE_TMP_PATH: &str = "to_revert_overwrite";
@@ -51,7 +52,8 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Ve
 	let mut dest = Db::open_or_create(&to)?;
 
 	let mut ncommits: u64 = 0;
-	let mut commit = Vec::with_capacity(COMMIT_SIZE);
+	let mut commit = CommitChangeSet::default();
+	let mut nb_commit = 0;
 	let mut last_time = std::time::Instant::now();
 	for c in 0 .. source_options.columns.len() as ColId {
 		if source_options.columns[c as usize] != to.columns[c as usize] {
@@ -72,14 +74,17 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Ve
 			//TODO: more efficient ref migration
 			for _ in 0 .. rc {
 				let value = std::mem::take(&mut value);
-				commit.push((c, key.clone(), Some(value)));
-				if commit.len() == COMMIT_SIZE {
+				commit.indexed.entry(c)
+					.or_insert_with(|| IndexedChangeSet::new(c))
+					.changes.push((key, Some(value)));
+				nb_commit += 1;
+				if nb_commit == COMMIT_SIZE {
 					ncommits += 1;
 					if let Err(e) = dest.commit_raw(std::mem::take(&mut commit)) {
 						log::warn!("Migration error: {:?}", e);
 						return false;
 					}
-					commit.reserve(COMMIT_SIZE);
+					nb_commit = 0;
 
 					if last_time.elapsed() > std::time::Duration::from_secs(3) {
 						last_time = std::time::Instant::now();
@@ -91,7 +96,8 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Ve
 		})?;
 		if overwrite {
 			dest.commit_raw(commit)?;
-			commit = Vec::with_capacity(COMMIT_SIZE);
+			commit = Default::default();
+			nb_commit = 0;
 			std::mem::drop(dest);
 			dest = Db::open_or_create(&to)?; // This is needed to flush logs.
 			log::info!("Collection migrated {}, imported", c);

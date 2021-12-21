@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::path::{PathBuf, Path};
 use crate::error::{Error, Result};
 use crate::column::Salt;
+use crate::btree::ConfigVariants;
 use crate::compress::CompressionType;
 use rand::Rng;
 
@@ -64,8 +65,9 @@ pub struct ColumnOptions {
 	pub compression: CompressionType,
 	/// Minimal value size threshold to attempt compressing a value.
 	pub compression_treshold: u32,
+	/// BTree index variant.
+	pub btree_index: ConfigVariants,
 }
-
 
 /// Database metadata.
 #[derive(Clone, Debug)]
@@ -80,18 +82,19 @@ pub struct Metadata {
 
 impl ColumnOptions {
 	fn as_string(&self) -> String {
-		format!("preimage: {}, uniform: {}, refc: {}, compression: {}, sizes: [{}]",
+		format!("preimage: {}, uniform: {}, refc: {}, compression: {}, btree: {}, sizes: [{}]",
 			self.preimage,
 			self.uniform,
 			self.ref_counted,
 			self.compression as u8,
+			self.btree_index as u8,
 			self.sizes.iter().fold(String::new(), |mut r, s| {
 				if !r.is_empty() {
 					r.push_str(", ");
 				}
 				r.push_str(&s.to_string());
 				r
-			})
+			}),
 		)
 	}
 
@@ -123,6 +126,7 @@ impl ColumnOptions {
 		let uniform = vals.get("uniform")?.parse().ok()?;
 		let ref_counted = vals.get("refc")?.parse().ok()?;
 		let compression: u8 = vals.get("compression").and_then(|c| c.parse().ok()).unwrap_or(0);
+		let btree_variant: u8 = vals.get("btree").and_then(|c| c.parse().ok()).unwrap_or(0);
 
 		Some(ColumnOptions {
 			preimage,
@@ -131,6 +135,7 @@ impl ColumnOptions {
 			compression: compression.into(),
 			sizes,
 			compression_treshold: ColumnOptions::default().compression_treshold,
+			btree_index: btree_variant.into(),
 		})
 	}
 }
@@ -157,6 +162,7 @@ impl Default for ColumnOptions {
 			compression: CompressionType::NoCompression,
 			compression_treshold: 4096,
 			sizes,
+			btree_index: ConfigVariants::Order2_3_64,
 		}
 	}
 }

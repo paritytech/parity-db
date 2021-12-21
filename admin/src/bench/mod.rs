@@ -22,7 +22,7 @@ use super::*;
 mod db;
 mod sizes;
 
-pub use parity_db::{Key, Value, Db, CompressionType};
+pub use parity_db::{Key, Value, Db, CompressionType, CommitItem, BTreeChange};
 pub use db::Db as BenchDb;
 
 use std::{sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, }, thread};
@@ -59,12 +59,31 @@ impl BenchDb for BenchAdapter {
 		BenchAdapter(Db::open_or_create(&db_options).unwrap())
 	}
 
-	fn get(&self, key: &Key) -> Option<Value> {
-		self.0.get(0, key).unwrap()
+	fn get(&self, key: &Key, indexed: bool) -> Option<Value> {
+		if indexed {
+			self.0.btree_get(0, key).unwrap()
+		} else {
+			self.0.get(0, key).unwrap()
+		}
 	}
 
-	fn commit<I: IntoIterator<Item=(Key, Option<Value>)>>(&self, tx: I) {
-		self.0.commit(tx.into_iter().map(|(k, v)| (0, k, v))).unwrap()
+	fn commit<I: IntoIterator<Item=(Key, Option<Value>)>>(&self, tx: I, indexed: bool) {
+		if indexed {
+			self.0.commit_items::<_, Key>(tx.into_iter().map(|(k, v)| {
+				CommitItem::KeyValueBTree {
+					column: 0,
+					change: if let Some(v) = v {
+						BTreeChange::Write(k.to_vec(), v)
+					} else {
+						BTreeChange::Drop(k.to_vec())
+					},
+				}
+			})).unwrap()
+		} else {
+			self.0.commit_items(tx.into_iter().map(|(k, v)| {
+				CommitItem::KeyValue { column: 0, key: k, value: v }
+			})).unwrap()
+		}
 	}
 }
 
@@ -105,10 +124,14 @@ pub struct Stress {
 	/// Enable compression.
 	#[structopt(long)]
 	pub compress: bool,
+
+	/// Use btree index.
+	#[structopt(long)]
+	pub indexed: bool,
 }
 
 #[derive(Clone)]
-pub struct Args { // TODO remove (rendundant with Stress)
+pub struct Args {
 	pub readers: usize,
 	pub commits: usize,
 	pub writers: usize,
@@ -117,6 +140,7 @@ pub struct Args { // TODO remove (rendundant with Stress)
 	pub append: bool,
 	pub no_check: bool,
 	pub compress: bool,
+	pub indexed: bool,
 }
 
 impl Stress {
@@ -130,6 +154,7 @@ impl Stress {
 			archive: self.archive,
 			no_check: self.no_check,
 			compress: self.compress,
+			indexed: self.indexed,
 		}
 	}
 }
@@ -188,8 +213,9 @@ fn informant(shutdown: Arc<AtomicBool>, total: usize, start: usize) {
 }
 
 fn writer<D: BenchDb>(db: Arc<D>, args: Arc<Args>, pool: Arc<SizePool>, shutdown: Arc<AtomicBool>, start_commit: usize) {
+	let indexed = args.indexed;
 	// Note that multiple worker will run on same range concurrently.
-	let mut key = start_commit as u64 * COMMIT_SIZE as u64;
+	let mut key = start_commit as u64 * COMMIT_SIZE as u64 + args.seed.unwrap_or(0);
 	let commit_size = COMMIT_SIZE;
 	let mut commit = Vec::with_capacity(commit_size);
 
@@ -207,7 +233,7 @@ fn writer<D: BenchDb>(db: Arc<D>, args: Arc<Args>, pool: Arc<SizePool>, shutdown
 		}
 		commit.push((KEY_RESTART, Some((n as u64).to_be_bytes().to_vec())));
 
-		db.commit(commit.drain(..));
+		db.commit(commit.drain(..), indexed);
 		COMMITS.fetch_add(1, Ordering::Release);
 		commit.clear();
 	}
@@ -222,6 +248,7 @@ fn reader<D: BenchDb>(_db: Arc<D>, shutdown: Arc<AtomicBool>) {
 }
 
 pub fn run_internal<D: BenchDb>(args: Args, db: D) {
+	let indexed = args.indexed;
 	let args = Arc::new(args);
 	let shutdown = Arc::new(AtomicBool::new(false));
 	let pool = Arc::new(SizePool::from_histogram(&sizes::KUSAMA_STATE_DISTRIBUTION));
@@ -230,7 +257,7 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 
 	let mut threads = Vec::new();
 
-	let start_commit = if let Some(start) = db.get(&KEY_RESTART) {
+	let start_commit = if let Some(start) = db.get(&KEY_RESTART, indexed) {
 		let mut buf = [0u8; 8];
 		buf.copy_from_slice(&start[0..8]);
 		u64::from_be_bytes(buf) as usize + 1
@@ -314,20 +341,20 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 		let prune_window: u64 = COMMIT_PRUNE_WINDOW as u64;
 		let start = if commits > prune_window && nc < commits - prune_window {
 			let end = nc * COMMIT_SIZE as u64 + pruned_per_commit;
-			for key in (nc * COMMIT_SIZE as u64) .. end {
+			for key in (nc * COMMIT_SIZE as u64) + args.seed.unwrap_or(0) .. end {
 				let k = pool.key(key);
-				let db_val = db.get(&k);
+				let db_val = db.get(&k, indexed);
 				queries += 1;
 				assert_eq!(None, db_val);
 			}
 			end
 		} else {
-			nc * COMMIT_SIZE as u64
+			nc * COMMIT_SIZE as u64 + args.seed.unwrap_or(0)
 		};
 		for key in start .. (nc + 1) * (COMMIT_SIZE as u64) {
 			let k = pool.key(key);
 			let val = pool.value(key, args.compress);
-			let db_val = db.get(&k);
+			let db_val = db.get(&k, indexed);
 			queries += 1;
 			assert_eq!(Some(val), db_val);
 		}

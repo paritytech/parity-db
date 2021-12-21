@@ -25,9 +25,11 @@ pub enum Error {
 	Corruption(String),
 	InvalidConfiguration(String),
 	InvalidInput(String),
+	InvalidValueData,
 	Background(Arc<Error>),
 	Locked(std::io::Error),
 	Migration(String),
+	Compression,
 }
 
 impl fmt::Display for Error {
@@ -37,9 +39,11 @@ impl fmt::Display for Error {
 			Error::Corruption(e) => write!(f, "Corruption: {}", e),
 			Error::InvalidConfiguration(e) => write!(f, "Invalid configuration: {}", e),
 			Error::InvalidInput(e) => write!(f, "Invalid input: {}", e),
+			Error::InvalidValueData => write!(f, "Invalid data in value table"),
 			Error::Background(e) => write!(f, "Background worker error: {}", e),
 			Error::Locked(e) => write!(f, "Database file is in use. ({})", e),
 			Error::Migration(e) => write!(f, "Migration error: {}", e),
+			Error::Compression => write!(f, "Compression error"),
 		}
     }
 }

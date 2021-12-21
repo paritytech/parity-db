@@ -24,7 +24,7 @@ snap = "1"
 [dev-dependencies]
 env_logger = "0.8.2"
 tempfile = "3.2"
-
+rand = { version = "0.8.2", features = ["small_rng"] }
 [profile.release]
 panic = "abort"
 #codegen-units = 1
