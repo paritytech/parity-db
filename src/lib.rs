@@ -56,26 +56,5 @@ impl std::hash::Hasher for IdentityKeyHash {
 	fn finish(&self) -> u64 { self.0 }
 }
 
-#[derive(Default)]
-pub struct IdentityKeyHashU64(u64);
-type IdentityBuildHasherU64 = std::hash::BuildHasherDefault<IdentityKeyHashU64>;
-
-impl std::hash::Hasher for IdentityKeyHashU64 {
-	fn write(&mut self, _: &[u8]) { unreachable!() }
-	fn write_u8(&mut self, _: u8)       { unreachable!() }
-	fn write_u16(&mut self, _: u16)     { unreachable!() }
-	fn write_u32(&mut self, _: u32)     { unreachable!() }
-	fn write_u64(&mut self, key: u64)     {
-		self.0 = key;
-	}
-	fn write_usize(&mut self, _: usize) { unreachable!() }
-	fn write_i8(&mut self, _: i8)       { unreachable!() }
-	fn write_i16(&mut self, _: i16)     { unreachable!() }
-	fn write_i32(&mut self, _: i32)     { unreachable!() }
-	fn write_i64(&mut self, _: i64)     { unreachable!() }
-	fn write_isize(&mut self, _: isize) { unreachable!() }
-	fn finish(&self) -> u64 { self.0 }
-}
-
 pub const KEY_SIZE: usize = 32;
 pub type Key = [u8; KEY_SIZE];

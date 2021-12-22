@@ -610,15 +610,6 @@ impl DbInner {
 									return Ok(false);
 								}
 							},
-							LogAction::InsertBTree(insertion) => {
-								let col = insertion.table.col() as usize;
-								if let Err(e) = self.columns[col].validate_plan(LogAction::InsertBTree(insertion), &mut reader) {
-									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
-									std::mem::drop(reader);
-									self.log.clear_replay_logs()?;
-									return Ok(false);
-								}
-							},
 							LogAction::DropTable(_) => {
 								continue;
 							}
@@ -643,10 +634,6 @@ impl DbInner {
 						LogAction::InsertValue(insertion) => {
 							self.columns[insertion.table.col() as usize]
 								.enact_plan(LogAction::InsertValue(insertion), &mut reader)?;
-						},
-						LogAction::InsertBTree(insertion) => {
-							self.columns[insertion.table.col() as usize]
-								.enact_plan(LogAction::InsertBTree(insertion), &mut reader)?;
 						},
 						LogAction::DropTable(id) => {
 							log::debug!(

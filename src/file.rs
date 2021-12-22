@@ -20,7 +20,6 @@ use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use parking_lot::{RwLockUpgradableReadGuard, RwLock};
 use crate::error::Result;
 use crate::table::TableId;
-use crate::btree::BTreeTableId;
 
 #[cfg(target_os = "linux")]
 fn disable_read_ahead(file: &std::fs::File) -> Result<()> {
@@ -71,6 +70,7 @@ fn fsync(file: &std::fs::File) -> Result<()> {
 	Ok(())
 }
 
+
 const GROW_SIZE_BYTES: u64 = 256 * 1024;
 
 pub struct TableFile {
@@ -78,34 +78,19 @@ pub struct TableFile {
 	pub path: std::path::PathBuf,
 	pub capacity: AtomicU64,
 	pub dirty: AtomicBool,
-	pub id: TableFileId,
-}
-
-#[derive(Clone, Copy)]
-pub enum TableFileId {
-	Table(TableId),
-	BTree(BTreeTableId),
-}
-
-impl std::fmt::Display for TableFileId {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		match self {
-			TableFileId::Table(id) => write!(f, "value {}", id),
-			TableFileId::BTree(id) => write!(f, "btree {}", id),
-		}
-	}
+	pub id: TableId,
 }
 
 impl TableFile {
-	pub fn open(filepath: std::path::PathBuf, entry_size: u64, id: TableFileId) -> Result<Self> {
+	pub fn open(filepath: std::path::PathBuf, entry_size: u16, id: TableId) -> Result<Self> {
 		let mut capacity = 0u64;
 		let file = if std::fs::metadata(&filepath).is_ok() {
 			let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(filepath.as_path())?;
 			disable_read_ahead(&file)?;
 			if file.metadata()?.len() == 0 {
 				// Preallocate.
-				capacity += GROW_SIZE_BYTES / entry_size;
-				file.set_len(capacity * entry_size)?;
+				capacity += GROW_SIZE_BYTES / entry_size as u64;
+				file.set_len(capacity * entry_size as u64)?;
 			}
 			Some(file)
 		} else {
@@ -121,7 +106,7 @@ impl TableFile {
 	}
 
 	fn create_file(&self) -> Result<std::fs::File> {
-		log::debug!(target: "parity-db", "Created table {}", self.id);
+		log::debug!(target: "parity-db", "Created value table {}", self.id);
 		let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(self.path.as_path())?;
 		disable_read_ahead(&file)?;
 		Ok(file)
@@ -156,9 +141,9 @@ impl TableFile {
 		Ok(())
 	}
 
-	pub fn grow(&self, entry_size: u64) -> Result<()> {
+	pub fn grow(&self, entry_size: u16) -> Result<()> {
 		let mut capacity = self.capacity.load(Ordering::Relaxed);
-		capacity += GROW_SIZE_BYTES / entry_size;
+		capacity += GROW_SIZE_BYTES / entry_size as u64;
 
 		self.capacity.store(capacity, Ordering::Relaxed);
 		let mut file = self.file.upgradable_read();
@@ -167,7 +152,7 @@ impl TableFile {
 			*wfile = Some(self.create_file()?);
 			file = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wfile);
 		}
-		file.as_ref().unwrap().set_len(capacity * entry_size)?;
+		file.as_ref().unwrap().set_len(capacity * entry_size as u64)?;
 		Ok(())
 	}
 

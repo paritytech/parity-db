@@ -416,11 +416,7 @@ impl ValueTable {
 
 		let mut filepath: std::path::PathBuf = std::path::PathBuf::clone(&*path);
 		filepath.push(id.file_name());
-		let file = crate::file::TableFile::open(
-			filepath,
-			entry_size as u64,
-			crate::file::TableFileId::Table(id),
-		)?;
+		let file = crate::file::TableFile::open(filepath, entry_size, id)?;
 		let mut filled = 1;
 		let mut last_removed = 0;
 		if let Some(file) = &mut *file.file.write() {
@@ -876,7 +872,7 @@ impl ValueTable {
 
 	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
 		while index >= self.file.capacity.load(Ordering::Relaxed) {
-			self.file.grow(self.entry_size as u64)?;
+			self.file.grow(self.entry_size)?;
 		}
 		if index == 0 {
 			let mut header = Header::default();
@@ -1160,7 +1156,6 @@ mod test {
 			match reader.next().unwrap() {
 				LogAction::BeginRecord
 					| LogAction::InsertIndex { .. }
-					| LogAction::InsertBTree { .. }
 					| LogAction::DropTable { .. } => {
 					panic!("Unexpected log entry");
 				},

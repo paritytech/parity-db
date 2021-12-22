@@ -42,14 +42,11 @@ use std::mem::MaybeUninit;
 use node::{NodeT, SeparatorInner};
 use crate::table::{Entry as LogEntry, ValueTable};
 use crate::table::key::{TableKeyQuery, NoHash};
-use crate::file::{TableFile, TableFileId};
 use crate::options::Options;
 use crate::index::Address;
-use std::sync::atomic::Ordering;
 use crate::error::Result;
 use crate::column::{ColId, ValueTableOrigin, Column};
-use crate::log::{LogQuery, LogReader, LogWriter};
-use std::collections::HashMap;
+use crate::log::{LogQuery, LogWriter};
 use crate::compress::Compress;
 use crate::btree::node::{Node, NodeReadNoCache};
 pub use btree::BTreeIterator;
@@ -101,7 +98,6 @@ pub struct BTreeIndex {
 }
 
 pub struct BTreeLogOverlay {
-	pub map: HashMap<u64, (u64, Vec<u8>), crate::IdentityBuildHasherU64>, // index -> (record_id, entry)
 	pub index: BTreeIndex,
 	pub record_id: u64,
 }
@@ -109,7 +105,6 @@ pub struct BTreeLogOverlay {
 impl BTreeLogOverlay {
 	pub fn new(record_id: u64, index: BTreeIndex) -> Self {
 		BTreeLogOverlay {
-			map: Default::default(),
 			index,
 			record_id,
 		}
@@ -275,7 +270,6 @@ impl<C: Config> Entry<C> {
 
 pub struct BTreeTable {
 	pub id: BTreeTableId,
-	file: TableFile,
 	variant: ConfigVariants,
 }
 
@@ -299,10 +293,8 @@ impl BTreeTable {
 	) -> Result<Self> {
 		let mut filepath: std::path::PathBuf = std::path::PathBuf::clone(path);
 		filepath.push(id.file_name());
-		let file = TableFile::open(filepath, C::ENTRY_SIZE as u64, TableFileId::BTree(id))?;
 		Ok(BTreeTable {
 			id,
-			file,
 			variant,
 		})
 	}
@@ -343,10 +335,6 @@ impl BTreeTable {
 		})
 	}
 
-	pub fn flush(&self) -> Result<()> {
-		self.file.flush()
-	}
-
 	pub fn get(&self, key: &[u8], log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<Vec<u8>>> {
 		match self.variant {
 			ConfigVariants::Order2_3_64 => {
@@ -381,44 +369,6 @@ impl BTreeTable {
 		} else {
 			Err(crate::error::Error::Corruption("Missing btree index".to_string()))
 		}
-	}
-
-	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
-		match self.variant {
-			ConfigVariants::Order2_3_64 => {
-				self.enact_plan_inner::<Node<Order2_3_64>>(index, log)
-			}
-		}
-	}
-	fn enact_plan_inner<N: NodeT>(&self, index: u64, log: &mut LogReader) -> Result<()> {
-		while index >= self.file.capacity.load(Ordering::Relaxed) {
-			self.file.grow(N::Config::ENTRY_SIZE as u64)?;
-		}
-		let mut buf = N::Config::uninit_encoded();
-		log.read(buf.as_mut())?;
-
-		self.file.write_at(buf.as_ref(), index * N::Config::ENTRY_SIZE as u64)?;
-
-		log::trace!(target: "parity-db", "{}: Enacted btree {}: {:x?}", self.id, index, buf.as_ref());
-		Ok(())
-	}
-
-	pub fn validate_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
-		match self.variant {
-			ConfigVariants::Order2_3_64 => {
-				self.validate_plan_inner::<Order2_3_64>(index, log)
-			}
-		}
-	}
-	fn validate_plan_inner<C: Config> (&self, index: u64, log: &mut LogReader) -> Result<()> {
-		let mut buf = C::uninit_encoded();
-		log.read(buf.as_mut())?;
-		log::trace!(target: "parity-db", "{}: Validated btree in slot {}", self.id, index);
-		Ok(())
-	}
-
-	pub fn complete_plan(&self, _log: &mut LogWriter) -> Result<()> {
-		Ok(())
 	}
 }
 

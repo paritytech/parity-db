@@ -272,9 +272,6 @@ impl Column {
 		for t in tables.value.iter() {
 			t.flush()?;
 		}
-		if let Some(btree) = tables.btree.as_ref() {
-			btree.flush()?;
-		}
 		Ok(())
 	}
 
@@ -673,11 +670,6 @@ impl Column {
 			LogAction::InsertValue(record) => {
 				tables.value[record.table.size_tier() as usize].enact_plan(record.index, log)?;
 			},
-			LogAction::InsertBTree(record) => {
-				if let Some(btree) = tables.btree.as_ref() {
-					btree.enact_plan(record.index, log)?;
-				}
-			},
 			_ => panic!("Unexpected log action"),
 		}
 		Ok(())
@@ -707,11 +699,6 @@ impl Column {
 			LogAction::InsertValue(record) => {
 				tables.value[record.table.size_tier() as usize].validate_plan(record.index, log)?;
 			},
-			LogAction::InsertBTree(record) => {
-				if let Some(btree) = tables.btree.as_ref() {
-					btree.validate_plan(record.index, log)?;
-				}
-			}
 			_ => panic!("Unexpected log action"),
 		}
 		Ok(())
@@ -724,10 +711,6 @@ impl Column {
 		}
 		if self.collect_stats {
 			self.stats.commit()
-		}
-
-		if let Some(btree) = tables.btree.as_ref() {
-			btree.complete_plan(log)?;
 		}
 		Ok(())
 	}

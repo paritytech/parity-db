@@ -32,7 +32,6 @@ const INSERT_INDEX: u8 = 2;
 const INSERT_VALUE: u8 = 3;
 const END_RECORD: u8 = 4;
 const DROPPED_TABLE: u8 = 5;
-const INSERT_BTREE: u8 = 6;
 
 pub struct InsertIndexAction {
 	pub table: IndexTableId,
@@ -44,16 +43,10 @@ pub struct InsertValueAction {
 	pub index: u64,
 }
 
-pub struct InsertBTreeAction {
-	pub table: BTreeTableId,
-	pub index: u64,
-}
-
 pub enum LogAction {
 	BeginRecord,
 	InsertIndex(InsertIndexAction),
 	InsertValue(InsertValueAction),
-	InsertBTree(InsertBTreeAction),
 	DropTable(IndexTableId),
 	EndRecord,
 }
@@ -61,7 +54,6 @@ pub enum LogAction {
 pub trait LogQuery {
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R> (&self, table: IndexTableId, index: u64, f: F) -> Option<R>;
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut[u8]) -> bool;
-	fn btree(&self, id: BTreeTableId, at: u64, dest: &mut[u8]) -> bool;
 	fn btree_index(&self, id: BTreeTableId) -> Option<BTreeIndex>;
 }
 
@@ -88,10 +80,6 @@ impl LogQuery for RwLock<LogOverlays> {
 		self.read().value(table, index, dest)
 	}
 
-	fn btree(&self, table: BTreeTableId, index: u64, dest: &mut[u8]) -> bool {
-		self.read().btree(table, index, dest)
-	}
-
 	fn btree_index(&self, id: BTreeTableId) -> Option<BTreeIndex> {
 		self.read().btree_index(id)
 	}
@@ -115,17 +103,6 @@ impl LogQuery for LogOverlays {
 		}
 	}
 
-	fn btree(&self, table: BTreeTableId, index: u64, dest: &mut[u8]) -> bool {
-		let s = self;
-		if let Some(d) = s.btree.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data)) {
-			let len = dest.len().min(d.len());
-			dest[0..len].copy_from_slice(&d[0..len]);
-			true
-		} else {
-			false
-		}
-	}
-
 	fn btree_index(&self, id: BTreeTableId) -> Option<BTreeIndex> {
 		let s = self;
 		s.btree.get(&id).map(|o| o.index.clone())
@@ -137,7 +114,6 @@ impl LogQuery for LogOverlays {
 pub struct Cleared {
 	index: Vec<(IndexTableId, u64)>,
 	values: Vec<(ValueTableId, u64)>,
-	btrees: Vec<(BTreeTableId, u64)>,
 }
 
 pub struct LogReader<'a> {
@@ -236,13 +212,6 @@ impl<'a> LogReader<'a> {
 				let table = IndexTableId::from_u16(u16::from_le_bytes(buf[0..2].try_into().unwrap()));
 				Ok(LogAction::DropTable(table))
 			},
-			INSERT_BTREE => {
-				read_buf(1, &mut buf)?;
-				let table = BTreeTableId::from_u8(u8::from_le_bytes(buf[0..1].try_into().unwrap()));
-				read_buf(8, &mut buf)?;
-				let index = u64::from_le_bytes(buf);
-				Ok(LogAction::InsertBTree(InsertBTreeAction { table, index }))
-			},
 			_ => {
 				Err(Error::Corruption("Bad log entry type".into()))
 			}
@@ -329,14 +298,6 @@ impl LogChange {
 				write(value)?;
 			}
 		}
-		for (id, overlay) in self.local_btree.iter() {
-			for (index, (_, value)) in overlay.map.iter() {
-				write(&INSERT_BTREE.to_le_bytes().as_ref())?;
-				write(&id.as_u8().to_le_bytes())?;
-				write(&index.to_le_bytes())?;
-				write(value)?;
-			}
-		}
 		for id in self.dropped_tables.iter() {
 			log::debug!(target: "parity-db", "Finalizing drop {}", id);
 			write(&DROPPED_TABLE.to_le_bytes().as_ref())?;
@@ -386,18 +347,11 @@ impl<'a> LogWriter<'a> {
 		self.log.local_values.entry(table).or_default().map.insert(index, (self.log.record_id, data.clone()));
 	}
 
-	pub fn insert_btree(&mut self, id: BTreeTableId, index: u64, data: Vec<u8>, record_id: u64, btree: &BTreeIndex) {
-		self.log.local_btree.entry(id)
-			.or_insert_with(|| BTreeLogOverlay::new(record_id, btree.clone()))
-			.map.insert(index, (self.log.record_id, data));
-	}
-
 	pub fn insert_btree_index(&mut self, id: BTreeTableId, record_id: u64, btree: BTreeIndex) {
 		let mut overlay = self.log.local_btree.entry(id)
 			.or_insert_with(|| BTreeLogOverlay::new(record_id, btree.clone()));
 		overlay.index = btree;
 	}
-
 
 	pub fn drop_table(&mut self, id: IndexTableId) {
 		self.log.dropped_tables.push(id);
@@ -423,16 +377,6 @@ impl<'a> LogQuery for LogWriter<'a> {
 			true
 		} else {
 			self.overlays.value(table, index, dest)
-		}
-	}
-
-	fn btree(&self, table: BTreeTableId, index: u64, dest: &mut[u8]) -> bool {
-		if let Some(d) = self.log.local_btree.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data)) {
-			let len = dest.len().min(d.len());
-			dest[0..len].copy_from_slice(&d[0..len]);
-			true
-		} else {
-			self.overlays.btree(table, index, dest)
 		}
 	}
 
@@ -664,22 +608,18 @@ impl Log {
 			total_value += overlay.map.len();
 			overlays.value.entry(id).or_default().map.extend(overlay.map.into_iter());
 		}
-		let mut total_btree = 0;
 		for (id, overlay) in btrees.into_iter() {
-			total_btree += overlay.map.len();
 			let dest = overlays.btree.entry(id).or_insert_with(|| BTreeLogOverlay::new(overlay.record_id, overlay.index.clone()));
-			dest.map.extend(overlay.map.into_iter());
 			dest.record_id = overlay.record_id;
 			dest.index = overlay.index;
 		}
 
 		log::debug!(
 			target: "parity-db",
-			"Finalizing log record {} ({} index, {} value, {} btree)",
+			"Finalizing log record {} ({} index, {} value)",
 			record_id,
 			total_index,
 			total_value,
-			total_btree,
 		);
 		appending.size += bytes;
 		self.dirty.store(true, Ordering::Relaxed);
@@ -705,18 +645,6 @@ impl Log {
 		}
 		for (table, index) in cleared.values.into_iter() {
 			if let Some(ref mut overlay) = overlays.value.get_mut(&table) {
-				match overlay.map.entry(index) {
-					std::collections::hash_map::Entry::Occupied(e) => {
-						if e.get().0 == record_id {
-							e.remove_entry();
-						}
-					}
-					_ => {},
-				}
-			}
-		}
-		for (table, index) in cleared.btrees.into_iter() {
-			if let Some(ref mut overlay) = overlays.btree.get_mut(&table) {
 				match overlay.map.entry(index) {
 					std::collections::hash_map::Entry::Occupied(e) => {
 						if e.get().0 == record_id {
