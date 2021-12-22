@@ -567,35 +567,6 @@ impl ValueTable {
 		})
 	}
 
-	pub fn var_key_at(&self, index: u64, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
-		let mut query_key = Vec::<u8>::default();
-		let mut size: Option<usize> = None;
-		let size = &mut size;
-		let (rc, _compressed) = self.for_parts(&mut TableKeyQuery::<NoHash>::Fetch(&mut ()), index, log, |buf| {
-			let start = if size.is_none() {
-				let mut size_buf = [0u8; 4]; 
-				size_buf.copy_from_slice(&buf[..4]);
-				*size = Some(u32::from_be_bytes(size_buf) as usize);
-				4
-			} else {
-				0
-			};
-			if let Some(size) = size.as_mut() {
-				let to_read = std::cmp::min(*size, buf.len() - start);
-				*size -= to_read;
-				query_key.extend_from_slice(&buf[start..start + to_read]);
-				*size != 0
-			} else {
-				false
-			}
-		})?;
-		Ok(if rc == 0 {
-			None
-		} else {
-			Some(query_key)
-		})
-	}
-
 	pub fn is_tombstone<Q: LogQuery>(&self, index: u64, log: &Q) -> Result<bool> {
 		let mut buf = PartialKeyEntry::new_uninit();
 		let buf = if log.value(self.id, index, buf.as_mut()) {

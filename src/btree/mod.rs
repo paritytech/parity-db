@@ -33,7 +33,6 @@
 //
 // This sequence is repeated ORDER time and a last CHILD index is added.
 
-use std::mem::MaybeUninit;
 use node::{NodeT, SeparatorInner};
 use crate::table::{Entry as LogEntry, ValueTable};
 use crate::table::key::{TableKeyQuery, NoHash};
@@ -107,61 +106,39 @@ impl BTreeLogOverlay {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ConfigVariants {
-	Order2_3_64 = 0,
+	Order2_3 = 0,
 	// TODO
 }
 
 impl From<u8> for ConfigVariants {
 	fn from(i: u8) -> Self {
 		match i {
-			0 => ConfigVariants::Order2_3_64,
+			0 => ConfigVariants::Order2_3,
 			_ => panic!("Unsupported btree index variant"),
 		}
 	}
 }
 
 pub trait Config: Sized {
-	// actualy keysize is - 1 (header is include in this value).
-	const KEYSIZE: usize; // Max supported value is 254
 	const ORDER: usize;
 	const ORDER_CHILD: usize = Self::ORDER + 1;
-	const ENTRY_SIZE: usize = (Self::ORDER * (Self::KEYSIZE + 8)  + (Self::ORDER_CHILD) * 8);
 	type Separators: Default + AsRef<[node::Separator]> + AsMut<[node::Separator]>;
 	type Children: Default + AsRef<[node::Child<Self>]> + AsMut<[node::Child<Self>]>;
-	type Encoded: AsRef<[u8]> + AsMut<[u8]>;
-	type KeyBuf: AsRef<[u8]> + AsMut<[u8]>;
-	fn default_encoded() -> Self::Encoded;
-	fn uninit_encoded() -> Self::Encoded;
-	fn default_keybuf() -> Self::KeyBuf;
 }
 
 macro_rules! def_config {
-	($name:ident, $order:expr, $key_size:expr) => {
+	($name:ident, $order:expr) => {
 		pub struct $name;
 
 		impl Config for $name {
-			const KEYSIZE: usize = $key_size;
 			const ORDER: usize = $order;
 			type Separators = [node::Separator; Self::ORDER];
 			type Children = [node::Child<Self>; Self::ORDER_CHILD];
-			type Encoded = [u8; Self::ENTRY_SIZE];
-			type KeyBuf = [u8; Self::KEYSIZE];
-			fn default_encoded() -> Self::Encoded {
-				[0; Self::ENTRY_SIZE]
-			}
-			fn uninit_encoded() -> Self::Encoded {
-				unsafe { MaybeUninit::uninit().assume_init() }
-			}
-			fn default_keybuf() -> Self::KeyBuf {
-				[0; Self::KEYSIZE]
-			}
 		}
 	};
 }
 
-def_config!(Order2_3_64, 2, 64);
-def_config!(Order2_3_128, 2, 128);
-def_config!(Order2_3_256, 2, 254);
+def_config!(Order2_3, 2);
 
 struct Entry {
 	encoded: LogEntry<Vec<u8>>,
@@ -176,15 +153,6 @@ impl Entry {
 		Entry {
 			encoded: LogEntry::new(enc),
 		}
-	}
-
-	fn read_has_separator(&mut self, at: usize) -> bool {
-		unimplemented!()
-		/*
-		let start = at * (8 + 8 + C::KEYSIZE);
-		self.encoded.set_offset(start + 8);
-		let value = self.encoded.read_u64();
-		value != 0*/
 	}
 
 	fn read_separator(&mut self) -> Option<SeparatorInner> {
@@ -262,8 +230,8 @@ impl BTreeTable {
 		variant: ConfigVariants,
 	) -> Result<Self> {
 		match variant {
-			ConfigVariants::Order2_3_64 => {
-				Self::open_inner::<Order2_3_64>(path, id, variant)
+			ConfigVariants::Order2_3 => {
+				Self::open_inner::<Order2_3>(path, id, variant)
 			},
 		}
 	}
@@ -313,8 +281,8 @@ impl BTreeTable {
 
 	pub fn get(&self, key: &[u8], log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<Vec<u8>>> {
 		match self.variant {
-			ConfigVariants::Order2_3_64 => {
-				self.get_inner::<Node<Order2_3_64>, _>(key, log, values, comp)
+			ConfigVariants::Order2_3 => {
+				self.get_inner::<Node<Order2_3>, _>(key, log, values, comp)
 			}
 		}
 	}
@@ -438,7 +406,7 @@ pub mod commit_overlay {
 			ops: &mut u64,
 		) -> Result<()> {
 			match column.with_btree(|btree| Ok(btree.variant))? {
-				ConfigVariants::Order2_3_64 => self.write_plan_inner::<Node<Order2_3_64>>(
+				ConfigVariants::Order2_3 => self.write_plan_inner::<Node<Order2_3>>(
 					column,
 					writer,
 					ops,

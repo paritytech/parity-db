@@ -198,7 +198,7 @@ impl Column {
 			value: (0.. options.sizes.len() + 1)
 				.map(|i| Self::open_table(arc_path.clone(), col, i as u8, &options, db_version)).collect::<Result<_>>()?,
 			btree: if options.btree_index {
-				Some(Self::open_btree(path, col, BTreeVariants::Order2_3_64)?)
+				Some(Self::open_btree(path, col, BTreeVariants::Order2_3)?)
 			} else {
 				None
 			},

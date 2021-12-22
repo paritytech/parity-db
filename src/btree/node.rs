@@ -41,7 +41,7 @@ pub trait NodeT: Sized {
 	fn from_encoded(enc: Vec<u8>) -> Self;
 	fn remove_separator(&mut self, at: usize) -> Self::Separator;
 	fn has_separator(&mut self, at: usize) -> bool;
-	fn separator_partial_key(&mut self, at: usize) -> Option<Vec<u8>>;
+	fn separator_key(&mut self, at: usize) -> Option<Vec<u8>>;
 	fn separator_value_index(&mut self, at: usize) -> Option<u64>;
 	fn separator_get_info(&mut self, at: usize) -> Option<Address>;
 	fn set_separator(&mut self, at: usize, sep: Self::Separator); // TODO a replace separator?
@@ -67,7 +67,7 @@ pub trait NodeT: Sized {
 	) -> (Box<Self>, Option<u64>);
 	fn shift_from(&mut self, from: usize, has_child: bool, with_left_child: bool);
 	fn remove_from(&mut self, from: usize, has_child: bool, with_left_child: bool);
-	fn position(&mut self, key: &[u8], values: &Vec<ValueTable>, log: &impl LogQuery) -> Result<(bool, usize)>;
+	fn position(&mut self, key: &[u8]) -> Result<(bool, usize)>;
 	fn number_separator(&mut self) -> usize;
 	fn last_separator_index(&mut self) -> Option<usize> {
 		let i = self.number_separator();
@@ -92,7 +92,7 @@ pub trait NodeT: Sized {
 	) -> Result<Option<(Self::Separator, Self::Child)>> {
 		let has_child = depth != 0;
 
-		let (at, i) = column.with_value_tables(|t| self.position(key, t, log))?;
+		let (at, i) = self.position(key)?;
 		// insert
 		if !at {
 			if has_child {
@@ -196,7 +196,7 @@ pub trait NodeT: Sized {
 		removed: &mut RemovedChildren<Self>,
 	) -> Result<bool> {
 		let has_child = depth != 0;
-		let (at, i) = column.with_value_tables(|t| self.position(key, t, log))?;
+		let (at, i) = self.position(key)?;
 		if at {
 			let existing = self.separator_value_index(i);
 			if let Some(existing) = existing {
@@ -399,7 +399,7 @@ pub trait NodeT: Sized {
 	}
 
 	fn get(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Address>> {
-		let (at, i) = self.position(key, values, log)?;
+		let (at, i) = self.position(key)?;
 		if at {
 			Ok(self.separator_get_info(i))
 		} else {
@@ -412,7 +412,7 @@ pub trait NodeT: Sized {
 	}
 	
 	fn seek(from: &mut Box<Self>, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, depth: u32, stack: &mut Vec<(usize, *mut Box<Self>)>, comp: &Compress) -> Result<bool> {
-		let (at, i) = from.position(key, values, log)?;
+		let (at, i) = from.position(key)?;
 		stack.push((i, from));
 		if at {
 			Ok(true)
@@ -617,7 +617,7 @@ impl<C: Config> NodeT for Node<C> {
 		at.separator.is_some()
 	}
 
-	fn separator_partial_key(&mut self, at: usize) -> Option<Vec<u8>> {
+	fn separator_key(&mut self, at: usize) -> Option<Vec<u8>> {
 		let at = self.get_separator(at);
 		at.separator.as_ref().map(|s| {
 			s.key.clone()
@@ -813,7 +813,7 @@ impl<C: Config> NodeT for Node<C> {
 
 	// Return true if match and matched position.
 	// Return index of first element bigger than key otherwhise.
-	fn position(&mut self, key: &[u8], values: &Vec<ValueTable>, log: &impl LogQuery) -> Result<(bool, usize)> {
+	fn position(&mut self, key: &[u8]) -> Result<(bool, usize)> {
 		let mut i = 0;
 		while let Some(separator) = self.get_separator(i).separator.as_mut() {
 			match key[..].cmp(&separator.key[..]) {
