@@ -21,22 +21,18 @@
 // Header (metadata)
 // [ROOT: 8][DEPTH: 4]
 //
-// ROOT: u64 LE current index for root node. TODO could be smaller than u64
+// ROOT: u64 LE current index for root node.
 // DEPTH: u32 LE current tree depth.
 //
-// Complete entry: TODO consider packing child.
+// Complete entry:
 // [CHILD: 8]: Internal index of child node, 0 for undefined (points to the metadata).
-// TODO consider u32?
 // [VALUE_PTR: 8]: Pointer to the value table for this key. If 0, no value (key should be 0 length
-// [KEY_HEADER: 1]: header of key, contains length up to 254. 255 indicate that key is stored with
-// value.
-// [KEY: KEYSIZE - KEY_HEADER]: stored key.
-// too).
+// [KEY_HEADER: 1]: header of key, contains length up to 254. If 255, then the length is u32
+// encoded on the next 4 bytes.
+// [KEY: KEYSIZE]: stored key.
 //
-// This sequence is repeated ORDER time and a last CHILD index is added, so total size is:
-// (ORDER * (KEYSIZE + 8 + 1)) + ((ORDER + 1) * (8))
+// This sequence is repeated ORDER time and a last CHILD index is added.
 
-use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use node::{NodeT, SeparatorInner};
 use crate::table::{Entry as LogEntry, ValueTable};
@@ -47,7 +43,7 @@ use crate::error::Result;
 use crate::column::{ColId, ValueTableOrigin, Column};
 use crate::log::{LogQuery, LogWriter};
 use crate::compress::Compress;
-use crate::btree::node::{Node, NodeReadNoCache};
+use crate::btree::node::Node;
 pub use btree::BTreeIterator;
 
 mod btree;
@@ -55,6 +51,7 @@ mod node;
 
 pub(crate) const HEADER_POSITION: u64 = 0;
 pub(crate) const HEADER_SIZE: u64 = 8 + 4;
+pub(crate) const ENTRY_CAPACITY: usize = 2 * 33 + 2 * 8 + 3 * 8;
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub struct BTreeTableId(u8); // contain its column id
@@ -129,7 +126,7 @@ pub trait Config: Sized {
 	const ORDER: usize;
 	const ORDER_CHILD: usize = Self::ORDER + 1;
 	const ENTRY_SIZE: usize = (Self::ORDER * (Self::KEYSIZE + 8)  + (Self::ORDER_CHILD) * 8);
-	type Separators: Default + AsRef<[node::Separator<Self>]> + AsMut<[node::Separator<Self>]>;
+	type Separators: Default + AsRef<[node::Separator]> + AsMut<[node::Separator]>;
 	type Children: Default + AsRef<[node::Child<Self>]> + AsMut<[node::Child<Self>]>;
 	type Encoded: AsRef<[u8]> + AsMut<[u8]>;
 	type KeyBuf: AsRef<[u8]> + AsMut<[u8]>;
@@ -145,7 +142,7 @@ macro_rules! def_config {
 		impl Config for $name {
 			const KEYSIZE: usize = $key_size;
 			const ORDER: usize = $order;
-			type Separators = [node::Separator<Self>; Self::ORDER];
+			type Separators = [node::Separator; Self::ORDER];
 			type Children = [node::Child<Self>; Self::ORDER_CHILD];
 			type Encoded = [u8; Self::ENTRY_SIZE];
 			type KeyBuf = [u8; Self::KEYSIZE];
@@ -166,75 +163,71 @@ def_config!(Order2_3_64, 2, 64);
 def_config!(Order2_3_128, 2, 128);
 def_config!(Order2_3_256, 2, 254);
 
-struct Entry<C: Config> {
-	encoded: LogEntry<C::Encoded>,
-	_ph: PhantomData<C>,
+struct Entry {
+	encoded: LogEntry<Vec<u8>>,
 }
 
-impl<C: Config> Entry<C> {
+impl Entry {
 	fn empty() -> Self {
-		Self::from_encoded(C::default_encoded())
+		Self::from_encoded(Vec::with_capacity(ENTRY_CAPACITY))
 	}
 
-	fn from_encoded(enc: C::Encoded) -> Self {
+	fn from_encoded(enc: Vec<u8>) -> Self {
 		Entry {
 			encoded: LogEntry::new(enc),
-			_ph: PhantomData,
 		}
 	}
 
 	fn read_has_separator(&mut self, at: usize) -> bool {
+		unimplemented!()
+		/*
 		let start = at * (8 + 8 + C::KEYSIZE);
 		self.encoded.set_offset(start + 8);
 		let value = self.encoded.read_u64();
-		value != 0
+		value != 0*/
 	}
 
-	fn read_separator(&mut self, at: usize) -> Option<SeparatorInner<C>> {
-		let start = at * (8 + 8 + C::KEYSIZE);
-		self.encoded.set_offset(start + 8);
+	fn read_separator(&mut self) -> Option<SeparatorInner> {
+		if self.encoded.offset() == self.encoded.inner_mut().len() {
+			return None;
+		}
 		let value = self.encoded.read_u64();
-		let key_slice = self.encoded.read_slice(C::KEYSIZE);
+		let head = self.encoded.read_slice(1);
+		let head = head[0];
+		let size = if head == u8::MAX {
+			self.encoded.read_u32() as usize
+		} else {
+			head as usize
+		};
+		let key = self.encoded.read_slice(size).to_vec();
 		if value == 0 {
 			return None;
 		}
-		let is_splitted = key_slice[0] == u8::MAX;
-		let size = (key_slice[0] & 0b0111_1111) as usize;
-		let mut key_buf = C::default_keybuf();
-		if is_splitted {
-			key_buf.as_mut()[..].copy_from_slice(key_slice.as_ref());
-		} else {
-			key_buf.as_mut()[..size + 1].copy_from_slice(&key_slice.as_ref()[..size + 1]);
-		};
 		Some(SeparatorInner {
-			key: key_buf,
-			splitted_key: None,
+			key,
 			value,
 		})
 	}
 
-	fn write_separator(&mut self, at: usize, key: &C::KeyBuf, value: u64) {
-		let start = at * (8 + 8 + C::KEYSIZE);
-		self.encoded.set_offset(start + 8);
-		self.encoded.write_u64(value);
-		let head = key.as_ref()[0];
-		if head == u8::MAX {
-			self.encoded.write_slice(key.as_ref());
+	fn write_separator(&mut self, key: &Vec<u8>, value: u64) {
+		let size = key.len();
+		let inner_size = self.encoded.inner_mut().len();
+		if size >= u8::MAX as usize {
+			self.encoded.inner_mut().resize(inner_size + 8 + 1 + 4 + size, 0); 
 		} else {
-			self.encoded.write_slice(&key.as_ref()[..1 + head as usize]);
+			self.encoded.inner_mut().resize(inner_size + 8 + 1 + size, 0); 
+		};
+		self.encoded.write_u64(value);
+		if size >= u8::MAX as usize {
+			self.encoded.write_slice(&[u8::MAX]);
+			self.encoded.write_u32(size as u32);
+		} else {
+			self.encoded.write_slice(&[size as u8]);
 		}
+		self.encoded.write_slice(key.as_slice());
 	}
 
-	fn remove_separator(&mut self, at: usize) {
-		let start = at * (8 + 8 + C::KEYSIZE);
-		self.encoded.set_offset(start + 8);
-		self.encoded.write_u64(HEADER_POSITION);
-		self.encoded.write_slice(&[0]);
-	}
-
-	fn read_child_index(&mut self, at: usize) -> Option<u64> {
-		let start = at * (8 + 8 + C::KEYSIZE);
-		self.encoded.set_offset(start);
+	fn read_child_index(&mut self) -> Option<u64> {
 		let index = self.encoded.read_u64();
 		if index == 0 {
 			None
@@ -243,22 +236,17 @@ impl<C: Config> Entry<C> {
 		}
 	}
 
-	fn write_child_index(&mut self, at: usize, index: u64) {
-		let start = at * (8 + 8 + C::KEYSIZE);
-		self.encoded.set_offset(start);
+	fn write_child_index(&mut self, index: u64) {
+		let inner_size = self.encoded.inner_mut().len();
+		self.encoded.inner_mut().resize(inner_size + 8, 0);
 		self.encoded.write_u64(index);
-	}
-
-	fn remove_child_index(&mut self, at: usize) {
-		let start = at * (8 + 8 + C::KEYSIZE);
-		self.encoded.set_offset(start);
-		self.encoded.write_u64(HEADER_POSITION);
 	}
 
 	fn write_header(&mut self, btree_index: &BTreeIndex) {
 		self.encoded.set_offset(0);
+		self.encoded.inner_mut().resize(8 + 4, 0);
 		self.encoded.write_u64(btree_index.root);
-		self.encoded.write_slice(&btree_index.depth.to_le_bytes()[..]);
+		self.encoded.write_u32(btree_index.depth);
 	}
 }
 
@@ -326,7 +314,7 @@ impl BTreeTable {
 	pub fn get(&self, key: &[u8], log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<Vec<u8>>> {
 		match self.variant {
 			ConfigVariants::Order2_3_64 => {
-				self.get_inner::<NodeReadNoCache<Order2_3_64>, _>(key, log, values, comp)
+				self.get_inner::<Node<Order2_3_64>, _>(key, log, values, comp)
 			}
 		}
 	}
@@ -348,12 +336,10 @@ impl BTreeTable {
 		tree.get_with_lock(key, self, values, log, comp)
 	}
 
-	fn get_index<N: NodeT, Q: LogQuery>(&self, at: u64, log: &Q, tables: &Vec<ValueTable>, comp: &Compress) -> Result<<N::Config as Config>::Encoded> {
+	fn get_index<N: NodeT, Q: LogQuery>(&self, at: u64, log: &Q, tables: &Vec<ValueTable>, comp: &Compress) -> Result<Vec<u8>> {
 		let key_query = TableKeyQuery::Check(&NoHash);
 		if let Some((_tier, value)) = Column::get_at_value_index_locked(key_query, Address::from_u64(at), tables, log, comp)? {
-			let mut dest = N::Config::uninit_encoded();
-			dest.as_mut().copy_from_slice(value.as_slice());
-			Ok(dest)
+			Ok(value)
 		} else {
 			Err(crate::error::Error::Corruption("Missing btree index".to_string()))
 		}
@@ -504,7 +490,7 @@ pub mod commit_overlay {
 			tree.write_plan(column, writer, table_id, record_id, &mut btree_index, origin)?;
 
 			if old_btree_index != btree_index {
-				let mut entry = Entry::<N::Config>::empty();
+				let mut entry = Entry::empty();
 				entry.write_header(&btree_index);
 				if let Some(address) = column.with_value_tables(|t| Ok(BTreeTable::btree_index_address(t)))? {
 					column.with_tables_and_self(|t, s| s.write_existing_value_plan(

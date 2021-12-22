@@ -169,7 +169,6 @@ type PartialKeyEntry = Entry<[u8; 40]>; // 2 + 4 + 26 + 8
 
 pub(crate) trait TableKeyFetch: Default + std::fmt::Debug {
 	fn fetch(&mut self, buf: &mut FullEntry)-> Result<()>;
-	fn set_var_key(&mut self, var_key: &[u8]);
 }
 
 pub(crate) trait TableKeyWrite {
@@ -186,8 +185,6 @@ impl TableKeyFetch for [u8; PARTIAL_SIZE] {
 			return Err(crate::error::Error::InvalidValueData);
 		}
 		Ok(())
-	}
-	fn set_var_key(&mut self, _var_key: &[u8]) {
 	}
 }
 
@@ -207,8 +204,6 @@ impl TableKeyFetch for () {
 	fn fetch(&mut self, _buf: &mut FullEntry)-> Result<()> {
 		Ok(())
 	}
-	fn set_var_key(&mut self, _var_key: &[u8]) {
-	}
 }
 
 impl TableKeyWrite for NoHash {
@@ -216,28 +211,6 @@ impl TableKeyWrite for NoHash {
 	}
 	fn has_key_at(&self, index: u64, table: &ValueTable, log: &LogWriter) -> Result<bool> {
 		Ok(!table.is_tombstone(index, log)?)
-	}
-}
-
-impl<'a> TableKeyWrite for crate::table::key::VarKey<'a> {
-	fn write(&self, _buf: &mut FullEntry) {
-	}
-	fn has_key_at(&self, index: u64, table: &ValueTable, log: &LogWriter) -> Result<bool> {
-		Ok(match table.var_key_at(index, log)? {
-			Some(existing_key) => {
-				&existing_key[..] == self.0.as_ref()
-			},
-			None => false,
-		})
-	}
-}
-
-impl TableKeyFetch for Vec<u8> {
-	fn fetch(&mut self, _buf: &mut FullEntry)-> Result<()> {
-		Ok(()) // fetch through VAR_KEY
-	}
-	fn set_var_key(&mut self, var_key: &[u8]) {
-		*self = var_key.into();
 	}
 }
 
@@ -256,7 +229,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 		self.0 = offset;
 	}
 
-	fn offset(&self) -> usize {
+	pub(crate) fn offset(&self) -> usize {
 		self.0
 	}
 
@@ -354,6 +327,10 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 		u32::from_le_bytes(self.read_slice(REFS_SIZE).try_into().unwrap())
 	}
 
+	pub(crate) fn write_u32(&mut self, next_index: u32) {
+		self.write_slice(&next_index.to_le_bytes());
+	}
+
 	fn read_rc(&mut self) -> u32 {
 		self.read_u32()
 	}
@@ -368,6 +345,10 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 
 	fn remaining_to(&self, end: usize) -> &[u8] {
 		&self.1.as_ref()[self.0..end]
+	}
+
+	pub(crate) fn inner_mut(&mut self) -> &mut B {
+		&mut self.1
 	}
 }
 
@@ -443,15 +424,9 @@ impl ValueTable {
 		})
 	}
 
-	pub(crate) fn value_size<K: TableKey>(&self, key: &K) -> Option<u16> {
+	pub(crate) fn value_size<K: TableKey>(&self, _key: &K) -> Option<u16> {
 		let base = self.entry_size - SIZE_SIZE as u16 - self.ref_size() as u16;
-		let k_encoded = if K::VAR_KEY {
-			let size_len = 4; // TODO compact
-			let s = K::ENCODED_SIZE.saturating_add(key.var_key().map(|k| k.len() + size_len).unwrap_or(0));
-			std::cmp::min(u16::MAX as usize, s) as u16
-		} else {
-			K::ENCODED_SIZE as u16
-		};
+		let k_encoded = K::ENCODED_SIZE as u16;
 		if base < k_encoded {
 			return None;
 		} else {
@@ -686,9 +661,7 @@ impl ValueTable {
 		let mut remainder = value.len() + self.ref_size() + K::ENCODED_SIZE;
 		let mut offset = 0;
 		let mut start = 0;
-		if !K::VAR_KEY {
-			assert!(self.multipart || value.len() <= self.value_size(key).unwrap() as usize);
-		}
+		assert!(self.multipart || value.len() <= self.value_size(key).unwrap() as usize);
 		let (mut index, mut follow) = match at {
 			Some(index) => (index, true),
 			None => (self.next_free(log)?, false)
@@ -996,7 +969,6 @@ impl ValueTable {
 
 pub mod key {
 	use crate::Key;
-	use std::borrow::Cow;
 
 	pub const PARTIAL_SIZE: usize = 26;
 
@@ -1007,13 +979,10 @@ pub mod key {
 	pub(crate) trait TableKey: crate::table::TableKeyWrite + std::fmt::Display {
 		type Fetch: crate::table::TableKeyFetch;
 		const ENCODED_SIZE: usize;
-		const VAR_KEY: bool = false; // key stored before value as var len key.
 
 		fn index(&self) -> Option<u64>;
 
 		fn compare(&self, fetch: &Self::Fetch) -> bool;
-
-		fn var_key(&self) -> Option<&[u8]>;
 	}
 
 	pub(crate) struct KeyDefault(pub Key);
@@ -1035,10 +1004,6 @@ pub mod key {
 		fn compare(&self, fetch: &Self::Fetch) -> bool {
 			partial_key(&self.0) == fetch
 		}
-
-		fn var_key(&self) -> Option<&[u8]> {
-			None
-		}
 	}
 
 	pub(crate) struct NoHash;
@@ -1054,41 +1019,11 @@ pub mod key {
 		fn compare(&self, _: &Self::Fetch) -> bool {
 			true
 		}
-
-		fn var_key(&self) -> Option<&[u8]> {
-			None
-		}
 	}
 
 	impl std::fmt::Display for NoHash {
 		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 			write!(f, "no_hash")
-		}
-	}
-
-	pub(crate) struct VarKey<'a>(pub Cow<'a, [u8]>);
-
-	impl<'a> TableKey for VarKey<'a> {
-		type Fetch = Vec<u8>;
-		const ENCODED_SIZE: usize = 0;
-		const VAR_KEY: bool = true;
-
-		fn index(&self) -> Option<u64> {
-			None
-		}
-
-		fn compare(&self, fetch: &Self::Fetch) -> bool {
-			&self.0 == fetch
-		}
-
-		fn var_key(&self) -> Option<&[u8]> {
-			Some(self.0.as_ref())
-		}
-	}
-
-	impl<'a> std::fmt::Display for VarKey<'a> {
-		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-			write!(f, "{}", crate::display::hex(self.0.as_ref()))
 		}
 	}
 

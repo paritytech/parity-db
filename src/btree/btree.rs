@@ -18,7 +18,7 @@
 
 use super::*;
 use crate::table::ValueTable;
-use crate::table::key::{TableKeyQuery, NoHash, VarKey};
+use crate::table::key::{TableKeyQuery, NoHash};
 use crate::log::{LogWriter, LogQuery};
 use crate::column::Column;
 use crate::error::Result;
@@ -45,7 +45,7 @@ pub struct BTreeIterator<'a> {
 }
 
 pub enum BTreeIterVariants {
-	Order2_3_64(BTree<NodeReadNoCache<Order2_3_64>>, BTreeIter<NodeReadNoCache<Order2_3_64>>),
+	Order2_3_64(BTree<Node<Order2_3_64>>, BTreeIter<Node<Order2_3_64>>),
 	// TODO
 }
 
@@ -61,7 +61,7 @@ impl<'a> BTreeIterator<'a> {
 			ConfigVariants::Order2_3_64 => {
 				// TODO move new_btree_inner to parent.
 				let record_id = log.read().btree_last_record_id(col);
-				let (tree, _table_id) = new_btree_inner::<NodeReadNoCache<crate::btree::Order2_3_64>, _>(column, log, record_id)?;
+				let (tree, _table_id) = new_btree_inner::<Node<crate::btree::Order2_3_64>, _>(column, log, record_id)?;
 				let iter = tree.iter();
 				Ok(BTreeIterator {
 					db,
@@ -103,7 +103,7 @@ impl<'a> BTreeIterator<'a> {
 		match &mut self.iter {
 			BTreeIterVariants::Order2_3_64(tree, iter) => {
 				if record_id != tree.record_id {
-					let (new_tree, _table_id) = new_btree_inner::<NodeReadNoCache<crate::btree::Order2_3_64>, _>(col, log, record_id)?;
+					let (new_tree, _table_id) = new_btree_inner::<Node<crate::btree::Order2_3_64>, _>(col, log, record_id)?;
 					*tree = new_tree;
 				}
 				iter.next(tree, col, log)
@@ -115,7 +115,7 @@ impl<'a> BTreeIterator<'a> {
 		match &mut self.iter {
 			BTreeIterVariants::Order2_3_64(tree, iter) => {
 				if record_id != tree.record_id {
-					let (new_tree, _table_id) = new_btree_inner::<NodeReadNoCache<crate::btree::Order2_3_64>, _>(col, log, record_id)?;
+					let (new_tree, _table_id) = new_btree_inner::<Node<crate::btree::Order2_3_64>, _>(col, log, record_id)?;
 					*tree = new_tree;
 				}
 				iter.seek(key, tree, col, log, after)
@@ -189,7 +189,7 @@ impl<N: NodeT> BTreeIter<N> {
 		if let Some((ix, node)) = self.state.last_mut() {
 			let node: &mut Box<N> = unsafe { node.as_mut().unwrap() };
 			if *ix < N::Config::ORDER {
-				if let Some((address, is_splitted)) = node.separator_get_info(*ix) {
+				if let Some(address) = node.separator_get_info(*ix) {
 					let mut key = node.separator_partial_key(*ix).unwrap();
 					// Warning, this only work as long as we have one iterator
 					// for one btree. Otherwhise using Rc would be needed.
@@ -197,20 +197,11 @@ impl<N: NodeT> BTreeIter<N> {
 					*ix += 1;
 					self.next_separator = false;
 
-					return if is_splitted {
-						let mut k = Vec::new();
-						let key_query = TableKeyQuery::Fetch::<VarKey>(&mut k);
-						let r = col.get_at_value_index(key_query, address, log)?;
-						key.append(&mut k);
-						self.last_key = Some(key.clone());
-						Ok(r.map(|r| (key, r.1)))
-					} else {
-						let mut k = ();
-						let key_query = TableKeyQuery::Fetch::<NoHash>(&mut k);
-						let r = col.get_at_value_index(key_query, address, log)?;
-						self.last_key = Some(key.clone());
-						Ok(r.map(|r| (key, r.1)))
-					};
+					let mut k = ();
+					let key_query = TableKeyQuery::Fetch::<NoHash>(&mut k);
+					let r = col.get_at_value_index(key_query, address, log)?;
+					self.last_key = Some(key.clone());
+					return Ok(r.map(|r| (key, r.1)));
 				}
 			}
 		}
@@ -284,18 +275,11 @@ impl<N: NodeT> BTree<N> {
 	}
 
 	pub fn get_with_lock(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Vec<u8>>> {
-		if let Some((address, is_splitted)) = self.root.get(key, btree, values, log, comp)? {
-			if is_splitted {
-				let mut k = Vec::new();
-				let key_query = TableKeyQuery::Fetch::<VarKey>(&mut k); // TODO could use skip instead of fetch
-				let r = Column::get_at_value_index_locked(key_query, address, values, log, comp)?;
-				Ok(r.map(|r| r.1))
-			} else {
-				let mut k = ();
-				let key_query = TableKeyQuery::Fetch::<NoHash>(&mut k);
-				let r = Column::get_at_value_index_locked(key_query, address, values, log, comp)?;
-				Ok(r.map(|r| r.1))
-			}
+		if let Some(address) = self.root.get(key, btree, values, log, comp)? {
+			let mut k = ();
+			let key_query = TableKeyQuery::Fetch::<NoHash>(&mut k);
+			let r = Column::get_at_value_index_locked(key_query, address, values, log, comp)?;
+			Ok(r.map(|r| r.1))
 		} else {
 			Ok(None)
 		}

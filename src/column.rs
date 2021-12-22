@@ -143,44 +143,11 @@ impl Column {
 
 	pub(crate) fn get_at_value_index_locked<K: TableKey>(mut key: TableKeyQuery<K>, address: Address, tables: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<(u8, Value)>> {
 		let size_tier = address.size_tier() as usize;
-		if let Some((mut value, compressed, _rc)) = tables[size_tier].query(&mut key, address.offset(), log)? {
-			let value = if K::VAR_KEY {
-				let mut size_buf = [0u8; 4];
-				size_buf.copy_from_slice(&value[..4]);
-				let size_var_key = u32::from_be_bytes(size_buf) as usize;
-
-				match &mut key {
-					TableKeyQuery::Check(key) => {
-						let wrong_key = if let Some(key) = key.var_key() {
-							&value[4..4 + size_var_key] == key
-						} else {
-							true
-						};
-						if wrong_key {
-							log::debug!(
-								target: "parity-db",
-								"Varkey mismatch at {}.",
-								address,
-							);
-							return Ok(None);
-						}
-					},
-					TableKeyQuery::Fetch(key) => {
-						use crate::table::TableKeyFetch;
-						key.set_var_key(&value[4..4 + size_var_key]);
-					},
-				}
-				if compressed {
-					comp.decompress(&value[4 + size_var_key..])?
-				} else {
-					value.split_off(4 + size_var_key)
-				}
+		if let Some((value, compressed, _rc)) = tables[size_tier].query(&mut key, address.offset(), log)? {
+			let value = if compressed {
+				comp.decompress(&value)?
 			} else {
-				if compressed {
-					comp.decompress(&value)?
-				} else {
-					value
-				}
+				value
 			};
 			return Ok(Some((size_tier as u8, value)));
 		}
@@ -433,18 +400,7 @@ impl Column {
 				return Ok((Some(PlanOutcome::Skipped), None));
 			}
 
-			let (mut cval, target_tier) = self.compress(key, &val, tables);
-			if let Some(var_key) = key.var_key() {
-				let mut cval_dest = (var_key.len() as u32).to_be_bytes().to_vec(); // TODO compact size
-				cval_dest.extend_from_slice(var_key);
-				if let Some(mut cval) = cval {
-					cval_dest.extend_from_slice(val);
-					cval_dest.append(&mut cval);
-				} else {
-					cval_dest.extend_from_slice(val);
-				}
-				cval = Some(cval_dest);
-			}
+			let (cval, target_tier) = self.compress(key, &val, tables);
 			let (cval, compressed) = cval.as_ref()
 				.map(|cval| (cval.as_slice(), true))
 				.unwrap_or((val, false));
@@ -536,18 +492,7 @@ impl Column {
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<Address> {
-		let (mut cval, target_tier) = self.compress(key, &val, &*tables);
-		if let Some(var_key) = key.var_key() {
-			let mut cval_dest = (var_key.len() as u32).to_be_bytes().to_vec(); // TODO compact size
-			cval_dest.extend_from_slice(var_key);
-			if let Some(mut cval) = cval {
-				cval_dest.extend_from_slice(val);
-				cval_dest.append(&mut cval);
-			} else {
-				cval_dest.extend_from_slice(val);
-			}
-			cval = Some(cval_dest);
-		}
+		let (cval, target_tier) = self.compress(key, &val, &*tables);
 		let (cval, compressed) = cval.as_ref()
 			.map(|cval| (cval.as_slice(), true))
 			.unwrap_or((val, false));

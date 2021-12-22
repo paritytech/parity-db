@@ -21,7 +21,7 @@
 use super::*;
 use crate::table::ValueTable;
 use std::cmp::Ordering;
-use crate::table::key::{NoHash, VarKey};
+use crate::table::key::NoHash;
 use crate::log::{LogWriter, LogQuery};
 use crate::column::Column;
 use crate::error::Result;
@@ -38,12 +38,12 @@ pub trait NodeT: Sized {
 	fn clear(&mut self);
 	fn new_child(child: Box<Self>, index: Option<u64>) -> Self::Child;
 	fn inner_child(child: Self::Child) -> (Option<u64>, Option<Box<Self>>);
-	fn from_encoded(enc: <Self::Config as Config>::Encoded) -> Self;
+	fn from_encoded(enc: Vec<u8>) -> Self;
 	fn remove_separator(&mut self, at: usize) -> Self::Separator;
 	fn has_separator(&mut self, at: usize) -> bool;
 	fn separator_partial_key(&mut self, at: usize) -> Option<Vec<u8>>;
 	fn separator_value_index(&mut self, at: usize) -> Option<u64>;
-	fn separator_get_info(&mut self, at: usize) -> Option<(Address, bool)>;
+	fn separator_get_info(&mut self, at: usize) -> Option<Address>;
 	fn set_separator(&mut self, at: usize, sep: Self::Separator); // TODO a replace separator?
 	fn create_separator(key: &[u8], value: &[u8], column: &Column, log: &mut LogWriter, existing: Option<u64>, origin: ValueTableOrigin) -> Result<Self::Separator>;
 	fn remove_child(&mut self, at: usize) -> Self::Child;
@@ -398,7 +398,7 @@ pub trait NodeT: Sized {
 		}
 	}
 
-	fn get(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<(Address, bool)>> {
+	fn get(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Address>> {
 		let (at, i) = self.position(key, values, log)?;
 		if at {
 			Ok(self.separator_get_info(i))
@@ -456,48 +456,30 @@ pub trait NodeT: Sized {
 pub struct Node<C: Config> {
 	separators: C::Separators,
 	children: C::Children,
-	entry: Entry<C>,
 	changed: bool,
 }
 
-pub struct Separator<C: Config> {
-	fetched: bool, // lazy read.
+pub struct Separator {
 	modified: bool,
-	separator: Option<SeparatorInner<C>>,
+	separator: Option<SeparatorInner>,
 }
-impl<C: Config> Default for Separator<C> {
+
+impl Default for Separator {
 	fn default() -> Self {
 		Separator {
-			fetched: false,
 			modified: false,
 			separator: None,
 		}
 	}
 }
 
-pub struct SeparatorInner<C: Config> {
-	pub key: C::KeyBuf,
-	pub splitted_key: Option<Vec<u8>>, // lazy read.
+pub struct SeparatorInner {
+	pub key: Vec<u8>, // TODO could use range and only allocate on change. 
 	pub value: u64,
-}
-
-impl<C: Config> SeparatorInner<C> {
-	fn is_splitted(&self) -> bool {
-		self.key.as_ref()[0] == u8::MAX
-	}
-	fn buf_key_size(&self) -> usize {
-		let s = self.key.as_ref()[0];
-		if s == u8::MAX {
-			C::KEYSIZE - 1
-		} else {
-			s as usize
-		}
-	}
 }
 
 #[derive(Clone, Default)]
 pub struct ChildState {
-	pub read_index: bool,
 	pub fetched: bool,
 	pub modified: bool,
 	pub moved: bool,
@@ -518,7 +500,6 @@ impl<C: Config> Default for Child<C> {
 impl<C: Config> Child<C> {
 	fn new(node: Box<Node<C>>, entry_index: Option<u64>) -> Self {
 		let mut state = ChildState::default();
-		state.read_index = true;
 		state.fetched = true;
 		state.modified = true;
 		state.moved = true;
@@ -532,14 +513,13 @@ impl<C: Config> Child<C> {
 
 impl<C: Config> NodeT for Node<C> {
 	type Config = C;
-	type Separator = Separator<C>;
+	type Separator = Separator;
 	type Child = Child<C>;
 
 	fn new() -> Self {
 		Node {
 			separators: Default::default(),
 			children: Default::default(),
-			entry: Entry::empty(),
 			changed: true,
 		}
 	}
@@ -547,23 +527,40 @@ impl<C: Config> NodeT for Node<C> {
 	fn clear(&mut self) {
 		self.separators = Default::default();
 		self.children = Default::default();
-		self.entry = Entry::empty();
 		self.changed = true;
 	}
 
-	fn from_encoded(enc: <Self::Config as Config>::Encoded) -> Self {
-		Node {
+	fn from_encoded(enc: Vec<u8>) -> Self {
+		let mut entry = Entry::from_encoded(enc);
+		let mut node = Node::<Self::Config> {
 			separators: Default::default(),
 			children: Default::default(),
-			entry: Entry::from_encoded(enc),
 			changed: false,
+		};
+		let mut i_children = 0;
+		let mut i_separator = 0;
+		loop {
+			if let Some(child_index) = entry.read_child_index() {
+				node.children.as_mut()[i_children].entry_index = Some(child_index);
+				
+			}
+			i_children += 1;
+			if i_children == <Self::Config as Config>::ORDER_CHILD {
+				break;
+			}
+			if let Some(sep) = entry.read_separator() {
+				node.separators.as_mut()[i_separator].separator = Some(sep);
+				i_separator += 1
+			} else {
+				break;
+			}
 		}
+		node
 	}
 
 	fn remove_separator(&mut self, at: usize) -> Self::Separator {
 		self.changed = true;
 		let mut separator = std::mem::replace(self.get_separator(at), Separator {
-			fetched: true,
 			modified: true,
 			separator: None,
 		});
@@ -576,7 +573,6 @@ impl<C: Config> NodeT for Node<C> {
 		let mut state = ChildState::default();
 		state.fetched = true;
 		state.moved = true;
-		state.read_index = true;
 		let mut child = std::mem::replace(self.get_child_index(at), Child {
 			state,
 			node: None,
@@ -624,8 +620,7 @@ impl<C: Config> NodeT for Node<C> {
 	fn separator_partial_key(&mut self, at: usize) -> Option<Vec<u8>> {
 		let at = self.get_separator(at);
 		at.separator.as_ref().map(|s| {
-			let size = s.buf_key_size();
-			s.key.as_ref()[1..1 + size].to_vec()
+			s.key.clone()
 		})
 	}
 
@@ -634,12 +629,12 @@ impl<C: Config> NodeT for Node<C> {
 		at.separator.as_ref().map(|s| s.value)
 	}
 
-	fn separator_get_info(&mut self, at: usize) -> Option<(Address, bool)> {
+	fn separator_get_info(&mut self, at: usize) -> Option<Address> {
 		let at = self.get_separator(at);
-		at.separator.as_ref().map(|s| (Address::from_u64(s.value), s.is_splitted()))
+		at.separator.as_ref().map(|s| Address::from_u64(s.value))
 	}
 	
-	fn set_separator(&mut self, at: usize, mut sep: Separator<C>) {
+	fn set_separator(&mut self, at: usize, mut sep: Separator) {
 		sep.modified = true;
 		self.changed = true;
 		self.separators.as_mut()[at] = sep;
@@ -661,61 +656,29 @@ impl<C: Config> NodeT for Node<C> {
 	}
 
 	fn create_separator(key: &[u8], value: &[u8], column: &Column, log: &mut LogWriter, existing: Option<u64>, origin: ValueTableOrigin) -> Result<Self::Separator> {
-		let mut key_buf = C::default_keybuf();
-		let splitted_key = if key.len() > C::KEYSIZE - 1 {
-			key_buf.as_mut()[0] = u8::MAX;
-			key_buf.as_mut()[1..].copy_from_slice(&key[.. C::KEYSIZE - 1]);
-			Some(key[C::KEYSIZE - 1 ..].to_vec())
+		let key = key.to_vec();
+		let value = if let Some(address) = existing {
+			column.with_tables_and_self(|t, s| s.write_existing_value_plan(
+				&NoHash,
+				t,
+				Address::from_u64(address),
+				Some(value),
+				log,
+				origin,
+			))?.1.map(|a| a.as_u64()).unwrap_or(address)
 		} else {
-			key_buf.as_mut()[0] = key.len() as u8;
-			key_buf.as_mut()[1..1 + key.len()].copy_from_slice(key);
-			None
-		};
-		let value = if let Some(splitted_key) = splitted_key.as_ref() {
-			if let Some(address) = existing {
-				column.with_tables_and_self(|t, s| s.write_existing_value_plan(
-					&VarKey(splitted_key.into()),
-					t,
-					Address::from_u64(address),
-					Some(value),
-					log,
-					origin,
-				))?.1.map(|a| a.as_u64()).unwrap_or(address)
-			} else {
-				column.with_tables_and_self(|t, s| s.write_new_value_plan(
-						&VarKey(splitted_key.into()),
-						t,
-						value,
-						log,
-						origin,
-				))?.as_u64()
-			}
-		} else {
-			if let Some(address) = existing {
-				column.with_tables_and_self(|t, s| s.write_existing_value_plan(
+			column.with_tables_and_self(|t, s| s.write_new_value_plan(
 					&NoHash,
 					t,
-					Address::from_u64(address),
-					Some(value),
+					value,
 					log,
 					origin,
-				))?.1.map(|a| a.as_u64()).unwrap_or(address)
-			} else {
-				column.with_tables_and_self(|t, s| s.write_new_value_plan(
-						&NoHash,
-						t,
-						value,
-						log,
-						origin,
-				))?.as_u64()
-			}
+			))?.as_u64()
 		};
 		Ok(Separator {
-			fetched: true,
 			modified: true,
 			separator: Some(SeparatorInner {
-				key: key_buf,
-				splitted_key,
+				key,
 				value,
 			}),
 		})
@@ -725,7 +688,7 @@ impl<C: Config> NodeT for Node<C> {
 		&mut self,
 		at: usize,
 		skip_left_child: bool,
-		mut insert_right: Option<(usize, Separator<C>)>,
+		mut insert_right: Option<(usize, Separator)>,
 		mut insert_right_child: Option<(usize, Child<C>)>,
 		has_child: bool,
 		removed_node: &mut RemovedChildren<Self>,
@@ -853,37 +816,13 @@ impl<C: Config> NodeT for Node<C> {
 	fn position(&mut self, key: &[u8], values: &Vec<ValueTable>, log: &impl LogQuery) -> Result<(bool, usize)> {
 		let mut i = 0;
 		while let Some(separator) = self.get_separator(i).separator.as_mut() {
-			let key_size = separator.buf_key_size();
-			let upper = if separator.is_splitted() {
-				std::cmp::min(key_size, key.len())
-			} else {
-				key.len()
-			};
-			match key[..upper].cmp(&separator.key.as_ref()[1..1 + key_size]) {
+			match key[..].cmp(&separator.key[..]) {
 				Ordering::Greater => (),
 				Ordering::Less => {
 					return Ok((false, i));
 				},
 				Ordering::Equal => {
-					if separator.is_splitted() {
-						if separator.splitted_key.is_none() {
-							let address = Address::from_u64(separator.value);
-							let tier = address.size_tier();
-							let index = address.offset();
-							separator.splitted_key = values[tier as usize].var_key_at(index, log)?;
-						}
-						match key[key_size..].cmp(separator.splitted_key.as_ref().unwrap()) {
-							Ordering::Greater => (),
-							Ordering::Less => {
-								return Ok((false, i));
-							},
-							Ordering::Equal => {
-								return Ok((true, i));
-							},
-						}
-					} else {
-						return Ok((true, i));
-					}
+					return Ok((true, i));
 				},
 			}
 			i += 1;
@@ -899,7 +838,7 @@ impl<C: Config> NodeT for Node<C> {
 		// TODO currently modified is not set properly so we iterate all, could have a child modified
 		// (but with current use it is only interesting for delete on non existing value)
 
-		for (at, child) in self.children.as_mut().iter_mut().enumerate() {
+		for child in self.children.as_mut().iter_mut() {
 			// TODO child modified is not handled properly (in case of recursive it needs parent and 
 			// other, for now, if fetched, then it is modified).
 			// let child_modified = child.modified;
@@ -909,68 +848,76 @@ impl<C: Config> NodeT for Node<C> {
 					if let Some(index) = node.write_plan(column, writer, child.entry_index, table_id, btree, record_id, origin)? {
 						child.entry_index = Some(index);
 						self.changed = true;
-						self.entry.write_child_index(at, index);
 					} else {
 						if child.state.moved {
-							if let Some(index) = child.entry_index {
-								self.changed = true;
-								self.entry.write_child_index(at, index);
-							}
+							self.changed = true;
 						}
 					}
 				} else {
 					if child.state.moved || child.state.modified {
-						if let Some(index) = child.entry_index {
-							self.changed = true;
-							self.entry.write_child_index(at, index);
-						} else {
-							self.changed = true;
-							self.entry.remove_child_index(at);
-						}
+						self.changed = true;
 					}
 				}
 			}
 		}
 
-		for (at, separator) in self.separators.as_mut().iter_mut().enumerate() {
+		for separator in self.separators.as_mut().iter_mut() {
 			if separator.modified {
 				self.changed = true;
-				if let Some(sep) = separator.separator.as_mut() {
-					self.entry.write_separator(at, &sep.key, sep.value);
-				} else {
-					self.entry.remove_separator(at);
-				}
 			}
 		}
 
-		let mut result = None;
-		if self.changed {
-			if let Some(existing) = node_id {
-				let k = NoHash;
-				if let (_, Some(new_index)) = column.with_tables_and_self(|tables, s| s.write_existing_value_plan(
-					&k,
-					tables,
-					Address::from_u64(existing),
-					Some(self.entry.encoded.as_ref()),
-					writer,
-					origin,
-				))? {
-					result = Some(new_index.as_u64())
-				}
+		if !self.changed {
+			return Ok(None);
+		}
+
+
+
+		let mut entry = Entry::empty();
+		let mut i_children = 0;
+		let mut i_separator = 0;
+		loop {
+			if let Some(index) = self.children.as_mut()[i_children].entry_index {
+				entry.write_child_index(index);
+				i_children += 1
 			} else {
-				let k = NoHash;
-				result = Some(column.with_tables_and_self(|t, s| s.write_new_value_plan(
-					&k,
-					t,
-					self.entry.encoded.as_ref(),
-					writer,
-					origin,
-				))?.as_u64());
+				entry.write_child_index(0);
+				i_children += 1
+			}
+			if i_children == <Self::Config as Config>::ORDER_CHILD {
+				break;
+			}
+			if let Some(sep) = &self.separators.as_mut()[i_separator].separator {
+				entry.write_separator(&sep.key, sep.value);
+				i_separator += 1
+			} else {
+				break;
 			}
 		}
-
-		// TODO could also update self back, but useless as long as only transient use.
-		// Global cache support could be interesting to test though.
+	
+		let mut result = None;
+		if let Some(existing) = node_id {
+			let k = NoHash;
+			if let (_, Some(new_index)) = column.with_tables_and_self(|tables, s| s.write_existing_value_plan(
+				&k,
+				tables,
+				Address::from_u64(existing),
+				Some(entry.encoded.as_ref()),
+				writer,
+				origin,
+			))? {
+				result = Some(new_index.as_u64())
+			}
+		} else {
+			let k = NoHash;
+			result = Some(column.with_tables_and_self(|t, s| s.write_new_value_plan(
+				&k,
+				t,
+				entry.encoded.as_ref(),
+				writer,
+				origin,
+			))?.as_u64());
+		}
 
 		Ok(result)
 	}
@@ -978,21 +925,11 @@ impl<C: Config> NodeT for Node<C> {
 }
 
 impl<C: Config> Node<C> {
-	fn get_separator(&mut self, at: usize) -> &mut Separator<C> {
-		if self.separators.as_ref()[at].fetched == false {
-			let separator = self.entry.read_separator(at);
-			self.separators.as_mut()[at].separator = separator;
-			self.separators.as_mut()[at].fetched = true;
-		}
+	fn get_separator(&mut self, at: usize) -> &mut Separator {
 		&mut self.separators.as_mut()[at]
 	}
 
 	fn get_child_index(&mut self, at: usize) -> &mut Child<C> {
-		if !self.children.as_ref()[at].state.read_index {
-			let child = self.entry.read_child_index(at);
-			self.children.as_mut()[at].entry_index = child;
-			self.children.as_mut()[at].state.read_index = true;
-		}
 		&mut self.children.as_mut()[at]
 	}
 
@@ -1019,246 +956,5 @@ impl<C: Config> Node<C> {
 			}
 		}
 		Ok(child)
-	}
-}
-
-/// For read access without changes or caching.
-pub struct NodeReadNoCache<C: Config>{
-	entry: Entry<C>,
-	current_child: Option<Box<Self>>,
-	current_child_index: Option<usize>,
-	current_separator: Option<SeparatorInner<C>>,
-	current_separator_index: Option<usize>,
-}
-
-impl<C: Config> NodeReadNoCache<C> {
-	fn get_fetched_child_index(&mut self, i: usize, column: &Column, log: &impl LogQuery) -> Result<Option<&mut Box<Self>>> {
-		if Some(i) == self.current_child_index {
-			return Ok(self.current_child.as_mut());
-		}
-		let child = self.entry.read_child_index(i);
-		if let Some(ix) = child {
-			let entry = column.with_value_tables_and_btree(|btree, values, comp| btree.get_index::<Self, _>(ix, log, values, comp))?;
-			self.current_child = Some(Box::new(Self::from_encoded(entry)));
-			self.current_child_index = Some(i);
-		}
-		Ok(self.current_child.as_mut())
-	}
-
-	// TODO merge with get_fetched_child_index
-	fn get_fetched_child_index_from_btree(&mut self, i: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Box<Self>>> {
-		if Some(i) == self.current_child_index {
-			return Ok(self.current_child.as_mut());
-		}
-		let child = self.entry.read_child_index(i);
-		if let Some(ix) = child {
-			let entry = btree.get_index::<Self, _>(ix, log, values, comp)?;
-			self.current_child = Some(Box::new(Self::from_encoded(entry)));
-			self.current_child_index = Some(i);
-		}
-		Ok(self.current_child.as_mut())
-	}
-
-	fn get_separator(&mut self, at: usize) -> &mut Option<SeparatorInner<C>> {
-		if Some(at) == self.current_separator_index {
-			return &mut self.current_separator;
-		}
-		self.current_separator = self.entry.read_separator(at);
-		self.current_separator_index = Some(at);
-		&mut self.current_separator
-	}
-}
-
-impl<C: Config> NodeT for NodeReadNoCache<C> {
-	type Config = C;
-	type Separator = Option<SeparatorInner<C>>;
-	type Child = Option<Box<Self>>;
-
-	fn new() -> Self {
-		NodeReadNoCache {
-			entry: Entry::empty(),
-			current_child: None,
-			current_child_index: None,
-			current_separator: None,
-			current_separator_index: None,
-		}
-	}
-
-	fn clear(&mut self) {
-		unreachable!("Read only");
-		//self.0 = Entry::empty();
-	}
-
-	fn from_encoded(enc: <Self::Config as Config>::Encoded) -> Self {
-		NodeReadNoCache {
-			entry: Entry::from_encoded(enc),
-			current_child: None,
-			current_child_index: None,
-			current_separator: None,
-			current_separator_index: None,
-		}
-	}
-
-	fn remove_separator(&mut self, _at: usize) -> Self::Separator {
-		unreachable!("Read only");
-	}
-
-	fn remove_child(&mut self, _at: usize) -> Self::Child {
-		unreachable!("Read only");
-	}
-
-	fn try_forget_child(&mut self, _at: usize) {
-	}
-
-	fn fetch_child_box(&mut self, at: usize, col: &Column, log: &impl LogQuery) -> Result<Option<&mut Box<Self>>> {
-		self.get_fetched_child_index(at, col, log)
-	}
-
-	fn fetch_child(&mut self, at: usize, col: &Column, log: &impl LogQuery) -> Result<Option<&mut Self>> {
-		let child = self.get_fetched_child_index(at, col, log)?;
-		Ok(child.map(|n| n.as_mut()))
-	}
-
-	fn fetch_child_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Self>> {
-		let child = self.get_fetched_child_index_from_btree(at, btree, log, values, comp)?;
-		Ok(child.map(|n| n.as_mut()))
-	}
-
-	fn fetch_child_box_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Box<Self>>> {
-		self.get_fetched_child_index_from_btree(at, btree, log, values, comp)
-	}
-
-	fn has_separator(&mut self, at: usize) -> bool {
-		self.entry.read_has_separator(at)
-	}
-
-	fn separator_partial_key(&mut self, at: usize) -> Option<Vec<u8>> {
-		self.get_separator(at);
-		self.current_separator.as_ref().map(|s| {
-			let size = s.buf_key_size();
-			s.key.as_ref()[1..1 + size].to_vec()
-		})
-	}
-
-	fn separator_value_index(&mut self, at: usize) -> Option<u64> {
-		self.get_separator(at);
-		self.current_separator.as_ref().map(|s| s.value)
-	}
-
-	fn separator_get_info(&mut self, at: usize) -> Option<(Address, bool)> {
-		self.get_separator(at);
-		self.current_separator.as_ref().map(|s| (Address::from_u64(s.value), s.is_splitted()))
-	}
-	
-	fn set_separator(&mut self, _at: usize, _sep: Self::Separator) {
-		unreachable!("Read only");
-	}
-
-	fn new_child(_child: Box<Self>, _index: Option<u64>) -> Self::Child {
-		unreachable!("Read only");
-	}
-
-	fn inner_child(_child: Self::Child) -> (Option<u64>, Option<Box<Self>>) {
-		unreachable!("Read only");
-	}
-
-	fn set_child(&mut self, _at: usize, _child: Self::Child) {
-		unreachable!("Read only");
-	}
-
-	fn create_separator(_key: &[u8], _value: &[u8], _column: &Column, _log: &mut LogWriter, _existing: Option<u64>, _origin: ValueTableOrigin) -> Result<Self::Separator> {
-		unreachable!("Read only");
-	}
-
-	fn split(
-		&mut self,
-		_at: usize,
-		_skip_left_child: bool,
-		_insert_right: Option<(usize, Self::Separator)>,
-		_insert_right_child: Option<(usize, Self::Child)>,
-		_has_child: bool,
-		_removed_node: &mut RemovedChildren<Self>,
-	) -> (Box<Self>, Option<u64>) {
-		unreachable!("Read only");
-	}
-
-	fn shift_from(&mut self, _from: usize, _has_child: bool, _with_left_child: bool) {
-		unreachable!("Read only");
-	}
-
-	fn remove_from(&mut self, _from: usize, _has_child: bool, _with_left_child: bool) {
-		unreachable!("Read only");
-	}
-
-	fn number_separator(&mut self) -> usize {
-		let mut i = 0;
-
-		while self.entry.read_has_separator(i) {
-			i += 1;
-			if i == C::ORDER {
-				break;
-			}
-		}
-		i
-	}
-
-	// TODO factorize code
-	fn position(&mut self, key: &[u8], values: &Vec<ValueTable>, log: &impl LogQuery) -> Result<(bool, usize)> {
-		let mut i = 0;
-		while let Some(mut separator) = self.entry.read_separator(i) {
-			let key_size = separator.buf_key_size();
-			let upper = if separator.is_splitted() {
-				std::cmp::min(key_size, key.len())
-			} else {
-				key.len()
-			};
-			match key[..upper].cmp(&separator.key.as_ref()[1..1 + key_size]) {
-				Ordering::Greater => (),
-				Ordering::Less => {
-					return Ok((false, i));
-				},
-				Ordering::Equal => {
-					if separator.is_splitted() {
-						if separator.splitted_key.is_none() {
-							let address = Address::from_u64(separator.value);
-							let tier = address.size_tier();
-							let index = address.offset();
-							separator.splitted_key = values[tier as usize].var_key_at(index, log)?;
-						}
-						match key[key_size..].cmp(separator.splitted_key.as_ref().unwrap()) {
-							Ordering::Greater => (),
-							Ordering::Less => {
-								return Ok((false, i));
-							},
-							Ordering::Equal => {
-								self.current_separator = Some(separator);
-								self.current_separator_index = Some(i);
-								return Ok((true, i));
-							},
-						}
-					} else {
-						return Ok((true, i));
-					}
-				},
-			}
-			i += 1;
-			if i == C::ORDER {
-				break;
-			}
-		}
-		Ok((false, i))
-	}
-
-	fn write_plan(
-		&mut self,
-		_column: &Column,
-		_writer: &mut LogWriter,
-		_node_id: Option<u64>,
-		_table_id: BTreeTableId,
-		_btree: &mut BTreeIndex,
-		_record_id: u64,
-		_origin: ValueTableOrigin,
-	) -> Result<Option<u64>> {
-		unimplemented!("Read only");
 	}
 }
