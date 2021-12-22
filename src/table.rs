@@ -992,6 +992,10 @@ impl ValueTable {
 		}
 		Ok(())
 	}
+
+	pub fn is_init(&self) -> bool {
+		self.file.file.read().is_some()
+	}
 }
 
 pub mod key {

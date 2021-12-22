@@ -41,12 +41,13 @@ use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use node::{NodeT, SeparatorInner};
 use crate::table::{Entry as LogEntry, ValueTable};
+use crate::table::key::{TableKeyQuery, NoHash};
 use crate::file::{TableFile, TableFileId};
 use crate::options::Options;
+use crate::index::Address;
 use std::sync::atomic::Ordering;
-use std::io::Read;
 use crate::error::Result;
-use crate::column::{ColId, ValueTableOrigin};
+use crate::column::{ColId, ValueTableOrigin, Column};
 use crate::log::{LogQuery, LogReader, LogWriter};
 use std::collections::HashMap;
 use crate::compress::Compress;
@@ -58,6 +59,7 @@ mod node;
 
 pub(crate) const HEADER_POSITION: u64 = 0;
 pub(crate) const HEADER_ENTRIES: u8 = 1;
+pub(crate) const HEADER_SIZE: u64 = 8 + 8 + 8 + 4;
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub struct BTreeTableId(u8); // contain its column id
@@ -280,7 +282,6 @@ pub struct BTreeTable {
 	pub id: BTreeTableId,
 	file: TableFile,
 	variant: ConfigVariants,
-	initial_index: BTreeIndex,
 }
 
 impl BTreeTable {
@@ -304,30 +305,46 @@ impl BTreeTable {
 		let mut filepath: std::path::PathBuf = std::path::PathBuf::clone(path);
 		filepath.push(id.file_name());
 		let file = TableFile::open(filepath, C::ENTRY_SIZE as u64, TableFileId::BTree(id))?;
-
-		let mut last_removed = HEADER_POSITION;
-		let mut filled = HEADER_ENTRIES as u64;
-		let mut root = HEADER_POSITION;
-		let mut depth = 0;
-		if let Some(file) = &mut *file.file.write() {
-			let mut buf: LogEntry<C::Encoded> = LogEntry::new_uninit();
-			file.read_exact(buf.as_mut())?;
-			last_removed = buf.read_u64();
-			filled = buf.read_u64();
-			root = buf.read_u64();
-			depth = buf.read_u32();
-		}
-
 		Ok(BTreeTable {
 			id,
 			file,
 			variant,
-			initial_index: BTreeIndex {
-				last_removed,
-				filled,
-				root,
-				depth,
-			},
+		})
+	}
+
+	fn btree_index_address(values: &Vec<ValueTable>) -> Option<Address> {
+		for (tier, v) in values.iter().enumerate() {
+			if v.value_size(&NoHash).map(|s| s >= HEADER_SIZE as u16).unwrap_or(true) {
+				return Some(Address::new(1, tier as u8));
+			}
+		}
+		None
+	}
+
+	fn btree_index(log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<BTreeIndex> {
+		let mut last_removed = HEADER_POSITION;
+		let mut filled = HEADER_ENTRIES as u64;
+		let mut root = HEADER_POSITION;
+		let mut depth = 0;
+		if let Some(address) = Self::btree_index_address(values) {
+			let mut k = ();
+			let key_query = TableKeyQuery::Fetch::<NoHash>(&mut k);
+			let tier = address.size_tier();
+			if values[tier as usize].is_init() {
+				if let Some(encoded) = Column::get_at_value_index_locked(key_query, address, values, log, comp)? {
+					let mut buf: LogEntry<Vec<u8>> = LogEntry::new(encoded.1);
+					last_removed = buf.read_u64();
+					filled = buf.read_u64();
+					root = buf.read_u64();
+					depth = buf.read_u32();
+				}
+			}
+		}
+		Ok(BTreeIndex {
+			last_removed,
+			filled,
+			root,
+			depth,
 		})
 	}
 
@@ -346,7 +363,8 @@ impl BTreeTable {
 		let (root_index, depth) = if let Some(btree_index) = log.btree_index(self.id) {
 			(btree_index.root, btree_index.depth)
 		} else {
-			(self.initial_index.root, self.initial_index.depth)
+			let btree_index = Self::btree_index(log, values, comp)?;
+			(btree_index.root, btree_index.depth)
 		};
 		if root_index == HEADER_POSITION {
 			return Ok(None);
@@ -407,12 +425,17 @@ impl BTreeTable {
 }
 
 pub fn new_btree_inner<N: NodeT, L: crate::log::LogQuery>(
-	column: &crate::column::Column,
+	column: &Column,
 	log: &L,
 	record_id: u64,
 ) -> Result<(btree::BTree<N>, BTreeTableId, u64, u64)> {
-	let (root, root_index, btree_index, table_id) = column.with_btree(|btree| {
-		let btree_index = log.btree_index(btree.id).unwrap_or_else(|| btree.initial_index.clone());
+	let (root, root_index, btree_index, table_id) = column.with_value_tables_and_btree(|btree, values, comp| {
+		let btree_index = if let Some(btree_index) = log.btree_index(btree.id) {
+			btree_index
+		} else {
+			BTreeTable::btree_index(log, values, comp)?
+		};
+
 		let (root_index, root) = if btree_index.root == HEADER_POSITION {
 			(None, N::new())
 		} else {
@@ -514,6 +537,19 @@ pub mod commit_overlay {
 			let record_id = writer.record_id();
 			// This is not racy as we have a single thread writing plan, so a single btree instance.
 			let (mut tree, table_id, last_removed, filled) = new_btree_inner::<N, _>(column, writer, record_id)?;
+			if tree.root_index.is_none() {
+				// reserve the header address.
+				if let Some(address) = column.with_value_tables(|t| Ok(BTreeTable::btree_index_address(t)))? {
+					let new_address = column.with_tables_and_self(|t, s| s.write_new_value_plan(
+						&NoHash,
+						t,
+						vec![0; HEADER_SIZE as usize].as_slice(),
+						writer,
+						origin,
+					))?;
+					assert!(new_address == address);
+				}
+			}
 			for change in self.changes.iter() {
 				match change {
 					(key, None) => {
@@ -538,7 +574,16 @@ pub mod commit_overlay {
 			if old_btree_index != btree_index {
 				let mut entry = Entry::<N::Config>::empty();
 				entry.write_header(&btree_index);
-				writer.insert_btree(table_id, HEADER_POSITION, entry.encoded.as_ref().to_vec(), record_id, &btree_index);
+				if let Some(address) = column.with_value_tables(|t| Ok(BTreeTable::btree_index_address(t)))? {
+					column.with_tables_and_self(|t, s| s.write_existing_value_plan(
+						&NoHash,
+						t,
+						address,
+						Some(&entry.encoded.as_ref()[..HEADER_SIZE as usize]),
+						writer,
+						origin,
+					))?;
+				}
 				writer.insert_btree_index(table_id, record_id, btree_index);
 			}
 			Ok(())
