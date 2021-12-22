@@ -970,6 +970,28 @@ impl ValueTable {
 			0
 		}
 	}
+
+	pub fn iter_while(&self, log: &impl LogQuery, mut f: impl FnMut (u64, u32, Vec<u8>, bool) -> bool) -> Result<()> {
+		let filled = self.filled.load(Ordering::Relaxed);
+		for index in 1 .. filled {
+			let mut result = Vec::new();
+			// expect only indexed key.
+			let mut _fetch_key = Default::default();
+			match self.for_parts(&mut TableKeyQuery::<KeyDefault>::Fetch(&mut _fetch_key), index, log, |buf| {
+				result.extend_from_slice(buf);
+				true
+			}) {
+				Ok((rc, compressed)) => if rc > 0 {
+					if !f(index, rc, result, compressed) {
+						break;
+					}
+				}
+				Err(crate::error::Error::InvalidValueData) => (), // ignore, can be external index.
+				Err(e) => return Err(e),
+			}
+		}
+		Ok(())
+	}
 }
 
 pub mod key {

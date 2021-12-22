@@ -41,7 +41,7 @@ pub type Salt = [u8; 32];
 pub(crate) struct Tables {
 	pub(crate) index: IndexTable,
 	pub(crate) value: Vec<ValueTable>,
-	pub(crate) btree: BTreeTable,
+	pub(crate) btree: Option<BTreeTable>,
 }
 
 struct Reindex {
@@ -57,6 +57,7 @@ pub struct Column {
 	uniform_keys: bool,
 	collect_stats: bool,
 	ref_counted: bool,
+	indexed: bool,
 	salt: Salt,
 	stats: ColumnStats,
 	compression: Compress,
@@ -229,7 +230,11 @@ impl Column {
 			index,
 			value: (0.. options.sizes.len() + 1)
 				.map(|i| Self::open_table(arc_path.clone(), col, i as u8, &options, db_version)).collect::<Result<_>>()?,
-			btree: Self::open_btree(path, col, options.btree_index)?,
+			btree: if options.btree_index {
+				Some(Self::open_btree(path, col, BTreeVariants::Order2_3_64)?)
+			} else {
+				None
+			},
 		};
 
 		Ok(Column {
@@ -242,6 +247,7 @@ impl Column {
 			preimage: options.preimage,
 			uniform_keys: options.uniform,
 			ref_counted: options.ref_counted,
+			indexed: options.btree_index,
 			collect_stats,
 			salt: metadata.salt.clone(),
 			stats,
@@ -266,7 +272,9 @@ impl Column {
 		for t in tables.value.iter() {
 			t.flush()?;
 		}
-		tables.btree.flush()?;
+		if let Some(btree) = tables.btree.as_ref() {
+			btree.flush()?;
+		}
 		Ok(())
 	}
 
@@ -666,7 +674,9 @@ impl Column {
 				tables.value[record.table.size_tier() as usize].enact_plan(record.index, log)?;
 			},
 			LogAction::InsertBTree(record) => {
-				tables.btree.enact_plan(record.index, log)?;
+				if let Some(btree) = tables.btree.as_ref() {
+					btree.enact_plan(record.index, log)?;
+				}
 			},
 			_ => panic!("Unexpected log action"),
 		}
@@ -698,7 +708,9 @@ impl Column {
 				tables.value[record.table.size_tier() as usize].validate_plan(record.index, log)?;
 			},
 			LogAction::InsertBTree(record) => {
-				tables.btree.validate_plan(record.index, log)?;
+				if let Some(btree) = tables.btree.as_ref() {
+					btree.validate_plan(record.index, log)?;
+				}
 			}
 			_ => panic!("Unexpected log action"),
 		}
@@ -713,7 +725,10 @@ impl Column {
 		if self.collect_stats {
 			self.stats.commit()
 		}
-		tables.btree.complete_plan(log)?;
+
+		if let Some(btree) = tables.btree.as_ref() {
+			btree.complete_plan(log)?;
+		}
 		Ok(())
 	}
 
@@ -754,6 +769,30 @@ impl Column {
 	) -> Result<()> {
 		let tables = self.tables.read();
 		let source = &tables.index;
+
+		if skip_preimage_indexes && self.preimage && tables.btree.is_none() {
+			// It is much faster to iterate over the value table than index.
+			// We have to assume hashing scheme however.
+			for table in &tables.value[..tables.value.len() - 1] {
+				log::debug!( target: "parity-db", "{}: Iterating table {}", source.id, table.id);
+				table.iter_while(&*log.overlays(), |index, rc, value, compressed| {
+					let value = if compressed {
+						if let Ok(value) = self.decompress(&value) {
+							value
+						} else {
+							return false;
+						}
+					} else {
+						value
+					};
+					let key = blake2_rfc::blake2b::blake2b(32, &[], &value);
+					let key = self.hash(key.as_bytes());
+					let state = IterStateOrCorrupted::Item(IterState { chunk_index: index, key, rc, value });
+					f(state).unwrap_or(false)
+				})?;
+				log::debug!( target: "parity-db", "{}: Done Iterating table {}", source.id, table.id);
+			}
+		}
 
 		for c in start_chunk .. source.id.total_chunks() {
 			let entries = source.entries(c, &*log.overlays());
@@ -912,7 +951,11 @@ impl Column {
 
 	pub fn btree_get(&self, key: &[u8], log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
 		let tables = self.tables.read();
-		tables.btree.get(key, log, &tables.value, &self.compression)
+		if let Some(btree) = tables.btree.as_ref() {
+			btree.get(key, log, &tables.value, &self.compression)
+		} else {
+			Err(crate::error::Error::InvalidConfiguration("Not an indexed column.".to_string()))
+		} 
 	}
 
 	pub(crate) fn with_value_tables<R>(&self, mut apply: impl FnMut(&Vec<ValueTable>) -> Result<R>) -> Result<R> {
@@ -922,17 +965,29 @@ impl Column {
 
 	pub(crate) fn with_value_tables_and_btree<R>(&self, mut apply: impl FnMut(&BTreeTable, &Vec<ValueTable>, &Compress) -> Result<R>) -> Result<R> {
 		let tables = self.tables.read();
-		apply(&tables.btree, &tables.value, &self.compression)
+		if let Some(btree) = tables.btree.as_ref() {
+			apply(btree, &tables.value, &self.compression)
+		} else {
+			Err(crate::error::Error::InvalidConfiguration("Not an indexed column.".to_string()))
+		}
 	}
 
 	pub(crate) fn with_btree<R>(&self, mut apply: impl FnMut(&BTreeTable) -> Result<R>) -> Result<R> {
 		let tables = self.tables.read();
-		apply(&tables.btree)
+		if let Some(btree) = tables.btree.as_ref() {
+			apply(btree)
+		} else {
+			Err(crate::error::Error::InvalidConfiguration("Not an indexed column.".to_string()))
+		}
 	}
 
 	// Warning the column calls can deadlock if accessing table, but keep lock on tables.
 	pub(crate) fn with_tables_and_self<R>(&self, mut apply: impl FnMut(&Tables, &Column) -> Result<R>) -> Result<R> {
 		let tables = self.tables.read();
 		apply(&tables, self)
+	}
+
+	pub(crate) fn indexed(&self) -> bool {
+		self.indexed
 	}
 }

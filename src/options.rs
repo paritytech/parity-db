@@ -19,7 +19,6 @@ use std::collections::HashMap;
 use std::path::{PathBuf, Path};
 use crate::error::{Error, Result};
 use crate::column::Salt;
-use crate::btree::ConfigVariants;
 use crate::compress::CompressionType;
 use rand::Rng;
 
@@ -65,8 +64,8 @@ pub struct ColumnOptions {
 	pub compression: CompressionType,
 	/// Minimal value size threshold to attempt compressing a value.
 	pub compression_treshold: u32,
-	/// BTree index variant.
-	pub btree_index: ConfigVariants,
+	/// Column is using a btree index.
+	pub btree_index: bool,
 }
 
 /// Database metadata.
@@ -87,7 +86,7 @@ impl ColumnOptions {
 			self.uniform,
 			self.ref_counted,
 			self.compression as u8,
-			self.btree_index as u8,
+			self.btree_index,
 			self.sizes.iter().fold(String::new(), |mut r, s| {
 				if !r.is_empty() {
 					r.push_str(", ");
@@ -126,7 +125,7 @@ impl ColumnOptions {
 		let uniform = vals.get("uniform")?.parse().ok()?;
 		let ref_counted = vals.get("refc")?.parse().ok()?;
 		let compression: u8 = vals.get("compression").and_then(|c| c.parse().ok()).unwrap_or(0);
-		let btree_variant: u8 = vals.get("btree").and_then(|c| c.parse().ok()).unwrap_or(0);
+		let btree_index = vals.get("btree")?.parse().ok()?;
 
 		Some(ColumnOptions {
 			preimage,
@@ -135,7 +134,7 @@ impl ColumnOptions {
 			compression: compression.into(),
 			sizes,
 			compression_treshold: ColumnOptions::default().compression_treshold,
-			btree_index: btree_variant.into(),
+			btree_index,
 		})
 	}
 }
@@ -162,7 +161,7 @@ impl Default for ColumnOptions {
 			compression: CompressionType::NoCompression,
 			compression_treshold: 4096,
 			sizes,
-			btree_index: ConfigVariants::Order2_3_64,
+			btree_index: false,
 		}
 	}
 }

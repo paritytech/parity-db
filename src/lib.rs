@@ -28,12 +28,11 @@ mod stats;
 mod compress;
 mod migration;
 
-pub use db::{Db, Value, check::CheckOptions, CommitItem};
+pub use db::{Db, Value, check::CheckOptions};
 pub use error::{Error, Result};
 pub use options::{ColumnOptions, Options};
 pub use migration::migrate;
 pub use compress::CompressionType;
-pub use btree::commit_overlay::BTreeChange;
 pub use btree::BTreeIterator;
 
 #[derive(Default)]

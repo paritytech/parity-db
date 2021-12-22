@@ -440,14 +440,9 @@ pub mod commit_overlay {
 	use crate::column::{Column, ColId};
 	use crate::error::Result;
 
-	#[derive(Clone)]
-	pub enum BTreeChange {
-		Write(Vec<u8>, Vec<u8>),
-		Drop(Vec<u8>),
-	}
 	pub struct BTreeChangeSet {
 		pub col: ColId,
-		pub changes: Vec<BTreeChange>,
+		pub changes: Vec<(Vec<u8>, Option<Vec<u8>>)>,
 	}
 
 	impl BTreeChangeSet {
@@ -455,21 +450,21 @@ pub mod commit_overlay {
 			BTreeChangeSet { col, changes: Default::default() }
 		}
 
-		pub fn push(&mut self, change: BTreeChange) {
+		pub fn push(&mut self, k: &[u8], v: Option<Vec<u8>>) {
 			// no key hashing
-			self.changes.push(change);
+			self.changes.push((k.to_vec(), v));
 		}
 
 		pub fn copy_to_overlay(&self, overlay: &mut BTreeCommitOverlay, record_id: u64, bytes: &mut usize, options: &Options) {
 			let ref_counted = options.columns[self.col as usize].ref_counted;
 			for commit in self.changes.iter() {
 				match commit {
-					BTreeChange::Write(key, value) => {
+					(key, Some(value)) => {
 						*bytes += key.len();
 						*bytes += value.len();
 						overlay.insert(key.clone(), (record_id, Some(value.clone())));
 					},
-					BTreeChange::Drop(key) => {
+					(key, None) => {
 						*bytes += key.len();
 						// Don't add removed ref-counted values to overlay.
 						// (current ref_counted implementation does not
@@ -484,14 +479,11 @@ pub mod commit_overlay {
 
 		pub fn clean_overlay(&mut self, overlay: &mut BTreeCommitOverlay, record_id: u64) {
 			use std::collections::btree_map::Entry;
-			for commit in self.changes.drain(..) {
-				match commit {
-					BTreeChange::Drop(key)
-						| BTreeChange::Write(key, _) => if let Entry::Occupied(e) = overlay.entry(key) {
-						if e.get().0 == record_id {
-							e.remove_entry();
-						}
-					},
+			for (key, _) in self.changes.drain(..) {
+				if let Entry::Occupied(e) = overlay.entry(key) {
+					if e.get().0 == record_id {
+						e.remove_entry();
+					}
 				}
 			}
 		}
@@ -524,10 +516,10 @@ pub mod commit_overlay {
 			let (mut tree, table_id, last_removed, filled) = new_btree_inner::<N, _>(column, writer, record_id)?;
 			for change in self.changes.iter() {
 				match change {
-					BTreeChange::Drop(key) => {
+					(key, None) => {
 						tree.remove(key, column, writer, origin)?;
 					},
-					BTreeChange::Write(key, value) => {
+					(key, Some(value)) => {
 						tree.insert(key, value, column, writer, origin)?;
 					},
 				}

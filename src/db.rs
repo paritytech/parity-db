@@ -56,19 +56,6 @@ const KEEP_LOGS: usize = 16;
 /// Value is just a vector of bytes. Value sizes up to 4Gb are allowed.
 pub type Value = Vec<u8>;
 
-#[derive(Clone)]
-pub enum CommitItem<K> {
-	KeyValue {
-		column: ColId,
-		key: K,
-		value: Option<Value>,
-	},
-	KeyValueBTree {
-		column: ColId,
-		change: crate::BTreeChange,
-	},
-}
-
 // Commit data passed to `commit`
 #[derive(Default)]
 struct Commit {
@@ -196,6 +183,9 @@ impl DbInner {
 	}
 
 	fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
+		if self.columns[col as usize].indexed() {
+			return self.btree_get(col, key);
+		}
 		let key = self.columns[col as usize].hash(key);
 		let overlay = self.commit_overlay.read();
 		// Check commit overlay first
@@ -338,32 +328,14 @@ impl DbInner {
 	{
 		let mut commit: CommitChangeSet = Default::default();
 		for (c, k, v) in tx.into_iter() {
-			commit.indexed.entry(c)
-				.or_insert_with(|| IndexedChangeSet::new(c))
-				.push(k.as_ref(), v, &self.options)
-		}
-
-		self.commit_raw(commit)
-	}
-
-	pub fn commit_items<I, K>(&self, tx: I) -> Result<()>
-	where
-		I: IntoIterator<Item=CommitItem<K>>,
-		K: AsRef<[u8]>,
-	{
-		let mut commit: CommitChangeSet = Default::default();
-		for item in tx.into_iter() {
-			match item {
-				CommitItem::KeyValue { column, key, value } => {
-					commit.indexed.entry(column)
-						.or_insert_with(|| IndexedChangeSet::new(column))
-						.push(key.as_ref(), value, &self.options)
-				},
-				CommitItem::KeyValueBTree { column, change } => {
-					commit.btree_indexed.entry(column)
-						.or_insert_with(|| BTreeChangeSet::new(column))
-						.push(change)
-				},
+			if self.options.columns[c as usize].btree_index {
+				commit.btree_indexed.entry(c)
+					.or_insert_with(|| BTreeChangeSet::new(c))
+					.push(k.as_ref(), v)
+			} else {
+				commit.indexed.entry(c)
+					.or_insert_with(|| IndexedChangeSet::new(c))
+					.push(k.as_ref(), v, &self.options)
 			}
 		}
 
@@ -962,11 +934,7 @@ impl Db {
 		self.inner.get_size(col, key)
 	}
 
-	pub fn btree_get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
-		self.inner.btree_get(col, key)
-	}
-
-	pub fn btree_iter(&self, col: ColId) -> Result<crate::btree::BTreeIterator> {
+	pub fn iter(&self, col: ColId) -> Result<crate::btree::BTreeIterator> {
 		self.inner.btree_iter(col)
 	}
 
@@ -976,14 +944,6 @@ impl Db {
 		K: AsRef<[u8]>,
 	{
 		self.inner.commit(tx)
-	}
-
-	pub fn commit_items<I, K>(&self, tx: I) -> Result<()>
-	where
-		I: IntoIterator<Item=CommitItem<K>>,
-		K: AsRef<[u8]>,
-	{
-		self.inner.commit_items(tx)
 	}
 
 	pub(crate) fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
@@ -1325,7 +1285,6 @@ impl TestSynch {
 #[cfg(test)]
 mod tests {
 	use super::{Db, Options, TestDbTarget};
-	use crate::{CommitItem, BTreeChange};
 	use tempfile::tempdir;
 
 	#[test]
@@ -1366,8 +1325,9 @@ mod tests {
 	}
 	fn test_indexed_btree_inner(db_test: TestDbTarget, long_key: bool) {
 		let tmp = tempdir().unwrap();
-		let options = Options::with_columns(tmp.path(), 5);
-		let col_nb = 0;
+		let col_nb = 0u8;
+		let mut options = Options::with_columns(tmp.path(), 5);
+		options.columns[col_nb as usize].btree_index = true;
 
 		let (key1, key2, key3, key4) = if !long_key {
 			(
@@ -1388,55 +1348,48 @@ mod tests {
 			)
 		};
 
-		let commit_item = |change: BTreeChange| -> CommitItem<Vec<u8>> {
-			CommitItem::KeyValueBTree {
-				column: col_nb,
-				change,
-			}
-		};
-
 		let db = Db::open_inner(&options, true, false, db_test.clone(), false).unwrap();
-		assert_eq!(db.btree_get(col_nb, &key1).unwrap(), None);
+		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
 
-		let mut iter = db.btree_iter(col_nb).unwrap();
+		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(iter.next().unwrap(), None);
 
-		db.commit_items(vec![
-			commit_item(BTreeChange::Write(key1.clone(), b"value1".to_vec())),
+		db.commit(vec![
+			(col_nb, key1.clone(), Some(b"value1".to_vec())),
 		]).unwrap();
 		db_test.wait();
 
-		assert_eq!(db.btree_get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
+		assert_eq!(db.get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
 		iter.seek(&[]).unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
 
-		db.commit_items(vec![
-			commit_item(BTreeChange::Drop(key1.clone())),
-			commit_item(BTreeChange::Write(key2.clone(), b"value2".to_vec())),
-			commit_item(BTreeChange::Write(key3.clone(), b"value3".to_vec())),
+		db.commit(vec![
+			(col_nb, key1.clone(), None),
+			(col_nb, key2.clone(), Some(b"value2".to_vec())),
+			(col_nb, key3.clone(), Some(b"value3".to_vec())),
 		]).unwrap();
 		db_test.wait();
 
-		assert_eq!(db.btree_get(col_nb, &key1).unwrap(), None);
-		assert_eq!(db.btree_get(col_nb, &key2).unwrap(), Some(b"value2".to_vec()));
-		assert_eq!(db.btree_get(col_nb, &key3).unwrap(), Some(b"value3".to_vec()));
+		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
+		assert_eq!(db.get(col_nb, &key2).unwrap(), Some(b"value2".to_vec()));
+		assert_eq!(db.get(col_nb, &key3).unwrap(), Some(b"value3".to_vec()));
 		iter.seek(key2.as_slice()).unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
 		assert_eq!(iter.next().unwrap(), Some((key3.clone(), b"value3".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
 
-		db.commit_items(vec![
-			commit_item(BTreeChange::Write(key2.clone(), b"value2b".to_vec())),
-			commit_item(BTreeChange::Write(key4.clone(), b"value4".to_vec())),
-			commit_item(BTreeChange::Drop(key3.clone())),
+		db.commit(vec![
+			(col_nb, key2.clone(), Some(b"value2b".to_vec())),
+			(col_nb, key4.clone(), Some(b"value4".to_vec())),
+			(col_nb, key3.clone(), None),
 		]).unwrap();
 		db_test.wait();
 
-		assert_eq!(db.btree_get(col_nb, &key1).unwrap(), None);
-		assert_eq!(db.btree_get(col_nb, &key3).unwrap(), None);
-		assert_eq!(db.btree_get(col_nb, &key2).unwrap(), Some(b"value2b".to_vec()));
-		assert_eq!(db.btree_get(col_nb, &key4).unwrap(), Some(b"value4".to_vec()));
+		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
+		assert_eq!(db.get(col_nb, &key3).unwrap(), None);
+		assert_eq!(db.get(col_nb, &key2).unwrap(), Some(b"value2b".to_vec()));
+		assert_eq!(db.get(col_nb, &key4).unwrap(), Some(b"value4".to_vec()));
 		let mut key22 = key2.clone();
 		key22.push(2);
 		iter.seek(key22.as_slice()).unwrap();
@@ -1451,48 +1404,42 @@ mod tests {
 	}
 	fn test_indexed_btree_inner_2(db_test: TestDbTarget) {
 		let tmp = tempdir().unwrap();
-		let options = Options::with_columns(tmp.path(), 5);
-		let col_nb = 0;
+		let col_nb = 0u8;
+		let mut options = Options::with_columns(tmp.path(), 5);
+		options.columns[col_nb as usize].btree_index = true;
 
 		let key1 = b"key1".to_vec();
 		let key2 = b"key2".to_vec();
 		let key3 = b"key3".to_vec();
 
-		let commit_item = |change: BTreeChange| -> CommitItem<Vec<u8>> {
-			CommitItem::KeyValueBTree {
-				column: col_nb,
-				change,
-			}
-		};
-
 		let written = TestDbTarget::DbFile(Default::default());
 		let db = Db::open_inner(&options, true, false, written.clone(), false).unwrap();
-		let mut iter = db.btree_iter(col_nb).unwrap();
-		assert_eq!(db.btree_get(col_nb, &key1).unwrap(), None);
+		let mut iter = db.iter(col_nb).unwrap();
+		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
 		assert_eq!(iter.next().unwrap(), None);
 
-		db.commit_items(vec![
-			commit_item(BTreeChange::Write(key1.clone(), b"value1".to_vec())),
+		db.commit(vec![
+			(col_nb, key1.clone(), Some(b"value1".to_vec())),
 		]).unwrap();
 		written.wait();
 
 		let db = Db::open_inner(&options, true, false, db_test.clone(), true).unwrap();
-		let mut iter = db.btree_iter(col_nb).unwrap();
-		assert_eq!(db.btree_get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
+		let mut iter = db.iter(col_nb).unwrap();
+		assert_eq!(db.get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
 		iter.seek(&[]).unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
 
-		db.commit_items(vec![
-			commit_item(BTreeChange::Drop(key1.clone())),
-			commit_item(BTreeChange::Write(key2.clone(), b"value2".to_vec())),
-			commit_item(BTreeChange::Write(key3.clone(), b"value3".to_vec())),
+		db.commit(vec![
+			(col_nb, key1.clone(), None),
+			(col_nb, key2.clone(), Some(b"value2".to_vec())),
+			(col_nb, key3.clone(), Some(b"value3".to_vec())),
 		]).unwrap();
 		db_test.wait();
 
-		assert_eq!(db.btree_get(col_nb, &key1).unwrap(), None);
-		assert_eq!(db.btree_get(col_nb, &key2).unwrap(), Some(b"value2".to_vec()));
-		assert_eq!(db.btree_get(col_nb, &key3).unwrap(), Some(b"value3".to_vec()));
+		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
+		assert_eq!(db.get(col_nb, &key2).unwrap(), Some(b"value2".to_vec()));
+		assert_eq!(db.get(col_nb, &key3).unwrap(), Some(b"value3".to_vec()));
 		iter.seek(key2.as_slice()).unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
 		assert_eq!(iter.next().unwrap(), Some((key3.clone(), b"value3".to_vec())));

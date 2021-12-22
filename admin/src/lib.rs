@@ -48,7 +48,13 @@ pub fn run() -> Result<(), String> {
 		options.salt = Some(metadata.salt);
 		options
 	} else {
-		parity_db::Options::with_columns(db_path.as_path(), nb_column)
+		let mut options = parity_db::Options::with_columns(db_path.as_path(), nb_column);
+		if cli.subcommand.indexed() {
+			for c in options.columns.iter_mut() {
+				c.btree_index = true;
+			}
+		}
+		options
 	};
 	options.sync_wal = !cli.shared().no_sync;
 	options.sync_data = !cli.shared().no_sync;
@@ -191,6 +197,15 @@ pub enum SubCommand {
 	Stress(bench::Stress),
 }
 
+impl SubCommand {
+	fn indexed(&self) -> bool {
+		if let SubCommand::Stress(arg) = self {
+			arg.indexed
+		} else {
+			false
+		}
+	}
+}
 impl Cli {
 	fn shared(&self) -> &Shared {
 		match &self.subcommand {
