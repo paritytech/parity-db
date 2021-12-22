@@ -14,14 +14,13 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-// On disk layout for indexed btree table.
-// BTree indexes are stored in a single file.
+// BTree indexes are stored as node value.
+// The header is stored at a fix address, the first offset of the
+// first value table that can contain the header.
 //
-// Entry 0 (metadata)
-// [LAST_REMOVED: 8][FILLED: 8][ROOT: 8][DEPTH: 4]
+// Header (metadata)
+// [ROOT: 8][DEPTH: 4]
 //
-// LAST_REMOVED - 64-bit index of removed entries linked list head
-// FILLED - highest index filled with live data
 // ROOT: u64 LE current index for root node. TODO could be smaller than u64
 // DEPTH: u32 LE current tree depth.
 //
@@ -55,8 +54,7 @@ mod btree;
 mod node;
 
 pub(crate) const HEADER_POSITION: u64 = 0;
-pub(crate) const HEADER_ENTRIES: u8 = 1;
-pub(crate) const HEADER_SIZE: u64 = 8 + 8 + 8 + 4;
+pub(crate) const HEADER_SIZE: u64 = 8 + 4;
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub struct BTreeTableId(u8); // contain its column id
@@ -93,8 +91,6 @@ impl std::fmt::Display for BTreeTableId {
 pub struct BTreeIndex {
 	pub root: u64,
 	pub depth: u32,
-	pub last_removed: u64,
-	pub filled: u64,
 }
 
 pub struct BTreeLogOverlay {
@@ -261,8 +257,6 @@ impl<C: Config> Entry<C> {
 
 	fn write_header(&mut self, btree_index: &BTreeIndex) {
 		self.encoded.set_offset(0);
-		self.encoded.write_u64(btree_index.last_removed);
-		self.encoded.write_u64(btree_index.filled);
 		self.encoded.write_u64(btree_index.root);
 		self.encoded.write_slice(&btree_index.depth.to_le_bytes()[..]);
 	}
@@ -309,8 +303,6 @@ impl BTreeTable {
 	}
 
 	fn btree_index(log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<BTreeIndex> {
-		let mut last_removed = HEADER_POSITION;
-		let mut filled = HEADER_ENTRIES as u64;
 		let mut root = HEADER_POSITION;
 		let mut depth = 0;
 		if let Some(address) = Self::btree_index_address(values) {
@@ -320,16 +312,12 @@ impl BTreeTable {
 			if values[tier as usize].is_init() {
 				if let Some(encoded) = Column::get_at_value_index_locked(key_query, address, values, log, comp)? {
 					let mut buf: LogEntry<Vec<u8>> = LogEntry::new(encoded.1);
-					last_removed = buf.read_u64();
-					filled = buf.read_u64();
 					root = buf.read_u64();
 					depth = buf.read_u32();
 				}
 			}
 		}
 		Ok(BTreeIndex {
-			last_removed,
-			filled,
 			root,
 			depth,
 		})
@@ -376,7 +364,7 @@ pub fn new_btree_inner<N: NodeT, L: crate::log::LogQuery>(
 	column: &Column,
 	log: &L,
 	record_id: u64,
-) -> Result<(btree::BTree<N>, BTreeTableId, u64, u64)> {
+) -> Result<(btree::BTree<N>, BTreeTableId)> {
 	let (root, root_index, btree_index, table_id) = column.with_value_tables_and_btree(|btree, values, comp| {
 		let btree_index = if let Some(btree_index) = log.btree_index(btree.id) {
 			btree_index
@@ -400,8 +388,6 @@ pub fn new_btree_inner<N: NodeT, L: crate::log::LogQuery>(
 	Ok((
 		btree::BTree::<N>::new(root_index, root, btree_index.depth, record_id),
 		table_id,
-		btree_index.last_removed,
-		btree_index.filled,
 	))
 }
 
@@ -484,7 +470,7 @@ pub mod commit_overlay {
 			// TODO consider runing on btree with ValueTable as params.
 			let record_id = writer.record_id();
 			// This is not racy as we have a single thread writing plan, so a single btree instance.
-			let (mut tree, table_id, last_removed, filled) = new_btree_inner::<N, _>(column, writer, record_id)?;
+			let (mut tree, table_id) = new_btree_inner::<N, _>(column, writer, record_id)?;
 			if tree.root_index.is_none() {
 				// reserve the header address.
 				if let Some(address) = column.with_value_tables(|t| Ok(BTreeTable::btree_index_address(t)))? {
@@ -510,8 +496,6 @@ pub mod commit_overlay {
 				*ops += 1;
 			}
 			let mut btree_index = BTreeIndex {
-				last_removed,
-				filled,
 				root: tree.root_index.unwrap_or(0),
 				depth: tree.depth,
 			};

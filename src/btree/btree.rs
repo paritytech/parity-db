@@ -61,7 +61,7 @@ impl<'a> BTreeIterator<'a> {
 			ConfigVariants::Order2_3_64 => {
 				// TODO move new_btree_inner to parent.
 				let record_id = log.read().btree_last_record_id(col);
-				let (tree, _table_id, _last_removed, _filled) = new_btree_inner::<NodeReadNoCache<crate::btree::Order2_3_64>, _>(column, log, record_id)?;
+				let (tree, _table_id) = new_btree_inner::<NodeReadNoCache<crate::btree::Order2_3_64>, _>(column, log, record_id)?;
 				let iter = tree.iter();
 				Ok(BTreeIterator {
 					db,
@@ -103,7 +103,7 @@ impl<'a> BTreeIterator<'a> {
 		match &mut self.iter {
 			BTreeIterVariants::Order2_3_64(tree, iter) => {
 				if record_id != tree.record_id {
-					let (new_tree, _table_id, _last_removed, _filled) = new_btree_inner::<NodeReadNoCache<crate::btree::Order2_3_64>, _>(col, log, record_id)?;
+					let (new_tree, _table_id) = new_btree_inner::<NodeReadNoCache<crate::btree::Order2_3_64>, _>(col, log, record_id)?;
 					*tree = new_tree;
 				}
 				iter.next(tree, col, log)
@@ -115,7 +115,7 @@ impl<'a> BTreeIterator<'a> {
 		match &mut self.iter {
 			BTreeIterVariants::Order2_3_64(tree, iter) => {
 				if record_id != tree.record_id {
-					let (new_tree, _table_id, _last_removed, _filled) = new_btree_inner::<NodeReadNoCache<crate::btree::Order2_3_64>, _>(col, log, record_id)?;
+					let (new_tree, _table_id) = new_btree_inner::<NodeReadNoCache<crate::btree::Order2_3_64>, _>(col, log, record_id)?;
 					*tree = new_tree;
 				}
 				iter.seek(key, tree, col, log, after)
