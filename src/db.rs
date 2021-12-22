@@ -308,10 +308,6 @@ impl DbInner {
 		// seek require log do not change
 		let log = self.log.overlays().read();
 		let record_id = log.btree_last_record_id(iter.col);
-		//self.btree_iter_seek_inner(iter, key, &*log, record_id)
-	//}
-
-	//fn btree_iter_seek_inner(&self, iter: &mut crate::BTreeIterator, key: &[u8], log: &impl crate::log::LogQuery, record_id: u64) -> Result<()> {
 		iter.from_seek = !after;
 		iter.overlay_last_key = Some(key.to_vec());
 		iter.pending_next_backend = None;

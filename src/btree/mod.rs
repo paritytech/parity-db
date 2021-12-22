@@ -271,11 +271,6 @@ impl<C: Config> Entry<C> {
 		self.encoded.write_u64(btree_index.root);
 		self.encoded.write_slice(&btree_index.depth.to_le_bytes()[..]);
 	}
-
-	fn write_removed(&mut self, last_removed: u64) {
-		self.encoded.set_offset(0);
-		self.encoded.write_u64(last_removed);
-	}
 }
 
 pub struct BTreeTable {
@@ -370,19 +365,22 @@ impl BTreeTable {
 			return Ok(None);
 		}
 		let record_id = 0; // lifetime of Btree is the query, so no invalidate.
-		let root = self.get_index::<N, Q>(root_index, log)?;
+		let root = self.get_index::<N, Q>(root_index, log, values, comp)?;
 		let root = N::from_encoded(root);
 		// keeping log locked when parsing tree.
 		let mut tree = btree::BTree::<N>::new(Some(root_index), root, depth, record_id);
 		tree.get_with_lock(key, self, values, log, comp)
 	}
 
-	fn get_index<N: NodeT, Q: LogQuery>(&self, at: u64, log: &Q) -> Result<<N::Config as Config>::Encoded> {
-		let mut dest = N::Config::uninit_encoded();
-		if !log.btree(self.id, at, dest.as_mut()) {
-			self.file.read_at(dest.as_mut(), at * N::Config::ENTRY_SIZE as u64)?;
+	fn get_index<N: NodeT, Q: LogQuery>(&self, at: u64, log: &Q, tables: &Vec<ValueTable>, comp: &Compress) -> Result<<N::Config as Config>::Encoded> {
+		let key_query = TableKeyQuery::Check(&NoHash);
+		if let Some((_tier, value)) = Column::get_at_value_index_locked(key_query, Address::from_u64(at), tables, log, comp)? {
+			let mut dest = N::Config::uninit_encoded();
+			dest.as_mut().copy_from_slice(value.as_slice());
+			Ok(dest)
+		} else {
+			Err(crate::error::Error::Corruption("Missing btree index".to_string()))
 		}
-		Ok(dest)
 	}
 
 	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
@@ -439,7 +437,7 @@ pub fn new_btree_inner<N: NodeT, L: crate::log::LogQuery>(
 		let (root_index, root) = if btree_index.root == HEADER_POSITION {
 			(None, N::new())
 		} else {
-			let root = btree.get_index::<N, _>(btree_index.root, log)?;
+			let root = btree.get_index::<N, _>(btree_index.root, log, values, comp)?;
 			(Some(btree_index.root), N::from_encoded(root))
 		};
 		Ok((
@@ -569,7 +567,7 @@ pub mod commit_overlay {
 			};
 			let old_btree_index = btree_index.clone();
 
-			tree.write_plan(column, writer, table_id, record_id, &mut btree_index)?;
+			tree.write_plan(column, writer, table_id, record_id, &mut btree_index, origin)?;
 
 			if old_btree_index != btree_index {
 				let mut entry = Entry::<N::Config>::empty();
@@ -584,8 +582,8 @@ pub mod commit_overlay {
 						origin,
 					))?;
 				}
-				writer.insert_btree_index(table_id, record_id, btree_index);
 			}
+			writer.insert_btree_index(table_id, record_id, btree_index); // TODO only usefull to put record id
 			Ok(())
 		}
 	}

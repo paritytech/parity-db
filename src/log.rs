@@ -729,7 +729,7 @@ impl Log {
 		}
 		// Cleanup index overlays
 		overlays.index.retain(|_, overlay| !overlay.map.is_empty());
-		overlays.btree.retain(|_, overlay| !overlay.map.is_empty());
+		// do not retain btree, we need to keep latest record id for iterator.
 	}
 
 	pub fn flush_one(&self, min_size: u64) -> Result<(bool, bool, bool)> {

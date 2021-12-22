@@ -49,8 +49,8 @@ pub trait NodeT: Sized {
 	fn remove_child(&mut self, at: usize) -> Self::Child;
 	fn fetch_child(&mut self, at: usize, col: &Column, log: &impl LogQuery) -> Result<Option<&mut Self>>;
 	fn fetch_child_box(&mut self, at: usize, col: &Column, log: &impl LogQuery) -> Result<Option<&mut Box<Self>>>;
-	fn fetch_child_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery) -> Result<Option<&mut Self>>;
-	fn fetch_child_box_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery) -> Result<Option<&mut Box<Self>>>;
+	fn fetch_child_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Self>>;
+	fn fetch_child_box_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Box<Self>>>;
 	fn try_forget_child(&mut self, at: usize);
 	fn set_child_node(&mut self, at: usize, child: Box<Self>, index: Option<u64>) {
 		self.set_child(at, Self::new_child(child, index))
@@ -77,7 +77,7 @@ pub trait NodeT: Sized {
 			Some(i - 1)
 		}
 	}
-	fn write_plan(&mut self, column: &Column, writer: &mut LogWriter, node_id: Option<u64>, table_id: BTreeTableId, btree: &mut BTreeIndex, record_id: u64) -> Result<Option<u64>>;
+	fn write_plan(&mut self, column: &Column, writer: &mut LogWriter, node_id: Option<u64>, table_id: BTreeTableId, btree: &mut BTreeIndex, record_id: u64, origin: ValueTableOrigin) -> Result<Option<u64>>;
 
 	fn insert(
 		&mut self,
@@ -398,28 +398,28 @@ pub trait NodeT: Sized {
 		}
 	}
 
-	fn get(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery) -> Result<Option<(Address, bool)>> {
+	fn get(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<(Address, bool)>> {
 		let (at, i) = self.position(key, values, log)?;
 		if at {
 			Ok(self.separator_get_info(i))
 		} else {
-			if let Some(child) = self.fetch_child_from_btree(i, btree, log)? {
-				return child.get(key, btree, values, log);
+			if let Some(child) = self.fetch_child_from_btree(i, btree, log, values, comp)? {
+				return child.get(key, btree, values, log, comp);
 			}
 
 			Ok(None)
 		}
 	}
 	
-	fn seek(from: &mut Box<Self>, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, depth: u32, stack: &mut Vec<(usize, *mut Box<Self>)>) -> Result<bool> {
+	fn seek(from: &mut Box<Self>, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, depth: u32, stack: &mut Vec<(usize, *mut Box<Self>)>, comp: &Compress) -> Result<bool> {
 		let (at, i) = from.position(key, values, log)?;
 		stack.push((i, from));
 		if at {
 			Ok(true)
 		} else {
 			if depth != 0 {
-				if let Some(child) = from.fetch_child_box_from_btree(i, btree, log)? {
-					return Self::seek(child, key, btree, values, log, depth - 1, stack);
+				if let Some(child) = from.fetch_child_box_from_btree(i, btree, log, values, comp)? {
+					return Self::seek(child, key, btree, values, log, depth - 1, stack, comp);
 				}
 			}
 
@@ -606,13 +606,13 @@ impl<C: Config> NodeT for Node<C> {
 		Ok(child.node.as_mut().map(|n| n.as_mut()))
 	}
 
-	fn fetch_child_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery) -> Result<Option<&mut Self>> {
-		let child = self.get_fetched_child_index_from_btree(at, btree, log)?;
+	fn fetch_child_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Self>> {
+		let child = self.get_fetched_child_index_from_btree(at, btree, log, values, comp)?;
 		Ok(child.node.as_mut().map(|n| n.as_mut()))
 	}
 
-	fn fetch_child_box_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery) -> Result<Option<&mut Box<Self>>> {
-		let child = self.get_fetched_child_index_from_btree(at, btree, log)?;
+	fn fetch_child_box_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Box<Self>>> {
+		let child = self.get_fetched_child_index_from_btree(at, btree, log, values, comp)?;
 		Ok(child.node.as_mut())
 	}
 
@@ -895,7 +895,7 @@ impl<C: Config> NodeT for Node<C> {
 	}
 
 	// TODO default traitify
-	fn write_plan(&mut self, column: &Column, writer: &mut LogWriter, node_id: Option<u64>, table_id: BTreeTableId, btree: &mut BTreeIndex, record_id: u64) -> Result<Option<u64>> {
+	fn write_plan(&mut self, column: &Column, writer: &mut LogWriter, node_id: Option<u64>, table_id: BTreeTableId, btree: &mut BTreeIndex, record_id: u64, origin: ValueTableOrigin) -> Result<Option<u64>> {
 		// TODO currently modified is not set properly so we iterate all, could have a child modified
 		// (but with current use it is only interesting for delete on non existing value)
 
@@ -906,7 +906,7 @@ impl<C: Config> NodeT for Node<C> {
 			let child_modified = true;
 			if child_modified {
 				if let Some(node) = child.node.as_mut() {
-					if let Some(index) = node.write_plan(column, writer, child.entry_index, table_id, btree, record_id)? {
+					if let Some(index) = node.write_plan(column, writer, child.entry_index, table_id, btree, record_id, origin)? {
 						child.entry_index = Some(index);
 						self.changed = true;
 						self.entry.write_child_index(at, index);
@@ -945,28 +945,28 @@ impl<C: Config> NodeT for Node<C> {
 
 		let mut result = None;
 		if self.changed {
-			let index = if let Some(existing) = node_id {
-				existing
+			if let Some(existing) = node_id {
+				let k = NoHash;
+				if let (_, Some(new_index)) = column.with_tables_and_self(|tables, s| s.write_existing_value_plan(
+					&k,
+					tables,
+					Address::from_u64(existing),
+					Some(self.entry.encoded.as_ref()),
+					writer,
+					origin,
+				))? {
+					result = Some(new_index.as_u64())
+				}
 			} else {
-				let new_index = if btree.last_removed == HEADER_POSITION {
-					let result = btree.filled;
-					btree.filled += 1;
-					result
-				} else {
-					let result = btree.last_removed;
-					btree.last_removed = column.with_btree(|btree| {
-						// TODO no need to read the whole encoded buffer.
-						let encoded = btree.get_index::<Self, _>(result, writer)?;
-						let mut buf = [0; 8];
-						buf.copy_from_slice(&encoded.as_ref()[..8]);
-						Ok(u64::from_le_bytes(buf))
-					})?;
-					result
-				};
-				result = Some(new_index);
-				new_index
-			};
-			writer.insert_btree(table_id, index, self.entry.encoded.as_ref().to_vec(), record_id, btree);
+				let k = NoHash;
+				result = Some(column.with_tables_and_self(|t, s| s.write_new_value_plan(
+					&k,
+					t,
+					self.entry.encoded.as_ref(),
+					writer,
+					origin,
+				))?.as_u64());
+			}
 		}
 
 		// TODO could also update self back, but useless as long as only transient use.
@@ -1001,7 +1001,7 @@ impl<C: Config> Node<C> {
 		if !child.state.fetched {
 			if let Some(ix) = child.entry_index {
 				child.state.fetched = true;
-				let entry = column.with_btree(|btree| btree.get_index::<Self, _>(ix, log))?;
+				let entry = column.with_value_tables_and_btree(|btree, values, comp| btree.get_index::<Self, _>(ix, log, values, comp))?;
 				child.node = Some(Box::new(Self::from_encoded(entry)));
 			}
 		}
@@ -1009,12 +1009,12 @@ impl<C: Config> Node<C> {
 	}
 
 	// TODO merge with get_fetched_child_index
-	fn get_fetched_child_index_from_btree(&mut self, i: usize, btree: &BTreeTable, log: &impl LogQuery) -> Result<&mut Child<C>> {
+	fn get_fetched_child_index_from_btree(&mut self, i: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<&mut Child<C>> {
 		let mut child = self.get_child_index(i);
 		if !child.state.fetched {
 			if let Some(ix) = child.entry_index {
 				child.state.fetched = true;
-				let entry = btree.get_index::<Self, _>(ix, log)?;
+				let entry = btree.get_index::<Self, _>(ix, log, values, comp)?;
 				child.node = Some(Box::new(Self::from_encoded(entry)));
 			}
 		}
@@ -1038,7 +1038,7 @@ impl<C: Config> NodeReadNoCache<C> {
 		}
 		let child = self.entry.read_child_index(i);
 		if let Some(ix) = child {
-			let entry = column.with_btree(|btree| btree.get_index::<Self, _>(ix, log))?;
+			let entry = column.with_value_tables_and_btree(|btree, values, comp| btree.get_index::<Self, _>(ix, log, values, comp))?;
 			self.current_child = Some(Box::new(Self::from_encoded(entry)));
 			self.current_child_index = Some(i);
 		}
@@ -1046,13 +1046,13 @@ impl<C: Config> NodeReadNoCache<C> {
 	}
 
 	// TODO merge with get_fetched_child_index
-	fn get_fetched_child_index_from_btree(&mut self, i: usize, btree: &BTreeTable, log: &impl LogQuery) -> Result<Option<&mut Box<Self>>> {
+	fn get_fetched_child_index_from_btree(&mut self, i: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Box<Self>>> {
 		if Some(i) == self.current_child_index {
 			return Ok(self.current_child.as_mut());
 		}
 		let child = self.entry.read_child_index(i);
 		if let Some(ix) = child {
-			let entry = btree.get_index::<Self, _>(ix, log)?;
+			let entry = btree.get_index::<Self, _>(ix, log, values, comp)?;
 			self.current_child = Some(Box::new(Self::from_encoded(entry)));
 			self.current_child_index = Some(i);
 		}
@@ -1119,13 +1119,13 @@ impl<C: Config> NodeT for NodeReadNoCache<C> {
 		Ok(child.map(|n| n.as_mut()))
 	}
 
-	fn fetch_child_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery) -> Result<Option<&mut Self>> {
-		let child = self.get_fetched_child_index_from_btree(at, btree, log)?;
+	fn fetch_child_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Self>> {
+		let child = self.get_fetched_child_index_from_btree(at, btree, log, values, comp)?;
 		Ok(child.map(|n| n.as_mut()))
 	}
 
-	fn fetch_child_box_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery) -> Result<Option<&mut Box<Self>>> {
-		self.get_fetched_child_index_from_btree(at, btree, log)
+	fn fetch_child_box_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Box<Self>>> {
+		self.get_fetched_child_index_from_btree(at, btree, log, values, comp)
 	}
 
 	fn has_separator(&mut self, at: usize) -> bool {
@@ -1257,6 +1257,7 @@ impl<C: Config> NodeT for NodeReadNoCache<C> {
 		_table_id: BTreeTableId,
 		_btree: &mut BTreeIndex,
 		_record_id: u64,
+		_origin: ValueTableOrigin,
 	) -> Result<Option<u64>> {
 		unimplemented!("Read only");
 	}

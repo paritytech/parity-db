@@ -223,7 +223,7 @@ impl<N: NodeT> BTreeIter<N> {
 		self.state.clear();
 		self.record_id = btree.record_id;
 		self.last_key = Some(key.to_vec());
-		if col.with_value_tables_and_btree(|b, t, _c| N::seek(&mut btree.root, key.as_ref(), b, t, log, btree.depth, &mut self.state))? {
+		if col.with_value_tables_and_btree(|b, t, c| N::seek(&mut btree.root, key.as_ref(), b, t, log, btree.depth, &mut self.state, c))? {
 			// on value
 			if after {
 				if let Some((ix, node)) = self.state.last_mut() {
@@ -284,7 +284,7 @@ impl<N: NodeT> BTree<N> {
 	}
 
 	pub fn get_with_lock(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Vec<u8>>> {
-		if let Some((address, is_splitted)) = self.root.get(key, btree, values, log)? {
+		if let Some((address, is_splitted)) = self.root.get(key, btree, values, log, comp)? {
 			if is_splitted {
 				let mut k = Vec::new();
 				let key_query = TableKeyQuery::Fetch::<VarKey>(&mut k); // TODO could use skip instead of fetch
@@ -306,16 +306,21 @@ impl<N: NodeT> BTree<N> {
 		Ok(())
 	}
 
-	pub fn write_plan(&mut self, column: &Column, writer: &mut LogWriter, table_id: BTreeTableId, record_id: u64, btree_index: &mut BTreeIndex) -> Result<()> {
-		if let Some(ix) = self.root.write_plan(column, writer, self.root_index, table_id, btree_index, record_id)? {
+	pub fn write_plan(&mut self, column: &Column, writer: &mut LogWriter, table_id: BTreeTableId, record_id: u64, btree_index: &mut BTreeIndex, origin: ValueTableOrigin) -> Result<()> {
+		if let Some(ix) = self.root.write_plan(column, writer, self.root_index, table_id, btree_index, record_id, origin)? {
 			self.root_index = Some(ix);
 		}
 		for (node_index, _node) in self.removed_children.0.drain(..) {
 			if let Some(index) = node_index {
-				let mut entry = Entry::<N::Config>::empty();
-				entry.write_removed(btree_index.last_removed);
-				writer.insert_btree(table_id, index, entry.encoded.as_ref().to_vec(), record_id, btree_index);
-				btree_index.last_removed = index;
+				let k = NoHash;
+				column.with_tables_and_self(|tables, s| s.write_existing_value_plan(
+					&k,
+					tables,
+					Address::from_u64(index),
+					None,
+					writer,
+					origin,
+				))?;
 			}
 		}
 		self.record_id = record_id;
