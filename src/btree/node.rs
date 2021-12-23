@@ -436,7 +436,7 @@ impl Default for Separator {
 }
 
 pub struct SeparatorInner {
-	pub key: Vec<u8>, // TODO could use range and only allocate on change. 
+	pub key: Vec<u8>,
 	pub value: u64,
 }
 
