@@ -26,7 +26,7 @@ use crate::{
 	display::hex,
 	index::{IndexTable, TableId as IndexTableId, PlanOutcome, Address},
 	options::{Options, ColumnOptions, Metadata},
-	btree::{BTreeTable, BTreeTableId, ConfigVariants as BTreeVariants},
+	btree::{BTreeTable, BTreeTableId},
 	stats::ColumnStats,
 	db::check::CheckDisplay,
 };
@@ -198,7 +198,7 @@ impl Column {
 			value: (0.. options.sizes.len() + 1)
 				.map(|i| Self::open_table(arc_path.clone(), col, i as u8, &options, db_version)).collect::<Result<_>>()?,
 			btree: if options.btree_index {
-				Some(Self::open_btree(path, col, BTreeVariants::Order2_3)?)
+				Some(Self::open_btree(col)?)
 			} else {
 				None
 			},
@@ -277,12 +277,10 @@ impl Column {
 	}
 
 	fn open_btree(
-		path: &std::path::PathBuf,
 		col: ColId,
-		variant: BTreeVariants,
 	) -> Result<BTreeTable> {
 		let id = BTreeTableId::new(col);
-		BTreeTable::open(path, id, variant)
+		BTreeTable::open(id)
 	}
 
 	fn trigger_reindex(
@@ -895,15 +893,6 @@ impl Column {
 		let tables = self.tables.read();
 		if let Some(btree) = tables.btree.as_ref() {
 			apply(btree, &tables.value, &self.compression)
-		} else {
-			Err(crate::error::Error::InvalidConfiguration("Not an indexed column.".to_string()))
-		}
-	}
-
-	pub(crate) fn with_btree<R>(&self, mut apply: impl FnMut(&BTreeTable) -> Result<R>) -> Result<R> {
-		let tables = self.tables.read();
-		if let Some(btree) = tables.btree.as_ref() {
-			apply(btree)
 		} else {
 			Err(crate::error::Error::InvalidConfiguration("Not an indexed column.".to_string()))
 		}

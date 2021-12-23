@@ -119,26 +119,8 @@ impl From<u8> for ConfigVariants {
 	}
 }
 
-pub trait Config: Sized {
-	const ORDER: usize;
-	const ORDER_CHILD: usize = Self::ORDER + 1;
-	type Separators: Default + AsRef<[node::Separator]> + AsMut<[node::Separator]>;
-	type Children: Default + AsRef<[node::Child<Self>]> + AsMut<[node::Child<Self>]>;
-}
-
-macro_rules! def_config {
-	($name:ident, $order:expr) => {
-		pub struct $name;
-
-		impl Config for $name {
-			const ORDER: usize = $order;
-			type Separators = [node::Separator; Self::ORDER];
-			type Children = [node::Child<Self>; Self::ORDER_CHILD];
-		}
-	};
-}
-
-def_config!(Order2_3, 2);
+const ORDER: usize = 2;
+const ORDER_CHILD: usize = ORDER + 1;
 
 struct Entry {
 	encoded: LogEntry<Vec<u8>>,
@@ -220,32 +202,14 @@ impl Entry {
 
 pub struct BTreeTable {
 	pub id: BTreeTableId,
-	variant: ConfigVariants,
 }
 
 impl BTreeTable {
 	pub fn open(
-		path: &std::path::PathBuf,
 		id: BTreeTableId,
-		variant: ConfigVariants,
 	) -> Result<Self> {
-		match variant {
-			ConfigVariants::Order2_3 => {
-				Self::open_inner::<Order2_3>(path, id, variant)
-			},
-		}
-	}
-
-	fn open_inner<C: Config>(
-		path: &std::path::PathBuf,
-		id: BTreeTableId,
-		variant: ConfigVariants,
-	) -> Result<Self> {
-		let mut filepath: std::path::PathBuf = std::path::PathBuf::clone(path);
-		filepath.push(id.file_name());
 		Ok(BTreeTable {
 			id,
-			variant,
 		})
 	}
 
@@ -280,13 +244,6 @@ impl BTreeTable {
 	}
 
 	pub fn get(&self, key: &[u8], log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<Vec<u8>>> {
-		match self.variant {
-			ConfigVariants::Order2_3 => {
-				self.get_inner::<Node<Order2_3>, _>(key, log, values, comp)
-			}
-		}
-	}
-	fn get_inner<N: NodeT, Q: LogQuery>(&self, key: &[u8], log: &Q, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<Vec<u8>>> {
 		let (root_index, depth) = if let Some(btree_index) = log.btree_index(self.id) {
 			(btree_index.root, btree_index.depth)
 		} else {
@@ -297,10 +254,10 @@ impl BTreeTable {
 			return Ok(None);
 		}
 		let record_id = 0; // lifetime of Btree is the query, so no invalidate.
-		let root = self.get_index::<N, Q>(root_index, log, values, comp)?;
-		let root = N::from_encoded(root);
+		let root = self.get_index::<Node, _>(root_index, log, values, comp)?;
+		let root = Node::from_encoded(root);
 		// keeping log locked when parsing tree.
-		let mut tree = btree::BTree::<N>::new(Some(root_index), root, depth, record_id);
+		let mut tree = btree::BTree::<Node>::new(Some(root_index), root, depth, record_id);
 		tree.get_with_lock(key, self, values, log, comp)
 	}
 
@@ -405,26 +362,11 @@ pub mod commit_overlay {
 			writer: &mut LogWriter,
 			ops: &mut u64,
 		) -> Result<()> {
-			match column.with_btree(|btree| Ok(btree.variant))? {
-				ConfigVariants::Order2_3 => self.write_plan_inner::<Node<Order2_3>>(
-					column,
-					writer,
-					ops,
-				),
-			}
-		}
-
-		fn write_plan_inner<N: NodeT>(
-			&self,
-			column: &Column,
-			writer: &mut LogWriter,
-			ops: &mut u64,
-		) -> Result<()> {
 			let origin = crate::column::ValueTableOrigin::BTree(crate::btree::BTreeTableId::new(self.col));
 			// TODO consider runing on btree with ValueTable as params.
 			let record_id = writer.record_id();
 			// This is not racy as we have a single thread writing plan, so a single btree instance.
-			let (mut tree, table_id) = new_btree_inner::<N, _>(column, writer, record_id)?;
+			let (mut tree, table_id) = new_btree_inner::<Node, _>(column, writer, record_id)?;
 			if tree.root_index.is_none() {
 				// reserve the header address.
 				if let Some(address) = column.with_value_tables(|t| Ok(BTreeTable::btree_index_address(t)))? {

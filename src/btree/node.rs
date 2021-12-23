@@ -30,7 +30,6 @@ use crate::btree::btree::RemovedChildren;
 
 
 pub trait NodeT: Sized {
-	type Config: Config;
 	type Separator;
 	type Child;
 
@@ -109,9 +108,9 @@ pub trait NodeT: Sized {
 				});
 			}
 
-			if self.has_separator(Self::Config::ORDER - 1) {
+			if self.has_separator(ORDER - 1) {
 				// full
-				let middle = Self::Config::ORDER / 2;
+				let middle = ORDER / 2;
 				let insert = i;
 				let insert_separator = Self::create_separator(key, value, column, log, None, origin)?;
 
@@ -154,9 +153,9 @@ pub trait NodeT: Sized {
 		debug_assert!(depth != 0);
 		let has_child = true;
 		let child = right_child;
-		if self.has_separator(Self::Config::ORDER - 1) {
+		if self.has_separator(ORDER - 1) {
 			// full
-			let middle = Self::Config::ORDER / 2;
+			let middle = ORDER / 2;
 			let insert = at;
 			if insert == middle {
 				let (mut right, right_ix) = self.split(middle, true, None, None, has_child, removed_node);
@@ -253,7 +252,7 @@ pub trait NodeT: Sized {
 		removed_nodes: &mut RemovedChildren<Self>,
 	) -> Result<()> {
 		let has_child = depth - 1 != 0;
-		let middle = Self::Config::ORDER / 2;
+		let middle = ORDER / 2;
 		let mut balance_from_left = false;
 		if at > 0 {
 			if let Some(node) = self.fetch_child(at - 1, column, log)? {
@@ -357,7 +356,7 @@ pub trait NodeT: Sized {
 
 	fn need_rebalance(&mut self) -> bool {
 		let mut rebalance = false;
-		let middle = Self::Config::ORDER / 2;
+		let middle = ORDER / 2;
 		if !self.has_separator(middle - 1) {
 			rebalance = true;
 		}
@@ -430,12 +429,12 @@ pub trait NodeT: Sized {
 	#[cfg(test)]
 	fn is_balanced(&mut self, column: &Column, log: &impl LogQuery, parent_size: usize) -> Result<bool> {
 		let size = self.number_separator();
-		if parent_size != 0 && size < Self::Config::ORDER / 2 {
+		if parent_size != 0 && size < ORDER / 2 {
 			return Ok(false);
 		}
 
 		let mut i = 0;
-		while i < Self::Config::ORDER {
+		while i < ORDER {
 			let child = self.fetch_child(i, column, log)?;
 			i += 1;
 			if child.is_none() {
@@ -453,9 +452,9 @@ pub trait NodeT: Sized {
 /// Nodes with data loaded in memory.
 /// Nodes get only serialized when flushed in the global overlay
 /// (there we need one entry per record id).
-pub struct Node<C: Config> {
-	separators: C::Separators,
-	children: C::Children,
+pub struct Node {
+	separators: [node::Separator; ORDER],
+	children: [node::Child; ORDER_CHILD],
 	changed: bool,
 }
 
@@ -485,20 +484,20 @@ pub struct ChildState {
 	pub moved: bool,
 }
 
-pub struct Child<C: Config> {
+pub struct Child {
 	state: ChildState,
-	node: Option<Box<Node<C>>>, // lazy fetch.
+	node: Option<Box<Node>>, // lazy fetch.
 	entry_index: Option<u64>, // no index is new.
 }
-impl<C: Config> Default for Child<C> {
+impl Default for Child {
 	fn default() -> Self {
 		let state = ChildState::default();
 		Child { state, node: None, entry_index: None }
 	}
 }
 
-impl<C: Config> Child<C> {
-	fn new(node: Box<Node<C>>, entry_index: Option<u64>) -> Self {
+impl Child {
+	fn new(node: Box<Node>, entry_index: Option<u64>) -> Self {
 		let mut state = ChildState::default();
 		state.fetched = true;
 		state.modified = true;
@@ -511,10 +510,9 @@ impl<C: Config> Child<C> {
 	}
 }
 
-impl<C: Config> NodeT for Node<C> {
-	type Config = C;
+impl NodeT for Node {
 	type Separator = Separator;
-	type Child = Child<C>;
+	type Child = Child;
 
 	fn new() -> Self {
 		Node {
@@ -532,7 +530,7 @@ impl<C: Config> NodeT for Node<C> {
 
 	fn from_encoded(enc: Vec<u8>) -> Self {
 		let mut entry = Entry::from_encoded(enc);
-		let mut node = Node::<Self::Config> {
+		let mut node = Node {
 			separators: Default::default(),
 			children: Default::default(),
 			changed: false,
@@ -545,7 +543,7 @@ impl<C: Config> NodeT for Node<C> {
 				
 			}
 			i_children += 1;
-			if i_children == <Self::Config as Config>::ORDER_CHILD {
+			if i_children == ORDER_CHILD {
 				break;
 			}
 			if let Some(sep) = entry.read_separator() {
@@ -649,7 +647,7 @@ impl<C: Config> NodeT for Node<C> {
 		(child.entry_index, child.node)
 	}
 
-	fn set_child(&mut self, at: usize, mut child: Child<C>) {
+	fn set_child(&mut self, at: usize, mut child: Child) {
 		child.state.moved = true;
 		self.changed = true;
 		self.children.as_mut()[at] = child;
@@ -689,7 +687,7 @@ impl<C: Config> NodeT for Node<C> {
 		at: usize,
 		skip_left_child: bool,
 		mut insert_right: Option<(usize, Separator)>,
-		mut insert_right_child: Option<(usize, Child<C>)>,
+		mut insert_right_child: Option<(usize, Child)>,
 		has_child: bool,
 		removed_node: &mut RemovedChildren<Self>,
 	) -> (Box<Self>, Option<u64>) {
@@ -704,7 +702,7 @@ impl<C: Config> NodeT for Node<C> {
 		};
 		let mut offset = 0;
 		let right_start = at;
-		for i in right_start .. C::ORDER {
+		for i in right_start .. ORDER {
 			let sep = self.remove_separator(i);
 			if insert_right.as_ref().map(|ins| ins.0 == i).unwrap_or(false) {
 				if let Some((_, sep)) = insert_right.take() {
@@ -715,13 +713,13 @@ impl<C: Config> NodeT for Node<C> {
 			right.separators.as_mut()[i + offset - right_start] = sep;
 		}
 		if let Some((insert, sep)) = insert_right.take() {
-			debug_assert!(insert == C::ORDER);
+			debug_assert!(insert == ORDER);
 			right.separators.as_mut()[insert - right_start] = sep;
 		}
 		let mut offset = 0;
 		if has_child {
 			let skip_offset = if skip_left_child { 1 } else { 0 };
-			for i in right_start + skip_offset .. C::ORDER_CHILD {
+			for i in right_start + skip_offset .. ORDER_CHILD {
 				let child = self.remove_child(i);
 				if insert_right_child.as_ref().map(|ins| ins.0 == i + 1).unwrap_or(false) {
 					offset = 1;
@@ -733,7 +731,7 @@ impl<C: Config> NodeT for Node<C> {
 				right.children.as_mut()[i + offset - right_start] = child;
 			}
 			if let Some((insert, mut child)) = insert_right_child.take() {
-				debug_assert!(insert == C::ORDER);
+				debug_assert!(insert == ORDER);
 				child.state.moved = true;
 				right.children.as_mut()[insert + 1 - right_start] = child;
 			}
@@ -748,7 +746,7 @@ impl<C: Config> NodeT for Node<C> {
 		while current.separator.is_some() {
 			current.modified = true;
 			i += 1;
-			if i == C::ORDER {
+			if i == ORDER {
 				break;
 			}
 			let mut next = self.get_separator(i);
@@ -764,7 +762,7 @@ impl<C: Config> NodeT for Node<C> {
 			while current.entry_index.is_some() || current.node.is_some() {
 				current.state.moved = true;
 				i += 1;
-				if i == C::ORDER_CHILD {
+				if i == ORDER_CHILD {
 					break;
 				}
 				let mut next = self.get_child_index(i);
@@ -776,7 +774,7 @@ impl<C: Config> NodeT for Node<C> {
 	fn remove_from(&mut self, from: usize, has_child: bool, with_left_child: bool) {
 		let mut i = from;
 		self.changed = true;
-		while i < C::ORDER - 1 {
+		while i < ORDER - 1 {
 			self.separators.as_mut()[i] = self.remove_separator(i + 1);
 			self.separators.as_mut()[i].modified = true;
 			if self.separators.as_mut()[i].separator.is_none() {
@@ -790,7 +788,7 @@ impl<C: Config> NodeT for Node<C> {
 			} else {
 				from + 1
 			};
-			while i < C::ORDER_CHILD - 1 {
+			while i < ORDER_CHILD - 1 {
 				self.children.as_mut()[i] = self.remove_child(i + 1);
 				if self.children.as_mut()[i].entry_index.is_none() && self.children.as_mut()[i].node.is_none() {
 					break;
@@ -804,7 +802,7 @@ impl<C: Config> NodeT for Node<C> {
 		let mut i = 0;
 		while self.get_separator(i).separator.is_some() {
 			i += 1;
-			if i == C::ORDER {
+			if i == ORDER {
 				break;
 			}
 		}
@@ -826,7 +824,7 @@ impl<C: Config> NodeT for Node<C> {
 				},
 			}
 			i += 1;
-			if i == C::ORDER {
+			if i == ORDER {
 				break;
 			}
 		}
@@ -884,7 +882,7 @@ impl<C: Config> NodeT for Node<C> {
 				entry.write_child_index(0);
 				i_children += 1
 			}
-			if i_children == <Self::Config as Config>::ORDER_CHILD {
+			if i_children == ORDER_CHILD {
 				break;
 			}
 			if let Some(sep) = &self.separators.as_mut()[i_separator].separator {
@@ -924,16 +922,16 @@ impl<C: Config> NodeT for Node<C> {
 
 }
 
-impl<C: Config> Node<C> {
+impl Node {
 	fn get_separator(&mut self, at: usize) -> &mut Separator {
 		&mut self.separators.as_mut()[at]
 	}
 
-	fn get_child_index(&mut self, at: usize) -> &mut Child<C> {
+	fn get_child_index(&mut self, at: usize) -> &mut Child {
 		&mut self.children.as_mut()[at]
 	}
 
-	fn get_fetched_child_index(&mut self, i: usize, column: &Column, log: &impl LogQuery) -> Result<&mut Child<C>> {
+	fn get_fetched_child_index(&mut self, i: usize, column: &Column, log: &impl LogQuery) -> Result<&mut Child> {
 		let mut child = self.get_child_index(i);
 		if !child.state.fetched {
 			if let Some(ix) = child.entry_index {
@@ -946,7 +944,7 @@ impl<C: Config> Node<C> {
 	}
 
 	// TODO merge with get_fetched_child_index
-	fn get_fetched_child_index_from_btree(&mut self, i: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<&mut Child<C>> {
+	fn get_fetched_child_index_from_btree(&mut self, i: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<&mut Child> {
 		let mut child = self.get_child_index(i);
 		if !child.state.fetched {
 			if let Some(ix) = child.entry_index {

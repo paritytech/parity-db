@@ -37,17 +37,14 @@ pub struct BTree<N: NodeT> {
 
 pub struct BTreeIterator<'a> {
 	db: &'a crate::db::DbInner,
-	pub(crate) iter: BTreeIterVariants,
+	pub(crate) iter: BtreeIterBackend,
 	pub(crate) col: ColId,
 	pub(crate) pending_next_backend: Option<Option<(Vec<u8>, Vec<u8>)>>,
 	pub(crate) overlay_last_key: Option<Vec<u8>>,
 	pub(crate) from_seek: bool,
 }
 
-pub enum BTreeIterVariants {
-	Order2_3(BTree<Node<Order2_3>>, BTreeIter<Node<Order2_3>>),
-	// TODO
-}
+pub struct BtreeIterBackend(BTree<Node>, BTreeIter<Node>);
 
 impl<'a> BTreeIterator<'a> {
 	pub(crate) fn new(
@@ -56,23 +53,17 @@ impl<'a> BTreeIterator<'a> {
 		log: &RwLock<crate::log::LogOverlays>,
 	) -> Result<Self> {
 		let column = db.column(col);
-		let variant = column.with_btree(|btree| Ok(btree.variant))?;
-		match variant {
-			ConfigVariants::Order2_3 => {
-				// TODO move new_btree_inner to parent.
-				let record_id = log.read().btree_last_record_id(col);
-				let (tree, _table_id) = new_btree_inner::<Node<crate::btree::Order2_3>, _>(column, log, record_id)?;
-				let iter = tree.iter();
-				Ok(BTreeIterator {
-					db,
-					iter: BTreeIterVariants::Order2_3(tree, iter),
-					col,
-					pending_next_backend: None,
-					overlay_last_key: None,
-					from_seek: false,
-				})
-			},
-		}
+		let record_id = log.read().btree_last_record_id(col);
+		let (tree, _table_id) = new_btree_inner::<Node, _>(column, log, record_id)?;
+		let iter = tree.iter();
+		Ok(BTreeIterator {
+			db,
+			iter: BtreeIterBackend(tree, iter),
+			col,
+			pending_next_backend: None,
+			overlay_last_key: None,
+			from_seek: false,
+		})
 	}
 
 	pub fn seek(&mut self, key: &[u8]) -> Result<()> {
@@ -85,7 +76,7 @@ impl<'a> BTreeIterator<'a> {
 	/*
 	pub fn last_key(&self) -> &Option<Vec<u8>> {
 		match &self.iter {
-			BTreeIterVariants::Order2_3(_tree, iter) => {
+			BtreeIterBackend::Order2_3(_tree, iter) => {
 				&iter.last_key
 			},
 		}
@@ -93,34 +84,28 @@ impl<'a> BTreeIterator<'a> {
 
 	pub fn set_last_key(&mut self, key: Vec<u8>) {
 		match &mut self.iter {
-			BTreeIterVariants::Order2_3(_tree, iter) => {
+			BtreeIterBackend::Order2_3(_tree, iter) => {
 				iter.last_key = Some(key);
 			},
 		}
 	}*/
 
 	pub fn next_backend(&mut self, record_id: u64, col: &Column, log: &impl LogQuery) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-		match &mut self.iter {
-			BTreeIterVariants::Order2_3(tree, iter) => {
-				if record_id != tree.record_id {
-					let (new_tree, _table_id) = new_btree_inner::<Node<crate::btree::Order2_3>, _>(col, log, record_id)?;
-					*tree = new_tree;
-				}
-				iter.next(tree, col, log)
-			}
+		let BtreeIterBackend(tree, iter) = &mut self.iter;
+		if record_id != tree.record_id {
+			let (new_tree, _table_id) = new_btree_inner::<Node, _>(col, log, record_id)?;
+			*tree = new_tree;
 		}
+		iter.next(tree, col, log)
 	}
 
 	pub fn seek_backend(&mut self, key: Vec<u8>, record_id: u64, col: &Column, log: &impl LogQuery, after: bool) -> Result<()> {
-		match &mut self.iter {
-			BTreeIterVariants::Order2_3(tree, iter) => {
-				if record_id != tree.record_id {
-					let (new_tree, _table_id) = new_btree_inner::<Node<crate::btree::Order2_3>, _>(col, log, record_id)?;
-					*tree = new_tree;
-				}
-				iter.seek(key, tree, col, log, after)
-			}
+		let BtreeIterBackend(tree, iter) = &mut self.iter;
+		if record_id != tree.record_id {
+			let (new_tree, _table_id) = new_btree_inner::<Node, _>(col, log, record_id)?;
+			*tree = new_tree;
 		}
+		iter.seek(key, tree, col, log, after)
 	}
 }
 
@@ -188,7 +173,7 @@ impl<N: NodeT> BTreeIter<N> {
 
 		if let Some((ix, node)) = self.state.last_mut() {
 			let node: &mut Box<N> = unsafe { node.as_mut().unwrap() };
-			if *ix < N::Config::ORDER {
+			if *ix < ORDER {
 				if let Some(address) = node.separator_get_info(*ix) {
 					let key = node.separator_key(*ix).unwrap();
 					// Warning, this only work as long as we have one iterator
@@ -332,7 +317,7 @@ mod test {
 		let db = crate::Db::open_inner(&options, true, false, crate::db::TestDbTarget::Standard, false).unwrap();
 
 		let root = Node::new();
-		let mut tree = BTree::<Node<crate::btree::Order2_3>>::new(None, root, 0, record_id);
+		let mut tree = BTree::<Node>::new(None, root, 0, record_id);
 		let overlays = RwLock::new(LogOverlays::default());
 		let mut log_overlay = LogWriter::new(&overlays, record_id);
 		for (key, value) in change_set.iter() {
