@@ -33,7 +33,7 @@
 //
 // This sequence is repeated ORDER time and a last CHILD index is added.
 
-use node::{NodeT, SeparatorInner};
+use node::SeparatorInner;
 use crate::table::{Entry as LogEntry, ValueTable};
 use crate::table::key::{TableKeyQuery, NoHash};
 use crate::options::Options;
@@ -254,14 +254,14 @@ impl BTreeTable {
 			return Ok(None);
 		}
 		let record_id = 0; // lifetime of Btree is the query, so no invalidate.
-		let root = self.get_index::<Node, _>(root_index, log, values, comp)?;
+		let root = self.get_index(root_index, log, values, comp)?;
 		let root = Node::from_encoded(root);
 		// keeping log locked when parsing tree.
-		let mut tree = btree::BTree::<Node>::new(Some(root_index), root, depth, record_id);
+		let mut tree = btree::BTree::new(Some(root_index), root, depth, record_id);
 		tree.get_with_lock(key, self, values, log, comp)
 	}
 
-	fn get_index<N: NodeT, Q: LogQuery>(&self, at: u64, log: &Q, tables: &Vec<ValueTable>, comp: &Compress) -> Result<Vec<u8>> {
+	fn get_index(&self, at: u64, log: &impl LogQuery, tables: &Vec<ValueTable>, comp: &Compress) -> Result<Vec<u8>> {
 		let key_query = TableKeyQuery::Check(&NoHash);
 		if let Some((_tier, value)) = Column::get_at_value_index_locked(key_query, Address::from_u64(at), tables, log, comp)? {
 			Ok(value)
@@ -271,11 +271,11 @@ impl BTreeTable {
 	}
 }
 
-pub fn new_btree_inner<N: NodeT, L: crate::log::LogQuery>(
+pub fn new_btree_inner(
 	column: &Column,
-	log: &L,
+	log: &impl LogQuery,
 	record_id: u64,
-) -> Result<(btree::BTree<N>, BTreeTableId)> {
+) -> Result<(btree::BTree, BTreeTableId)> {
 	let (root, root_index, btree_index, table_id) = column.with_value_tables_and_btree(|btree, values, comp| {
 		let btree_index = if let Some(btree_index) = log.btree_index(btree.id) {
 			btree_index
@@ -284,10 +284,10 @@ pub fn new_btree_inner<N: NodeT, L: crate::log::LogQuery>(
 		};
 
 		let (root_index, root) = if btree_index.root == HEADER_POSITION {
-			(None, N::new())
+			(None, Node::new())
 		} else {
-			let root = btree.get_index::<N, _>(btree_index.root, log, values, comp)?;
-			(Some(btree_index.root), N::from_encoded(root))
+			let root = btree.get_index(btree_index.root, log, values, comp)?;
+			(Some(btree_index.root), Node::from_encoded(root))
 		};
 		Ok((
 			root,
@@ -297,7 +297,7 @@ pub fn new_btree_inner<N: NodeT, L: crate::log::LogQuery>(
 		))
 	})?;
 	Ok((
-		btree::BTree::<N>::new(root_index, root, btree_index.depth, record_id),
+		btree::BTree::new(root_index, root, btree_index.depth, record_id),
 		table_id,
 	))
 }
@@ -366,7 +366,7 @@ pub mod commit_overlay {
 			// TODO consider runing on btree with ValueTable as params.
 			let record_id = writer.record_id();
 			// This is not racy as we have a single thread writing plan, so a single btree instance.
-			let (mut tree, table_id) = new_btree_inner::<Node, _>(column, writer, record_id)?;
+			let (mut tree, table_id) = new_btree_inner(column, writer, record_id)?;
 			if tree.root_index.is_none() {
 				// reserve the header address.
 				if let Some(address) = column.with_value_tables(|t| Ok(BTreeTable::btree_index_address(t)))? {

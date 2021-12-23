@@ -27,11 +27,11 @@ use parking_lot::RwLock;
 
 /// In memory local btree overlay.
 
-pub struct BTree<N: NodeT> {
+pub struct BTree {
 	pub(super) depth: u32,
-	root: Box<N>,
+	root: Box<Node>,
 	pub(super) root_index: Option<u64>,
-	removed_children: RemovedChildren<N>,
+	removed_children: RemovedChildren,
 	record_id: u64,
 }
 
@@ -44,7 +44,7 @@ pub struct BTreeIterator<'a> {
 	pub(crate) from_seek: bool,
 }
 
-pub struct BtreeIterBackend(BTree<Node>, BTreeIter<Node>);
+pub struct BtreeIterBackend(BTree, BTreeIter);
 
 impl<'a> BTreeIterator<'a> {
 	pub(crate) fn new(
@@ -54,7 +54,7 @@ impl<'a> BTreeIterator<'a> {
 	) -> Result<Self> {
 		let column = db.column(col);
 		let record_id = log.read().btree_last_record_id(col);
-		let (tree, _table_id) = new_btree_inner::<Node, _>(column, log, record_id)?;
+		let (tree, _table_id) = new_btree_inner(column, log, record_id)?;
 		let iter = tree.iter();
 		Ok(BTreeIterator {
 			db,
@@ -93,7 +93,7 @@ impl<'a> BTreeIterator<'a> {
 	pub fn next_backend(&mut self, record_id: u64, col: &Column, log: &impl LogQuery) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
 		if record_id != tree.record_id {
-			let (new_tree, _table_id) = new_btree_inner::<Node, _>(col, log, record_id)?;
+			let (new_tree, _table_id) = new_btree_inner(col, log, record_id)?;
 			*tree = new_tree;
 		}
 		iter.next(tree, col, log)
@@ -102,29 +102,29 @@ impl<'a> BTreeIterator<'a> {
 	pub fn seek_backend(&mut self, key: Vec<u8>, record_id: u64, col: &Column, log: &impl LogQuery, after: bool) -> Result<()> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
 		if record_id != tree.record_id {
-			let (new_tree, _table_id) = new_btree_inner::<Node, _>(col, log, record_id)?;
+			let (new_tree, _table_id) = new_btree_inner(col, log, record_id)?;
 			*tree = new_tree;
 		}
 		iter.seek(key, tree, col, log, after)
 	}
 }
 
-pub struct BTreeIter<N: NodeT> {
+pub struct BTreeIter {
 	// TODO could just use NodeBox and fetch, but this could allow caching, then this is better
-	state: Vec<(usize, *mut Box<N>)>,
+	state: Vec<(usize, *mut Box<Node>)>,
 	next_separator: bool,
 	pub record_id: u64,
 	pub last_key: Option<Vec<u8>>, // used to seek if state did change.
 }
 
-pub struct RemovedChildren<N: NodeT>(Vec<(Option<u64>, Option<Box<N>>)>);
+pub struct RemovedChildren(Vec<(Option<u64>, Option<Box<Node>>)>);
 
-impl<N: NodeT> RemovedChildren<N> {
-	pub fn push(&mut self, index: Option<u64>, node: Option<Box<N>>) {
+impl RemovedChildren {
+	pub fn push(&mut self, index: Option<u64>, node: Option<Box<Node>>) {
 		self.0.push((index, node));
 	}
 
-	pub fn available(&mut self) -> (Option<u64>, Option<Box<N>>) {
+	pub fn available(&mut self) -> (Option<u64>, Option<Box<Node>>) {
 		let mut index = None;
 		let mut node = None;
 		for i in self.0.iter_mut().rev() {
@@ -145,8 +145,8 @@ impl<N: NodeT> RemovedChildren<N> {
 	}
 }
 
-impl<N: NodeT> BTreeIter<N> {
-	pub fn next(&mut self, btree: &mut BTree<N>, col: &Column, log: &impl LogQuery) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+impl BTreeIter {
+	pub fn next(&mut self, btree: &mut BTree, col: &Column, log: &impl LogQuery) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 		if self.next_separator && self.state.is_empty() {
 			return Ok(None);
 		}
@@ -161,7 +161,7 @@ impl<N: NodeT> BTreeIter<N> {
 				self.state.push((0, &mut btree.root));
 			}
 			while let Some((ix, node)) = self.state.last_mut() {
-				let node: &mut Box<N> = unsafe { node.as_mut().unwrap() };
+				let node: &mut Box<Node> = unsafe { node.as_mut().unwrap() };
 				if let Some(child) = node.fetch_child_box(*ix, col, log)? {
 					self.state.push((0, child));
 				} else {
@@ -172,7 +172,7 @@ impl<N: NodeT> BTreeIter<N> {
 		}
 
 		if let Some((ix, node)) = self.state.last_mut() {
-			let node: &mut Box<N> = unsafe { node.as_mut().unwrap() };
+			let node: &mut Box<Node> = unsafe { node.as_mut().unwrap() };
 			if *ix < ORDER {
 				if let Some(address) = node.separator_get_info(*ix) {
 					let key = node.separator_key(*ix).unwrap();
@@ -195,15 +195,15 @@ impl<N: NodeT> BTreeIter<N> {
 		self.next(btree, col, log)
 	}
 
-	pub fn seek(&mut self, key: Vec<u8>, btree: &mut BTree<N>, col: &Column, log: &impl LogQuery, after: bool) -> Result<()> {
+	pub fn seek(&mut self, key: Vec<u8>, btree: &mut BTree, col: &Column, log: &impl LogQuery, after: bool) -> Result<()> {
 		self.state.clear();
 		self.record_id = btree.record_id;
 		self.last_key = Some(key.to_vec());
-		if col.with_value_tables_and_btree(|b, t, c| N::seek(&mut btree.root, key.as_ref(), b, t, log, btree.depth, &mut self.state, c))? {
+		if col.with_value_tables_and_btree(|b, t, c| Node::seek(&mut btree.root, key.as_ref(), b, t, log, btree.depth, &mut self.state, c))? {
 			// on value
 			if after {
 				if let Some((ix, node)) = self.state.last_mut() {
-					let node: &mut Box<N> = unsafe { node.as_mut().unwrap() };
+					let node: &mut Box<Node> = unsafe { node.as_mut().unwrap() };
 					node.try_forget_child(*ix);
 					*ix += 1;
 				}
@@ -218,8 +218,8 @@ impl<N: NodeT> BTreeIter<N> {
 	}
 }
 
-impl<N: NodeT> BTree<N> {
-	pub fn new(root_index: Option<u64>, root: N, depth: u32, record_id: u64) -> Self {
+impl BTree {
+	pub fn new(root_index: Option<u64>, root: Node, depth: u32, record_id: u64) -> Self {
 		BTree {
 			root: Box::new(root),
 			root_index,
@@ -229,7 +229,7 @@ impl<N: NodeT> BTree<N> {
 		}
 	}
 
-	pub fn iter(&self) -> BTreeIter<N> {
+	pub fn iter(&self) -> BTreeIter {
 		BTreeIter {
 			last_key: None,
 			next_separator: false,
@@ -243,7 +243,7 @@ impl<N: NodeT> BTree<N> {
 			Some((sep, right)) => {
 				// add one level
 				self.depth += 1;
-				let left = std::mem::replace(&mut self.root, Box::new(N::new()));
+				let left = std::mem::replace(&mut self.root, Box::new(Node::new()));
 				self.root.set_child_node(0, left, self.root_index);
 				self.root_index = None;
 				self.root.set_child(1, right);
@@ -317,7 +317,7 @@ mod test {
 		let db = crate::Db::open_inner(&options, true, false, crate::db::TestDbTarget::Standard, false).unwrap();
 
 		let root = Node::new();
-		let mut tree = BTree::<Node>::new(None, root, 0, record_id);
+		let mut tree = BTree::new(None, root, 0, record_id);
 		let overlays = RwLock::new(LogOverlays::default());
 		let mut log_overlay = LogWriter::new(&overlays, record_id);
 		for (key, value) in change_set.iter() {

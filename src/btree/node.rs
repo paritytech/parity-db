@@ -28,47 +28,12 @@ use crate::error::Result;
 use crate::index::Address;
 use crate::btree::btree::RemovedChildren;
 
-
-pub trait NodeT: Sized {
-	type Separator;
-	type Child;
-
-	fn new() -> Self;
-	fn clear(&mut self);
-	fn new_child(child: Box<Self>, index: Option<u64>) -> Self::Child;
-	fn inner_child(child: Self::Child) -> (Option<u64>, Option<Box<Self>>);
-	fn from_encoded(enc: Vec<u8>) -> Self;
-	fn remove_separator(&mut self, at: usize) -> Self::Separator;
-	fn has_separator(&mut self, at: usize) -> bool;
-	fn separator_key(&mut self, at: usize) -> Option<Vec<u8>>;
-	fn separator_value_index(&mut self, at: usize) -> Option<u64>;
-	fn separator_get_info(&mut self, at: usize) -> Option<Address>;
-	fn set_separator(&mut self, at: usize, sep: Self::Separator); // TODO a replace separator?
-	fn create_separator(key: &[u8], value: &[u8], column: &Column, log: &mut LogWriter, existing: Option<u64>, origin: ValueTableOrigin) -> Result<Self::Separator>;
-	fn remove_child(&mut self, at: usize) -> Self::Child;
-	fn fetch_child(&mut self, at: usize, col: &Column, log: &impl LogQuery) -> Result<Option<&mut Self>>;
-	fn fetch_child_box(&mut self, at: usize, col: &Column, log: &impl LogQuery) -> Result<Option<&mut Box<Self>>>;
-	fn fetch_child_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Self>>;
-	fn fetch_child_box_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Box<Self>>>;
-	fn try_forget_child(&mut self, at: usize);
-	fn set_child_node(&mut self, at: usize, child: Box<Self>, index: Option<u64>) {
+impl Node {
+	pub fn set_child_node(&mut self, at: usize, child: Box<Self>, index: Option<u64>) {
 		self.set_child(at, Self::new_child(child, index))
 	}
-	fn set_child(&mut self, at: usize, child: Self::Child);
-	fn split(
-		&mut self,
-		at: usize,
-		skip_left_child: bool,
-		insert_right: Option<(usize, Self::Separator)>,
-		insert_right_child: Option<(usize, Self::Child)>,
-		has_child: bool,
-		removed_node: &mut RemovedChildren<Self>,
-	) -> (Box<Self>, Option<u64>);
-	fn shift_from(&mut self, from: usize, has_child: bool, with_left_child: bool);
-	fn remove_from(&mut self, from: usize, has_child: bool, with_left_child: bool);
-	fn position(&mut self, key: &[u8]) -> Result<(bool, usize)>;
-	fn number_separator(&mut self) -> usize;
-	fn last_separator_index(&mut self) -> Option<usize> {
+
+	pub fn last_separator_index(&mut self) -> Option<usize> {
 		let i = self.number_separator();
 		if i == 0 {
 			None
@@ -76,9 +41,8 @@ pub trait NodeT: Sized {
 			Some(i - 1)
 		}
 	}
-	fn write_plan(&mut self, column: &Column, writer: &mut LogWriter, node_id: Option<u64>, table_id: BTreeTableId, btree: &mut BTreeIndex, record_id: u64, origin: ValueTableOrigin) -> Result<Option<u64>>;
 
-	fn insert(
+	pub fn insert(
 		&mut self,
 		depth: u32,
 		key: &[u8],
@@ -87,8 +51,8 @@ pub trait NodeT: Sized {
 		column: &Column,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
-		removed_node: &mut RemovedChildren<Self>,
-	) -> Result<Option<(Self::Separator, Self::Child)>> {
+		removed_node: &mut RemovedChildren,
+	) -> Result<Option<(Separator, Child)>> {
 		let has_child = depth != 0;
 
 		let (at, i) = self.position(key)?;
@@ -142,14 +106,14 @@ pub trait NodeT: Sized {
 		Ok(None)
 	}
 
-	fn insert_node(
+	pub fn insert_node(
 		&mut self,
 		depth: u32,
 		at: usize,
-		separator: Self::Separator,
-		right_child: Self::Child,
-		removed_node: &mut RemovedChildren<Self>,
-	) -> Result<Option<(Self::Separator, Self::Child)>> {
+		separator: Separator,
+		right_child: Child,
+		removed_node: &mut RemovedChildren,
+	) -> Result<Option<(Separator, Child)>> {
 		debug_assert!(depth != 0);
 		let has_child = true;
 		let child = right_child;
@@ -184,7 +148,7 @@ pub trait NodeT: Sized {
 		}
 	}
 
-	fn remove(
+	pub fn remove(
 		&mut self,
 		depth: u32,
 		key: &[u8],
@@ -192,7 +156,7 @@ pub trait NodeT: Sized {
 		column: &Column,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
-		removed: &mut RemovedChildren<Self>,
+		removed: &mut RemovedChildren,
 	) -> Result<bool> {
 		let has_child = depth != 0;
 		let (at, i) = self.position(key)?;
@@ -243,13 +207,13 @@ pub trait NodeT: Sized {
 		Ok(self.need_rebalance())
 	}
 
-	fn rebalance(
+	pub fn rebalance(
 		&mut self,
 		depth: u32,
 		at: usize,
 		column: &Column,
 		log: &impl LogQuery,
-		removed_nodes: &mut RemovedChildren<Self>,
+		removed_nodes: &mut RemovedChildren,
 	) -> Result<()> {
 		let has_child = depth - 1 != 0;
 		let middle = ORDER / 2;
@@ -354,7 +318,7 @@ pub trait NodeT: Sized {
 		Ok(())
 	}
 
-	fn need_rebalance(&mut self) -> bool {
+	pub fn need_rebalance(&mut self) -> bool {
 		let mut rebalance = false;
 		let middle = ORDER / 2;
 		if !self.has_separator(middle - 1) {
@@ -363,15 +327,15 @@ pub trait NodeT: Sized {
 		rebalance
 	}
 
-	fn remove_last(
+	pub fn remove_last(
 		&mut self,
 		depth: u32,
 		record_id: u64,
 		column: &Column,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
-		removed: &mut RemovedChildren<Self>,
-	) -> Result<(bool, Option<Self::Separator>)> {
+		removed: &mut RemovedChildren,
+	) -> Result<(bool, Option<Separator>)> {
 		let last = if let Some(last) = self.last_separator_index() {
 			last
 		} else {
@@ -397,7 +361,7 @@ pub trait NodeT: Sized {
 		}
 	}
 
-	fn get(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Address>> {
+	pub fn get(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Address>> {
 		let (at, i) = self.position(key)?;
 		if at {
 			Ok(self.separator_get_info(i))
@@ -410,7 +374,7 @@ pub trait NodeT: Sized {
 		}
 	}
 	
-	fn seek(from: &mut Box<Self>, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, depth: u32, stack: &mut Vec<(usize, *mut Box<Self>)>, comp: &Compress) -> Result<bool> {
+	pub fn seek(from: &mut Box<Self>, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, depth: u32, stack: &mut Vec<(usize, *mut Box<Self>)>, comp: &Compress) -> Result<bool> {
 		let (at, i) = from.position(key)?;
 		stack.push((i, from));
 		if at {
@@ -427,7 +391,7 @@ pub trait NodeT: Sized {
 	}
 
 	#[cfg(test)]
-	fn is_balanced(&mut self, column: &Column, log: &impl LogQuery, parent_size: usize) -> Result<bool> {
+	pub fn is_balanced(&mut self, column: &Column, log: &impl LogQuery, parent_size: usize) -> Result<bool> {
 		let size = self.number_separator();
 		if parent_size != 0 && size < ORDER / 2 {
 			return Ok(false);
@@ -510,11 +474,8 @@ impl Child {
 	}
 }
 
-impl NodeT for Node {
-	type Separator = Separator;
-	type Child = Child;
-
-	fn new() -> Self {
+impl Node {
+	pub fn new() -> Self {
 		Node {
 			separators: Default::default(),
 			children: Default::default(),
@@ -522,13 +483,13 @@ impl NodeT for Node {
 		}
 	}
 
-	fn clear(&mut self) {
+	pub fn clear(&mut self) {
 		self.separators = Default::default();
 		self.children = Default::default();
 		self.changed = true;
 	}
 
-	fn from_encoded(enc: Vec<u8>) -> Self {
+	pub fn from_encoded(enc: Vec<u8>) -> Self {
 		let mut entry = Entry::from_encoded(enc);
 		let mut node = Node {
 			separators: Default::default(),
@@ -556,7 +517,7 @@ impl NodeT for Node {
 		node
 	}
 
-	fn remove_separator(&mut self, at: usize) -> Self::Separator {
+	pub fn remove_separator(&mut self, at: usize) -> Separator {
 		self.changed = true;
 		let mut separator = std::mem::replace(self.get_separator(at), Separator {
 			modified: true,
@@ -566,7 +527,7 @@ impl NodeT for Node {
 		separator
 	}
 
-	fn remove_child(&mut self, at: usize) -> Self::Child {
+	pub fn remove_child(&mut self, at: usize) -> Child {
 		self.changed = true;
 		let mut state = ChildState::default();
 		state.fetched = true;
@@ -580,7 +541,7 @@ impl NodeT for Node {
 		child
 	}
 
-	fn try_forget_child(&mut self, at: usize) {
+	pub fn try_forget_child(&mut self, at: usize) {
 		let child = &mut self.children.as_mut()[at];
 		if child.state.fetched && !child.state.modified {
 			let mut state = child.state.clone();
@@ -590,70 +551,70 @@ impl NodeT for Node {
 		}
 	}
 
-	fn fetch_child_box(&mut self, at: usize, col: &Column, log: &impl LogQuery) -> Result<Option<&mut Box<Self>>> {
+	pub fn fetch_child_box(&mut self, at: usize, col: &Column, log: &impl LogQuery) -> Result<Option<&mut Box<Self>>> {
 		let child = self.get_fetched_child_index(at, col, log)?;
 		Ok(child.node.as_mut())
 	}
 
-	fn fetch_child(&mut self, at: usize, col: &Column, log: &impl LogQuery) -> Result<Option<&mut Self>> {
+	pub fn fetch_child(&mut self, at: usize, col: &Column, log: &impl LogQuery) -> Result<Option<&mut Self>> {
 		let child = self.get_fetched_child_index(at, col, log)?;
 		Ok(child.node.as_mut().map(|n| n.as_mut()))
 	}
 
-	fn fetch_child_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Self>> {
+	pub fn fetch_child_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Self>> {
 		let child = self.get_fetched_child_index_from_btree(at, btree, log, values, comp)?;
 		Ok(child.node.as_mut().map(|n| n.as_mut()))
 	}
 
-	fn fetch_child_box_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Box<Self>>> {
+	pub fn fetch_child_box_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Box<Self>>> {
 		let child = self.get_fetched_child_index_from_btree(at, btree, log, values, comp)?;
 		Ok(child.node.as_mut())
 	}
 
-	fn has_separator(&mut self, at: usize) -> bool {
+	pub fn has_separator(&mut self, at: usize) -> bool {
 		let at = self.get_separator(at);
 		at.separator.is_some()
 	}
 
-	fn separator_key(&mut self, at: usize) -> Option<Vec<u8>> {
+	pub fn separator_key(&mut self, at: usize) -> Option<Vec<u8>> {
 		let at = self.get_separator(at);
 		at.separator.as_ref().map(|s| {
 			s.key.clone()
 		})
 	}
 
-	fn separator_value_index(&mut self, at: usize) -> Option<u64> {
+	pub fn separator_value_index(&mut self, at: usize) -> Option<u64> {
 		let at = self.get_separator(at);
 		at.separator.as_ref().map(|s| s.value)
 	}
 
-	fn separator_get_info(&mut self, at: usize) -> Option<Address> {
+	pub fn separator_get_info(&mut self, at: usize) -> Option<Address> {
 		let at = self.get_separator(at);
 		at.separator.as_ref().map(|s| Address::from_u64(s.value))
 	}
 	
-	fn set_separator(&mut self, at: usize, mut sep: Separator) {
+	pub fn set_separator(&mut self, at: usize, mut sep: Separator) {
 		sep.modified = true;
 		self.changed = true;
 		self.separators.as_mut()[at] = sep;
 	}
 
-	fn new_child(mut child: Box<Self>, index: Option<u64>) -> Self::Child {
+	pub fn new_child(mut child: Box<Self>, index: Option<u64>) -> Child {
 		child.changed = true;
 		Child::new(child, index)
 	}
 
-	fn inner_child(child: Self::Child) -> (Option<u64>, Option<Box<Self>>) {
+	pub fn inner_child(child: Child) -> (Option<u64>, Option<Box<Self>>) {
 		(child.entry_index, child.node)
 	}
 
-	fn set_child(&mut self, at: usize, mut child: Child) {
+	pub fn set_child(&mut self, at: usize, mut child: Child) {
 		child.state.moved = true;
 		self.changed = true;
 		self.children.as_mut()[at] = child;
 	}
 
-	fn create_separator(key: &[u8], value: &[u8], column: &Column, log: &mut LogWriter, existing: Option<u64>, origin: ValueTableOrigin) -> Result<Self::Separator> {
+	pub fn create_separator(key: &[u8], value: &[u8], column: &Column, log: &mut LogWriter, existing: Option<u64>, origin: ValueTableOrigin) -> Result<Separator> {
 		let key = key.to_vec();
 		let value = if let Some(address) = existing {
 			column.with_tables_and_self(|t, s| s.write_existing_value_plan(
@@ -682,14 +643,14 @@ impl NodeT for Node {
 		})
 	}
 
-	fn split(
+	pub fn split(
 		&mut self,
 		at: usize,
 		skip_left_child: bool,
 		mut insert_right: Option<(usize, Separator)>,
 		mut insert_right_child: Option<(usize, Child)>,
 		has_child: bool,
-		removed_node: &mut RemovedChildren<Self>,
+		removed_node: &mut RemovedChildren,
 	) -> (Box<Self>, Option<u64>) {
 		let (right_ix, mut right) = match removed_node.available() {
 			(ix, Some(mut node)) => {
@@ -739,7 +700,7 @@ impl NodeT for Node {
 		(right, right_ix)
 	}
 
-	fn shift_from(&mut self, from: usize, has_child: bool, with_left_child: bool) {
+	pub fn shift_from(&mut self, from: usize, has_child: bool, with_left_child: bool) {
 		self.changed = true;
 		let mut i = from;
 		let mut current = self.remove_separator(i);
@@ -771,7 +732,7 @@ impl NodeT for Node {
 		}
 	}
 
-	fn remove_from(&mut self, from: usize, has_child: bool, with_left_child: bool) {
+	pub fn remove_from(&mut self, from: usize, has_child: bool, with_left_child: bool) {
 		let mut i = from;
 		self.changed = true;
 		while i < ORDER - 1 {
@@ -798,7 +759,7 @@ impl NodeT for Node {
 		}
 	}
 
-	fn number_separator(&mut self) -> usize {
+	pub fn number_separator(&mut self) -> usize {
 		let mut i = 0;
 		while self.get_separator(i).separator.is_some() {
 			i += 1;
@@ -811,7 +772,7 @@ impl NodeT for Node {
 
 	// Return true if match and matched position.
 	// Return index of first element bigger than key otherwhise.
-	fn position(&mut self, key: &[u8]) -> Result<(bool, usize)> {
+	pub fn position(&mut self, key: &[u8]) -> Result<(bool, usize)> {
 		let mut i = 0;
 		while let Some(separator) = self.get_separator(i).separator.as_mut() {
 			match key[..].cmp(&separator.key[..]) {
@@ -832,7 +793,7 @@ impl NodeT for Node {
 	}
 
 	// TODO default traitify
-	fn write_plan(&mut self, column: &Column, writer: &mut LogWriter, node_id: Option<u64>, table_id: BTreeTableId, btree: &mut BTreeIndex, record_id: u64, origin: ValueTableOrigin) -> Result<Option<u64>> {
+	pub fn write_plan(&mut self, column: &Column, writer: &mut LogWriter, node_id: Option<u64>, table_id: BTreeTableId, btree: &mut BTreeIndex, record_id: u64, origin: ValueTableOrigin) -> Result<Option<u64>> {
 		// TODO currently modified is not set properly so we iterate all, could have a child modified
 		// (but with current use it is only interesting for delete on non existing value)
 
@@ -920,9 +881,6 @@ impl NodeT for Node {
 		Ok(result)
 	}
 
-}
-
-impl Node {
 	fn get_separator(&mut self, at: usize) -> &mut Separator {
 		&mut self.separators.as_mut()[at]
 	}
@@ -936,7 +894,7 @@ impl Node {
 		if !child.state.fetched {
 			if let Some(ix) = child.entry_index {
 				child.state.fetched = true;
-				let entry = column.with_value_tables_and_btree(|btree, values, comp| btree.get_index::<Self, _>(ix, log, values, comp))?;
+				let entry = column.with_value_tables_and_btree(|btree, values, comp| btree.get_index(ix, log, values, comp))?;
 				child.node = Some(Box::new(Self::from_encoded(entry)));
 			}
 		}
@@ -949,7 +907,7 @@ impl Node {
 		if !child.state.fetched {
 			if let Some(ix) = child.entry_index {
 				child.state.fetched = true;
-				let entry = btree.get_index::<Self, _>(ix, log, values, comp)?;
+				let entry = btree.get_index(ix, log, values, comp)?;
 				child.node = Some(Box::new(Self::from_encoded(entry)));
 			}
 		}
