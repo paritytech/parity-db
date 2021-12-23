@@ -19,9 +19,8 @@
 
 
 use super::*;
-use crate::table::ValueTable;
+use crate::table::{ValueTable, key::TableKey};
 use std::cmp::Ordering;
-use crate::table::key::NoHash;
 use crate::log::{LogWriter, LogQuery};
 use crate::column::Column;
 use crate::error::Result;
@@ -164,7 +163,7 @@ impl Node {
 			let existing = self.separator_value_index(i);
 			if let Some(existing) = existing {
 				column.with_tables_and_self(|t, s| s.write_existing_value_plan(
-					&NoHash,
+					&TableKey::NoHash,
 					t,
 					Address::from_u64(existing),
 					None,
@@ -618,7 +617,7 @@ impl Node {
 		let key = key.to_vec();
 		let value = if let Some(address) = existing {
 			column.with_tables_and_self(|t, s| s.write_existing_value_plan(
-				&NoHash,
+				&TableKey::NoHash,
 				t,
 				Address::from_u64(address),
 				Some(value),
@@ -627,7 +626,7 @@ impl Node {
 			))?.1.map(|a| a.as_u64()).unwrap_or(address)
 		} else {
 			column.with_tables_and_self(|t, s| s.write_new_value_plan(
-					&NoHash,
+					&TableKey::NoHash,
 					t,
 					value,
 					log,
@@ -856,7 +855,7 @@ impl Node {
 	
 		let mut result = None;
 		if let Some(existing) = node_id {
-			let k = NoHash;
+			let k = TableKey::NoHash;
 			if let (_, Some(new_index)) = column.with_tables_and_self(|tables, s| s.write_existing_value_plan(
 				&k,
 				tables,
@@ -868,7 +867,7 @@ impl Node {
 				result = Some(new_index.as_u64())
 			}
 		} else {
-			let k = NoHash;
+			let k = TableKey::NoHash;
 			result = Some(column.with_tables_and_self(|t, s| s.write_new_value_plan(
 				&k,
 				t,

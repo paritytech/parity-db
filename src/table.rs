@@ -64,7 +64,7 @@ use std::io::Read;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::sync::Arc;
 use crate::{
-	table::key::{partial_key, TableKey, TableKeyQuery, PARTIAL_SIZE, KeyDefault, NoHash},
+	table::key::{TableKey, TableKeyQuery, PARTIAL_SIZE},
 	error::Result,
 	column::ColId,
 	log::{LogQuery, LogReader, LogWriter},
@@ -166,53 +166,6 @@ pub(crate) struct Entry<B: AsRef<[u8]> + AsMut<[u8]>>(usize, B);
 type FullEntry = Entry<[u8; MAX_ENTRY_BUF_SIZE]>;
 type PartialEntry = Entry<[u8; 10]>;
 type PartialKeyEntry = Entry<[u8; 40]>; // 2 + 4 + 26 + 8
-
-pub(crate) trait TableKeyFetch: Default + std::fmt::Debug {
-	fn fetch(&mut self, buf: &mut FullEntry)-> Result<()>;
-}
-
-pub(crate) trait TableKeyWrite {
-	fn write(&self, buf: &mut FullEntry);
-	fn has_key_at(&self, index: u64, table: &ValueTable, log: &LogWriter) -> Result<bool>;
-}
-
-impl TableKeyFetch for [u8; PARTIAL_SIZE] {
-	fn fetch(&mut self, buf: &mut FullEntry)-> Result<()> {
-		if buf.1.len() >= PARTIAL_SIZE {
-			let pks = buf.read_partial();
-			self.copy_from_slice(&pks);
-		} else {
-			return Err(crate::error::Error::InvalidValueData);
-		}
-		Ok(())
-	}
-}
-
-impl TableKeyWrite for KeyDefault {
-	fn write(&self, buf: &mut FullEntry) {
-		buf.write_slice(partial_key(&self.0));
-	}
-	fn has_key_at(&self, index: u64, table: &ValueTable, log: &LogWriter) -> Result<bool> {
-		Ok(match table.partial_key_at(index, log)? {
-			Some(existing_key) => &existing_key[..] == partial_key(&self.0),
-			None => false,
-		})
-	}
-}
-
-impl TableKeyFetch for () {
-	fn fetch(&mut self, _buf: &mut FullEntry)-> Result<()> {
-		Ok(())
-	}
-}
-
-impl TableKeyWrite for NoHash {
-	fn write(&self, _buf: &mut FullEntry) {
-	}
-	fn has_key_at(&self, index: u64, table: &ValueTable, log: &LogWriter) -> Result<bool> {
-		Ok(!table.is_tombstone(index, log)?)
-	}
-}
 
 impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	#[inline(always)]
@@ -424,9 +377,9 @@ impl ValueTable {
 		})
 	}
 
-	pub(crate) fn value_size<K: TableKey>(&self, _key: &K) -> Option<u16> {
+	pub(crate) fn value_size(&self, key: &TableKey) -> Option<u16> {
 		let base = self.entry_size - SIZE_SIZE as u16 - self.ref_size() as u16;
-		let k_encoded = K::ENCODED_SIZE as u16;
+		let k_encoded = key.encoded_size() as u16;
 		if base < k_encoded {
 			return None;
 		} else {
@@ -436,12 +389,12 @@ impl ValueTable {
 
 	// Return ref counter, partial key and if it was compressed.
 	#[inline(always)]
-	fn for_parts<K: TableKey, Q: LogQuery, F: FnMut(&[u8]) -> bool>(
+	fn for_parts(
 		&self,
-		key: &mut TableKeyQuery<K>,
+		key: &mut TableKeyQuery,
 		mut index: u64,
-		log: &Q,
-		mut f: F,
+		log: &impl LogQuery,
+		mut f: impl FnMut(&[u8]) -> bool,
 	) -> Result<(u32, bool)> {
 		let mut buf = FullEntry::new_uninit();
 		let mut part = 0;
@@ -483,12 +436,12 @@ impl ValueTable {
 					rc = buf.read_rc();
 				}
 				match key {
-					TableKeyQuery::Fetch(to_fetch) => {
-						to_fetch.fetch(buf)?;
+					TableKeyQuery::Fetch(Some(to_fetch)) => {
+						**to_fetch = TableKey::fetch_partial(buf)?;
 					},
+					TableKeyQuery::Fetch(None) => (),
 					TableKeyQuery::Check(k) => {
-						let mut to_fetch = K::Fetch::default();
-						to_fetch.fetch(buf)?;
+						let to_fetch = k.fetch(buf)?;
 						if !k.compare(&to_fetch) {
 							log::debug!(
 								target: "parity-db",
@@ -517,7 +470,7 @@ impl ValueTable {
 		Ok((rc, compressed))
 	}
 
-	pub(crate) fn get(&self, key: &impl TableKey, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool)>> {
+	pub(crate) fn get(&self, key: &TableKey, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool)>> {
 		if let Some((value, compressed, _)) = self.query(&mut TableKeyQuery::Check(key), index, log)? {
 			Ok(Some((value, compressed)))
 		} else {
@@ -525,7 +478,7 @@ impl ValueTable {
 		}
 	}
 
-	pub(crate) fn query<K: TableKey>(&self, key: &mut TableKeyQuery<K>, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool, u32)>> {
+	pub(crate) fn query(&self, key: &mut TableKeyQuery, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool, u32)>> {
 		let mut result = Vec::new();
 		let (rc, compressed) = self.for_parts(key, index, log, |buf| {
 			result.extend_from_slice(buf);
@@ -539,13 +492,13 @@ impl ValueTable {
 
 	pub fn get_with_meta(&self, index: u64, log: &impl LogQuery) -> Result<Option<(Value, u32, [u8; PARTIAL_SIZE], bool)>> {
 		let mut query_key = Default::default();
-		if let Some((value, compressed, rc)) = self.query(&mut TableKeyQuery::<KeyDefault>::Fetch(&mut query_key), index, log)? {
+		if let Some((value, compressed, rc)) = self.query(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index, log)? {
 			return Ok(Some((value, rc, query_key, compressed)));
 		}
 		Ok(None)
 	}
 
-	pub(crate) fn size(&self, key: &impl TableKey, index: u64, log: &impl LogQuery) -> Result<Option<(u32, bool)>> {
+	pub(crate) fn size(&self, key: &TableKey, index: u64, log: &impl LogQuery) -> Result<Option<(u32, bool)>> {
 		let mut result = 0;
 		let (rc, compressed) = self.for_parts(&mut TableKeyQuery::Check(key), index, log, |buf| {
 			result += buf.len() as u32;
@@ -559,7 +512,7 @@ impl ValueTable {
 
 	pub fn partial_key_at(&self, index: u64, log: &impl LogQuery) -> Result<Option<[u8; PARTIAL_SIZE]>> {
 		let mut query_key = Default::default();
-		let (rc, _compressed) = self.for_parts(&mut TableKeyQuery::<KeyDefault>::Fetch(&mut query_key), index, log, |_buf| false)?;
+		let (rc, _compressed) = self.for_parts(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index, log, |_buf| false)?;
 		Ok(if rc == 0 {
 			None
 		} else {
@@ -628,8 +581,8 @@ impl ValueTable {
 		Ok(index)
 	}
 
-	fn overwrite_chain<K: TableKey>(&self, key: &K, value: &[u8], log: &mut LogWriter, at: Option<u64>, compressed: bool) -> Result<u64> {
-		let mut remainder = value.len() + self.ref_size() + K::ENCODED_SIZE;
+	fn overwrite_chain(&self, key: &TableKey, value: &[u8], log: &mut LogWriter, at: Option<u64>, compressed: bool) -> Result<u64> {
+		let mut remainder = value.len() + self.ref_size() + key.encoded_size();
 		let mut offset = 0;
 		let mut start = 0;
 		assert!(self.multipart || value.len() <= self.value_size(key).unwrap() as usize);
@@ -737,11 +690,11 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub(crate) fn write_insert_plan(&self, key: &impl TableKey, value: &[u8], log: &mut LogWriter, compressed: bool) -> Result<u64> {
+	pub(crate) fn write_insert_plan(&self, key: &TableKey, value: &[u8], log: &mut LogWriter, compressed: bool) -> Result<u64> {
 		self.overwrite_chain(key, value, log, None, compressed)
 	}
 
-	pub(crate) fn write_replace_plan(&self, index: u64, key: &impl TableKey, value: &[u8], log: &mut LogWriter, compressed: bool) -> Result<()> {
+	pub(crate) fn write_replace_plan(&self, index: u64, key: &TableKey, value: &[u8], log: &mut LogWriter, compressed: bool) -> Result<()> {
 		self.overwrite_chain(key, value, log, Some(index), compressed)?;
 		Ok(())
 	}
@@ -917,7 +870,7 @@ impl ValueTable {
 			let mut result = Vec::new();
 			// expect only indexed key.
 			let mut _fetch_key = Default::default();
-			match self.for_parts(&mut TableKeyQuery::<KeyDefault>::Fetch(&mut _fetch_key), index, log, |buf| {
+			match self.for_parts(&mut TableKeyQuery::Fetch(Some(&mut _fetch_key)), index, log, |buf| {
 				result.extend_from_slice(buf);
 				true
 			}) {
@@ -939,7 +892,9 @@ impl ValueTable {
 }
 
 pub mod key {
-	use crate::Key;
+	use super::{FullEntry, ValueTable};
+	use crate::{Result, Key};
+	use crate::log::LogWriter;
 
 	pub const PARTIAL_SIZE: usize = 26;
 
@@ -947,60 +902,89 @@ pub mod key {
 		&hash[6..]
 	}
 
-	pub(crate) trait TableKey: crate::table::TableKeyWrite + std::fmt::Display {
-		type Fetch: crate::table::TableKeyFetch;
-		const ENCODED_SIZE: usize;
-
-		fn index(&self) -> Option<u64>;
-
-		fn compare(&self, fetch: &Self::Fetch) -> bool;
+	pub enum TableKey {
+		Partial(Key),
+		NoHash,
 	}
 
-	pub(crate) struct KeyDefault(pub Key);
+	impl TableKey {
+		pub fn encoded_size(&self) -> usize {
+			match self {
+				TableKey::Partial(_) => PARTIAL_SIZE,
+				TableKey::NoHash => 0,
+			}
+		}
 
-	impl std::fmt::Display for KeyDefault {
+		pub fn index(&self) -> Option<u64> {
+			match self {
+				TableKey::Partial(k) => {
+					Some(u64::from_be_bytes((k[0..8]).try_into().unwrap()))
+				},
+				TableKey::NoHash => {
+					None
+				},
+			}
+		}
+
+		pub fn compare(&self, fetch: &Option<[u8; PARTIAL_SIZE]>) -> bool {
+			match (self, fetch) {
+				(TableKey::Partial(k), Some(fetch)) => {
+					partial_key(k) == fetch
+				},
+				(TableKey::NoHash, _) => true,
+				_ => false,
+			}
+		}
+
+		pub(crate) fn fetch_partial(buf: &mut super::FullEntry)-> Result<[u8; PARTIAL_SIZE]> {
+			let mut result = [0u8; PARTIAL_SIZE];
+			if buf.1.len() >= PARTIAL_SIZE {
+				let pks = buf.read_partial();
+				result.copy_from_slice(&pks);
+				return Ok(result)
+			}
+			Err(crate::error::Error::InvalidValueData)
+		}
+
+		pub(crate) fn fetch(&self, buf: &mut super::FullEntry)-> Result<Option<[u8; PARTIAL_SIZE]>> {
+			match self {
+				TableKey::Partial(_k) => Ok(Some(Self::fetch_partial(buf)?)),
+				TableKey::NoHash => Ok(None),
+			}
+		}
+
+		pub(crate) fn write(&self, buf: &mut FullEntry) {
+			match self {
+				TableKey::Partial(k) => {
+					buf.write_slice(partial_key(k));
+				},
+				TableKey::NoHash => (),
+			}
+		}
+
+		pub fn has_key_at(&self, index: u64, table: &ValueTable, log: &LogWriter) -> Result<bool> {
+			match self {
+				TableKey::Partial(k) => Ok(match table.partial_key_at(index, log)? {
+					Some(existing_key) => &existing_key[..] == partial_key(k),
+					None => false,
+				}),
+				TableKey::NoHash => Ok(!table.is_tombstone(index, log)?),
+			}
+		}
+	}
+
+	impl std::fmt::Display for TableKey {
 		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-			write!(f, "{}", crate::display::hex(&self.0))
+			match self {
+				TableKey::Partial(k) => write!(f, "{}", crate::display::hex(k)),
+				TableKey::NoHash => write!(f, "no_hash"),
+			}
 		}
 	}
 
-	impl TableKey for KeyDefault {
-		type Fetch = [u8; PARTIAL_SIZE];
-		const ENCODED_SIZE: usize = PARTIAL_SIZE;
-
-		fn index(&self) -> Option<u64> {
-			Some(u64::from_be_bytes((self.0[0..8]).try_into().unwrap()))
-		}
-
-		fn compare(&self, fetch: &Self::Fetch) -> bool {
-			partial_key(&self.0) == fetch
-		}
-	}
-
-	pub(crate) struct NoHash;
-
-	impl TableKey for NoHash {
-		type Fetch = ();
-		const ENCODED_SIZE: usize = 0;
-
-		fn index(&self) -> Option<u64> {
-			None
-		}
-
-		fn compare(&self, _: &Self::Fetch) -> bool {
-			true
-		}
-	}
-
-	impl std::fmt::Display for NoHash {
-		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-			write!(f, "no_hash")
-		}
-	}
-
-	pub(crate) enum TableKeyQuery<'a, K: TableKey> {
-		Check(&'a K),
-		Fetch(&'a mut K::Fetch),
+	pub(crate) enum TableKeyQuery<'a> {
+		Check(&'a TableKey),
+		Fetch(Option<&'a mut [u8; PARTIAL_SIZE]>),
 	}
 }
 
@@ -1008,7 +992,7 @@ pub mod key {
 mod test {
 	const ENTRY_SIZE: u16 = 64;
 	use crate::Key;
-	use crate::table::key::{TableKey, KeyDefault, NoHash};
+	use crate::table::key::TableKey;
 	use super::{ValueTable, TableId, Value};
 	use crate::{log::{Log, LogWriter, LogAction}, options::{Options, ColumnOptions, CURRENT_VERSION}};
 
@@ -1083,12 +1067,12 @@ mod test {
 		key
 	}
 
-	fn simple_key(k: Key) -> KeyDefault {
-		KeyDefault(k)
+	fn simple_key(k: Key) -> TableKey {
+		TableKey::Partial(k)
 	}
 
-	fn no_hash(_: Key) -> NoHash {
-		NoHash
+	fn no_hash(_: Key) -> TableKey {
+		TableKey::NoHash
 	}
 
 	fn value(size: usize) -> Value {
@@ -1116,7 +1100,7 @@ mod test {
 		let log = dir.log();
 
 		let key = key(1);
-		let key = KeyDefault(key);
+		let key = TableKey::Partial(key);
 		let key = &key;
 		let val = value(19);
 		let compressed = true;
@@ -1148,9 +1132,9 @@ mod test {
 		let log = dir.log();
 
 		let key1 = key(1);
-		let key1 = &KeyDefault(key1);
+		let key1 = &TableKey::Partial(key1);
 		let key2 = key(2);
-		let key2 = &KeyDefault(key2);
+		let key2 = &TableKey::Partial(key2);
 		let val1 = value(11);
 		let val2 = value(21);
 		let compressed = false;
@@ -1181,7 +1165,7 @@ mod test {
 		replace_simple_inner(&Default::default(), no_hash);
 		replace_simple_inner(&rc_options(), no_hash);
 	}
-	fn replace_simple_inner<K: TableKey>(options: &ColumnOptions, table_key: fn(Key) -> K) {
+	fn replace_simple_inner(options: &ColumnOptions, table_key: fn(Key) -> TableKey) {
 		let dir = TempDir::new("replace_simple");
 		let table = dir.table(Some(ENTRY_SIZE), options);
 		let log = dir.log();
@@ -1219,9 +1203,9 @@ mod test {
 		let log = dir.log();
 
 		let key1 = key(1);
-		let key1 = &KeyDefault(key1);
+		let key1 = &TableKey::Partial(key1);
 		let key2 = key(2);
-		let key2 = &KeyDefault(key2);
+		let key2 = &TableKey::Partial(key2);
 		let val1 = value(20000);
 		let val2 = value(30);
 		let val1s = value(5000);
@@ -1259,9 +1243,9 @@ mod test {
 		let log = dir.log();
 
 		let key1 = key(1);
-		let key1 = &KeyDefault(key1);
+		let key1 = &TableKey::Partial(key1);
 		let key2 = key(2);
-		let key2 = &KeyDefault(key2);
+		let key2 = &TableKey::Partial(key2);
 		let val1 = value(5000);
 		let val2 = value(30);
 		let val1l = value(20000);
@@ -1292,7 +1276,7 @@ mod test {
 			let log = dir.log();
 
 			let key = key(1);
-			let key = &KeyDefault(key);
+			let key = &TableKey::Partial(key);
 			let val = value(5000);
 
 			write_ops(&table, &log, |writer| {
@@ -1318,7 +1302,7 @@ mod test {
 		let log = dir.log();
 
 		let key = key(1);
-		let key = &KeyDefault(key);
+		let key = &TableKey::Partial(key);
 		let val = value(10);
 
 		let compressed = false;
@@ -1342,7 +1326,7 @@ mod test {
 		let log = dir.log();
 
 		let key = key(1);
-		let key = &KeyDefault(key);
+		let key = &TableKey::Partial(key);
 		let val = value(32225); // This result in 0x7dff entry size, which conflicts with v4 multipart definition
 
 		let compressed = true;

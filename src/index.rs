@@ -271,7 +271,7 @@ impl IndexTable {
 		key
 	}
 
-	pub(crate) fn get(&self, key: &impl TableKey, sub_index: usize, log: &impl LogQuery) -> (Entry, usize) {
+	pub(crate) fn get(&self, key: &TableKey, sub_index: usize, log: &impl LogQuery) -> (Entry, usize) {
 		log::trace!(target: "parity-db", "{}: Querying {}", self.id, key);
 		let key = if let Some(key) = key.index() {
 			key
@@ -375,7 +375,7 @@ impl IndexTable {
 		return Ok(PlanOutcome::NeedReindex);
 	}
 
-	pub(crate) fn write_insert_plan(&self, key: &impl TableKey, address: Address, sub_index: Option<usize>, log: &mut LogWriter) -> Result<PlanOutcome> {
+	pub(crate) fn write_insert_plan(&self, key: &TableKey, address: Address, sub_index: Option<usize>, log: &mut LogWriter) -> Result<PlanOutcome> {
 		log::trace!(target: "parity-db", "{}: Inserting {} -> {}", self.id, key, address);
 		let key = if let Some(key) = key.index() {
 			key
@@ -415,7 +415,7 @@ impl IndexTable {
 		Ok(PlanOutcome::Skipped)
 	}
 
-	pub(crate) fn write_remove_plan(&self, key: &impl TableKey, sub_index: usize, log: &mut LogWriter) -> Result<PlanOutcome> {
+	pub(crate) fn write_remove_plan(&self, key: &TableKey, sub_index: usize, log: &mut LogWriter) -> Result<PlanOutcome> {
 		log::trace!(target: "parity-db", "{}: Removing {}", self.id, key);
 		let key = if let Some(key) = key.index() {
 			key

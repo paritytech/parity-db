@@ -35,7 +35,7 @@
 
 use node::SeparatorInner;
 use crate::table::{Entry as LogEntry, ValueTable};
-use crate::table::key::{TableKeyQuery, NoHash};
+use crate::table::key::{TableKey, TableKeyQuery};
 use crate::options::Options;
 use crate::index::Address;
 use crate::error::Result;
@@ -215,7 +215,7 @@ impl BTreeTable {
 
 	fn btree_index_address(values: &Vec<ValueTable>) -> Option<Address> {
 		for (tier, v) in values.iter().enumerate() {
-			if v.value_size(&NoHash).map(|s| s >= HEADER_SIZE as u16).unwrap_or(true) {
+			if v.value_size(&TableKey::NoHash).map(|s| s >= HEADER_SIZE as u16).unwrap_or(true) {
 				return Some(Address::new(1, tier as u8));
 			}
 		}
@@ -226,8 +226,7 @@ impl BTreeTable {
 		let mut root = HEADER_POSITION;
 		let mut depth = 0;
 		if let Some(address) = Self::btree_index_address(values) {
-			let mut k = ();
-			let key_query = TableKeyQuery::Fetch::<NoHash>(&mut k);
+			let key_query = TableKeyQuery::Fetch(None);
 			let tier = address.size_tier();
 			if values[tier as usize].is_init() {
 				if let Some(encoded) = Column::get_at_value_index_locked(key_query, address, values, log, comp)? {
@@ -262,7 +261,7 @@ impl BTreeTable {
 	}
 
 	fn get_index(&self, at: u64, log: &impl LogQuery, tables: &Vec<ValueTable>, comp: &Compress) -> Result<Vec<u8>> {
-		let key_query = TableKeyQuery::Check(&NoHash);
+		let key_query = TableKeyQuery::Check(&TableKey::NoHash);
 		if let Some((_tier, value)) = Column::get_at_value_index_locked(key_query, Address::from_u64(at), tables, log, comp)? {
 			Ok(value)
 		} else {
@@ -371,7 +370,7 @@ pub mod commit_overlay {
 				// reserve the header address.
 				if let Some(address) = column.with_value_tables(|t| Ok(BTreeTable::btree_index_address(t)))? {
 					let new_address = column.with_tables_and_self(|t, s| s.write_new_value_plan(
-						&NoHash,
+						&TableKey::NoHash,
 						t,
 						vec![0; HEADER_SIZE as usize].as_slice(),
 						writer,
@@ -404,7 +403,7 @@ pub mod commit_overlay {
 				entry.write_header(&btree_index);
 				if let Some(address) = column.with_value_tables(|t| Ok(BTreeTable::btree_index_address(t)))? {
 					column.with_tables_and_self(|t, s| s.write_existing_value_plan(
-						&NoHash,
+						&TableKey::NoHash,
 						t,
 						address,
 						Some(&entry.encoded.as_ref()[..HEADER_SIZE as usize]),

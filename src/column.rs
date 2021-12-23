@@ -92,7 +92,7 @@ impl std::fmt::Display for ValueTableOrigin {
 }
 
 impl Column {
-	pub(crate) fn get(&self, key: &impl TableKey, log: &impl LogQuery) -> Result<Option<Value>> {
+	pub(crate) fn get(&self, key: &TableKey, log: &impl LogQuery) -> Result<Option<Value>> {
 		let tables = self.tables.read();
 		if let Some((tier, value)) = self.get_in_index(key, &tables.index, &*tables, log)? {
 			if self.collect_stats {
@@ -114,11 +114,11 @@ impl Column {
 		Ok(None)
 	}
 
-	pub(crate) fn get_size(&self, key: &impl TableKey, log: &RwLock<LogOverlays>) -> Result<Option<u32>> {
+	pub(crate) fn get_size(&self, key: &TableKey, log: &RwLock<LogOverlays>) -> Result<Option<u32>> {
 		self.get(key, log).map(|v| v.map(|v| v.len() as u32))
 	}
 
-	fn get_in_index(&self, key: &impl TableKey, index: &IndexTable, tables: &Tables, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
+	fn get_in_index(&self, key: &TableKey, index: &IndexTable, tables: &Tables, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
 		let (mut entry, mut sub_index) = index.get(key, 0, log);
 		while !entry.is_empty() {
 			let address = entry.address(index.id.index_bits());
@@ -136,12 +136,12 @@ impl Column {
 		Ok(None)
 	}
 
-	pub(crate) fn get_at_value_index<K: TableKey>(&self, key: TableKeyQuery<K>, address: Address, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
+	pub(crate) fn get_at_value_index(&self, key: TableKeyQuery, address: Address, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
 		let tables = self.tables.read();
 		Column::get_at_value_index_locked(key, address, &tables.value, log, &self.compression)
 	}
 
-	pub(crate) fn get_at_value_index_locked<K: TableKey>(mut key: TableKeyQuery<K>, address: Address, tables: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<(u8, Value)>> {
+	pub(crate) fn get_at_value_index_locked(mut key: TableKeyQuery, address: Address, tables: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<(u8, Value)>> {
 		let size_tier = address.size_tier() as usize;
 		if let Some((value, compressed, _rc)) = tables[size_tier].query(&mut key, address.offset(), log)? {
 			let value = if compressed {
@@ -155,11 +155,11 @@ impl Column {
 	}
 
 	/// Compress if needed and return the target tier to use.
-	fn compress(&self, key: &impl TableKey, value: &[u8], tables: &Tables) -> (Option<Vec<u8>>, usize) {
+	fn compress(&self, key: &TableKey, value: &[u8], tables: &Tables) -> (Option<Vec<u8>>, usize) {
 		Self::compress_internal(&self.compression, key, value, tables)
 	}
 
-	fn compress_internal(compression: &Compress, key: &impl TableKey, value: &[u8], tables: &Tables) -> (Option<Vec<u8>>, usize) {
+	fn compress_internal(compression: &Compress, key: &TableKey, value: &[u8], tables: &Tables) -> (Option<Vec<u8>>, usize) {
 		let (len, result) = if value.len() > compression.treshold as usize {
 			let cvalue = compression.compress(value);
 			if cvalue.len() < value.len() {
@@ -318,7 +318,7 @@ impl Column {
 		)
 	}
 
-	pub(crate) fn write_reindex_plan(&self, key: &impl TableKey, address: Address, log: &mut LogWriter) -> Result<PlanOutcome> {
+	pub(crate) fn write_reindex_plan(&self, key: &TableKey, address: Address, log: &mut LogWriter) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
 		if Self::search_index(key, &tables.index, &*tables, log)?.is_some() {
@@ -338,7 +338,7 @@ impl Column {
 	}
 
 	fn search_index<'a>(
-		key: &impl TableKey,
+		key: &TableKey,
 		index: &'a IndexTable,
 		tables: &'a Tables,
 		log: &LogWriter
@@ -359,7 +359,7 @@ impl Column {
 	}
 
 	fn search_all_indexes<'a>(
-		key: &impl TableKey,
+		key: &TableKey,
 		tables: &'a Tables,
 		reindex: &'a Reindex,
 		log: &LogWriter
@@ -379,7 +379,7 @@ impl Column {
 
 	pub(crate) fn write_existing_value_plan(
 		&self,
-		key: &impl TableKey,
+		key: &TableKey,
 		tables: &Tables,
 		address: Address,
 		value: Option<&[u8]>,
@@ -484,7 +484,7 @@ impl Column {
 
 	pub(crate) fn write_new_value_plan(
 		&self,
-		key: &impl TableKey,
+		key: &TableKey,
 		tables: &Tables,
 		val: &[u8],
 		log: &mut LogWriter,
@@ -507,7 +507,7 @@ impl Column {
 
 	pub(crate) fn write_plan(
 		&self,
-		key: &impl TableKey,
+		key: &TableKey,
 		value: Option<&[u8]>,
 		log: &mut LogWriter,
 	) -> Result<PlanOutcome> {
@@ -521,7 +521,7 @@ impl Column {
 		&self,
 		tables: parking_lot::RwLockUpgradableReadGuard<'a, Tables>,
 		reindex: parking_lot::RwLockUpgradableReadGuard<'b, Reindex>,
-		key: &impl TableKey,
+		key: &TableKey,
 		value: Option<&[u8]>,
 		log: &mut LogWriter,
 	) -> Result<(PlanOutcome, parking_lot::RwLockUpgradableReadGuard<'a, Tables>, parking_lot::RwLockUpgradableReadGuard<'b, Reindex>)> {
@@ -548,7 +548,7 @@ impl Column {
 	pub(crate) fn write_plan_indexed_with_lock_existing(
 		&self,
 		tables: &Tables,
-		key: &impl TableKey,
+		key: &TableKey,
 		value: Option<&[u8]>,
 		log: &mut LogWriter,
 		table: &IndexTable,
@@ -575,7 +575,7 @@ impl Column {
 		&self,
 		tables: parking_lot::RwLockUpgradableReadGuard<'a, Tables>,
 		reindex: parking_lot::RwLockUpgradableReadGuard<'b, Reindex>,
-		key: &impl TableKey,
+		key: &TableKey,
 		value: &[u8],
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,

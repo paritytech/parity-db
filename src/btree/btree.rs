@@ -18,7 +18,7 @@
 
 use super::*;
 use crate::table::ValueTable;
-use crate::table::key::{TableKeyQuery, NoHash};
+use crate::table::key::{TableKeyQuery, TableKey};
 use crate::log::{LogWriter, LogQuery};
 use crate::column::Column;
 use crate::error::Result;
@@ -182,8 +182,7 @@ impl BTreeIter {
 					*ix += 1;
 					self.next_separator = false;
 
-					let mut k = ();
-					let key_query = TableKeyQuery::Fetch::<NoHash>(&mut k);
+					let key_query = TableKeyQuery::Fetch(None);
 					let r = col.get_at_value_index(key_query, address, log)?;
 					self.last_key = Some(key.clone());
 					return Ok(r.map(|r| (key, r.1)));
@@ -261,8 +260,7 @@ impl BTree {
 
 	pub fn get_with_lock(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Vec<u8>>> {
 		if let Some(address) = self.root.get(key, btree, values, log, comp)? {
-			let mut k = ();
-			let key_query = TableKeyQuery::Fetch::<NoHash>(&mut k);
+			let key_query = TableKeyQuery::Fetch(None);
 			let r = Column::get_at_value_index_locked(key_query, address, values, log, comp)?;
 			Ok(r.map(|r| r.1))
 		} else {
@@ -281,9 +279,8 @@ impl BTree {
 		}
 		for (node_index, _node) in self.removed_children.0.drain(..) {
 			if let Some(index) = node_index {
-				let k = NoHash;
 				column.with_tables_and_self(|tables, s| s.write_existing_value_plan(
-					&k,
+					&TableKey::NoHash,
 					tables,
 					Address::from_u64(index),
 					None,

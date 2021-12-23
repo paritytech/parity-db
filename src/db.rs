@@ -37,7 +37,7 @@ use parking_lot::{RwLock, Mutex, Condvar};
 use fs2::FileExt;
 use crate::{
 	Key,
-	table::key::KeyDefault,
+	table::key::TableKey,
 	error::{Error, Result},
 	column::{ColId, Column, IterState},
 	log::{Log, LogAction},
@@ -194,7 +194,7 @@ impl DbInner {
 		}
 		// Go into tables and log overlay.
 		let log = self.log.overlays();
-		let key = KeyDefault(key);
+		let key = TableKey::Partial(key);
 		self.columns[col as usize].get(&key, log)
 	}
 
@@ -207,7 +207,7 @@ impl DbInner {
 		}
 		// Go into tables and log overlay.
 		let log = self.log.overlays();
-		let key = KeyDefault(key);
+		let key = TableKey::Partial(key);
 		self.columns[col as usize].get_size(&key, log)
 	}
 
@@ -508,7 +508,7 @@ impl DbInner {
 					writer.record_id(),
 				);
 				for (key, address) in batch.into_iter() {
-					let key = KeyDefault(key);
+					let key = TableKey::Partial(key);
 					match column.write_reindex_plan(&key, address, &mut writer)? {
 						PlanOutcome::NeedReindex => {
 							next_reindex = true
@@ -1146,7 +1146,7 @@ impl IndexedChangeSet {
 		reindex: &mut bool,
 	) -> Result<()> {
 		for (key, value) in self.changes.iter() {
-			let key = KeyDefault(*key);
+			let key = TableKey::Partial(*key);
 			match column.write_plan(&key, value.as_ref().map(|v| v.as_slice()), writer)? {
 				// Reindex has triggered another reindex.
 				PlanOutcome::NeedReindex => {
