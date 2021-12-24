@@ -681,11 +681,11 @@ impl Node {
 			let skip_offset = if skip_left_child { 1 } else { 0 };
 			for i in right_start + skip_offset .. ORDER_CHILD {
 				let child = self.remove_child(i);
-				if insert_right_child.as_ref().map(|ins| ins.0 == i + 1).unwrap_or(false) {
+				if insert_right_child.as_ref().map(|ins| ins.0 + 1 == i).unwrap_or(false) {
 					offset = 1;
 					if let Some((_, mut child)) = insert_right_child.take() {
 						child.state.moved = true;
-						right.children.as_mut()[i + offset - right_start] = child;
+						right.children.as_mut()[i - right_start] = child;
 					}
 				}
 				right.children.as_mut()[i + offset - right_start] = child;
