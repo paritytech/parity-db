@@ -387,18 +387,19 @@ impl Node {
 		}
 	}
 
-	pub fn seek(from: &mut Box<Self>, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, depth: u32, stack: &mut Vec<(usize, *mut Box<Self>)>, comp: &Compress) -> Result<bool> {
+	pub fn seek(mut from: Self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, depth: u32, stack: &mut Vec<(usize, Self)>, comp: &Compress) -> Result<bool> {
 		let (at, i) = from.position(key)?;
-		stack.push((i, from));
 		if at {
+			stack.push((i, from));
 			Ok(true)
 		} else {
 			if depth != 0 {
-				if let Some(child) = from.fetch_child_box_from_btree(i, btree, log, values, comp)? {
+				if let Some(child) = from.force_fetch_node_at(i, btree, log, values, comp)? {
+					stack.push((i, from));
 					return Self::seek(child, key, btree, values, log, depth - 1, stack, comp);
 				}
 			}
-
+			stack.push((i, from));
 			Ok(false)
 		}
 	}
@@ -429,12 +430,14 @@ impl Node {
 /// Nodes with data loaded in memory.
 /// Nodes get only serialized when flushed in the global overlay
 /// (there we need one entry per record id).
+#[derive(Clone)]
 pub struct Node {
 	separators: [node::Separator; ORDER],
 	children: [node::Child; ORDER_CHILD],
 	changed: bool,
 }
 
+#[derive(Clone)]
 pub struct Separator {
 	modified: bool,
 	separator: Option<SeparatorInner>,
@@ -449,6 +452,7 @@ impl Default for Separator {
 	}
 }
 
+#[derive(Clone)]
 pub struct SeparatorInner {
 	pub key: Vec<u8>,
 	pub value: u64,
@@ -461,6 +465,7 @@ pub struct ChildState {
 	pub moved: bool,
 }
 
+#[derive(Clone)]
 pub struct Child {
 	state: ChildState,
 	node: Option<Box<Node>>, // lazy fetch.
@@ -554,21 +559,6 @@ impl Node {
 		child
 	}
 
-	pub fn try_forget_child(&mut self, at: usize) {
-		let child = &mut self.children.as_mut()[at];
-		if child.state.fetched && !child.state.modified {
-			let mut state = child.state.clone();
-			state.fetched = false;
-			child.state = state;
-			child.node = None;
-		}
-	}
-
-	pub fn fetch_child_box(&mut self, at: usize, col: &Column, log: &impl LogQuery) -> Result<Option<&mut Box<Self>>> {
-		let child = self.get_fetched_child_index(at, col, log)?;
-		Ok(child.node.as_mut())
-	}
-
 	pub fn fetch_child(&mut self, at: usize, col: &Column, log: &impl LogQuery) -> Result<Option<&mut Self>> {
 		let child = self.get_fetched_child_index(at, col, log)?;
 		Ok(child.node.as_mut().map(|n| n.as_mut()))
@@ -578,11 +568,6 @@ impl Node {
 	pub fn fetch_child_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Self>> {
 		let child = self.get_fetched_child_index_from_btree(at, btree, log, values, comp)?;
 		Ok(child.node.as_mut().map(|n| n.as_mut()))
-	}
-
-	pub fn fetch_child_box_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Box<Self>>> {
-		let child = self.get_fetched_child_index_from_btree(at, btree, log, values, comp)?;
-		Ok(child.node.as_mut())
 	}
 
 	pub fn has_separator(&mut self, at: usize) -> bool {
@@ -925,6 +910,7 @@ impl Node {
 	}
 
 	// TODO merge with get_fetched_child_index
+	#[cfg(test)]
 	fn get_fetched_child_index_from_btree(&mut self, i: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<&mut Child> {
 		let mut child = self.get_child_index(i);
 		if !child.state.fetched {

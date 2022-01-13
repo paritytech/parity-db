@@ -110,8 +110,7 @@ impl<'a> BTreeIterator<'a> {
 }
 
 pub struct BTreeIter {
-	// TODO could just use NodeBox and fetch, but this could allow caching, then this is better
-	state: Vec<(usize, *mut Box<Node>)>,
+	state: Vec<(usize, Node)>,
 	next_separator: bool,
 	pub record_id: u64,
 	pub last_key: Option<Vec<u8>>, // used to seek if state did change.
@@ -158,11 +157,13 @@ impl BTreeIter {
 		}
 		if !self.next_separator {
 			if self.state.is_empty() {
-				self.state.push((0, &mut btree.root));
+				self.state.push((0, btree.root.as_ref().clone()));
 			}
 			while let Some((ix, node)) = self.state.last_mut() {
-				let node: &mut Box<Node> = unsafe { node.as_mut().unwrap() };
-				if let Some(child) = node.fetch_child_box(*ix, col, log)? {
+
+				if let Some(child) = col.with_value_tables_and_btree(|btree, values, comp| {
+					node.force_fetch_node_at(*ix, btree, log, values, comp)
+				})? {
 					self.state.push((0, child));
 				} else {
 					break;
@@ -172,13 +173,9 @@ impl BTreeIter {
 		}
 
 		if let Some((ix, node)) = self.state.last_mut() {
-			let node: &mut Box<Node> = unsafe { node.as_mut().unwrap() };
 			if *ix < ORDER {
 				if let Some(address) = node.separator_get_info(*ix) {
 					let key = node.separator_key(*ix).unwrap();
-					// Warning, this only work as long as we have one iterator
-					// for one btree. Otherwhise using Rc would be needed.
-					node.try_forget_child(*ix);
 					*ix += 1;
 					self.next_separator = false;
 
@@ -198,12 +195,10 @@ impl BTreeIter {
 		self.state.clear();
 		self.record_id = btree.record_id;
 		self.last_key = Some(key.to_vec());
-		if col.with_value_tables_and_btree(|b, t, c| Node::seek(&mut btree.root, key.as_ref(), b, t, log, btree.depth, &mut self.state, c))? {
+		if col.with_value_tables_and_btree(|b, t, c| Node::seek(btree.root.as_ref().clone(), key.as_ref(), b, t, log, btree.depth, &mut self.state, c))? {
 			// on value
 			if after {
-				if let Some((ix, node)) = self.state.last_mut() {
-					let node: &mut Box<Node> = unsafe { node.as_mut().unwrap() };
-					node.try_forget_child(*ix);
+				if let Some((ix, _node)) = self.state.last_mut() {
 					*ix += 1;
 				}
 				self.next_separator = false;
@@ -337,14 +332,9 @@ mod test {
 		}
 
 		let state: BTreeMap<Vec<u8>, Option<Vec<u8>>> = change_set.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-		let mut iter = tree.iter();
 		for (key, value) in state.iter() {
 			assert_eq!(&tree.get(key, db.column(col_nb), &log_overlay).unwrap(), value);
-			if let Some(value) = value.as_ref() {
-				assert_eq!(iter.next(&mut tree, db.column(col_nb), &log_overlay).unwrap(), Some((key.clone(), value.clone())));
-			}
 		}
-		assert_eq!(iter.next(&mut tree, db.column(col_nb), &log_overlay).unwrap(), None);
 		assert!(tree.root.is_balanced(db.column(col_nb), &log_overlay, 0).unwrap());
 	}
 
