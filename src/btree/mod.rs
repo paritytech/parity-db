@@ -50,7 +50,7 @@ mod node;
 
 pub(crate) const HEADER_POSITION: u64 = 0;
 pub(crate) const HEADER_SIZE: u64 = 8 + 4;
-pub(crate) const ENTRY_CAPACITY: usize = 2 * 33 + 2 * 8 + 3 * 8;
+pub(crate) const ENTRY_CAPACITY: usize = ORDER * 33 + ORDER * 8 + ORDER_CHILD * 8;
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub struct BTreeTableId(u8); // contain its column id
@@ -119,7 +119,7 @@ impl From<u8> for ConfigVariants {
 	}
 }
 
-const ORDER: usize = 2;
+const ORDER: usize = 8;
 const ORDER_CHILD: usize = ORDER + 1;
 
 struct Entry {
