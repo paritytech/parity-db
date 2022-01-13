@@ -258,8 +258,19 @@ impl BTree {
 		column.with_value_tables_and_btree(|b, t, c| self.get_with_lock(key, b, t, log, c))
 	}
 
+	#[cfg(test)]
 	pub fn get_with_lock(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Vec<u8>>> {
 		if let Some(address) = self.root.get(key, btree, values, log, comp)? {
+			let key_query = TableKeyQuery::Fetch(None);
+			let r = Column::get_at_value_index_locked(key_query, address, values, log, comp)?;
+			Ok(r.map(|r| r.1))
+		} else {
+			Ok(None)
+		}
+	}
+
+	pub fn get_with_lock_no_cache(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Vec<u8>>> {
+		if let Some(address) = self.root.get_no_cache(key, btree, values, log, comp)? {
 			let key_query = TableKeyQuery::Fetch(None);
 			let r = Column::get_at_value_index_locked(key_query, address, values, log, comp)?;
 			Ok(r.map(|r| r.1))

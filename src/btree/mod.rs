@@ -257,7 +257,7 @@ impl BTreeTable {
 		let root = Node::from_encoded(root);
 		// keeping log locked when parsing tree.
 		let mut tree = btree::BTree::new(Some(root_index), root, depth, record_id);
-		tree.get_with_lock(key, self, values, log, comp)
+		tree.get_with_lock_no_cache(key, self, values, log, comp)
 	}
 
 	fn get_index(&self, at: u64, log: &impl LogQuery, tables: &Vec<ValueTable>, comp: &Compress) -> Result<Vec<u8>> {

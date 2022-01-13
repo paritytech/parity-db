@@ -360,6 +360,20 @@ impl Node {
 		}
 	}
 
+	pub fn get_no_cache(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Address>> {
+		let (at, i) = self.position(key)?;
+		if at {
+			Ok(self.separator_get_info(i))
+		} else {
+			if let Some(mut child) = self.force_fetch_node_at(i, btree, log, values, comp)? {
+				return child.get_no_cache(key, btree, values, log, comp);
+			}
+
+			Ok(None)
+		}
+	}
+
+	#[cfg(test)]
 	pub fn get(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Address>> {
 		let (at, i) = self.position(key)?;
 		if at {
@@ -372,7 +386,7 @@ impl Node {
 			Ok(None)
 		}
 	}
-	
+
 	pub fn seek(from: &mut Box<Self>, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, depth: u32, stack: &mut Vec<(usize, *mut Box<Self>)>, comp: &Compress) -> Result<bool> {
 		let (at, i) = from.position(key)?;
 		stack.push((i, from));
@@ -560,6 +574,7 @@ impl Node {
 		Ok(child.node.as_mut().map(|n| n.as_mut()))
 	}
 
+	#[cfg(test)]
 	pub fn fetch_child_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Self>> {
 		let child = self.get_fetched_child_index_from_btree(at, btree, log, values, comp)?;
 		Ok(child.node.as_mut().map(|n| n.as_mut()))
@@ -886,6 +901,15 @@ impl Node {
 
 	fn get_child_index(&mut self, at: usize) -> &mut Child {
 		&mut self.children.as_mut()[at]
+	}
+
+	pub fn force_fetch_node_at(&mut self, i: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<Self>> {
+		let child = self.get_child_index(i);
+		if let Some(ix) = child.entry_index {
+			let entry = btree.get_index(ix, log, values, comp)?;
+			return Ok(Some(Self::from_encoded(entry)));
+		}
+		Ok(None)
 	}
 
 	fn get_fetched_child_index(&mut self, i: usize, column: &Column, log: &impl LogQuery) -> Result<&mut Child> {
