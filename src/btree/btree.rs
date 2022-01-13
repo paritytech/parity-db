@@ -491,7 +491,7 @@ mod test {
 				Some(key.clone())
 			};
 			let var_keysize = rng.next_u32();
-			let var_keysize = var_keysize as usize % (size / 2);
+			let var_keysize = var_keysize as usize % (key_size / 2);
 			key.truncate(key_size - var_keysize);
 			data.push((key, value));
 		}
