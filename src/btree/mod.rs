@@ -63,18 +63,6 @@ impl BTreeTableId {
 	pub fn col(&self) -> ColId {
 		self.0 as ColId
 	}
-
-	pub fn file_name(&self) -> String {
-		format!("btree_{:02}", self.col())
-	}
-
-	pub fn as_u8(&self) -> u8 {
-		self.0
-	}
-
-	pub fn from_u8(c: u8) -> Self {
-		BTreeTableId(c)
-	}
 }
 
 impl std::fmt::Display for BTreeTableId {
@@ -87,20 +75,6 @@ impl std::fmt::Display for BTreeTableId {
 pub struct BTreeIndex {
 	pub root: u64,
 	pub depth: u32,
-}
-
-pub struct BTreeLogOverlay {
-	pub index: BTreeIndex,
-	pub record_id: u64,
-}
-
-impl BTreeLogOverlay {
-	pub fn new(record_id: u64, index: BTreeIndex) -> Self {
-		BTreeLogOverlay {
-			index,
-			record_id,
-		}
-	}
 }
 
 const ORDER: usize = 8;
@@ -384,7 +358,6 @@ pub mod commit_overlay {
 					))?;
 				}
 			}
-			writer.insert_btree_index(table_id, record_id, btree_index); // TODO only usefull to put record id
 			Ok(())
 		}
 	}

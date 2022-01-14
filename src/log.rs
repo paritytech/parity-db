@@ -21,9 +21,9 @@ use parking_lot::{Condvar, Mutex, RwLock, RwLockWriteGuard, MappedRwLockWriteGua
 use crate::{
 	error::{Error, Result},
 	table::TableId as ValueTableId,
-	btree::{BTreeTableId, BTreeLogOverlay, BTreeIndex},
 	index::{TableId as IndexTableId, Chunk as IndexChunk, ENTRY_BYTES},
 	options::Options,
+	column::ColId,
 };
 
 const MAX_LOG_POOL_SIZE: usize = 16;
@@ -60,13 +60,12 @@ pub trait LogQuery {
 pub struct LogOverlays {
 	index: HashMap<IndexTableId, IndexLogOverlay>,
 	value: HashMap<ValueTableId, ValueLogOverlay>,
-	btree: HashMap<BTreeTableId, BTreeLogOverlay>,
+	last_record_id: HashMap<ColId, u64>,
 }
 
 impl LogOverlays {
-	pub(crate) fn btree_last_record_id(&self, col: crate::column::ColId) -> u64 {
-		let id = BTreeTableId::new(col);
-		self.btree.get(&id).map(|overlay| overlay.record_id).unwrap_or(u64::MAX)
+	pub(crate) fn last_record_id(&self, col: ColId) -> u64 {
+		self.last_record_id.get(&col).cloned().unwrap_or(u64::MAX)
 	}
 }
 
@@ -229,7 +228,6 @@ impl<'a> LogReader<'a> {
 pub struct LogChange {
 	local_index: HashMap<IndexTableId, IndexLogOverlay>,
 	pub(crate) local_values: HashMap<ValueTableId, ValueLogOverlay>, // TODO remove pub
-	local_btree: HashMap<BTreeTableId, BTreeLogOverlay>,
 	record_id: u64,
 	dropped_tables: Vec<IndexTableId>,
 }
@@ -241,7 +239,6 @@ impl LogChange {
 		LogChange {
 			local_index: Default::default(),
 			local_values: Default::default(),
-			local_btree: Default::default(),
 			dropped_tables: Default::default(),
 			record_id,
 		}
@@ -250,7 +247,6 @@ impl LogChange {
 	pub fn to_file(self, file: &mut std::io::BufWriter<std::fs::File>) -> Result<(
 		HashMap<IndexTableId, IndexLogOverlay>,
 		HashMap<ValueTableId, ValueLogOverlay>,
-		HashMap<BTreeTableId, BTreeLogOverlay>,
 		u64,
 	)> {
 		let mut crc32 = crc32fast::Hasher::new();
@@ -298,7 +294,7 @@ impl LogChange {
 		file.write(&checksum.to_le_bytes())?;
 		bytes += 4;
 		file.flush()?;
-		Ok((self.local_index, self.local_values, self.local_btree, bytes))
+		Ok((self.local_index, self.local_values, bytes))
 	}
 }
 
@@ -335,12 +331,6 @@ impl<'a> LogWriter<'a> {
 
 	pub fn insert_value(&mut self, table: ValueTableId, index: u64, data: Vec<u8>) {
 		self.log.local_values.entry(table).or_default().map.insert(index, (self.log.record_id, data.clone()));
-	}
-
-	pub fn insert_btree_index(&mut self, id: BTreeTableId, record_id: u64, btree: BTreeIndex) {
-		let mut overlay = self.log.local_btree.entry(id)
-			.or_insert_with(|| BTreeLogOverlay::new(record_id, btree.clone()));
-		overlay.index = btree;
 	}
 
 	pub fn drop_table(&mut self, id: IndexTableId) {
@@ -539,7 +529,7 @@ impl Log {
 		let mut overlays = self.overlays.write();
 		overlays.index.clear();
 		overlays.value.clear();
-		overlays.btree.clear();
+		overlays.last_record_id.clear();
 		*self.reading_state.lock() = ReadingState::Idle;
 		self.dirty.store(false, Ordering::Relaxed);
 		Ok(())
@@ -578,7 +568,7 @@ impl Log {
 			});
 		}
 		let appending = appending.as_mut().unwrap();
-		let (index, values, btrees, bytes) = log.to_file(&mut appending.file)?;
+		let (index, values, bytes) = log.to_file(&mut appending.file)?;
 		let mut overlays = self.overlays.write();
 		let mut total_index = 0;
 		for (id, overlay) in index.into_iter() {
@@ -588,12 +578,8 @@ impl Log {
 		let mut total_value = 0;
 		for (id, overlay) in values.into_iter() {
 			total_value += overlay.map.len();
+			overlays.last_record_id.insert(id.col(), record_id);
 			overlays.value.entry(id).or_default().map.extend(overlay.map.into_iter());
-		}
-		for (id, overlay) in btrees.into_iter() {
-			let dest = overlays.btree.entry(id).or_insert_with(|| BTreeLogOverlay::new(overlay.record_id, overlay.index.clone()));
-			dest.record_id = overlay.record_id;
-			dest.index = overlay.index;
 		}
 
 		log::debug!(

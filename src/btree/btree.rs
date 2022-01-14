@@ -53,7 +53,7 @@ impl<'a> BTreeIterator<'a> {
 		log: &RwLock<crate::log::LogOverlays>,
 	) -> Result<Self> {
 		let column = db.column(col);
-		let record_id = log.read().btree_last_record_id(col);
+		let record_id = log.read().last_record_id(col);
 		let (tree, _table_id) = new_btree_inner(column, log, record_id)?;
 		let iter = tree.iter();
 		Ok(BTreeIterator {

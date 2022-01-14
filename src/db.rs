@@ -234,7 +234,7 @@ impl DbInner {
 		// (could also have log per column but ~).
 		let col = iter.col;
 		let log = self.log.overlays().read();
-		let record_id = log.btree_last_record_id(iter.col);
+		let record_id = log.last_record_id(iter.col);
 		let commit_overlay = self.commit_overlay.read();
 		let next_commit_overlay = commit_overlay.get(col as usize).and_then(|o| o.btree_next(&iter.overlay_last_key, iter.from_seek));
 		// droping lock to overlay, there is no consistency.
@@ -307,7 +307,7 @@ impl DbInner {
 	pub(crate) fn btree_iter_seek(&self, iter: &mut crate::BTreeIterator, key: &[u8], after: bool) -> Result<()> {
 		// seek require log do not change
 		let log = self.log.overlays().read();
-		let record_id = log.btree_last_record_id(iter.col);
+		let record_id = log.last_record_id(iter.col);
 		iter.from_seek = !after;
 		iter.overlay_last_key = Some(key.to_vec());
 		iter.pending_next_backend = None;
