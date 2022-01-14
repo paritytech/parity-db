@@ -113,7 +113,8 @@ pub struct BTreeIter {
 	state: Vec<(usize, Node)>,
 	next_separator: bool,
 	pub record_id: u64,
-	pub last_key: Option<Vec<u8>>, // used to seek if state did change.
+	// After state change, we seek to this last accessed key.
+	pub last_key: Option<Vec<u8>>,
 }
 
 pub struct RemovedChildren(Vec<(Option<u64>, Option<Box<Node>>)>);
@@ -458,10 +459,16 @@ mod test {
 			(b"key5".to_vec(), None),
 			(b"key3".to_vec(), None),
 		]);
-
-		// TODO big key
+		test_basic(&[
+			([5u8; 250].to_vec(), Some(b"value5".to_vec())),
+			([5u8; 200].to_vec(), Some(b"value3".to_vec())),
+			([5u8; 100].to_vec(), Some(b"value4".to_vec())),
+			([5u8; 150].to_vec(), Some(b"value2".to_vec())),
+			([5u8; 101].to_vec(), Some(b"value1".to_vec())),
+			([5u8; 250].to_vec(), None),
+			([5u8; 101].to_vec(), None),
+		]);
 	}
-
 
 	#[test]
 	fn test_random() {

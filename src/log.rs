@@ -54,7 +54,6 @@ pub enum LogAction {
 pub trait LogQuery {
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R> (&self, table: IndexTableId, index: u64, f: F) -> Option<R>;
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut[u8]) -> bool;
-	fn btree_index(&self, id: BTreeTableId) -> Option<BTreeIndex>;
 }
 
 #[derive(Default)]
@@ -79,10 +78,6 @@ impl LogQuery for RwLock<LogOverlays> {
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut[u8]) -> bool {
 		self.read().value(table, index, dest)
 	}
-
-	fn btree_index(&self, id: BTreeTableId) -> Option<BTreeIndex> {
-		self.read().btree_index(id)
-	}
 }
 
 // TODO This is for locking log on btree access with btree iterator, could be avoided
@@ -101,11 +96,6 @@ impl LogQuery for LogOverlays {
 		} else {
 			false
 		}
-	}
-
-	fn btree_index(&self, id: BTreeTableId) -> Option<BTreeIndex> {
-		let s = self;
-		s.btree.get(&id).map(|o| o.index.clone())
 	}
 }
 
@@ -377,14 +367,6 @@ impl<'a> LogQuery for LogWriter<'a> {
 			true
 		} else {
 			self.overlays.value(table, index, dest)
-		}
-	}
-
-	fn btree_index(&self, id: BTreeTableId) -> Option<BTreeIndex> {
-		if let Some(d) = self.log.local_btree.get(&id).map(|o| o.index.clone()) {
-			Some(d)
-		} else {
-			self.overlays.btree_index(id)
 		}
 	}
 }

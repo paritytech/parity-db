@@ -103,22 +103,6 @@ impl BTreeLogOverlay {
 	}
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum ConfigVariants {
-	Order2_3 = 0,
-	// TODO
-}
-
-impl From<u8> for ConfigVariants {
-	fn from(i: u8) -> Self {
-		match i {
-			0 => ConfigVariants::Order2_3,
-			_ => panic!("Unsupported btree index variant"),
-		}
-	}
-}
-
 const ORDER: usize = 8;
 const ORDER_CHILD: usize = ORDER + 1;
 
@@ -243,20 +227,15 @@ impl BTreeTable {
 	}
 
 	pub fn get(&self, key: &[u8], log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<Vec<u8>>> {
-		let (root_index, depth) = if let Some(btree_index) = log.btree_index(self.id) {
-			(btree_index.root, btree_index.depth)
-		} else {
-			let btree_index = Self::btree_index(log, values, comp)?;
-			(btree_index.root, btree_index.depth)
-		};
-		if root_index == HEADER_POSITION {
+		let btree_index = Self::btree_index(log, values, comp)?;
+		if btree_index.root == HEADER_POSITION {
 			return Ok(None);
 		}
 		let record_id = 0; // lifetime of Btree is the query, so no invalidate.
-		let root = self.get_index(root_index, log, values, comp)?;
+		let root = self.get_index(btree_index.root, log, values, comp)?;
 		let root = Node::from_encoded(root);
 		// keeping log locked when parsing tree.
-		let mut tree = btree::BTree::new(Some(root_index), root, depth, record_id);
+		let mut tree = btree::BTree::new(Some(btree_index.root), root, btree_index.depth, record_id);
 		tree.get_with_lock_no_cache(key, self, values, log, comp)
 	}
 
@@ -276,11 +255,7 @@ pub fn new_btree_inner(
 	record_id: u64,
 ) -> Result<(btree::BTree, BTreeTableId)> {
 	let (root, root_index, btree_index, table_id) = column.with_value_tables_and_btree(|btree, values, comp| {
-		let btree_index = if let Some(btree_index) = log.btree_index(btree.id) {
-			btree_index
-		} else {
-			BTreeTable::btree_index(log, values, comp)?
-		};
+		let btree_index = BTreeTable::btree_index(log, values, comp)?;
 
 		let (root_index, root) = if btree_index.root == HEADER_POSITION {
 			(None, Node::new())
