@@ -1,4 +1,4 @@
-// Copyright 2015-2021 Parity Technologies (UK) Ltd.
+// Copyright 2015-2022 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -1297,14 +1297,14 @@ mod tests {
 
 	#[test]
 	fn test_indexed_btree_1() {
-//		test_indexed_btree_inner(TestDbTarget::CommitOverlay, false);
+		test_indexed_btree_inner(TestDbTarget::CommitOverlay, false);
 		test_indexed_btree_inner(TestDbTarget::LogOverlay(Default::default()), false);
-/*		test_indexed_btree_inner(TestDbTarget::DbFile(Default::default()), false);
+		test_indexed_btree_inner(TestDbTarget::DbFile(Default::default()), false);
 		test_indexed_btree_inner(TestDbTarget::Standard, false);
 		test_indexed_btree_inner(TestDbTarget::CommitOverlay, true);
 		test_indexed_btree_inner(TestDbTarget::LogOverlay(Default::default()), true);
 		test_indexed_btree_inner(TestDbTarget::DbFile(Default::default()), true);
-		test_indexed_btree_inner(TestDbTarget::Standard, true);*/
+		test_indexed_btree_inner(TestDbTarget::Standard, true);
 	}
 	fn test_indexed_btree_inner(db_test: TestDbTarget, long_key: bool) {
 		let tmp = tempdir().unwrap();

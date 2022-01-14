@@ -191,7 +191,20 @@ pub struct BTreeTable {
 impl BTreeTable {
 	pub fn open(
 		id: BTreeTableId,
+		values: &Vec<ValueTable>,
 	) -> Result<Self> {
+		if let Some(address) = Self::btree_index_address(values) {
+			let size_tier = address.size_tier() as usize;
+			if !values[size_tier].is_init() {
+				let btree_index = BTreeIndex {
+					root: HEADER_POSITION,
+					depth: 0,
+				};
+				let mut entry = Entry::empty();
+				entry.write_header(&btree_index);
+				values[size_tier].init_with_entry(&*entry.encoded.inner_mut())?;
+			}
+		}
 		Ok(BTreeTable {
 			id,
 		})
@@ -211,13 +224,10 @@ impl BTreeTable {
 		let mut depth = 0;
 		if let Some(address) = Self::btree_index_address(values) {
 			let key_query = TableKeyQuery::Fetch(None);
-			let tier = address.size_tier();
-			if values[tier as usize].is_init() {
-				if let Some(encoded) = Column::get_at_value_index_locked(key_query, address, values, log, comp)? {
-					let mut buf: LogEntry<Vec<u8>> = LogEntry::new(encoded.1);
-					root = buf.read_u64();
-					depth = buf.read_u32();
-				}
+			if let Some(encoded) = Column::get_at_value_index_locked(key_query, address, values, log, comp)? {
+				let mut buf: LogEntry<Vec<u8>> = LogEntry::new(encoded.1);
+				root = buf.read_u64();
+				depth = buf.read_u32();
 			}
 		}
 		Ok(BTreeIndex {
@@ -341,19 +351,6 @@ pub mod commit_overlay {
 			let record_id = writer.record_id();
 			// This is not racy as we have a single thread writing plan, so a single btree instance.
 			let (mut tree, table_id) = new_btree_inner(column, writer, record_id)?;
-			if tree.root_index.is_none() {
-				// reserve the header address.
-				if let Some(address) = column.with_value_tables(|t| Ok(BTreeTable::btree_index_address(t)))? {
-					let new_address = column.with_tables_and_self(|t, s| s.write_new_value_plan(
-						&TableKey::NoHash,
-						t,
-						vec![0; HEADER_SIZE as usize].as_slice(),
-						writer,
-						origin,
-					))?;
-					assert!(new_address == address);
-				}
-			}
 			for change in self.changes.iter() {
 				match change {
 					(key, None) => {

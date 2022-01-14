@@ -1,4 +1,4 @@
-// Copyright 2015-2020 Parity Technologies (UK) Ltd.
+// Copyright 2015-2022 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -193,19 +193,16 @@ impl Column {
 		let arc_path = std::sync::Arc::new(path.clone());
 		let options = &metadata.columns[col as usize];
 		let db_version = metadata.version;
-		let tables = Tables {
-			index,
-			value: (0.. options.sizes.len() + 1)
-				.map(|i| Self::open_table(arc_path.clone(), col, i as u8, &options, db_version)).collect::<Result<_>>()?,
-			btree: if options.btree_index {
-				Some(Self::open_btree(col)?)
-			} else {
-				None
-			},
+		let value = (0.. options.sizes.len() + 1)
+			.map(|i| Self::open_table(arc_path.clone(), col, i as u8, &options, db_version)).collect::<Result<_>>()?;
+		let btree = if options.btree_index {
+			Some(Self::open_btree(col, &value)?)
+		} else {
+			None
 		};
 
 		Ok(Column {
-			tables: RwLock::new(tables),
+			tables: RwLock::new(Tables { index, value, btree }),
 			reindex: RwLock::new(Reindex {
 				queue: reindexing,
 				progress: AtomicU64::new(0),
@@ -278,9 +275,10 @@ impl Column {
 
 	fn open_btree(
 		col: ColId,
+		values: &Vec<ValueTable>,
 	) -> Result<BTreeTable> {
 		let id = BTreeTableId::new(col);
-		BTreeTable::open(id)
+		BTreeTable::open(id, values)
 	}
 
 	fn trigger_reindex(

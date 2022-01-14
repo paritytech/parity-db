@@ -889,6 +889,22 @@ impl ValueTable {
 	pub fn is_init(&self) -> bool {
 		self.file.file.read().is_some()
 	}
+
+	pub fn init_with_entry(&self, entry: &[u8]) -> Result<()> {
+		self.file.grow(self.entry_size)?;
+
+		let empty_overlays = parking_lot::RwLock::new(Default::default());
+		let mut log = LogWriter::new(&empty_overlays, 0);
+		let at = self.overwrite_chain(&TableKey::NoHash, entry, &mut log, None, false)?;
+		self.complete_plan(&mut log)?;
+		assert!(at == 1);
+		let log = log.drain();
+		let change = log.local_values.get(&self.id).expect("entry written above");
+		for (at, (_rec_id, entry)) in change.map.iter() {
+			self.file.write_at(entry.as_slice(), *at * (self.entry_size as u64))?;
+		}
+		Ok(())
+	}
 }
 
 pub mod key {

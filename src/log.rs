@@ -228,7 +228,7 @@ impl<'a> LogReader<'a> {
 
 pub struct LogChange {
 	local_index: HashMap<IndexTableId, IndexLogOverlay>,
-	local_values: HashMap<ValueTableId, ValueLogOverlay>,
+	pub(crate) local_values: HashMap<ValueTableId, ValueLogOverlay>, // TODO remove pub
 	local_btree: HashMap<BTreeTableId, BTreeLogOverlay>,
 	record_id: u64,
 	dropped_tables: Vec<IndexTableId>,
