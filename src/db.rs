@@ -150,7 +150,8 @@ impl WaitCondvar<bool> {
 		*work = false;
 	}
 
-	pub fn wait_notify(&self) {
+	#[cfg(test)]
+	fn wait_notify(&self) {
 		let mut work = self.work.lock();
 		self.cv.wait(&mut work)
 	}
