@@ -73,22 +73,6 @@ impl<'a> BTreeIterator<'a> {
 	pub fn next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 		self.db.btree_iter_next(self)
 	}
-	/*
-	pub fn last_key(&self) -> &Option<Vec<u8>> {
-		match &self.iter {
-			BtreeIterBackend::Order2_3(_tree, iter) => {
-				&iter.last_key
-			},
-		}
-	}
-
-	pub fn set_last_key(&mut self, key: Vec<u8>) {
-		match &mut self.iter {
-			BtreeIterBackend::Order2_3(_tree, iter) => {
-				iter.last_key = Some(key);
-			},
-		}
-	}*/
 
 	pub fn next_backend(&mut self, record_id: u64, col: &Column, log: &impl LogQuery) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
@@ -239,7 +223,7 @@ impl BTree {
 				// add one level
 				self.depth += 1;
 				let left = std::mem::replace(&mut self.root, Box::new(Node::new()));
-				self.root.set_child_node(0, left, self.root_index);
+				self.root.set_child(0, Node::new_child(left, self.root_index));
 				self.root_index = None;
 				self.root.set_child(1, right);
 				self.root.set_separator(0, sep);

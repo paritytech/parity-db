@@ -14,9 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-//! BTree implementation struct and methods.
-//! Allows multiple order variants or nodes in memory storage.
-
+//! BTree node struct and methods.
 
 use super::*;
 use crate::table::{ValueTable, key::TableKey};
@@ -28,11 +26,7 @@ use crate::index::Address;
 use crate::btree::btree::RemovedChildren;
 
 impl Node {
-	pub fn set_child_node(&mut self, at: usize, child: Box<Self>, index: Option<u64>) {
-		self.set_child(at, Self::new_child(child, index))
-	}
-
-	pub fn last_separator_index(&mut self) -> Option<usize> {
+	fn last_separator_index(&mut self) -> Option<usize> {
 		let i = self.number_separator();
 		if i == 0 {
 			None
@@ -535,7 +529,7 @@ impl Node {
 
 	pub fn remove_separator(&mut self, at: usize) -> Separator {
 		self.changed = true;
-		let mut separator = std::mem::replace(self.get_separator(at), Separator {
+		let mut separator = std::mem::replace(&mut self.separators[at], Separator {
 			modified: true,
 			separator: None,
 		});
@@ -548,7 +542,7 @@ impl Node {
 		let mut state = ChildState::default();
 		state.fetched = true;
 		state.moved = true;
-		let mut child = std::mem::replace(self.get_child_index(at), Child {
+		let mut child = std::mem::replace(&mut self.children[at], Child {
 			state,
 			node: None,
 			entry_index: None,
@@ -569,25 +563,21 @@ impl Node {
 	}
 
 	pub fn has_separator(&mut self, at: usize) -> bool {
-		let at = self.get_separator(at);
-		at.separator.is_some()
+		self.separators[at].separator.is_some()
 	}
 
 	pub fn separator_key(&mut self, at: usize) -> Option<Vec<u8>> {
-		let at = self.get_separator(at);
-		at.separator.as_ref().map(|s| {
+		self.separators[at].separator.as_ref().map(|s| {
 			s.key.clone()
 		})
 	}
 
 	pub fn separator_value_index(&mut self, at: usize) -> Option<u64> {
-		let at = self.get_separator(at);
-		at.separator.as_ref().map(|s| s.value)
+		self.separators[at].separator.as_ref().map(|s| s.value)
 	}
 
 	pub fn separator_get_info(&mut self, at: usize) -> Option<Address> {
-		let at = self.get_separator(at);
-		at.separator.as_ref().map(|s| Address::from_u64(s.value))
+		self.separators[at].separator.as_ref().map(|s| Address::from_u64(s.value))
 	}
 	
 	pub fn set_separator(&mut self, at: usize, mut sep: Separator) {
@@ -707,8 +697,7 @@ impl Node {
 			if i == ORDER {
 				break;
 			}
-			let mut next = self.get_separator(i);
-			current = std::mem::replace(&mut next, current);
+			current = std::mem::replace(&mut self.separators[i], current);
 		}
 		if has_child {
 			let mut i = if with_left_child {
@@ -723,8 +712,7 @@ impl Node {
 				if i == ORDER_CHILD {
 					break;
 				}
-				let mut next = self.get_child_index(i);
-				current = std::mem::replace(&mut next, current);
+				current = std::mem::replace(&mut self.children[i], current);
 			}
 		}
 	}
@@ -758,7 +746,7 @@ impl Node {
 
 	pub fn number_separator(&mut self) -> usize {
 		let mut i = 0;
-		while self.get_separator(i).separator.is_some() {
+		while self.separators[i].separator.is_some() {
 			i += 1;
 			if i == ORDER {
 				break;
@@ -771,7 +759,7 @@ impl Node {
 	// Return index of first element bigger than key otherwhise.
 	pub fn position(&mut self, key: &[u8]) -> Result<(bool, usize)> {
 		let mut i = 0;
-		while let Some(separator) = self.get_separator(i).separator.as_mut() {
+		while let Some(separator) = self.separators[i].separator.as_ref() {
 			match key[..].cmp(&separator.key[..]) {
 				Ordering::Greater => (),
 				Ordering::Less => {
@@ -789,7 +777,6 @@ impl Node {
 		Ok((false, i))
 	}
 
-	// TODO default traitify
 	pub fn write_plan(
 		&mut self,
 		column: &Column,
@@ -827,19 +814,16 @@ impl Node {
 			return Ok(None);
 		}
 
-
-
 		let mut entry = Entry::empty();
 		let mut i_children = 0;
 		let mut i_separator = 0;
 		loop {
 			if let Some(index) = self.children.as_mut()[i_children].entry_index {
 				entry.write_child_index(index);
-				i_children += 1
 			} else {
 				entry.write_child_index(0);
-				i_children += 1
 			}
+			i_children += 1;
 			if i_children == ORDER_CHILD {
 				break;
 			}
@@ -878,17 +862,8 @@ impl Node {
 		Ok(result)
 	}
 
-	fn get_separator(&mut self, at: usize) -> &mut Separator {
-		&mut self.separators.as_mut()[at]
-	}
-
-	fn get_child_index(&mut self, at: usize) -> &mut Child {
-		&mut self.children.as_mut()[at]
-	}
-
 	pub fn force_fetch_node_at(&mut self, i: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<Self>> {
-		let child = self.get_child_index(i);
-		if let Some(ix) = child.entry_index {
+		if let Some(ix) = self.children[i].entry_index {
 			let entry = btree.get_index(ix, log, values, comp)?;
 			return Ok(Some(Self::from_encoded(entry)));
 		}
@@ -896,7 +871,7 @@ impl Node {
 	}
 
 	fn get_fetched_child_index(&mut self, i: usize, column: &Column, log: &impl LogQuery) -> Result<&mut Child> {
-		let mut child = self.get_child_index(i);
+		let mut child = &mut self.children[i];
 		if !child.state.fetched {
 			if let Some(ix) = child.entry_index {
 				child.state.fetched = true;
@@ -907,10 +882,9 @@ impl Node {
 		Ok(child)
 	}
 
-	// TODO merge with get_fetched_child_index
 	#[cfg(test)]
 	fn get_fetched_child_index_from_btree(&mut self, i: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<&mut Child> {
-		let mut child = self.get_child_index(i);
+		let mut child = &mut self.children[i];
 		if !child.state.fetched {
 			if let Some(ix) = child.entry_index {
 				child.state.fetched = true;

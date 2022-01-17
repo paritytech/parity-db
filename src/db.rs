@@ -227,17 +227,14 @@ impl DbInner {
 	}
 
 	pub(crate) fn btree_iter_next(&self, iter: &mut crate::BTreeIterator) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-		// we impose lock to ensure the internal btree stays in sync
-		// with the node structure.
-		// TODO long term replace with a layer keeping diff in the iter and
-		// remove LogQuery implementation from &Vec<Overlays>.
-		// (could also have log per column but ~).
 		let col = iter.col;
+
+		// Lock log over function call (no btree struct change).
 		let log = self.log.overlays().read();
 		let record_id = log.last_record_id(iter.col);
 		let commit_overlay = self.commit_overlay.read();
 		let next_commit_overlay = commit_overlay.get(col as usize).and_then(|o| o.btree_next(&iter.overlay_last_key, iter.from_seek));
-		// droping lock to overlay, there is no consistency.
+		// No consistency over iteration, allows dropping lock to overlay.
 		std::mem::drop(commit_overlay);
 		let column = &self.columns[col as usize];
 		let next_backend = if let Some(n) = iter.pending_next_backend.take() {
