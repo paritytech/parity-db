@@ -461,7 +461,6 @@ pub struct SeparatorInner {
 #[derive(Clone, Default)]
 pub struct ChildState {
 	pub fetched: bool,
-	pub modified: bool,
 	pub moved: bool,
 }
 
@@ -482,7 +481,6 @@ impl Child {
 	fn new(node: Box<Node>, entry_index: Option<u64>) -> Self {
 		let mut state = ChildState::default();
 		state.fetched = true;
-		state.modified = true;
 		state.moved = true;
 		Child {
 			state,
@@ -792,29 +790,29 @@ impl Node {
 	}
 
 	// TODO default traitify
-	pub fn write_plan(&mut self, column: &Column, writer: &mut LogWriter, node_id: Option<u64>, table_id: BTreeTableId, btree: &mut BTreeIndex, record_id: u64, origin: ValueTableOrigin) -> Result<Option<u64>> {
-		// TODO currently modified is not set properly so we iterate all, could have a child modified
-		// (but with current use it is only interesting for delete on non existing value)
-
+	pub fn write_plan(
+		&mut self,
+		column: &Column,
+		writer: &mut LogWriter,
+		node_id: Option<u64>,
+		btree: &mut BTreeIndex,
+		record_id: u64,
+		origin: ValueTableOrigin,
+	) -> Result<Option<u64>> {
 		for child in self.children.as_mut().iter_mut() {
-			// TODO child modified is not handled properly (in case of recursive it needs parent and 
-			// other, for now, if fetched, then it is modified).
-			// let child_modified = child.modified;
-			let child_modified = true;
-			if child_modified {
-				if let Some(node) = child.node.as_mut() {
-					if let Some(index) = node.write_plan(column, writer, child.entry_index, table_id, btree, record_id, origin)? {
-						child.entry_index = Some(index);
-						self.changed = true;
-					} else {
-						if child.state.moved {
-							self.changed = true;
-						}
-					}
+			// Only modified nodes are cached in children
+			if let Some(node) = child.node.as_mut() {
+				if let Some(index) = node.write_plan(column, writer, child.entry_index, btree, record_id, origin)? {
+					child.entry_index = Some(index);
+					self.changed = true;
 				} else {
-					if child.state.moved || child.state.modified {
+					if child.state.moved {
 						self.changed = true;
 					}
+				}
+			} else {
+				if child.state.moved {
+					self.changed = true;
 				}
 			}
 		}

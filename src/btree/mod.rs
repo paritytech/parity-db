@@ -237,8 +237,8 @@ pub fn new_btree_inner(
 	column: &Column,
 	log: &impl LogQuery,
 	record_id: u64,
-) -> Result<(btree::BTree, BTreeTableId)> {
-	let (root, root_index, btree_index, table_id) = column.with_value_tables_and_btree(|btree, values, comp| {
+) -> Result<btree::BTree> {
+	let (root, root_index, btree_index) = column.with_value_tables_and_btree(|btree, values, comp| {
 		let btree_index = BTreeTable::btree_index(log, values, comp)?;
 
 		let (root_index, root) = if btree_index.root == HEADER_POSITION {
@@ -251,13 +251,9 @@ pub fn new_btree_inner(
 			root,
 			root_index,
 			btree_index,
-			btree.id,
 		))
 	})?;
-	Ok((
-		btree::BTree::new(root_index, root, btree_index.depth, record_id),
-		table_id,
-	))
+	Ok(btree::BTree::new(root_index, root, btree_index.depth, record_id))
 }
 
 pub mod commit_overlay {
@@ -321,10 +317,10 @@ pub mod commit_overlay {
 			ops: &mut u64,
 		) -> Result<()> {
 			let origin = crate::column::ValueTableOrigin::BTree(crate::btree::BTreeTableId::new(self.col));
-			// TODO consider runing on btree with ValueTable as params.
 			let record_id = writer.record_id();
-			// This is not racy as we have a single thread writing plan, so a single btree instance.
-			let (mut tree, table_id) = new_btree_inner(column, writer, record_id)?;
+			// This is racy but we have a single thread writing plan, so only a single writing btree at a
+			// time.
+			let mut tree = new_btree_inner(column, writer, record_id)?;
 			for change in self.changes.iter() {
 				match change {
 					(key, None) => {
@@ -342,7 +338,7 @@ pub mod commit_overlay {
 			};
 			let old_btree_index = btree_index.clone();
 
-			tree.write_plan(column, writer, table_id, record_id, &mut btree_index, origin)?;
+			tree.write_plan(column, writer, record_id, &mut btree_index, origin)?;
 
 			if old_btree_index != btree_index {
 				let mut entry = Entry::empty();

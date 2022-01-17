@@ -54,7 +54,7 @@ impl<'a> BTreeIterator<'a> {
 	) -> Result<Self> {
 		let column = db.column(col);
 		let record_id = log.read().last_record_id(col);
-		let (tree, _table_id) = new_btree_inner(column, log, record_id)?;
+		let tree = new_btree_inner(column, log, record_id)?;
 		let iter = tree.iter();
 		Ok(BTreeIterator {
 			db,
@@ -93,7 +93,7 @@ impl<'a> BTreeIterator<'a> {
 	pub fn next_backend(&mut self, record_id: u64, col: &Column, log: &impl LogQuery) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
 		if record_id != tree.record_id {
-			let (new_tree, _table_id) = new_btree_inner(col, log, record_id)?;
+			let new_tree = new_btree_inner(col, log, record_id)?;
 			*tree = new_tree;
 		}
 		iter.next(tree, col, log)
@@ -102,7 +102,7 @@ impl<'a> BTreeIterator<'a> {
 	pub fn seek_backend(&mut self, key: Vec<u8>, record_id: u64, col: &Column, log: &impl LogQuery, after: bool) -> Result<()> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
 		if record_id != tree.record_id {
-			let (new_tree, _table_id) = new_btree_inner(col, log, record_id)?;
+			let new_tree = new_btree_inner(col, log, record_id)?;
 			*tree = new_tree;
 		}
 		iter.seek(key, tree, col, log, after)
@@ -280,8 +280,15 @@ impl BTree {
 		Ok(())
 	}
 
-	pub fn write_plan(&mut self, column: &Column, writer: &mut LogWriter, table_id: BTreeTableId, record_id: u64, btree_index: &mut BTreeIndex, origin: ValueTableOrigin) -> Result<()> {
-		if let Some(ix) = self.root.write_plan(column, writer, self.root_index, table_id, btree_index, record_id, origin)? {
+	pub fn write_plan(
+		&mut self,
+		column: &Column,
+		writer: &mut LogWriter,
+		record_id: u64,
+		btree_index: &mut BTreeIndex,
+		origin: ValueTableOrigin,
+	) -> Result<()> {
+		if let Some(ix) = self.root.write_plan(column, writer, self.root_index, btree_index, record_id, origin)? {
 			self.root_index = Some(ix);
 		}
 		for (node_index, _node) in self.removed_children.0.drain(..) {
