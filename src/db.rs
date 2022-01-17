@@ -158,18 +158,18 @@ impl WaitCondvar<bool> {
 }
 
 impl DbInner {
-	fn open(options: &Options, create: bool, skip_lock: bool) -> Result<DbInner> {
-		if create {
+	fn open(options: &Options, inner_options: &InternalOptions) -> Result<DbInner> {
+		if inner_options.create {
 			std::fs::create_dir_all(&options.path)?
 		};
 		let mut lock_path: std::path::PathBuf = options.path.clone();
 		lock_path.push("lock");
 		let lock_file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(lock_path.as_path())?;
-		if !skip_lock {
+		if !inner_options.skip_check_lock {
 			lock_file.try_lock_exclusive().map_err(|e| Error::Locked(e))?;
 		}
 
-		let metadata = options.load_and_validate_metadata(create)?;
+		let metadata = options.load_and_validate_metadata(inner_options.create)?;
 		let mut columns = Vec::with_capacity(metadata.columns.len());
 		let mut commit_overlay = Vec::with_capacity(metadata.columns.len());
 		let log = Log::open(&options)?;
@@ -726,57 +726,60 @@ pub struct Db {
 impl Db {
 	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Result<Db> {
 		let options = Options::with_columns(path, num_columns);
-
-		Self::open_inner(&options, true, false, RunMode::Standard, false)
+		let mut inner_options = InternalOptions::default();
+		inner_options.create = true;
+		Self::open_inner(&options, &inner_options)
 			.map(|r| r.0)
 	}
 
 	/// Open the database with given options.
 	pub fn open(options: &Options) -> Result<Db> {
-		Self::open_inner(options, false, false, RunMode::Standard, false)
+		let inner_options = InternalOptions::default();
+		Self::open_inner(options, &inner_options)
 			.map(|r| r.0)
 	}
 
 	/// Create the database using given options.
 	pub fn open_or_create(options: &Options) -> Result<Db> {
-		Self::open_inner(options, true, false, RunMode::Standard, false)
+		let mut inner_options = InternalOptions::default();
+		inner_options.create = true;
+		Self::open_inner(options, &inner_options)
 			.map(|r| r.0)
 	}
 
 	pub fn open_read_only(options: &Options) -> Result<Db> {
-		Self::open_inner(options, false, true, RunMode::Standard, false)
+		let mut inner_options = InternalOptions::default();
+		inner_options.read_only = true;
+		Self::open_inner(options, &inner_options)
 			.map(|r| r.0)
 	}
 
-	pub fn open_inner(
+	fn open_inner(
 		options: &Options,
-		create: bool,
-		read_only: bool,
-		run_mode: RunMode,
-		skip_check_lock: bool,
+		inner_options: &InternalOptions,
 	) -> Result<(Db, Option<Arc<WaitCondvar<bool>>>)> {
 		assert!(options.is_valid());
-		let mut db = DbInner::open(options, create, skip_check_lock)?;
+		let mut db = DbInner::open(options, &inner_options)?;
 		// This needs to be call before log thread: so first reindexing
 		// will run in correct state.
 		db.replay_all_logs()?;
 		let db = Arc::new(db);
-		if read_only {
+		if inner_options.read_only {
 			return Ok((Db {
 				inner: db,
 				commit_thread: None,
 				flush_thread: None,
 				log_thread: None,
 				cleanup_thread: None,
-				do_drop: run_mode.do_drop(),
+				do_drop: inner_options.commit_stages.do_drop(),
 			}, None))
 		}
-		let run_test_cv = match run_mode {
-			RunMode::LogOverlay => Some(db.flush_worker_wait.clone()),
-			RunMode::DbFile => Some(db.commit_worker_wait.clone()),
+		let run_test_cv = match inner_options.commit_stages {
+			EnableCommitPipelineStages::LogOverlay => Some(db.flush_worker_wait.clone()),
+			EnableCommitPipelineStages::DbFile => Some(db.commit_worker_wait.clone()),
 			_ => None,
 		};
-		let commit_thread = if run_mode.spawn_commit_thread() {
+		let commit_thread = if inner_options.commit_stages.spawn_commit_thread() {
 			let commit_worker_db = db.clone();
 			Some(std::thread::spawn(move ||
 				commit_worker_db.store_err(Self::commit_worker(commit_worker_db.clone()))
@@ -784,9 +787,9 @@ impl Db {
 		} else {
 			None
 		};
-		let flush_thread = if run_mode.spawn_flush_thread() {
+		let flush_thread = if inner_options.commit_stages.spawn_flush_thread() {
 			let flush_worker_db = db.clone();
-			let min_log_size = if matches!(run_mode, RunMode::DbFile) {
+			let min_log_size = if matches!(inner_options.commit_stages, EnableCommitPipelineStages::DbFile) {
 				0
 			} else {
 				MIN_LOG_SIZE
@@ -797,7 +800,7 @@ impl Db {
 		} else {
 			None
 		};
-		let log_thread = if run_mode.spawn_log_thread() {
+		let log_thread = if inner_options.commit_stages.spawn_log_thread() {
 			let log_worker_db = db.clone();
 			Some(std::thread::spawn(move ||
 				log_worker_db.store_err(Self::log_worker(log_worker_db.clone()))
@@ -805,7 +808,7 @@ impl Db {
 		} else {
 			None
 		};
-		let cleanup_thread = if run_mode.spawn_cleanup_thread() {
+		let cleanup_thread = if inner_options.commit_stages.spawn_cleanup_thread() {
 			let cleanup_worker_db = db.clone();
 			Some(std::thread::spawn(move ||
 				cleanup_worker_db.store_err(Self::cleanup_worker(cleanup_worker_db.clone()))
@@ -819,7 +822,7 @@ impl Db {
 			flush_thread: flush_thread,
 			log_thread: log_thread,
 			cleanup_thread: cleanup_thread,
-			do_drop: run_mode.do_drop(),
+			do_drop: inner_options.commit_stages.do_drop(),
 		}, run_test_cv))
 	}
 
@@ -980,40 +983,51 @@ pub mod check {
 	}
 }
 
+#[derive(Default)]
+struct InternalOptions {
+	create: bool,
+	read_only: bool,
+	commit_stages: EnableCommitPipelineStages,
+	skip_check_lock: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
-pub enum RunMode {
-	// no threads started, data stays in commit overlay.
+enum EnableCommitPipelineStages {
+	// No threads started, data stays in commit overlay.
+	#[allow(dead_code)]
 	CommitOverlay,
-	// log worker run, not the others workers.
+	// Log worker run, data processed up to the log overlay.
+	#[allow(dead_code)]
 	LogOverlay,
-	// runing all.
+	// Runing all.
+	#[allow(dead_code)]
 	DbFile,
-	// Default run mode
+	// Default run mode.
 	Standard,
 }
 
-impl Default for RunMode {
+impl Default for EnableCommitPipelineStages {
 	fn default() -> Self {
-		RunMode::Standard
+		EnableCommitPipelineStages::Standard
 	}
 }
 
-impl RunMode {
+impl EnableCommitPipelineStages {
 	fn spawn_commit_thread(&self) -> bool {
 		match self {
-			RunMode::CommitOverlay
-			| RunMode::LogOverlay => false,
-			RunMode::DbFile
-			| RunMode::Standard => true,
+			EnableCommitPipelineStages::CommitOverlay
+			| EnableCommitPipelineStages::LogOverlay => false,
+			EnableCommitPipelineStages::DbFile
+			| EnableCommitPipelineStages::Standard => true,
 		}
 	}
 
 	fn spawn_log_thread(&self) -> bool {
 		match self {
-			RunMode::CommitOverlay => false,
-			RunMode::LogOverlay
-			| RunMode::DbFile
-			| RunMode::Standard => true,
+			EnableCommitPipelineStages::CommitOverlay => false,
+			EnableCommitPipelineStages::LogOverlay
+			| EnableCommitPipelineStages::DbFile
+			| EnableCommitPipelineStages::Standard => true,
 		}
 	}
 
@@ -1028,7 +1042,7 @@ impl RunMode {
 	#[cfg(test)]
 	fn check_empty_overlay(&self, db: &Db, col: ColId) -> bool {
 		match self {
-			RunMode::LogOverlay => {
+			EnableCommitPipelineStages::LogOverlay => {
 			 if let Some(overlay) = db.inner.commit_overlay.read().get(col as usize) {
 				if !overlay.is_empty() {
 					let mut replayed = 5;
@@ -1045,7 +1059,7 @@ impl RunMode {
 				}
 			 }
 			},
-			RunMode::DbFile => {
+			EnableCommitPipelineStages::DbFile => {
 				 if let Some(overlay) = db.inner.commit_overlay.read().get(col as usize) {
 					if !overlay.is_empty() { return false; }
 				 }
@@ -1056,13 +1070,13 @@ impl RunMode {
 	}
 
 	fn do_drop(&self) -> bool {
-		matches!(self, RunMode::Standard)
+		matches!(self, EnableCommitPipelineStages::Standard)
 	}
 }
 
 #[cfg(test)]
 mod tests {
-	use super::{Db, Options, RunMode};
+	use super::{Db, Options, EnableCommitPipelineStages, InternalOptions};
 	use tempfile::tempdir;
 
 	#[test]
@@ -1092,12 +1106,12 @@ mod tests {
 
 	#[test]
 	fn test_indexed_keyvalues() {
-		test_indexed_keyvalues_inner(RunMode::CommitOverlay);
-		test_indexed_keyvalues_inner(RunMode::LogOverlay);
-		test_indexed_keyvalues_inner(RunMode::DbFile);
-		test_indexed_keyvalues_inner(RunMode::Standard);
+		test_indexed_keyvalues_inner(EnableCommitPipelineStages::CommitOverlay);
+		test_indexed_keyvalues_inner(EnableCommitPipelineStages::LogOverlay);
+		test_indexed_keyvalues_inner(EnableCommitPipelineStages::DbFile);
+		test_indexed_keyvalues_inner(EnableCommitPipelineStages::Standard);
 	}
-	fn test_indexed_keyvalues_inner(db_test: RunMode) {
+	fn test_indexed_keyvalues_inner(db_test: EnableCommitPipelineStages) {
 		let tmp = tempdir().unwrap();
 		let options = Options::with_columns(tmp.path(), 5);
 		let col_nb = 0;
@@ -1106,7 +1120,10 @@ mod tests {
 		let key2 = b"key2".to_vec();
 		let key3 = b"key3".to_vec();
 
-		let (db, wait_on) = Db::open_inner(&options, true, false, db_test.clone(), false).unwrap();
+		let mut inner_options = InternalOptions::default();
+		inner_options.create = true;
+		inner_options.commit_stages = db_test;
+		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
 		assert!(db.inner.get(col_nb, key1.as_slice()).unwrap().is_none());
 
 		db.commit(vec![
@@ -1151,8 +1168,11 @@ mod tests {
 		let key2 = b"key2".to_vec();
 		let key3 = b"key3".to_vec();
 
-		let db_test = RunMode::DbFile;
-		let (db, wait_on) = Db::open_inner(&options, true, false, db_test.clone(), false).unwrap();
+		let db_test = EnableCommitPipelineStages::DbFile;
+		let mut inner_options = InternalOptions::default();
+		inner_options.create = true;
+		inner_options.commit_stages = db_test;
+		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
 
 		db.commit(vec![
 			(col_nb, key1.clone(), Some(b"value1".to_vec())),
@@ -1162,8 +1182,11 @@ mod tests {
 		wait_on.as_ref().map(|w| w.wait_notify());
 		std::mem::drop(db);
 
-		let db_test = RunMode::CommitOverlay;
-		let (db, wait_on) = Db::open_inner(&options, true, false, db_test.clone(), true).unwrap();
+		let mut inner_options = InternalOptions::default();
+		inner_options.create = false;
+		inner_options.commit_stages = EnableCommitPipelineStages::CommitOverlay;
+		inner_options.skip_check_lock = true;
+		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
 		assert_eq!(db.inner.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
 		assert_eq!(db.inner.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2".to_vec()));
 		assert_eq!(db.inner.get(col_nb, key3.as_slice()).unwrap(), Some(b"value3".to_vec()));
