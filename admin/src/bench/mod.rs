@@ -43,24 +43,20 @@ const COMMIT_PRUNE_WINDOW: usize = 2000;
 pub(super) struct BenchAdapter(parity_db::Db);
 
 impl BenchDb for BenchAdapter {
-	type Options = parity_db::Options;
-	type Args = Args;
+	type Options = (parity_db::Options, Args);
 
 	fn open(path: &std::path::Path) -> Self {
 		BenchAdapter(Db::with_columns(path, 1).unwrap())
 	}
 
-	fn with_options(options: &Self::Options, args: &mut Self::Args) -> Self {
-		let mut db_options = options.clone();
-		if args.compress {
+	fn with_options(options: &Self::Options) -> Self {
+		let mut db_options = options.0.clone();
+		if options.1.compress {
 			for mut c in &mut db_options.columns {
 				c.compression = CompressionType::Lz4;
 			}
 		}
-		let (db, wait_on) = Db::open_inner(&db_options, true, false, args.target.clone(), false)
-			.unwrap();
-		args.wait_on = wait_on;
-		BenchAdapter(db)
+		BenchAdapter(Db::open_or_create(&db_options).unwrap())
 	}
 
 	fn get(&self, key: &Key) -> Option<Value> {
@@ -109,24 +105,10 @@ pub struct Stress {
 	/// Enable compression.
 	#[structopt(long)]
 	pub compress: bool,
-
-	/// Target partial executions (unstable).
-	#[structopt(long)]
-	pub target: Option<String>,
-}
-
-fn db_target_from_str(name: &Option<String>) -> parity_db::RunMode {
-	match name.as_ref().map(|n| n.as_str()).unwrap_or("") {
-		"commit" => parity_db::RunMode::CommitOverlay,
-		"log" => parity_db::RunMode::LogOverlay,
-		"file" => parity_db::RunMode::DbFile,
-		"" => parity_db::RunMode::Standard,
-		_ => panic!("expect `commit` `log` or `file`"),
-	}
 }
 
 #[derive(Clone)]
-pub struct Args {
+pub struct Args { // TODO remove (rendundant with Stress)
 	pub readers: usize,
 	pub commits: usize,
 	pub writers: usize,
@@ -135,8 +117,6 @@ pub struct Args {
 	pub append: bool,
 	pub no_check: bool,
 	pub compress: bool,
-	pub target: parity_db::RunMode,
-	pub wait_on: Option<Arc<parity_db::WaitCondvar<bool>>>,
 }
 
 impl Stress {
@@ -150,8 +130,6 @@ impl Stress {
 			archive: self.archive,
 			no_check: self.no_check,
 			compress: self.compress,
-			target: db_target_from_str(&self.target),
-			wait_on: None,
 		}
 	}
 }
@@ -295,27 +273,10 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 		);
 	}
 
-	for _ in 0..args.commits {
-		args.wait_on.as_ref().map(|w| w.wait_notify());
-	}
-
 	while COMMITS.load(Ordering::Relaxed) < start_commit + args.commits {
 		thread::sleep(std::time::Duration::from_millis(50));
 	}
 	shutdown.store(true, Ordering::SeqCst);
-
-	if !matches!(args.target, parity_db::RunMode::Standard) { 
-		let commits = COMMITS.load(Ordering::SeqCst);
-		let commits = commits - start_commit;
-		let elapsed = start.elapsed().as_secs_f64();
-
-		println!(
-			"Completed {} targetted commits in {} seconds. {} cps",
-			commits,
-			elapsed,
-			commits as f64  / elapsed
-		);
-	}
 
 	for t in threads.into_iter() {
 		t.join().unwrap();
