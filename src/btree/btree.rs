@@ -159,7 +159,7 @@ impl BTreeIter {
 
 		if let Some((ix, node)) = self.state.last_mut() {
 			if *ix < ORDER {
-				if let Some(address) = node.separator_get_info(*ix) {
+				if let Some(address) = node.separator_address(*ix) {
 					let key = node.separator_key(*ix).unwrap();
 					*ix += 1;
 					self.next_separator = false;

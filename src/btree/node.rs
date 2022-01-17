@@ -303,8 +303,7 @@ impl Node {
 		}
 
 		let removed = self.remove_child(at_right);
-		let (index, node) = Self::inner_child(removed);
-		removed_nodes.push(index, node);
+		removed_nodes.push(removed.entry_index, removed.node);
 		let has_child = true; // rebalance on parent.
 		self.remove_from(at, has_child, false);
 
@@ -357,7 +356,7 @@ impl Node {
 	pub fn get_no_cache(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Address>> {
 		let (at, i) = self.position(key)?;
 		if at {
-			Ok(self.separator_get_info(i))
+			Ok(self.separator_address(i))
 		} else {
 			if let Some(mut child) = self.force_fetch_node_at(i, btree, log, values, comp)? {
 				return child.get_no_cache(key, btree, values, log, comp);
@@ -371,7 +370,7 @@ impl Node {
 	pub fn get(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Address>> {
 		let (at, i) = self.position(key)?;
 		if at {
-			Ok(self.separator_get_info(i))
+			Ok(self.separator_address(i))
 		} else {
 			if let Some(child) = self.fetch_child_from_btree(i, btree, log, values, comp)? {
 				return child.get(key, btree, values, log, comp);
@@ -567,16 +566,14 @@ impl Node {
 	}
 
 	pub fn separator_key(&mut self, at: usize) -> Option<Vec<u8>> {
-		self.separators[at].separator.as_ref().map(|s| {
-			s.key.clone()
-		})
+		self.separators[at].separator.as_ref().map(|s| s.key.clone())
 	}
 
 	pub fn separator_value_index(&mut self, at: usize) -> Option<u64> {
 		self.separators[at].separator.as_ref().map(|s| s.value)
 	}
 
-	pub fn separator_get_info(&mut self, at: usize) -> Option<Address> {
+	pub fn separator_address(&mut self, at: usize) -> Option<Address> {
 		self.separators[at].separator.as_ref().map(|s| Address::from_u64(s.value))
 	}
 	
@@ -591,17 +588,13 @@ impl Node {
 		Child::new(child, index)
 	}
 
-	pub fn inner_child(child: Child) -> (Option<u64>, Option<Box<Self>>) {
-		(child.entry_index, child.node)
-	}
-
 	pub fn set_child(&mut self, at: usize, mut child: Child) {
 		child.state.moved = true;
 		self.changed = true;
 		self.children.as_mut()[at] = child;
 	}
 
-	pub fn create_separator(key: &[u8], value: &[u8], column: &Column, log: &mut LogWriter, existing: Option<u64>, origin: ValueTableOrigin) -> Result<Separator> {
+	fn create_separator(key: &[u8], value: &[u8], column: &Column, log: &mut LogWriter, existing: Option<u64>, origin: ValueTableOrigin) -> Result<Separator> {
 		let key = key.to_vec();
 		let value = if let Some(address) = existing {
 			column.with_tables_and_self(|t, s| s.write_existing_value_plan(
@@ -630,7 +623,7 @@ impl Node {
 		})
 	}
 
-	pub fn split(
+	fn split(
 		&mut self,
 		at: usize,
 		skip_left_child: bool,
@@ -687,7 +680,7 @@ impl Node {
 		(right, right_ix)
 	}
 
-	pub fn shift_from(&mut self, from: usize, has_child: bool, with_left_child: bool) {
+	fn shift_from(&mut self, from: usize, has_child: bool, with_left_child: bool) {
 		self.changed = true;
 		let mut i = from;
 		let mut current = self.remove_separator(i);
@@ -717,7 +710,7 @@ impl Node {
 		}
 	}
 
-	pub fn remove_from(&mut self, from: usize, has_child: bool, with_left_child: bool) {
+	fn remove_from(&mut self, from: usize, has_child: bool, with_left_child: bool) {
 		let mut i = from;
 		self.changed = true;
 		while i < ORDER - 1 {
@@ -744,7 +737,7 @@ impl Node {
 		}
 	}
 
-	pub fn number_separator(&mut self) -> usize {
+	fn number_separator(&mut self) -> usize {
 		let mut i = 0;
 		while self.separators[i].separator.is_some() {
 			i += 1;
@@ -757,7 +750,7 @@ impl Node {
 
 	// Return true if match and matched position.
 	// Return index of first element bigger than key otherwhise.
-	pub fn position(&mut self, key: &[u8]) -> Result<(bool, usize)> {
+	fn position(&mut self, key: &[u8]) -> Result<(bool, usize)> {
 		let mut i = 0;
 		while let Some(separator) = self.separators[i].separator.as_ref() {
 			match key[..].cmp(&separator.key[..]) {
