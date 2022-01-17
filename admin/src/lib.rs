@@ -113,7 +113,7 @@ pub fn run() -> Result<(), String> {
 		},
 		SubCommand::Stress(bench) => {
 
-			let args = bench.get_args();
+			let mut args = bench.get_args();
 			// avoid deleting folders by mistake.
 			options.path.push("test_db_stress");
 			if options.path.exists() && !args.append {
@@ -122,7 +122,7 @@ pub fn run() -> Result<(), String> {
 			}
 
 			use crate::bench::BenchDb;
-			let db = bench::BenchAdapter::with_options(&(options, args.clone()));
+			let db = bench::BenchAdapter::with_options(&options, &mut args);
 
 			crate::bench::run_internal(args, db);
 		},

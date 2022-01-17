@@ -27,7 +27,7 @@ mod stats;
 mod compress;
 mod migration;
 
-pub use db::{Db, Value, check::CheckOptions, TestDbTarget};
+pub use db::{Db, Value, check::CheckOptions, RunMode, WaitCondvar};
 pub use table::Key;
 pub use error::{Error, Result};
 pub use options::{ColumnOptions, Options};

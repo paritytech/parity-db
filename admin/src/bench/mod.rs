@@ -43,21 +43,24 @@ const COMMIT_PRUNE_WINDOW: usize = 2000;
 pub(super) struct BenchAdapter(parity_db::Db);
 
 impl BenchDb for BenchAdapter {
-	type Options = (parity_db::Options, Args);
+	type Options = parity_db::Options;
+	type Args = Args;
 
 	fn open(path: &std::path::Path) -> Self {
 		BenchAdapter(Db::with_columns(path, 1).unwrap())
 	}
 
-	fn with_options(options: &Self::Options) -> Self {
-		let mut db_options = options.0.clone();
-		if options.1.compress {
+	fn with_options(options: &Self::Options, args: &mut Self::Args) -> Self {
+		let mut db_options = options.clone();
+		if args.compress {
 			for mut c in &mut db_options.columns {
 				c.compression = CompressionType::Lz4;
 			}
 		}
-		let db = Db::open_inner(&db_options, true, false, options.1.target.clone(), false);
-		BenchAdapter(db.unwrap())
+		let (db, wait_on) = Db::open_inner(&db_options, true, false, args.target.clone(), false)
+			.unwrap();
+		args.wait_on = wait_on;
+		BenchAdapter(db)
 	}
 
 	fn get(&self, key: &Key) -> Option<Value> {
@@ -112,12 +115,12 @@ pub struct Stress {
 	pub target: Option<String>,
 }
 
-fn db_target_from_str(name: &Option<String>) -> parity_db::TestDbTarget {
+fn db_target_from_str(name: &Option<String>) -> parity_db::RunMode {
 	match name.as_ref().map(|n| n.as_str()).unwrap_or("") {
-		"commit" => parity_db::TestDbTarget::CommitOverlay,
-		"log" => parity_db::TestDbTarget::LogOverlay(Default::default()),
-		"file" => parity_db::TestDbTarget::DbFile(Default::default()),
-		"" => parity_db::TestDbTarget::Standard,
+		"commit" => parity_db::RunMode::CommitOverlay,
+		"log" => parity_db::RunMode::LogOverlay,
+		"file" => parity_db::RunMode::DbFile,
+		"" => parity_db::RunMode::Standard,
 		_ => panic!("expect `commit` `log` or `file`"),
 	}
 }
@@ -132,7 +135,8 @@ pub struct Args {
 	pub append: bool,
 	pub no_check: bool,
 	pub compress: bool,
-	pub target: parity_db::TestDbTarget,
+	pub target: parity_db::RunMode,
+	pub wait_on: Option<Arc<parity_db::WaitCondvar<bool>>>,
 }
 
 impl Stress {
@@ -147,6 +151,7 @@ impl Stress {
 			no_check: self.no_check,
 			compress: self.compress,
 			target: db_target_from_str(&self.target),
+			wait_on: None,
 		}
 	}
 }
@@ -291,7 +296,7 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 	}
 
 	for _ in 0..args.commits {
-		args.target.wait();
+		args.wait_on.as_ref().map(|w| w.wait_notify());
 	}
 
 	while COMMITS.load(Ordering::Relaxed) < start_commit + args.commits {
@@ -299,7 +304,7 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 	}
 	shutdown.store(true, Ordering::SeqCst);
 
-	if !matches!(args.target, parity_db::TestDbTarget::Standard) { 
+	if !matches!(args.target, parity_db::RunMode::Standard) { 
 		let commits = COMMITS.load(Ordering::SeqCst);
 		let commits = commits - start_commit;
 		let elapsed = start.elapsed().as_secs_f64();

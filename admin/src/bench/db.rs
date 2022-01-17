@@ -18,9 +18,10 @@ use parity_db::{Key, Value};
 
 pub trait Db: Send + Sync + 'static {
 	type Options;
+	type Args;
 
 	fn open(path: &std::path::Path) -> Self;
-	fn with_options(options: &Self::Options) -> Self;
+	fn with_options(options: &Self::Options, args: &mut Self::Args) -> Self;
 	fn get(&self, key: &Key) -> Option<Value>;
 	fn commit<I: IntoIterator<Item=(Key, Option<Value>)>>(&self, tx: I);
 }
