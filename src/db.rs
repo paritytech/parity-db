@@ -1273,7 +1273,8 @@ impl EnableCommitPipelineStages {
 	#[cfg(test)]
 	fn check_empty_overlay(&self, db: &Db, col: ColId) -> bool {
 		match self {
-			EnableCommitPipelineStages::LogOverlay => {
+			EnableCommitPipelineStages::DbFile
+			| EnableCommitPipelineStages::LogOverlay => {
 			 if let Some(overlay) = db.inner.commit_overlay.read().get(col as usize) {
 				if !overlay.is_empty() {
 					let mut replayed = 5;
@@ -1282,7 +1283,9 @@ impl EnableCommitPipelineStages {
 							replayed -= 1;
 							// the signal is triggered just before cleaning the overlay, so
 							// we wait a bit.
-							std::thread::sleep(std::time::Duration::from_millis(10));
+							// Warning this is still rather flaky and should be ignored
+							// or removed.
+							std::thread::sleep(std::time::Duration::from_millis(100));
 						} else {
 							return false;
 						}
@@ -1290,11 +1293,6 @@ impl EnableCommitPipelineStages {
 				}
 			 }
 			},
-			EnableCommitPipelineStages::DbFile => {
-				 if let Some(overlay) = db.inner.commit_overlay.read().get(col as usize) {
-					if !overlay.is_empty() { return false; }
-				 }
-			 }
 			_ => (),
 		}
 		true
@@ -1412,6 +1410,9 @@ mod tests {
 		]).unwrap();
 		wait_on.as_ref().map(|w| w.wait_notify());
 		std::mem::drop(db);
+
+		// issue with some file reopening when no delay
+		std::thread::sleep(std::time::Duration::from_millis(100));
 
 		let mut inner_options = InternalOptions::default();
 		inner_options.create = false;
