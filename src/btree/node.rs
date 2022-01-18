@@ -146,35 +146,40 @@ impl Node {
 		depth: u32,
 		key: &[u8],
 		record_id: u64,
-		column: &Column,
+		tables: &BTreeTable,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 		removed: &mut RemovedChildren,
 	) -> Result<bool> {
 		let has_child = depth != 0;
 		let (at, i) = self.position(key)?;
+		let values = &*tables.tables.read();
 		if at {
 			let existing = self.separator_value_index(i);
 			if let Some(existing) = existing {
-				column.with_tables_and_self(|t, s| s.write_existing_value_plan(
+				Column::write_existing_value_plan(
 					&TableKey::NoHash,
-					t,
+					values,
 					Address::from_u64(existing),
 					None,
 					log,
 					origin,
-				))?;
+					tables.preimage,
+					tables.ref_counted,
+					None,
+					&tables.compression,
+				)?;
 			}
 			let _ = self.remove_separator(i);
 			if depth != 0 {
 				// replace by bigger value in left child.
-				if let Some(child) = self.fetch_child(i, column, log)? {
-					let (need_balance, sep) = child.remove_last(depth - 1, record_id, column, log, origin, removed)?;
+				if let Some(child) = self.fetch_child(i, values, log, &tables.compression)? {
+					let (need_balance, sep) = child.remove_last(depth - 1, record_id, values, log, origin, removed, &tables.compression)?;
 					if let Some(sep) = sep {
 						self.set_separator(i, sep);
 					}
 					if need_balance {
-						self.rebalance(depth, i, column, log, removed)?;
+						self.rebalance(depth, i, values, log, removed, &tables.compression)?;
 					}
 				}
 			} else {
@@ -184,10 +189,12 @@ impl Node {
 			if !has_child {
 				return Ok(false);
 			}
-			if let Some(child) = self.fetch_child(i, column, log)? {
-				let need_rebalance = child.remove(depth - 1, key, record_id, column, log, origin, removed)?;
+			if let Some(child) = self.fetch_child(i, values, log, &tables.compression)? {
+				std::mem::drop(values); // TODO consider values and compress in param
+				let need_rebalance = child.remove(depth - 1, key, record_id, tables, log, origin, removed)?;
 				if need_rebalance {
-					self.rebalance(depth, i, column, log, removed)?;
+					let values = &*tables.tables.read();
+					self.rebalance(depth, i, values, log, removed, &tables.compression)?;
 					return Ok(self.need_rebalance());
 				} else {
 					return Ok(false);
@@ -204,15 +211,16 @@ impl Node {
 		&mut self,
 		depth: u32,
 		at: usize,
-		column: &Column,
+		values: &Vec<ValueTable>,
 		log: &impl LogQuery,
 		removed_nodes: &mut RemovedChildren,
+		comp: &Compress,
 	) -> Result<()> {
 		let has_child = depth - 1 != 0;
 		let middle = ORDER / 2;
 		let mut balance_from_left = false;
 		if at > 0 {
-			if let Some(node) = self.fetch_child(at - 1, column, log)? {
+			if let Some(node) = self.fetch_child(at - 1, values, log, comp)? {
 				if node.has_separator(middle) {
 					balance_from_left = true;
 				}
@@ -220,7 +228,7 @@ impl Node {
 		}
 		if balance_from_left {
 			let mut child = None;
-			let left = self.fetch_child(at - 1, column, log)?.unwrap();
+			let left = self.fetch_child(at - 1, values, log, comp)?.unwrap();
 			let last_sibling = left.last_separator_index().unwrap();
 			if has_child {
 				child = Some(left.remove_child(last_sibling + 1));
@@ -228,7 +236,7 @@ impl Node {
 			let separator2 = left.remove_separator(last_sibling);
 			let separator = self.remove_separator(at - 1);
 			self.set_separator(at - 1, separator2);
-			let right = self.fetch_child(at, column, log)?.unwrap();
+			let right = self.fetch_child(at, values, log, comp)?.unwrap();
 			right.shift_from(0, has_child, true);
 			if let Some(child) = child {
 				right.set_child(0, child);
@@ -240,7 +248,7 @@ impl Node {
 		let number_child = self.number_separator() + 1;
 		let mut balance_from_right = false;
 		if at + 1 < number_child {
-			if let Some(node) = self.fetch_child(at + 1, column, log)? {
+			if let Some(node) = self.fetch_child(at + 1, values, log, comp)? {
 				if node.has_separator(middle) {
 					balance_from_right = true;
 				}
@@ -249,7 +257,7 @@ impl Node {
 
 		if balance_from_right {
 			let mut child = None;
-			let right = self.fetch_child(at + 1, column, log)?.unwrap();
+			let right = self.fetch_child(at + 1, values, log, comp)?.unwrap();
 			if has_child {
 				child = Some(right.remove_child(0));
 			}
@@ -257,7 +265,7 @@ impl Node {
 			right.remove_from(0, has_child, true);
 			let separator = self.remove_separator(at);
 			self.set_separator(at, separator2);
-			let left = self.fetch_child(at, column, log)?.unwrap();
+			let left = self.fetch_child(at, values, log, comp)?.unwrap();
 			let last_left = left.number_separator();
 			left.set_separator(last_left, separator);
 			if let Some(child) = child {
@@ -273,21 +281,21 @@ impl Node {
 		};
 
 		let separator = self.remove_separator(at);
-		let left = self.fetch_child(at_left, column, log)?.unwrap();
+		let left = self.fetch_child(at_left, values, log, comp)?.unwrap();
 		let mut i = left.number_separator();
 		left.set_separator(i, separator);
 		i += 1;
-		let right = self.fetch_child(at_right, column, log)?.unwrap();
+		let right = self.fetch_child(at_right, values, log, comp)?.unwrap();
 		let right_len = right.number_separator();
 		let mut right_i = 0;
 		while right_i < right_len {
 			let mut child = None;
-			let right = self.fetch_child(at_right, column, log)?.unwrap();
+			let right = self.fetch_child(at_right, values, log, comp)?.unwrap();
 			if has_child {
 				child = Some(right.remove_child(right_i));
 			}
 			let separator = right.remove_separator(right_i);
-			let left = self.fetch_child(at_left, column, log)?.unwrap();
+			let left = self.fetch_child(at_left, values, log, comp)?.unwrap();
 			left.set_separator(i, separator);
 			if let Some(child) = child {
 				left.set_child(i, child);
@@ -296,9 +304,9 @@ impl Node {
 			right_i += 1;
 		}
 		if has_child {
-			let right = self.fetch_child(at_right, column, log)?.unwrap();
+			let right = self.fetch_child(at_right, values, log, comp)?.unwrap();
 			let child = right.remove_child(right_i);
-			let left = self.fetch_child(at_left, column, log)?.unwrap();
+			let left = self.fetch_child(at_left, values, log, comp)?.unwrap();
 			left.set_child(i, child);
 		}
 
@@ -323,10 +331,11 @@ impl Node {
 		&mut self,
 		depth: u32,
 		record_id: u64,
-		column: &Column,
+		values: &Vec<ValueTable>,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 		removed: &mut RemovedChildren,
+		comp: &Compress,
 	) -> Result<(bool, Option<Separator>)> {
 		let last = if let Some(last) = self.last_separator_index() {
 			last
@@ -339,10 +348,10 @@ impl Node {
 
 			Ok((self.need_rebalance(), Some(result)))
 		} else {
-			if let Some(child) = self.fetch_child(i + 1, column, log)? {
-				let result = child.remove_last(depth - 1, record_id, column, log, origin, removed)?;
+			if let Some(child) = self.fetch_child(i + 1, values, log, comp)? {
+				let result = child.remove_last(depth - 1, record_id, values, log, origin, removed, comp)?;
 				if result.0 {
-					self.rebalance(depth, i + 1, column, log, removed)?;
+					self.rebalance(depth, i + 1, values, log, removed, comp)?;
 					Ok((self.need_rebalance(), result.1))
 				} else {
 					Ok(result)
@@ -353,7 +362,7 @@ impl Node {
 		}
 	}
 
-	pub fn get_no_cache(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Address>> {
+	pub fn get_no_cache(&mut self, key: &[u8], btree: BTreeTableId, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Address>> {
 		let (at, i) = self.position(key)?;
 		if at {
 			Ok(self.separator_address(i))
@@ -550,14 +559,8 @@ impl Node {
 		child
 	}
 
-	pub fn fetch_child(&mut self, at: usize, col: &Column, log: &impl LogQuery) -> Result<Option<&mut Self>> {
-		let child = self.get_fetched_child_index(at, col, log)?;
-		Ok(child.node.as_mut().map(|n| n.as_mut()))
-	}
-
-	#[cfg(test)]
-	pub fn fetch_child_from_btree(&mut self, at: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<&mut Self>> {
-		let child = self.get_fetched_child_index_from_btree(at, btree, log, values, comp)?;
+	pub fn fetch_child(&mut self, at: usize, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<&mut Self>> {
+		let child = self.get_fetched_child_index(at, values, log, comp)?;
 		Ok(child.node.as_mut().map(|n| n.as_mut()))
 	}
 
@@ -594,7 +597,14 @@ impl Node {
 		self.children.as_mut()[at] = child;
 	}
 
-	fn create_separator(key: &[u8], value: &[u8], column: &Column, log: &mut LogWriter, existing: Option<u64>, origin: ValueTableOrigin) -> Result<Separator> {
+	fn create_separator(
+		key: &[u8],
+		value: &[u8],
+		btree: &BTreeTable,
+		log: &mut LogWriter,
+		existing: Option<u64>,
+		origin: ValueTableOrigin,
+	) -> Result<Separator> {
 		let key = key.to_vec();
 		let value = if let Some(address) = existing {
 			column.with_tables_and_self(|t, s| s.write_existing_value_plan(
@@ -855,33 +865,20 @@ impl Node {
 		Ok(result)
 	}
 
-	pub fn force_fetch_node_at(&mut self, i: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<Self>> {
+	pub fn force_fetch_node_at(&mut self, i: usize, btree: BTreeTableId, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<Self>> {
 		if let Some(ix) = self.children[i].entry_index {
-			let entry = btree.get_index(ix, log, values, comp)?;
+			let entry = BTreeTable::get_index(ix, log, values, comp)?;
 			return Ok(Some(Self::from_encoded(entry)));
 		}
 		Ok(None)
 	}
 
-	fn get_fetched_child_index(&mut self, i: usize, column: &Column, log: &impl LogQuery) -> Result<&mut Child> {
+	fn get_fetched_child_index(&mut self, i: usize, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<&mut Child> {
 		let mut child = &mut self.children[i];
 		if !child.state.fetched {
 			if let Some(ix) = child.entry_index {
 				child.state.fetched = true;
-				let entry = column.with_value_tables_and_btree(|btree, values, comp| btree.get_index(ix, log, values, comp))?;
-				child.node = Some(Box::new(Self::from_encoded(entry)));
-			}
-		}
-		Ok(child)
-	}
-
-	#[cfg(test)]
-	fn get_fetched_child_index_from_btree(&mut self, i: usize, btree: &BTreeTable, log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<&mut Child> {
-		let mut child = &mut self.children[i];
-		if !child.state.fetched {
-			if let Some(ix) = child.entry_index {
-				child.state.fetched = true;
-				let entry = btree.get_index(ix, log, values, comp)?;
+				let entry = BTreeTable::get_index(ix, log, values, comp)?;
 				child.node = Some(Box::new(Self::from_encoded(entry)));
 			}
 		}

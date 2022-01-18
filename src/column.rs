@@ -41,7 +41,6 @@ pub type Salt = [u8; 32];
 pub(crate) struct Tables {
 	pub(crate) index: IndexTable,
 	pub(crate) value: Vec<ValueTable>,
-	pub(crate) btree: Option<BTreeTable>,
 }
 
 struct Reindex {
@@ -49,7 +48,12 @@ struct Reindex {
 	progress: AtomicU64,
 }
 
-pub struct Column {
+pub enum Column {
+	Hash(HashColumn),
+	Tree(BTreeTable),
+}
+
+pub struct HashColumn {
 	tables: RwLock<Tables>,
 	reindex: RwLock<Reindex>,
 	path: std::path::PathBuf,
@@ -57,11 +61,18 @@ pub struct Column {
 	uniform_keys: bool,
 	collect_stats: bool,
 	ref_counted: bool,
-	indexed: bool,
 	salt: Salt,
 	stats: ColumnStats,
 	compression: Compress,
 	db_version: u32,
+}
+
+pub struct TableLocked<'a> {
+	pub(crate) tables: &'a Vec<ValueTable>,
+	compression: &'a Compress,
+	preimage: bool,
+	uniform_keys: bool,
+	ref_counted: bool,
 }
 
 pub struct IterState {
@@ -91,17 +102,18 @@ impl std::fmt::Display for ValueTableOrigin {
 	}
 }
 
-impl Column {
+impl HashColumn {
 	pub(crate) fn get(&self, key: &TableKey, log: &impl LogQuery) -> Result<Option<Value>> {
 		let tables = self.tables.read();
-		if let Some((tier, value)) = self.get_in_index(key, &tables.index, &*tables, log)? {
+		let values = self.locked(&tables.value);
+		if let Some((tier, value)) = self.get_in_index(key, &tables.index, values, log)? {
 			if self.collect_stats {
 				self.stats.query_hit(tier);
 			}
 			return Ok(Some(value));
 		}
 		for r in &self.reindex.read().queue {
-			if let Some((tier, value)) = self.get_in_index(key, &r, &*tables, log)? {
+			if let Some((tier, value)) = self.get_in_index(key, &r, values, log)? {
 				if self.collect_stats {
 					self.stats.query_hit(tier);
 				}
@@ -118,11 +130,12 @@ impl Column {
 		self.get(key, log).map(|v| v.map(|v| v.len() as u32))
 	}
 
-	fn get_in_index(&self, key: &TableKey, index: &IndexTable, tables: &Tables, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
+	fn get_in_index(&self, key: &TableKey, index: &IndexTable, tables: TableLocked, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
 		let (mut entry, mut sub_index) = index.get(key, 0, log);
 		while !entry.is_empty() {
 			let address = entry.address(index.id.index_bits());
-			match Self::get_at_value_index_locked(TableKeyQuery::Check(key), address, &tables.value, log, &self.compression)? {
+			let value = Column::get_at_value_index_locked(TableKeyQuery::Check(key), address, tables, log)?;
+			match value {
 				Some(result) => {
 					return Ok(Some(result));
 				}
@@ -136,16 +149,29 @@ impl Column {
 		Ok(None)
 	}
 
-	pub(crate) fn get_at_value_index(&self, key: TableKeyQuery, address: Address, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
-		let tables = self.tables.read();
-		Column::get_at_value_index_locked(key, address, &tables.value, log, &self.compression)
+	pub(crate) fn locked<'a>(&'a self, tables: &'a Vec<ValueTable>) -> TableLocked<'a> {
+		TableLocked {
+			tables,
+			preimage: self.preimage,
+			uniform_keys: self.uniform_keys,
+			ref_counted: self.ref_counted,
+			compression: &self.compression,
+		}
 	}
 
-	pub(crate) fn get_at_value_index_locked(mut key: TableKeyQuery, address: Address, tables: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<(u8, Value)>> {
+	pub(crate) fn with_locked<R>(&self, mut apply: impl FnMut(TableLocked) -> Result<R>) -> Result<R> {
+		let locked_tables = &self.tables.read().value;
+		let locked = self.locked(locked_tables);
+		apply(locked)
+	}
+}
+
+impl Column {
+	pub(crate) fn get_at_value_index_locked(mut key: TableKeyQuery, address: Address, tables: TableLocked, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
 		let size_tier = address.size_tier() as usize;
-		if let Some((value, compressed, _rc)) = tables[size_tier].query(&mut key, address.offset(), log)? {
+		if let Some((value, compressed, _rc)) = tables.tables[size_tier].query(&mut key, address.offset(), log)? {
 			let value = if compressed {
-				comp.decompress(&value)?
+				tables.compression.decompress(&value)?
 			} else {
 				value
 			};
@@ -153,13 +179,10 @@ impl Column {
 		}
 		Ok(None)
 	}
+}
 
-	/// Compress if needed and return the target tier to use.
-	fn compress(&self, key: &TableKey, value: &[u8], tables: &Tables) -> (Option<Vec<u8>>, usize) {
-		Self::compress_internal(&self.compression, key, value, tables)
-	}
-
-	fn compress_internal(compression: &Compress, key: &TableKey, value: &[u8], tables: &Tables) -> (Option<Vec<u8>>, usize) {
+impl Column {
+	pub(crate) fn compress_internal(compression: &Compress, key: &TableKey, value: &[u8], tables: &Vec<ValueTable>) -> (Option<Vec<u8>>, usize) {
 		let (len, result) = if value.len() > compression.treshold as usize {
 			let cvalue = compression.compress(value);
 			if cvalue.len() < value.len() {
@@ -170,39 +193,33 @@ impl Column {
 		} else {
 			(value.len(), None)
 		};
-		let target_tier = tables.value.iter().position(|t| t.value_size(key).map_or(false, |s| len <= s as usize));
+		let target_tier = tables.iter().position(|t| t.value_size(key).map_or(false, |s| len <= s as usize));
 		let target_tier = match target_tier {
 			Some(tier) => tier as usize,
 			None => {
 				log::trace!(target: "parity-db", "Using blob {}", key);
-				tables.value.len() - 1
+				tables.len() - 1
 			}
 		};
 
 		(result, target_tier)
 	}
+}
 
+impl HashColumn {
 	fn decompress(&self, buf: &[u8]) -> Result<Vec<u8>> {
 		self.compression.decompress(buf)
 	}
 
-	pub fn open(col: ColId, options: &Options, metadata: &Metadata) -> Result<Column> {
+	fn open_hashed(col: ColId, value: Vec<ValueTable>, options: &Options, metadata: &Metadata) -> Result<HashColumn> {
 		let (index, reindexing, stats) = Self::open_index(&options.path, col)?;
 		let collect_stats = options.stats;
 		let path = &options.path;
 		let arc_path = std::sync::Arc::new(path.clone());
 		let options = &metadata.columns[col as usize];
 		let db_version = metadata.version;
-		let value = (0.. options.sizes.len() + 1)
-			.map(|i| Self::open_table(arc_path.clone(), col, i as u8, &options, db_version)).collect::<Result<_>>()?;
-		let btree = if options.btree_index {
-			Some(Self::open_btree(col, &value)?)
-		} else {
-			None
-		};
-
-		Ok(Column {
-			tables: RwLock::new(Tables { index, value, btree }),
+		Ok(HashColumn {
+			tables: RwLock::new(Tables { index, value }),
 			reindex: RwLock::new(Reindex {
 				queue: reindexing,
 				progress: AtomicU64::new(0),
@@ -211,7 +228,6 @@ impl Column {
 			preimage: options.preimage,
 			uniform_keys: options.uniform,
 			ref_counted: options.ref_counted,
-			indexed: options.btree_index,
 			collect_stats,
 			salt: metadata.salt.clone(),
 			stats,
@@ -219,7 +235,29 @@ impl Column {
 			db_version,
 		})
 	}
+}
 
+impl Column {
+	pub fn open(col: ColId, options: &Options, metadata: &Metadata) -> Result<Column> {
+		let (index, reindexing, stats) = HashColumn::open_index(&options.path, col)?;
+		let collect_stats = options.stats;
+		let path = &options.path;
+		let arc_path = std::sync::Arc::new(path.clone());
+		let column_options = &metadata.columns[col as usize];
+		let db_version = metadata.version;
+		let value = (0.. column_options.sizes.len() + 1)
+			.map(|i| Self::open_table(arc_path.clone(), col, i as u8, column_options, db_version)).collect::<Result<_>>()?;
+
+		if column_options.btree_index {
+			let id = BTreeTableId::new(col);
+			Ok(Column::Tree(BTreeTable::open(id, value, options, metadata)?))
+		} else {
+			Ok(Column::Hash(HashColumn::open_hashed(col, value, options, metadata)?))
+		}
+	}
+}
+
+impl HashColumn {
 	pub fn hash(&self, key: &[u8]) -> Key {
 		let mut k = Key::default();
 		if self.uniform_keys {
@@ -260,7 +298,9 @@ impl Column {
 		};
 		Ok((table, reindexing, stats))
 	}
+}
 
+impl Column {
 	fn open_table(
 		path: std::sync::Arc<std::path::PathBuf>,
 		col: ColId,
@@ -272,15 +312,9 @@ impl Column {
 		let entry_size = options.sizes.get(tier as usize).cloned();
 		ValueTable::open(path, id, entry_size, options, db_version)
 	}
+}
 
-	fn open_btree(
-		col: ColId,
-		values: &Vec<ValueTable>,
-	) -> Result<BTreeTable> {
-		let id = BTreeTableId::new(col);
-		BTreeTable::open(id, values)
-	}
-
+impl HashColumn {
 	fn trigger_reindex(
 		tables: parking_lot::RwLockUpgradableReadGuard<Tables>,
 		reindex: parking_lot::RwLockUpgradableReadGuard<Reindex>,
@@ -374,84 +408,72 @@ impl Column {
 			}
 			Ok(None)
 	}
+}
 
+impl Column {
 	pub(crate) fn write_existing_value_plan(
-		&self,
 		key: &TableKey,
-		tables: &Tables,
+		tables: TableLocked,
 		address: Address,
 		value: Option<&[u8]>,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
+		stats: Option<&ColumnStats>,
 	) -> Result<(Option<PlanOutcome>, Option<Address>)> {
 		let tier = address.size_tier() as usize;
 		if let Some(val) = value.as_ref() {
-			if self.ref_counted {
-				log::trace!(target: "parity-db", "{}: Increment ref {}", tables.index.id, key);
-				tables.value[tier].write_inc_ref(address.offset(), log)?;
+			if tables.ref_counted {
+				log::trace!(target: "parity-db", "{}: Increment ref {}", origin, key);
+				tables.tables[tier].write_inc_ref(address.offset(), log)?;
 				return Ok((Some(PlanOutcome::Written), None));
 			}
-			if self.preimage {
+			if tables.preimage {
 				// Replace is not supported
 				return Ok((Some(PlanOutcome::Skipped), None));
 			}
 
-			let (cval, target_tier) = self.compress(key, &val, tables);
+			let (cval, target_tier) = Column::compress_internal(tables.compression, key, &val, tables.tables);
 			let (cval, compressed) = cval.as_ref()
 				.map(|cval| (cval.as_slice(), true))
 				.unwrap_or((val, false));
 
-			if self.collect_stats {
-				let (cur_size, compressed) = tables.value[tier].size(key, address.offset(), log)?
+			if let Some(stats) = stats {
+				let (cur_size, compressed) = tables.tables[tier].size(key, address.offset(), log)?
 					.unwrap_or((0, false));
 				if compressed {
 					// This is very costy.
-					let compressed = tables.value[tier].get(key, address.offset(), log)?
+					let compressed = tables.tables[tier].get(key, address.offset(), log)?
 						.expect("Same query as size").0;
-					let uncompressed = self.decompress(compressed.as_slice())?;
+					let uncompressed = tables.compression.decompress(compressed.as_slice())?;
 
-					self.stats.replace_val(cur_size, uncompressed.len() as u32, val.len() as u32, cval.len() as u32);
+					stats.replace_val(cur_size, uncompressed.len() as u32, val.len() as u32, cval.len() as u32);
 				} else {
-					self.stats.replace_val(cur_size, cur_size, val.len() as u32, cval.len() as u32);
+					stats.replace_val(cur_size, cur_size, val.len() as u32, cval.len() as u32);
 				}
 			}
 			if tier == target_tier {
-				match origin {
-					ValueTableOrigin::Index(_) => {
-						log::trace!(target: "parity-db", "{}: Replacing {}", tables.index.id, key);
-					},
-					ValueTableOrigin::BTree(id) => {
-						log::trace!(target: "parity-db", "{}: Replacing btree {}", id, key);
-					},
-				}
+				log::trace!(target: "parity-db", "{}: Replacing {}", origin, key);
 
-				tables.value[target_tier].write_replace_plan(address.offset(), key, &cval, log, compressed)?;
+				tables.tables[target_tier].write_replace_plan(address.offset(), key, &cval, log, compressed)?;
 				return Ok((Some(PlanOutcome::Written), None));
 			} else {
-				match origin {
-					ValueTableOrigin::Index(_) => {
-						log::trace!(target: "parity-db", "{}: Replacing in a new table {}", tables.index.id, key);
-					},
-					ValueTableOrigin::BTree(id) => {
-						log::trace!(target: "parity-db", "{}: Replacing in a new table from btree {}", id, key);
-					},
-				}
+				log::trace!(target: "parity-db", "{}: Replacing in a new table {}", origin, key);
 
-				tables.value[tier].write_remove_plan(address.offset(), log)?;
-				let new_offset = tables.value[target_tier].write_insert_plan(key, &cval, log, compressed)?;
+				tables.tables[tier].write_remove_plan(address.offset(), log)?;
+				let new_offset = tables.tables[target_tier].write_insert_plan(key, &cval, log, compressed)?;
 				let new_address = Address::new(new_offset, target_tier as u8);
 				return Ok((None, Some(new_address)));
 			}
 		} else {
 			// Deletion
-			let cur_size = if self.collect_stats {
-				let (cur_size, compressed) = tables.value[tier].size(key, address.offset(), log)?
+			let cur_size = if let Some(stats) = stats {
+				let (cur_size, compressed) = tables.tables[tier].size(key, address.offset(), log)?
 					.unwrap_or((0, false));
 				Some(if compressed {
 					// This is very costly.
-					let compressed = tables.value[tier].get(key, address.offset(), log)?
+					let compressed = tables.tables[tier].get(key, address.offset(), log)?
 						.expect("Same query as size").0;
-					let uncompressed = self.decompress(compressed.as_slice())?;
+					let uncompressed = tables.compression.decompress(compressed.as_slice())?;
 
 					(cur_size, uncompressed.len() as u32)
 				} else {
@@ -460,18 +482,20 @@ impl Column {
 			} else {
 				None
 			};
-			let remove = if self.ref_counted {
-				let removed = !tables.value[tier].write_dec_ref(address.offset(), log)?;
+			let remove = if tables.ref_counted {
+				let removed = !tables.tables[tier].write_dec_ref(address.offset(), log)?;
 				log::trace!(target: "parity-db", "{}: Dereference {}, deleted={}", origin, key, removed);
 				removed
 			} else {
 				log::trace!(target: "parity-db", "{}: Deleting {}", origin, key);
-				tables.value[tier].write_remove_plan(address.offset(), log)?;
+				tables.tables[tier].write_remove_plan(address.offset(), log)?;
 				true
 			};
 			if remove {
 				if let Some((compressed_size, uncompressed_size)) = cur_size {
-					self.stats.remove_val(uncompressed_size, compressed_size);
+					if let Some(stats) = stats {
+						stats.remove_val(uncompressed_size, compressed_size);
+					}
 				}
 				return Ok((None, Some(address)));
 			} else {
@@ -480,29 +504,34 @@ impl Column {
 		}
 	}
 
+	// TODO consider moving to a struct ValueTables(Vec<ValueTable>), maybe with the ref_counted,
+	// uniform, compress and other.
 	pub(crate) fn write_new_value_plan(
-		&self,
 		key: &TableKey,
-		tables: &Tables,
+		tables: TableLocked,
 		val: &[u8],
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
+		stats: Option<&ColumnStats>,
 	) -> Result<Address> {
-		let (cval, target_tier) = self.compress(key, &val, &*tables);
+
+		let (cval, target_tier) = Column::compress_internal(tables.compression, key, &val, tables.tables);
 		let (cval, compressed) = cval.as_ref()
 			.map(|cval| (cval.as_slice(), true))
 			.unwrap_or((val, false));
 
 		log::trace!(target: "parity-db", "{}: Inserting new {}, size = {}", origin, key, cval.len());
-		let offset = tables.value[target_tier].write_insert_plan(key, &cval, log, compressed)?;
+		let offset = tables.tables[target_tier].write_insert_plan(key, &cval, log, compressed)?;
 		let address = Address::new(offset, target_tier as u8);
 
-		if self.collect_stats {
-			self.stats.insert_val(val.len() as u32, cval.len() as u32);
+		if let Some(stats) = stats {
+			stats.insert_val(val.len() as u32, cval.len() as u32);
 		}
 		Ok(address)
 	}
+}
 
+impl HashColumn {
 	pub(crate) fn write_plan(
 		&self,
 		key: &TableKey,
@@ -515,6 +544,7 @@ impl Column {
 			.map(|(outcome, _, _)| outcome)
 	}
 	
+	// TODO used only once?
 	fn write_plan_indexed_with_lock<'a, 'b>(
 		&self,
 		tables: parking_lot::RwLockUpgradableReadGuard<'a, Tables>,
@@ -527,7 +557,7 @@ impl Column {
 		let existing = Self::search_all_indexes(key, &*tables, &*reindex, log)?;
 		if let Some((table, sub_index, existing_address)) = existing {
 
-			self.write_plan_indexed_with_lock_existing(&*tables, key, value, log, table, sub_index, existing_address, ValueTableOrigin::Index(table.id))
+			self.write_plan_indexed_with_lock_existing(&*tables, key, value, log, table, sub_index, existing_address, ValueTableOrigin::Index(tables.index.id))
 				.map(|outcome| (outcome, tables, reindex))
 		} else {
 			let origin = ValueTableOrigin::Index(tables.index.id);
@@ -554,7 +584,24 @@ impl Column {
 		existing_address: Address,
 		origin: ValueTableOrigin,
 	) -> Result<PlanOutcome> {
-		match self.write_existing_value_plan(key, &*tables, existing_address, value, log, origin)? {
+		let stats = if self.collect_stats {
+			Some(&self.stats)
+		} else {
+			None
+		};
+
+		match Column::write_existing_value_plan(
+			key,
+			&tables.value,
+			existing_address,
+			value,
+			log,
+			origin,
+			self.preimage,
+			self.ref_counted,
+			stats,
+			&self.compression,
+		)? {
 			(Some(outcome), _) => return Ok(outcome),
 			(None, Some(value_address)) => if value.is_some() {
 				// If it was found in an older index we just insert a new entry. Reindex won't overwrite it.
@@ -578,7 +625,13 @@ impl Column {
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<(PlanOutcome, parking_lot::RwLockUpgradableReadGuard<'a, Tables>, parking_lot::RwLockUpgradableReadGuard<'b, Reindex>)> {
-		let address = self.write_new_value_plan(key, &*tables, value, log, origin.clone())?;
+		let stats = if self.collect_stats {
+			Some(&self.stats)
+		} else {
+			None
+		};
+
+		let address = Column::write_new_value_plan(key, &tables.value, value, log, origin.clone(), stats, &self.compression)?;
 		match tables.index.write_insert_plan(key, address, None, log)? {
 			PlanOutcome::NeedReindex => {
 				log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, key);
@@ -694,7 +747,7 @@ impl Column {
 		let tables = self.tables.read();
 		let source = &tables.index;
 
-		if skip_preimage_indexes && self.preimage && tables.btree.is_none() {
+		if skip_preimage_indexes && self.preimage {
 			// It is much faster to iterate over the value table than index.
 			// We have to assume hashing scheme however.
 			for table in &tables.value[..tables.value.len() - 1] {
@@ -872,7 +925,9 @@ impl Column {
 		log::debug!(target: "parity-db", "Dropped {}", id);
 		Ok(())
 	}
+}
 
+/* TODO rem
 	pub fn btree_get(&self, key: &[u8], log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
 		let tables = self.tables.read();
 		if let Some(btree) = tables.btree.as_ref() {
@@ -881,13 +936,26 @@ impl Column {
 			Err(crate::error::Error::InvalidConfiguration("Not an indexed column.".to_string()))
 		} 
 	}
+*/
 
+impl Column {
+	// TODO should not be use
 	pub(crate) fn with_value_tables<R>(&self, mut apply: impl FnMut(&Vec<ValueTable>) -> Result<R>) -> Result<R> {
-		let tables = self.tables.read();
-		apply(&tables.value)
+		match self {
+			Column::Hash(s) => {
+				let tables = s.tables.read();
+				apply(&tables.value)
+			},
+			Column::Tree(s) => {
+				let tables = s.tables.read();
+				apply(&tables)
+			},
+		}
 	}
 
+/* TODO should not be of any use
 	pub(crate) fn with_value_tables_and_btree<R>(&self, mut apply: impl FnMut(&BTreeTable, &Vec<ValueTable>, &Compress) -> Result<R>) -> Result<R> {
+
 		let tables = self.tables.read();
 		if let Some(btree) = tables.btree.as_ref() {
 			apply(btree, &tables.value, &self.compression)
@@ -901,8 +969,9 @@ impl Column {
 		let tables = self.tables.read();
 		apply(&tables, self)
 	}
+*/
 
-	pub(crate) fn indexed(&self) -> bool {
-		self.indexed
+	pub(crate) fn indexed(&self) -> bool { // TODO still used?
+		matches!(self, Column::Hash(..))
 	}
 }
