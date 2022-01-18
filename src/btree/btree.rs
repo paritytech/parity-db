@@ -309,7 +309,7 @@ mod test {
 		let mut options = crate::options::Options::with_columns(tmp.path(), 1);
 		options.columns[col_nb].btree_index = true;
 		let origin = crate::column::ValueTableOrigin::BTree(crate::btree::BTreeTableId::new(col_nb as u8));
-		let db = crate::Db::open_inner(&options, true, false, crate::db::TestDbTarget::Standard, false).unwrap();
+		let db = crate::Db::open_or_create(&options).unwrap();
 
 		let root = Node::new();
 		let mut tree = BTree::new(None, root, 0, record_id);
