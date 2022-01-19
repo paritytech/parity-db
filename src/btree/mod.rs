@@ -43,6 +43,7 @@ use crate::column::{ColId, ValueTableOrigin, Column, TableLocked};
 use crate::log::{LogQuery, LogWriter, LogAction, LogReader};
 use crate::compress::Compress;
 use crate::btree::node::Node;
+use crate::btree::btree::BTree;
 use parking_lot::RwLock;
 pub use btree::BTreeIterator;
 
@@ -245,7 +246,7 @@ impl BTreeTable {
 		let root = Self::get_index(btree_index.root, log, values)?;
 		let root = Node::from_encoded(root);
 		// keeping log locked when parsing tree.
-		let mut tree = btree::BTree::new(Some(btree_index.root), root, btree_index.depth, record_id);
+		let mut tree = BTree::new(Some(btree_index.root), root, btree_index.depth, record_id);
 		tree.get_with_lock_no_cache(key, values, log)
 	}
 
@@ -317,6 +318,123 @@ impl BTreeTable {
 			t.refresh_metadata()?;
 		}
 		Ok(())
+	}
+
+	pub fn write_plan(
+		&self,
+		btree: &mut BTree,
+		writer: &mut LogWriter,
+		record_id: u64,
+		btree_index: &mut BTreeIndex,
+		origin: ValueTableOrigin,
+	) -> Result<()> {
+		if let Some(ix) = self.write_plan_node(&mut btree.root, writer, btree.root_index, btree_index, record_id, origin)? {
+			btree.root_index = Some(ix);
+		}
+		for (node_index, _node) in btree.removed_children.0.drain(..) {
+			if let Some(index) = node_index {
+				self.with_locked(|tables| Column::write_existing_value_plan(
+					&TableKey::NoHash,
+					tables,
+					Address::from_u64(index),
+					None,
+					writer,
+					origin,
+					None,
+				))?;
+			}
+		}
+		btree.record_id = record_id;
+		btree_index.root = btree.root_index.unwrap_or(0);
+		btree_index.depth = btree.depth;
+		Ok(())
+	}
+
+	pub fn write_plan_node(
+		&self,
+		node: &mut Node,
+		writer: &mut LogWriter,
+		node_id: Option<u64>,
+		btree: &mut BTreeIndex,
+		record_id: u64,
+		origin: ValueTableOrigin,
+	) -> Result<Option<u64>> {
+		for child in node.children.as_mut().iter_mut() {
+			// Only modified nodes are cached in children
+			if let Some(child_node) = child.node.as_mut() {
+				if let Some(index) = self.write_plan_node(child_node, writer, child.entry_index, btree, record_id, origin)? {
+					child.entry_index = Some(index);
+					node.changed = true;
+				} else {
+					if child.state.moved {
+						node.changed = true;
+					}
+				}
+			} else {
+				if child.state.moved {
+					node.changed = true;
+				}
+			}
+		}
+
+		for separator in node.separators.as_mut().iter_mut() {
+			if separator.modified {
+				node.changed = true;
+			}
+		}
+
+		if !node.changed {
+			return Ok(None);
+		}
+
+		let mut entry = Entry::empty();
+		let mut i_children = 0;
+		let mut i_separator = 0;
+		loop {
+			if let Some(index) = node.children.as_mut()[i_children].entry_index {
+				entry.write_child_index(index);
+			} else {
+				entry.write_child_index(0);
+			}
+			i_children += 1;
+			if i_children == ORDER_CHILD {
+				break;
+			}
+			if let Some(sep) = &node.separators.as_mut()[i_separator].separator {
+				entry.write_separator(&sep.key, sep.value);
+				i_separator += 1
+			} else {
+				break;
+			}
+		}
+	
+		let mut result = None;
+		if let Some(existing) = node_id {
+			let k = TableKey::NoHash;
+			if let (_, Some(new_index)) = self.with_locked_no_comp(|tables| Column::write_existing_value_plan(
+				&k,
+				tables,
+				Address::from_u64(existing),
+				Some(entry.encoded.as_ref()),
+				writer,
+				origin,
+				None,
+			))? {
+				result = Some(new_index.as_u64())
+			}
+		} else {
+			let k = TableKey::NoHash;
+			result = Some(self.with_locked_no_comp(|tables| Column::write_new_value_plan(
+				&k,
+				tables,
+				entry.encoded.as_ref(),
+				writer,
+				origin,
+				None,
+			))?.as_u64());
+		}
+
+		Ok(result)
 	}
 }
 
@@ -418,7 +536,7 @@ pub mod commit_overlay {
 			};
 			let old_btree_index = btree_index.clone();
 
-			tree.write_plan(btree, writer, record_id, &mut btree_index, origin)?;
+			btree.write_plan(&mut tree, writer, record_id, &mut btree_index, origin)?;
 
 			if old_btree_index != btree_index {
 				let mut entry = Entry::empty();

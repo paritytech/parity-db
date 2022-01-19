@@ -17,7 +17,7 @@
 //! BTree structure.
 
 use super::*;
-use crate::table::key::{TableKeyQuery, TableKey};
+use crate::table::key::TableKeyQuery;
 use crate::log::{LogWriter, LogQuery};
 use crate::column::Column;
 use crate::error::{Error, Result};
@@ -27,10 +27,10 @@ use parking_lot::RwLock;
 
 pub struct BTree {
 	pub(super) depth: u32,
-	root: Box<Node>,
+	pub(super) root: Box<Node>,
 	pub(super) root_index: Option<u64>,
-	removed_children: RemovedChildren,
-	record_id: u64,
+	pub(super) removed_children: RemovedChildren,
+	pub(super) record_id: u64,
 }
 
 pub struct BTreeIterator<'a> {
@@ -104,7 +104,7 @@ pub struct BTreeIter {
 	pub last_key: Option<Vec<u8>>,
 }
 
-pub struct RemovedChildren(Vec<(Option<u64>, Option<Box<Node>>)>);
+pub struct RemovedChildren(pub(super) Vec<(Option<u64>, Option<Box<Node>>)>);
 
 impl RemovedChildren {
 	pub fn push(&mut self, index: Option<u64>, node: Option<Box<Node>>) {
@@ -246,12 +246,7 @@ impl BTree {
 	}
 
 	#[cfg(test)]
-	pub fn get(&mut self, key: &[u8], btree: &BTreeTable, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
-		btree.with_locked(|b| self.get_with_lock(key, b, log))
-	}
-
-	#[cfg(test)]
-	pub fn get_with_lock(&mut self, key: &[u8], btree: TableLocked, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
+	pub fn get(&mut self, key: &[u8], btree: TableLocked, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
 		if let Some(address) = self.root.get(key, btree, log)? {
 			let key_query = TableKeyQuery::Fetch(None);
 			let r = Column::get_at_value_index_locked(key_query, address, btree, log)?;
@@ -275,36 +270,6 @@ impl BTree {
 		btree.with_locked(|btree|
 			self.root.remove(self.depth, key, self.record_id, btree, log, origin, &mut self.removed_children)
 		)?;
-		Ok(())
-	}
-
-	pub fn write_plan(
-		&mut self,
-		btree: &BTreeTable,
-		writer: &mut LogWriter,
-		record_id: u64,
-		btree_index: &mut BTreeIndex,
-		origin: ValueTableOrigin,
-	) -> Result<()> {
-		if let Some(ix) = self.root.write_plan(btree, writer, self.root_index, btree_index, record_id, origin)? {
-			self.root_index = Some(ix);
-		}
-		for (node_index, _node) in self.removed_children.0.drain(..) {
-			if let Some(index) = node_index {
-				btree.with_locked(|tables| Column::write_existing_value_plan(
-					&TableKey::NoHash,
-					tables,
-					Address::from_u64(index),
-					None,
-					writer,
-					origin,
-					None,
-				))?;
-			}
-		}
-		self.record_id = record_id;
-		btree_index.root = self.root_index.unwrap_or(0);
-		btree_index.depth = self.depth;
 		Ok(())
 	}
 }
@@ -345,7 +310,7 @@ mod test {
 
 		let state: BTreeMap<Vec<u8>, Option<Vec<u8>>> = change_set.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 		for (key, value) in state.iter() {
-			assert_eq!(&tree.get(key, col, &log_overlay).unwrap(), value);
+			assert_eq!(&col.with_locked(|col| tree.get(key, col, &log_overlay)).unwrap(), value);
 		}
 		assert!(col.with_locked(|col| tree.root.is_balanced(col, &log_overlay, 0)).unwrap());
 	}

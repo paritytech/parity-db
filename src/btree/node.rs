@@ -426,15 +426,15 @@ impl Node {
 /// (there we need one entry per record id).
 #[derive(Clone)]
 pub struct Node {
-	separators: [node::Separator; ORDER],
-	children: [node::Child; ORDER_CHILD],
-	changed: bool,
+	pub(super) separators: [node::Separator; ORDER],
+	pub(super) children: [node::Child; ORDER_CHILD],
+	pub(super) changed: bool,
 }
 
 #[derive(Clone)]
 pub struct Separator {
-	modified: bool,
-	separator: Option<SeparatorInner>,
+	pub(super) modified: bool,
+	pub(super) separator: Option<SeparatorInner>,
 }
 
 impl Default for Separator {
@@ -460,9 +460,9 @@ pub struct ChildState {
 
 #[derive(Clone)]
 pub struct Child {
-	state: ChildState,
-	node: Option<Box<Node>>, // lazy fetch.
-	entry_index: Option<u64>, // no index is new.
+	pub(super) state: ChildState,
+	pub(super) node: Option<Box<Node>>, // lazy fetch.
+	pub(super) entry_index: Option<u64>, // no index is new.
 }
 impl Default for Child {
 	fn default() -> Self {
@@ -772,93 +772,6 @@ impl Node {
 			}
 		}
 		Ok((false, i))
-	}
-
-	pub fn write_plan(
-		&mut self,
-		btree_table: &BTreeTable,
-		writer: &mut LogWriter,
-		node_id: Option<u64>,
-		btree: &mut BTreeIndex,
-		record_id: u64,
-		origin: ValueTableOrigin,
-	) -> Result<Option<u64>> {
-		for child in self.children.as_mut().iter_mut() {
-			// Only modified nodes are cached in children
-			if let Some(node) = child.node.as_mut() {
-				if let Some(index) = node.write_plan(btree_table, writer, child.entry_index, btree, record_id, origin)? {
-					child.entry_index = Some(index);
-					self.changed = true;
-				} else {
-					if child.state.moved {
-						self.changed = true;
-					}
-				}
-			} else {
-				if child.state.moved {
-					self.changed = true;
-				}
-			}
-		}
-
-		for separator in self.separators.as_mut().iter_mut() {
-			if separator.modified {
-				self.changed = true;
-			}
-		}
-
-		if !self.changed {
-			return Ok(None);
-		}
-
-		let mut entry = Entry::empty();
-		let mut i_children = 0;
-		let mut i_separator = 0;
-		loop {
-			if let Some(index) = self.children.as_mut()[i_children].entry_index {
-				entry.write_child_index(index);
-			} else {
-				entry.write_child_index(0);
-			}
-			i_children += 1;
-			if i_children == ORDER_CHILD {
-				break;
-			}
-			if let Some(sep) = &self.separators.as_mut()[i_separator].separator {
-				entry.write_separator(&sep.key, sep.value);
-				i_separator += 1
-			} else {
-				break;
-			}
-		}
-	
-		let mut result = None;
-		if let Some(existing) = node_id {
-			let k = TableKey::NoHash;
-			if let (_, Some(new_index)) = btree_table.with_locked_no_comp(|tables| Column::write_existing_value_plan(
-				&k,
-				tables,
-				Address::from_u64(existing),
-				Some(entry.encoded.as_ref()),
-				writer,
-				origin,
-				None,
-			))? {
-				result = Some(new_index.as_u64())
-			}
-		} else {
-			let k = TableKey::NoHash;
-			result = Some(btree_table.with_locked_no_comp(|tables| Column::write_new_value_plan(
-				&k,
-				tables,
-				entry.encoded.as_ref(),
-				writer,
-				origin,
-				None,
-			))?.as_u64());
-		}
-
-		Ok(result)
 	}
 
 	pub fn force_fetch_node_at(&mut self, i: usize, log: &impl LogQuery, values: TableLocked) -> Result<Option<Self>> {
