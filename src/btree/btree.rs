@@ -17,12 +17,10 @@
 //! BTree structure.
 
 use super::*;
-use crate::table::ValueTable;
 use crate::table::key::{TableKeyQuery, TableKey};
 use crate::log::{LogWriter, LogQuery};
 use crate::column::Column;
-use crate::error::Result;
-use crate::compress::Compress;
+use crate::error::{Error, Result};
 use parking_lot::RwLock;
 
 /// In memory local btree overlay.
@@ -36,7 +34,7 @@ pub struct BTree {
 }
 
 pub struct BTreeIterator<'a> {
-	db: &'a crate::db::DbInner,
+	db: &'a crate::db::DbInner, // TODO replace by BTreeTable
 	pub(crate) iter: BtreeIterBackend,
 	pub(crate) col: ColId,
 	pub(crate) pending_next_backend: Option<Option<(Vec<u8>, Vec<u8>)>>,
@@ -52,9 +50,14 @@ impl<'a> BTreeIterator<'a> {
 		col: ColId, 
 		log: &RwLock<crate::log::LogOverlays>,
 	) -> Result<Self> {
-		let column = db.column(col);
+		let column = match db.column(col) {
+			Column::Hash(_) => {
+				return Err(Error::InvalidConfiguration("Not an indexed column.".to_string()));
+			},
+			Column::Tree(col) => col,
+		};
 		let record_id = log.read().last_record_id(col);
-		let tree = new_btree_inner(column, log, record_id)?;
+		let tree = column.with_locked(|btree| new_btree_inner(btree, log, record_id))?;
 		let iter = tree.iter();
 		Ok(BTreeIterator {
 			db,
@@ -74,19 +77,19 @@ impl<'a> BTreeIterator<'a> {
 		self.db.btree_iter_next(self)
 	}
 
-	pub fn next_backend(&mut self, record_id: u64, col: &Column, log: &impl LogQuery) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+	pub fn next_backend(&mut self, record_id: u64, col: &BTreeTable, log: &impl LogQuery) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
 		if record_id != tree.record_id {
-			let new_tree = new_btree_inner(col, log, record_id)?;
+			let new_tree = col.with_locked(|btree| new_btree_inner(btree, log, record_id))?;
 			*tree = new_tree;
 		}
 		iter.next(tree, col, log)
 	}
 
-	pub fn seek_backend(&mut self, key: Vec<u8>, record_id: u64, col: &Column, log: &impl LogQuery, after: bool) -> Result<()> {
+	pub fn seek_backend(&mut self, key: Vec<u8>, record_id: u64, col: &BTreeTable, log: &impl LogQuery, after: bool) -> Result<()> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
 		if record_id != tree.record_id {
-			let new_tree = new_btree_inner(col, log, record_id)?;
+			let new_tree = col.with_locked(|btree| new_btree_inner(btree, log, record_id))?;
 			*tree = new_tree;
 		}
 		iter.seek(key, tree, col, log, after)
@@ -130,7 +133,7 @@ impl RemovedChildren {
 }
 
 impl BTreeIter {
-	pub fn next(&mut self, btree: &mut BTree, col: &Column, log: &impl LogQuery) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+	pub fn next(&mut self, btree: &mut BTree, col: &BTreeTable, log: &impl LogQuery) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 		if self.next_separator && self.state.is_empty() {
 			return Ok(None);
 		}
@@ -146,8 +149,8 @@ impl BTreeIter {
 			}
 			while let Some((ix, node)) = self.state.last_mut() {
 
-				if let Some(child) = col.with_value_tables_and_btree(|btree, values, comp| {
-					node.force_fetch_node_at(*ix, btree, log, values, comp)
+				if let Some(child) = col.with_locked(|btree| {
+					node.force_fetch_node_at(*ix, log, btree)
 				})? {
 					self.state.push((0, child));
 				} else {
@@ -176,11 +179,11 @@ impl BTreeIter {
 		self.next(btree, col, log)
 	}
 
-	pub fn seek(&mut self, key: Vec<u8>, btree: &mut BTree, col: &Column, log: &impl LogQuery, after: bool) -> Result<()> {
+	pub fn seek(&mut self, key: Vec<u8>, btree: &mut BTree, col: &BTreeTable, log: &impl LogQuery, after: bool) -> Result<()> {
 		self.state.clear();
 		self.record_id = btree.record_id;
 		self.last_key = Some(key.to_vec());
-		if col.with_value_tables_and_btree(|b, t, c| Node::seek(btree.root.as_ref().clone(), key.as_ref(), b, t, log, btree.depth, &mut self.state, c))? {
+		if col.with_locked(|b| Node::seek(btree.root.as_ref().clone(), key.as_ref(), b, log, btree.depth, &mut self.state))? {
 			// on value
 			if after {
 				if let Some((ix, _node)) = self.state.last_mut() {
@@ -217,8 +220,8 @@ impl BTree {
 		}
 	}
 
-	pub fn insert(&mut self, key: &[u8], value: &[u8], column: &Column, log: &mut LogWriter, origin: ValueTableOrigin) -> Result<()> {
-		match self.root.insert(self.depth, key, value, self.record_id, column, log, origin, &mut self.removed_children)? {
+	pub fn insert(&mut self, key: &[u8], value: &[u8], btree: &BTreeTable, log: &mut LogWriter, origin: ValueTableOrigin) -> Result<()> {
+		match self.root.insert(self.depth, key, value, self.record_id, btree, log, origin, &mut self.removed_children)? {
 			Some((sep, right)) => {
 				// add one level
 				self.depth += 1;
@@ -234,56 +237,59 @@ impl BTree {
 	}
 
 	#[cfg(test)]
-	pub fn get(&mut self, key: &[u8], column: &Column, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
-		column.with_value_tables_and_btree(|b, t, c| self.get_with_lock(key, b, t, log, c))
+	pub fn get(&mut self, key: &[u8], btree: &BTreeTable, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
+		btree.with_locked(|b| self.get_with_lock(key, b, log))
 	}
 
 	#[cfg(test)]
-	pub fn get_with_lock(&mut self, key: &[u8], btree: &BTreeTable, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Vec<u8>>> {
-		if let Some(address) = self.root.get(key, btree, values, log, comp)? {
+	pub fn get_with_lock(&mut self, key: &[u8], btree: TableLocked, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
+		if let Some(address) = self.root.get(key, btree, log)? {
 			let key_query = TableKeyQuery::Fetch(None);
-			let r = Column::get_at_value_index_locked(key_query, address, values, log, comp)?;
+			let r = Column::get_at_value_index_locked(key_query, address, btree, log)?;
 			Ok(r.map(|r| r.1))
 		} else {
 			Ok(None)
 		}
 	}
 
-	pub fn get_with_lock_no_cache(&mut self, key: &[u8], btree: BTreeTableId, values: &Vec<ValueTable>, log: &impl LogQuery, comp: &Compress) -> Result<Option<Vec<u8>>> {
-		if let Some(address) = self.root.get_no_cache(key, btree, values, log, comp)? {
+	pub fn get_with_lock_no_cache(&mut self, key: &[u8], values: TableLocked, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
+		if let Some(address) = self.root.get_no_cache(key, values, log)? {
 			let key_query = TableKeyQuery::Fetch(None);
-			let r = Column::get_at_value_index_locked(key_query, address, values, log, comp)?;
+			let r = Column::get_at_value_index_locked(key_query, address, values, log)?;
 			Ok(r.map(|r| r.1))
 		} else {
 			Ok(None)
 		}
 	}
 
-	pub fn remove(&mut self, key: &[u8], column: &Column, log: &mut LogWriter, origin: ValueTableOrigin) -> Result<()> {
-		self.root.remove(self.depth, key, self.record_id, column, log, origin, &mut self.removed_children)?;
+	pub fn remove(&mut self, key: &[u8], btree: &BTreeTable, log: &mut LogWriter, origin: ValueTableOrigin) -> Result<()> {
+		btree.with_locked(|btree|
+			self.root.remove(self.depth, key, self.record_id, btree, log, origin, &mut self.removed_children)
+		)?;
 		Ok(())
 	}
 
 	pub fn write_plan(
 		&mut self,
-		column: &Column,
+		btree: &BTreeTable,
 		writer: &mut LogWriter,
 		record_id: u64,
 		btree_index: &mut BTreeIndex,
 		origin: ValueTableOrigin,
 	) -> Result<()> {
-		if let Some(ix) = self.root.write_plan(column, writer, self.root_index, btree_index, record_id, origin)? {
+		if let Some(ix) = self.root.write_plan(btree, writer, self.root_index, btree_index, record_id, origin)? {
 			self.root_index = Some(ix);
 		}
 		for (node_index, _node) in self.removed_children.0.drain(..) {
 			if let Some(index) = node_index {
-				column.with_tables_and_self(|tables, s| s.write_existing_value_plan(
+				btree.with_locked(|tables| Column::write_existing_value_plan(
 					&TableKey::NoHash,
 					tables,
 					Address::from_u64(index),
 					None,
 					writer,
 					origin,
+					None,
 				))?;
 			}
 		}

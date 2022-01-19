@@ -212,12 +212,12 @@ impl BTreeTable {
 		None
 	}
 
-	fn btree_index(log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<BTreeIndex> {
+	fn btree_index(log: &impl LogQuery, values: TableLocked) -> Result<BTreeIndex> {
 		let mut root = HEADER_POSITION;
 		let mut depth = 0;
-		if let Some(address) = Self::btree_index_address(values) {
+		if let Some(address) = Self::btree_index_address(values.tables) {
 			let key_query = TableKeyQuery::Fetch(None);
-			if let Some(encoded) = Column::get_at_value_index_locked(key_query, address, values, log, comp)? {
+			if let Some(encoded) = Column::get_at_value_index_locked(key_query, address, values, log)? {
 				let mut buf: LogEntry<Vec<u8>> = LogEntry::new(encoded.1);
 				root = buf.read_u64();
 				depth = buf.read_u32();
@@ -230,8 +230,7 @@ impl BTreeTable {
 	}
 
 	pub(crate) fn get_at_value_index(&self, key: TableKeyQuery, address: Address, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
-		let tables = self.tables.read();
-		Column::get_at_value_index_locked(key, address, &tables, log, &self.compression)
+		self.with_locked(|tables| Column::get_at_value_index_locked(key, address, tables, log))
 	}
 
 	/// Compress if needed and return the target tier to use.
@@ -251,22 +250,22 @@ impl BTreeTable {
 		Ok(())
 	}
 
-	pub fn get(key: &[u8], log: &impl LogQuery, values: &Vec<ValueTable>, comp: &Compress) -> Result<Option<Vec<u8>>> {
-		let btree_index = Self::btree_index(log, values, comp)?;
+	pub fn get(key: &[u8], log: &impl LogQuery, values: TableLocked) -> Result<Option<Vec<u8>>> {
+		let btree_index = Self::btree_index(log, values)?;
 		if btree_index.root == HEADER_POSITION {
 			return Ok(None);
 		}
 		let record_id = 0; // lifetime of Btree is the query, so no invalidate.
-		let root = Self::get_index(btree_index.root, log, values, comp)?;
+		let root = Self::get_index(btree_index.root, log, values)?;
 		let root = Node::from_encoded(root);
 		// keeping log locked when parsing tree.
 		let mut tree = btree::BTree::new(Some(btree_index.root), root, btree_index.depth, record_id);
-		tree.get_with_lock_no_cache(key, self.id, values, log, comp)
+		tree.get_with_lock_no_cache(key, values, log)
 	}
 
-	fn get_index(at: u64, log: &impl LogQuery, tables: &Vec<ValueTable>, comp: &Compress) -> Result<Vec<u8>> {
+	fn get_index(at: u64, log: &impl LogQuery, tables: TableLocked) -> Result<Vec<u8>> {
 		let key_query = TableKeyQuery::Check(&TableKey::NoHash);
-		if let Some((_tier, value)) = Column::get_at_value_index_locked(key_query, Address::from_u64(at), tables, log, comp)? {
+		if let Some((_tier, value)) = Column::get_at_value_index_locked(key_query, Address::from_u64(at), tables, log)? {
 			Ok(value)
 		} else {
 			Err(crate::error::Error::Corruption("Missing btree index".to_string()))
@@ -287,17 +286,16 @@ impl BTreeTable {
 }
 
 pub fn new_btree_inner(
-	values: &Vec<ValueTable>,
+	values: TableLocked,
 	log: &impl LogQuery,
 	record_id: u64,
-	comp: &Compress,
 ) -> Result<btree::BTree> {
-	let btree_index = BTreeTable::btree_index(log, values, comp)?;
+	let btree_index = BTreeTable::btree_index(log, values)?;
 
 	let (root_index, root) = if btree_index.root == HEADER_POSITION {
 		(None, Node::new())
 	} else {
-		let root = BTreeTable::get_index(btree_index.root, log, values, comp)?;
+		let root = BTreeTable::get_index(btree_index.root, log, values)?;
 		(Some(btree_index.root), Node::from_encoded(root))
 	};
 	Ok(btree::BTree::new(root_index, root, btree_index.depth, record_id))
@@ -367,14 +365,14 @@ pub mod commit_overlay {
 			let record_id = writer.record_id();
 			// This is racy but we have a single thread writing plan, so only a single writing btree at a
 			// time.
-			let mut tree = new_btree_inner(&*btree.tables.read(), writer, record_id, &btree.compression)?;
+			let mut tree = btree.with_locked(|btree| new_btree_inner(btree, writer, record_id))?;
 			for change in self.changes.iter() {
 				match change {
 					(key, None) => {
-						tree.remove(key, column, writer, origin)?;
+						tree.remove(key, btree, writer, origin)?;
 					},
 					(key, Some(value)) => {
-						tree.insert(key, value, column, writer, origin)?;
+						tree.insert(key, value, btree, writer, origin)?;
 					},
 				}
 				*ops += 1;
@@ -385,21 +383,25 @@ pub mod commit_overlay {
 			};
 			let old_btree_index = btree_index.clone();
 
-			tree.write_plan(column, writer, record_id, &mut btree_index, origin)?;
+			tree.write_plan(btree, writer, record_id, &mut btree_index, origin)?;
 
 			if old_btree_index != btree_index {
 				let mut entry = Entry::empty();
 				entry.write_header(&btree_index);
-				if let Some(address) = column.with_value_tables(|t| Ok(BTreeTable::btree_index_address(t)))? {
-					column.with_tables_and_self(|t, s| s.write_existing_value_plan(
-						&TableKey::NoHash,
-						t,
-						address,
-						Some(&entry.encoded.as_ref()[..HEADER_SIZE as usize]),
-						writer,
-						origin,
-					))?;
-				}
+				btree.with_locked(|btree| {
+					if let Some(address) = BTreeTable::btree_index_address(btree.tables) {
+						Column::write_existing_value_plan(
+							&TableKey::NoHash,
+							btree,
+							address,
+							Some(&entry.encoded.as_ref()[..HEADER_SIZE as usize]),
+							writer,
+							origin,
+							None,
+						)?;
+					}
+					Ok(())
+				});
 			}
 			Ok(())
 		}

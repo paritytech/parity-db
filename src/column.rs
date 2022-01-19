@@ -16,7 +16,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use crate::{
 	Key,
 	table::key::{TableKeyQuery, TableKey},
@@ -316,21 +316,21 @@ impl Column {
 
 impl HashColumn {
 	fn trigger_reindex(
-		tables: parking_lot::RwLockUpgradableReadGuard<Tables>,
-		reindex: parking_lot::RwLockUpgradableReadGuard<Reindex>,
+		tables: RwLockUpgradableReadGuard<Tables>,
+		reindex: RwLockUpgradableReadGuard<Reindex>,
 		path: &std::path::Path,
 	) {
 		let _ = Self::trigger_reindex_with_lock(tables, reindex, path);
 	}
 
 	fn trigger_reindex_with_lock<'a, 'b>(
-		tables: parking_lot::RwLockUpgradableReadGuard<'a, Tables>,
-		reindex: parking_lot::RwLockUpgradableReadGuard<'b, Reindex>,
+		tables: RwLockUpgradableReadGuard<'a, Tables>,
+		reindex: RwLockUpgradableReadGuard<'b, Reindex>,
 		path: &std::path::Path,
-	) -> (parking_lot::RwLockUpgradableReadGuard<'a, Tables>, parking_lot::RwLockUpgradableReadGuard<'b, Reindex>) {
+	) -> (RwLockUpgradableReadGuard<'a, Tables>, RwLockUpgradableReadGuard<'b, Reindex>) {
 	
-		let mut tables = parking_lot::RwLockUpgradableReadGuard::upgrade(tables);
-		let mut reindex = parking_lot::RwLockUpgradableReadGuard::upgrade(reindex);
+		let mut tables = RwLockUpgradableReadGuard::upgrade(tables);
+		let mut reindex = RwLockUpgradableReadGuard::upgrade(reindex);
 		log::info!(
 			target: "parity-db",
 			"Started reindex for {}",
@@ -547,12 +547,12 @@ impl HashColumn {
 	// TODO used only once?
 	fn write_plan_indexed_with_lock<'a, 'b>(
 		&self,
-		tables: parking_lot::RwLockUpgradableReadGuard<'a, Tables>,
-		reindex: parking_lot::RwLockUpgradableReadGuard<'b, Reindex>,
+		tables: RwLockUpgradableReadGuard<'a, Tables>,
+		reindex: RwLockUpgradableReadGuard<'b, Reindex>,
 		key: &TableKey,
 		value: Option<&[u8]>,
 		log: &mut LogWriter,
-	) -> Result<(PlanOutcome, parking_lot::RwLockUpgradableReadGuard<'a, Tables>, parking_lot::RwLockUpgradableReadGuard<'b, Reindex>)> {
+	) -> Result<(PlanOutcome, RwLockUpgradableReadGuard<'a, Tables>, RwLockUpgradableReadGuard<'b, Reindex>)> {
 		//TODO: return sub-chunk position in index.get
 		let existing = Self::search_all_indexes(key, &*tables, &*reindex, log)?;
 		if let Some((table, sub_index, existing_address)) = existing {
@@ -592,15 +592,12 @@ impl HashColumn {
 
 		match Column::write_existing_value_plan(
 			key,
-			&tables.value,
+			self.locked(&tables.value),
 			existing_address,
 			value,
 			log,
 			origin,
-			self.preimage,
-			self.ref_counted,
 			stats,
-			&self.compression,
 		)? {
 			(Some(outcome), _) => return Ok(outcome),
 			(None, Some(value_address)) => if value.is_some() {
@@ -618,20 +615,20 @@ impl HashColumn {
 
 	fn write_plan_indexed_with_lock_new<'a, 'b>(
 		&self,
-		tables: parking_lot::RwLockUpgradableReadGuard<'a, Tables>,
-		reindex: parking_lot::RwLockUpgradableReadGuard<'b, Reindex>,
+		tables: RwLockUpgradableReadGuard<'a, Tables>,
+		reindex: RwLockUpgradableReadGuard<'b, Reindex>,
 		key: &TableKey,
 		value: &[u8],
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
-	) -> Result<(PlanOutcome, parking_lot::RwLockUpgradableReadGuard<'a, Tables>, parking_lot::RwLockUpgradableReadGuard<'b, Reindex>)> {
+	) -> Result<(PlanOutcome, RwLockUpgradableReadGuard<'a, Tables>, RwLockUpgradableReadGuard<'b, Reindex>)> {
 		let stats = if self.collect_stats {
 			Some(&self.stats)
 		} else {
 			None
 		};
 
-		let address = Column::write_new_value_plan(key, &tables.value, value, log, origin.clone(), stats, &self.compression)?;
+		let address = Column::write_new_value_plan(key, self.locked(&tables.value), value, log, origin.clone(), stats)?;
 		match tables.index.write_insert_plan(key, address, None, log)? {
 			PlanOutcome::NeedReindex => {
 				log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, key);
