@@ -224,13 +224,11 @@ impl BTree {
 		&mut self,
 		key: &[u8],
 		value: &[u8],
-		btree: &BTreeTable,
+		btree: TableLocked,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<()> {
-		match btree.with_locked(|btree|
-			self.root.insert(self.depth, key, value, self.record_id, btree, log, origin, &mut self.removed_children)
-		)? {
+		match self.root.insert(self.depth, key, value, self.record_id, btree, log, origin, &mut self.removed_children)? {
 			Some((sep, right)) => {
 				// add one level
 				self.depth += 1;
@@ -266,10 +264,8 @@ impl BTree {
 		}
 	}
 
-	pub fn remove(&mut self, key: &[u8], btree: &BTreeTable, log: &mut LogWriter, origin: ValueTableOrigin) -> Result<()> {
-		btree.with_locked(|btree|
-			self.root.remove(self.depth, key, self.record_id, btree, log, origin, &mut self.removed_children)
-		)?;
+	pub fn remove(&mut self, key: &[u8], btree: TableLocked, log: &mut LogWriter, origin: ValueTableOrigin) -> Result<()> {
+		self.root.remove(self.depth, key, self.record_id, btree, log, origin, &mut self.removed_children)?;
 		Ok(())
 	}
 }

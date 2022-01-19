@@ -313,15 +313,13 @@ impl BTreeTable {
 	}
 
 	pub fn write_plan(
-		&self,
+		tables: TableLocked,
 		btree: &mut BTree,
 		writer: &mut LogWriter,
 		record_id: u64,
 		btree_index: &mut BTreeIndex,
 		origin: ValueTableOrigin,
 	) -> Result<()> {
-		let lock = self.tables.read();
-		let tables = self.locked(&*lock);
 		if let Some(ix) = Self::write_plan_node(tables, &mut btree.root, writer, btree.root_index, btree_index, record_id, origin)? {
 			btree.root_index = Some(ix);
 		}
@@ -515,14 +513,16 @@ pub mod commit_overlay {
 			let record_id = writer.record_id();
 			// This is racy but we have a single thread writing plan, so only a single writing btree at a
 			// time.
-			let mut tree = btree.with_locked(|btree| new_btree_inner(btree, writer, record_id))?;
+			let locked_tables = btree.tables.read();
+			let locked = btree.locked(&*locked_tables);
+			let mut tree = new_btree_inner(locked, writer, record_id)?;
 			for change in self.changes.iter() {
 				match change {
 					(key, None) => {
-						tree.remove(key, btree, writer, origin)?;
+						tree.remove(key, locked, writer, origin)?;
 					},
 					(key, Some(value)) => {
-						tree.insert(key, value, btree, writer, origin)?;
+						tree.insert(key, value, locked, writer, origin)?;
 					},
 				}
 				*ops += 1;
@@ -533,25 +533,22 @@ pub mod commit_overlay {
 			};
 			let old_btree_index = btree_index.clone();
 
-			btree.write_plan(&mut tree, writer, record_id, &mut btree_index, origin)?;
+			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_index, origin)?;
 
 			if old_btree_index != btree_index {
 				let mut entry = Entry::empty();
 				entry.write_header(&btree_index);
-				btree.with_locked(|btree| {
-					if let Some(address) = BTreeTable::btree_index_address(btree.tables) {
-						Column::write_existing_value_plan(
-							&TableKey::NoHash,
-							btree,
-							address,
-							Some(&entry.encoded.as_ref()[..HEADER_SIZE as usize]),
-							writer,
-							origin,
-							None,
-						)?;
-					}
-					Ok(())
-				})?;
+				if let Some(address) = BTreeTable::btree_index_address(locked.tables) {
+					Column::write_existing_value_plan(
+						&TableKey::NoHash,
+						locked,
+						address,
+						Some(&entry.encoded.as_ref()[..HEADER_SIZE as usize]),
+						writer,
+						origin,
+						None,
+					)?;
+				}
 			}
 			Ok(())
 		}
