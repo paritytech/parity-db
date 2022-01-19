@@ -220,8 +220,17 @@ impl BTree {
 		}
 	}
 
-	pub fn insert(&mut self, key: &[u8], value: &[u8], btree: &BTreeTable, log: &mut LogWriter, origin: ValueTableOrigin) -> Result<()> {
-		match self.root.insert(self.depth, key, value, self.record_id, btree, log, origin, &mut self.removed_children)? {
+	pub fn insert(
+		&mut self,
+		key: &[u8],
+		value: &[u8],
+		btree: &BTreeTable,
+		log: &mut LogWriter,
+		origin: ValueTableOrigin,
+	) -> Result<()> {
+		match btree.with_locked(|btree|
+			self.root.insert(self.depth, key, value, self.record_id, btree, log, origin, &mut self.removed_children)
+		)? {
 			Some((sep, right)) => {
 				// add one level
 				self.depth += 1;
@@ -321,19 +330,24 @@ mod test {
 		let mut tree = BTree::new(None, root, 0, record_id);
 		let overlays = RwLock::new(LogOverlays::default());
 		let mut log_overlay = LogWriter::new(&overlays, record_id);
+		let col = match db.column(col_nb) {
+			Column::Hash(_) => unreachable!(),
+			Column::Tree(col) => col,
+		};
+
 		for (key, value) in change_set.iter() {
 			if let Some(value) = value.as_ref() {
-				tree.insert(key, value, db.column(col_nb), &mut log_overlay, origin).unwrap();
+				tree.insert(key, value, col, &mut log_overlay, origin).unwrap();
 			} else {
-				tree.remove(key, db.column(col_nb), &mut log_overlay, origin).unwrap();
+				tree.remove(key, col, &mut log_overlay, origin).unwrap();
 			}
 		}
 
 		let state: BTreeMap<Vec<u8>, Option<Vec<u8>>> = change_set.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 		for (key, value) in state.iter() {
-			assert_eq!(&tree.get(key, db.column(col_nb), &log_overlay).unwrap(), value);
+			assert_eq!(&tree.get(key, col, &log_overlay).unwrap(), value);
 		}
-		assert!(tree.root.is_balanced(db.column(col_nb), &log_overlay, 0).unwrap());
+		assert!(col.with_locked(|col| tree.root.is_balanced(col, &log_overlay, 0)).unwrap());
 	}
 
 	#[test]

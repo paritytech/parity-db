@@ -40,7 +40,7 @@ use crate::options::Options;
 use crate::index::Address;
 use crate::error::Result;
 use crate::column::{ColId, ValueTableOrigin, Column, TableLocked};
-use crate::log::{LogQuery, LogWriter};
+use crate::log::{LogQuery, LogWriter, LogAction, LogReader};
 use crate::compress::Compress;
 use crate::btree::node::Node;
 use parking_lot::RwLock;
@@ -160,11 +160,9 @@ impl Entry {
 }
 
 pub struct BTreeTable {
-	pub(crate) id: BTreeTableId, // TODO not pub
-	path: std::path::PathBuf,
-	pub(crate) tables: RwLock<Vec<ValueTable>>, // TODO not pub
+	id: BTreeTableId, // TODO not pub
+	tables: RwLock<Vec<ValueTable>>,
 	preimage: bool,
-	uniform_keys: bool,
 	ref_counted: bool,
 	compression: Compress, // TODO do not compress btree nodes!!!
 }
@@ -173,7 +171,6 @@ impl BTreeTable {
 	pub fn open(
 		id: BTreeTableId,
 		values: Vec<ValueTable>,
-		options: &Options,
 		metadata: &crate::options::Metadata,
 	) -> Result<Self> {
 		if let Some(address) = Self::btree_index_address(&values) {
@@ -189,15 +186,11 @@ impl BTreeTable {
 			}
 		}
 		let col = id.col();
-		let collect_stats = options.stats;
-		let path = &options.path;
 		let options = &metadata.columns[col as usize];
 		Ok(BTreeTable {
 			id,
-			path: path.into(),
 			tables: RwLock::new(values),
 			preimage: options.preimage,
-			uniform_keys: options.uniform,
 			ref_counted: options.ref_counted,
 			compression: Compress::new(options.compression, options.compression_treshold),
 		})
@@ -230,16 +223,9 @@ impl BTreeTable {
 	}
 
 	pub(crate) fn get_at_value_index(&self, key: TableKeyQuery, address: Address, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
-		self.with_locked(|tables| Column::get_at_value_index_locked(key, address, tables, log))
-	}
-
-	/// Compress if needed and return the target tier to use.
-	pub(crate) fn compress(&self, key: &TableKey, value: &[u8], tables: &Vec<ValueTable>) -> (Option<Vec<u8>>, usize) { // TODO is it used
-		Column::compress_internal(&self.compression, key, value, tables)
-	}
-
-	pub(crate) fn decompress(&self, buf: &[u8]) -> Result<Vec<u8>> { // TODO is it used
-		self.compression.decompress(buf)
+		let tables = self.tables.read();
+		let btree = self.locked(&*tables);
+		Column::get_at_value_index_locked(key, address, btree, log)
 	}
 
 	pub fn flush(&self) -> Result<()> {
@@ -272,16 +258,57 @@ impl BTreeTable {
 		}
 	}
 
-	pub(crate) fn with_locked<R>(&self, mut apply: impl FnMut(TableLocked) -> Result<R>) -> Result<R> {
-		let locked_tables = &*self.tables.read();
-		let locked = TableLocked {
-			tables: locked_tables,
+	pub(crate) fn locked<'a>(&'a self, tables: &'a Vec<ValueTable>) -> TableLocked<'a> {
+		TableLocked {
+			tables,
 			preimage: self.preimage,
-			uniform_keys: self.uniform_keys,
 			ref_counted: self.ref_counted,
 			compression: &self.compression,
-		};
+		}
+	}
+
+	pub(crate) fn with_locked<R>(&self, mut apply: impl FnMut(TableLocked) -> Result<R>) -> Result<R> {
+		let locked_tables = &*self.tables.read();
+		let locked = self.locked(locked_tables);
 		apply(locked)
+	}
+
+	pub fn enact_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
+		let tables = self.tables.read();
+		match action {
+			LogAction::InsertValue(record) => {
+				tables[record.table.size_tier() as usize].enact_plan(record.index, log)?;
+			},
+			_ => panic!("Unexpected log action"),
+		}
+		Ok(())
+	}
+
+	pub fn validate_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
+		let tables = self.tables.upgradable_read();
+		match action {
+			LogAction::InsertValue(record) => {
+				tables[record.table.size_tier() as usize].validate_plan(record.index, log)?;
+			},
+			_ => panic!("Unexpected log action"),
+		}
+		Ok(())
+	}
+
+	pub fn complete_plan(&self, log: &mut LogWriter) -> Result<()> {
+		let tables = self.tables.read();
+		for t in tables.iter() {
+			t.complete_plan(log)?;
+		}
+		Ok(())
+	}
+
+	pub fn refresh_metadata(&self) -> Result<()> {
+		let tables = self.tables.read();
+		for t in tables.iter() {
+			t.refresh_metadata()?;
+		}
+		Ok(())
 	}
 }
 
@@ -361,7 +388,7 @@ pub mod commit_overlay {
 			writer: &mut LogWriter,
 			ops: &mut u64,
 		) -> Result<()> {
-			let origin = crate::column::ValueTableOrigin::BTree(crate::btree::BTreeTableId::new(self.col));
+			let origin = crate::column::ValueTableOrigin::BTree(btree.id);
 			let record_id = writer.record_id();
 			// This is racy but we have a single thread writing plan, so only a single writing btree at a
 			// time.
@@ -401,7 +428,7 @@ pub mod commit_overlay {
 						)?;
 					}
 					Ok(())
-				});
+				})?;
 			}
 			Ok(())
 		}

@@ -41,7 +41,7 @@ impl Node {
 		key: &[u8],
 		value: &[u8],
 		record_id: u64,
-		btree: &BTreeTable,
+		btree: TableLocked,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 		removed_node: &mut RemovedChildren,
@@ -52,7 +52,7 @@ impl Node {
 		// insert
 		if !at {
 			if has_child {
-				return Ok(if let Some(child) = btree.with_locked(|btree| self.fetch_child(i, btree, log))? {
+				return Ok(if let Some(child) = self.fetch_child(i, btree, log)? {
 					match child.insert(depth - 1, key, value, record_id, btree, log, origin, removed_node)? {
 						Some((sep, right)) => {
 							// insert from child
@@ -399,7 +399,7 @@ impl Node {
 	}
 
 	#[cfg(test)]
-	pub fn is_balanced(&mut self, column: &Column, log: &impl LogQuery, parent_size: usize) -> Result<bool> {
+	pub fn is_balanced(&mut self, tables: TableLocked, log: &impl LogQuery, parent_size: usize) -> Result<bool> {
 		let size = self.number_separator();
 		if parent_size != 0 && size < ORDER / 2 {
 			return Ok(false);
@@ -407,12 +407,12 @@ impl Node {
 
 		let mut i = 0;
 		while i < ORDER {
-			let child = self.fetch_child(i, column, log)?;
+			let child = self.fetch_child(i, tables, log)?;
 			i += 1;
 			if child.is_none() {
 				continue;
 			}
-			if !child.unwrap().is_balanced(column, log, size)? {
+			if !child.unwrap().is_balanced(tables, log, size)? {
 				return Ok(false);
 			}
 		}
@@ -592,31 +592,31 @@ impl Node {
 	fn create_separator(
 		key: &[u8],
 		value: &[u8],
-		btree: &BTreeTable,
+		btree: TableLocked,
 		log: &mut LogWriter,
 		existing: Option<u64>,
 		origin: ValueTableOrigin,
 	) -> Result<Separator> {
 		let key = key.to_vec();
 		let value = if let Some(address) = existing {
-			btree.with_locked(|values| Column::write_existing_value_plan(
+			Column::write_existing_value_plan(
 				&TableKey::NoHash,
-				values,
+				btree,
 				Address::from_u64(address),
 				Some(value),
 				log,
 				origin,
 				None,
-			))?.1.map(|a| a.as_u64()).unwrap_or(address)
+			)?.1.map(|a| a.as_u64()).unwrap_or(address)
 		} else {
-			btree.with_locked(|values| Column::write_new_value_plan(
+			Column::write_new_value_plan(
 				&TableKey::NoHash,
-				values,
+				btree,
 				value,
 				log,
 				origin,
 				None,
-			))?.as_u64()
+			)?.as_u64()
 		};
 		Ok(Separator {
 			modified: true,

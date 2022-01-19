@@ -43,7 +43,7 @@ use crate::{
 	log::{Log, LogAction},
 	index::PlanOutcome,
 	options::Options,
-	btree::commit_overlay::{BTreeChangeSet},
+	btree::{BTreeTable, commit_overlay::{BTreeChangeSet}},
 };
 
 // These are in memory, so we use usize
@@ -185,42 +185,47 @@ impl DbInner {
 	}
 
 	fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
-		if self.columns[col as usize].indexed() {
-			return self.btree_get(col, key);
+		match &self.columns[col as usize] {
+			Column::Hash(column) => {
+				let key = column.hash(key);
+				let overlay = self.commit_overlay.read();
+				// Check commit overlay first
+				if let Some(v) = overlay.get(col as usize).and_then(|o| o.get(&key)) {
+					return Ok(v);
+				}
+				// Go into tables and log overlay.
+				let log = self.log.overlays();
+				let key = TableKey::Partial(key);
+				column.get(&key, log)
+			},
+			Column::Tree(column) => {
+				let overlay = self.commit_overlay.read();
+				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
+					return Ok(l.cloned());
+				}
+				// We lock log as btree structure changed while reading it would be an issue.
+				let log = self.log.overlays().read();
+				column.with_locked(|btree| BTreeTable::get(key, &*log, btree))
+			},
 		}
-		let key = self.columns[col as usize].hash(key);
-		let overlay = self.commit_overlay.read();
-		// Check commit overlay first
-		if let Some(v) = overlay.get(col as usize).and_then(|o| o.get(&key)) {
-			return Ok(v);
-		}
-		// Go into tables and log overlay.
-		let log = self.log.overlays();
-		let key = TableKey::Partial(key);
-		self.columns[col as usize].get(&key, log)
 	}
 
 	fn get_size(&self, col: ColId, key: &[u8]) -> Result<Option<u32>> {
-		let key = self.columns[col as usize].hash(key);
-		let overlay = self.commit_overlay.read();
-		// Check commit overlay first
-		if let Some(l) = overlay.get(col as usize).and_then(|o| o.get_size(&key)) {
-			return Ok(l);
+		match &self.columns[col as usize] {
+			Column::Hash(column) => {
+				let key = column.hash(key);
+				let overlay = self.commit_overlay.read();
+				// Check commit overlay first
+				if let Some(l) = overlay.get(col as usize).and_then(|o| o.get_size(&key)) {
+					return Ok(l);
+				}
+				// Go into tables and log overlay.
+				let log = self.log.overlays();
+				let key = TableKey::Partial(key);
+				column.get_size(&key, log)
+			},
+			Column::Tree(_column) => unimplemented!("TODO any use over simply using get"),
 		}
-		// Go into tables and log overlay.
-		let log = self.log.overlays();
-		let key = TableKey::Partial(key);
-		self.columns[col as usize].get_size(&key, log)
-	}
-
-	fn btree_get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
-		let overlay = self.commit_overlay.read();
-		if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
-			return Ok(l.cloned());
-		}
-		// We lock log as btree structure changed while reading it would be an issue.
-		let log = self.log.overlays().read();
-		self.columns[col as usize].btree_get(key, &*log)
 	}
 
 	pub fn btree_iter(&self, col: ColId) -> Result<crate::btree::BTreeIterator> {
@@ -238,11 +243,17 @@ impl DbInner {
 		let next_commit_overlay = commit_overlay.get(col as usize).and_then(|o| o.btree_next(&iter.overlay_last_key, iter.from_seek));
 		// No consistency over iteration, allows dropping lock to overlay.
 		std::mem::drop(commit_overlay);
-		let column = &self.columns[col as usize];
 		let next_backend = if let Some(n) = iter.pending_next_backend.take() {
 			n
 		} else {
-			iter.next_backend(record_id, column, &*log)?
+			match &self.columns[col as usize] {
+				Column::Hash(_column) => {
+					return Err(Error::InvalidConfiguration("Not an indexed column.".to_string()));
+				},
+				Column::Tree(column) => {
+					iter.next_backend(record_id, column, &*log)?
+				},
+			}
 		};
 
 		match (next_commit_overlay, next_backend) {
@@ -310,8 +321,14 @@ impl DbInner {
 		iter.from_seek = !after;
 		iter.overlay_last_key = Some(key.to_vec());
 		iter.pending_next_backend = None;
-		let column = &self.columns[iter.col as usize];
-		iter.seek_backend(key.to_vec(), record_id, column, &*log, after)
+		match &self.columns[iter.col as usize] {
+			Column::Hash(_column) => {
+				return Err(Error::InvalidConfiguration("Not an indexed column.".to_string()));
+			},
+			Column::Tree(column) => {
+				iter.seek_backend(key.to_vec(), record_id, column, &*log, after)
+			},
+		}
 	}
 
 	// Commit simply adds the the data to the queue and to the overlay and
@@ -433,7 +450,14 @@ impl DbInner {
 			}
 
 			for (c, btree) in commit.changeset.btree_indexed.iter() {
-				btree.write_plan(&self.columns[*c as usize], &mut writer, &mut ops)?;
+				match &self.columns[*c as usize] {
+					Column::Hash(_column) => {
+						return Err(Error::InvalidConfiguration("Not an indexed column.".to_string()));
+					},
+					Column::Tree(column) => {
+						btree.write_plan(column, &mut writer, &mut ops)?;
+					},
+				}
 			}
 
 			// Collect final changes to value tables
@@ -491,6 +515,11 @@ impl DbInner {
 		}
 		// Process any pending reindexes
 		for column in self.columns.iter() {
+			let column = if let Column::Hash(c) = column {
+				c
+			} else {
+				continue;
+			};
 			let (drop_index, batch) = column.reindex(&self.log)?;
 			if !batch.is_empty() || drop_index.is_some() {
 				let mut next_reindex = false;
@@ -634,9 +663,14 @@ impl DbInner {
 								"Dropping index {}",
 								id,
 							);
-							self.columns[id.col() as usize].drop_index(id)?;
-							// Check if there's another reindex on the next iteration
-							self.start_reindex(reader.record_id());
+							match &self.columns[id.col() as usize] {
+								Column::Hash(col) => {
+									col.drop_index(id)?;
+									// Check if there's another reindex on the next iteration
+									self.start_reindex(reader.record_id());
+								},
+								Column::Tree(_) => (),
+							}
 						}
 					}
 				}
@@ -800,7 +834,10 @@ impl DbInner {
 	}
 
 	fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
-		self.columns[c as usize].iter_while(&self.log, f)
+		match &self.columns[c as usize] {
+			Column::Hash(column) => column.iter_while(&self.log, f),
+			Column::Tree(_) => unimplemented!(),
+		}
 	}
 
 	pub(crate) fn column(&self, c: ColId) -> &Column {
@@ -1147,6 +1184,13 @@ impl IndexedChangeSet {
 		ops: &mut u64,
 		reindex: &mut bool,
 	) -> Result<()> {
+		let column = match column {
+			Column::Hash(column) => column,
+			Column::Tree(_) => {
+				log::warn!(target: "parity-db", "Skipping unindex commit in indexed column");
+				return Ok(());
+			},
+		};
 		for (key, value) in self.changes.iter() {
 			let key = TableKey::Partial(*key);
 			match column.write_plan(&key, value.as_ref().map(|v| v.as_slice()), writer)? {

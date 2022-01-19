@@ -67,12 +67,12 @@ pub struct HashColumn {
 	db_version: u32,
 }
 
+#[derive(Clone, Copy)]
 pub struct TableLocked<'a> {
-	pub(crate) tables: &'a Vec<ValueTable>,
-	compression: &'a Compress,
-	preimage: bool,
-	uniform_keys: bool,
-	ref_counted: bool,
+	pub tables: &'a Vec<ValueTable>,
+	pub compression: &'a Compress,
+	pub preimage: bool,
+	pub ref_counted: bool,
 }
 
 pub struct IterState {
@@ -153,16 +153,9 @@ impl HashColumn {
 		TableLocked {
 			tables,
 			preimage: self.preimage,
-			uniform_keys: self.uniform_keys,
 			ref_counted: self.ref_counted,
 			compression: &self.compression,
 		}
-	}
-
-	pub(crate) fn with_locked<R>(&self, mut apply: impl FnMut(TableLocked) -> Result<R>) -> Result<R> {
-		let locked_tables = &self.tables.read().value;
-		let locked = self.locked(locked_tables);
-		apply(locked)
 	}
 }
 
@@ -215,7 +208,6 @@ impl HashColumn {
 		let (index, reindexing, stats) = Self::open_index(&options.path, col)?;
 		let collect_stats = options.stats;
 		let path = &options.path;
-		let arc_path = std::sync::Arc::new(path.clone());
 		let options = &metadata.columns[col as usize];
 		let db_version = metadata.version;
 		Ok(HashColumn {
@@ -239,8 +231,6 @@ impl HashColumn {
 
 impl Column {
 	pub fn open(col: ColId, options: &Options, metadata: &Metadata) -> Result<Column> {
-		let (index, reindexing, stats) = HashColumn::open_index(&options.path, col)?;
-		let collect_stats = options.stats;
 		let path = &options.path;
 		let arc_path = std::sync::Arc::new(path.clone());
 		let column_options = &metadata.columns[col as usize];
@@ -250,7 +240,7 @@ impl Column {
 
 		if column_options.btree_index {
 			let id = BTreeTableId::new(col);
-			Ok(Column::Tree(BTreeTable::open(id, value, options, metadata)?))
+			Ok(Column::Tree(BTreeTable::open(id, value, metadata)?))
 		} else {
 			Ok(Column::Hash(HashColumn::open_hashed(col, value, options, metadata)?))
 		}
@@ -466,7 +456,7 @@ impl Column {
 			}
 		} else {
 			// Deletion
-			let cur_size = if let Some(stats) = stats {
+			let cur_size = if stats.is_some() {
 				let (cur_size, compressed) = tables.tables[tier].size(key, address.offset(), log)?
 					.unwrap_or((0, false));
 				Some(if compressed {
@@ -825,7 +815,7 @@ impl HashColumn {
 		Ok(())
 	}
 
-	pub(crate) fn check_from_index(&self, log: &Log, check_param: &crate::CheckOptions, col: ColId) -> Result<()> {
+	fn check_from_index(&self, log: &Log, check_param: &crate::CheckOptions, col: ColId) -> Result<()> {
 		let start_chunk = check_param.from.unwrap_or(0);
 		let end_chunk = check_param.bound;
 
@@ -936,39 +926,59 @@ impl HashColumn {
 */
 
 impl Column {
-	// TODO should not be use
-	pub(crate) fn with_value_tables<R>(&self, mut apply: impl FnMut(&Vec<ValueTable>) -> Result<R>) -> Result<R> {
+	pub fn complete_plan(&self, log: &mut LogWriter) -> Result<()> {
 		match self {
-			Column::Hash(s) => {
-				let tables = s.tables.read();
-				apply(&tables.value)
-			},
-			Column::Tree(s) => {
-				let tables = s.tables.read();
-				apply(&tables)
-			},
+			Column::Hash(column) => column.complete_plan(log),
+			Column::Tree(column) => column.complete_plan(log),
 		}
 	}
 
-/* TODO should not be of any use
-	pub(crate) fn with_value_tables_and_btree<R>(&self, mut apply: impl FnMut(&BTreeTable, &Vec<ValueTable>, &Compress) -> Result<R>) -> Result<R> {
-
-		let tables = self.tables.read();
-		if let Some(btree) = tables.btree.as_ref() {
-			apply(btree, &tables.value, &self.compression)
-		} else {
-			Err(crate::error::Error::InvalidConfiguration("Not an indexed column.".to_string()))
+	pub fn validate_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
+		match self {
+			Column::Hash(column) => column.validate_plan(action, log),
+			Column::Tree(column) => column.validate_plan(action, log),
 		}
 	}
 
-	// Warning the column calls can deadlock if accessing table, but keep lock on tables.
-	pub(crate) fn with_tables_and_self<R>(&self, mut apply: impl FnMut(&Tables, &Column) -> Result<R>) -> Result<R> {
-		let tables = self.tables.read();
-		apply(&tables, self)
+	pub fn enact_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
+		match self {
+			Column::Hash(column) => column.enact_plan(action, log),
+			Column::Tree(column) => column.enact_plan(action, log),
+		}
 	}
-*/
 
-	pub(crate) fn indexed(&self) -> bool { // TODO still used?
-		matches!(self, Column::Hash(..))
+	pub fn flush(&self) -> Result<()> {
+		match self {
+			Column::Hash(column) => column.flush(),
+			Column::Tree(column) => column.flush(),
+		}
+	}
+
+	pub fn refresh_metadata(&self) -> Result<()> {
+		match self {
+			Column::Hash(column) => column.refresh_metadata(),
+			Column::Tree(column) => column.refresh_metadata(),
+		}
+	}
+
+	pub fn write_stats(&self, writer: &mut impl std::io::Write) {
+		match self {
+			Column::Hash(column) => column.write_stats(writer),
+			Column::Tree(_column) => (),
+		}
+	}
+
+	pub fn clear_stats(&self) {
+		match self {
+			Column::Hash(column) => column.clear_stats(),
+			Column::Tree(_column) => (),
+		}
+	}
+
+	pub(crate) fn check_from_index(&self, log: &Log, check_param: &crate::CheckOptions, col: ColId) -> Result<()> {
+		match self {
+			Column::Hash(column) => column.check_from_index(log, check_param, col),
+			Column::Tree(_column) => Ok(()),
+		}
 	}
 }
