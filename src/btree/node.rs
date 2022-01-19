@@ -835,7 +835,7 @@ impl Node {
 		let mut result = None;
 		if let Some(existing) = node_id {
 			let k = TableKey::NoHash;
-			if let (_, Some(new_index)) = btree_table.with_locked(|tables| Column::write_existing_value_plan(
+			if let (_, Some(new_index)) = btree_table.with_locked_no_comp(|tables| Column::write_existing_value_plan(
 				&k,
 				tables,
 				Address::from_u64(existing),
@@ -848,7 +848,7 @@ impl Node {
 			}
 		} else {
 			let k = TableKey::NoHash;
-			result = Some(btree_table.with_locked(|tables| Column::write_new_value_plan(
+			result = Some(btree_table.with_locked_no_comp(|tables| Column::write_new_value_plan(
 				&k,
 				tables,
 				entry.encoded.as_ref(),

@@ -160,11 +160,11 @@ impl Entry {
 }
 
 pub struct BTreeTable {
-	id: BTreeTableId, // TODO not pub
+	id: BTreeTableId,
 	tables: RwLock<Vec<ValueTable>>,
 	preimage: bool,
 	ref_counted: bool,
-	compression: Compress, // TODO do not compress btree nodes!!!
+	compression: Compress,
 }
 
 impl BTreeTable {
@@ -270,6 +270,14 @@ impl BTreeTable {
 	pub(crate) fn with_locked<R>(&self, mut apply: impl FnMut(TableLocked) -> Result<R>) -> Result<R> {
 		let locked_tables = &*self.tables.read();
 		let locked = self.locked(locked_tables);
+		apply(locked)
+	}
+
+	pub(crate) fn with_locked_no_comp<R>(&self, mut apply: impl FnMut(TableLocked) -> Result<R>) -> Result<R> {
+		let locked_tables = &*self.tables.read();
+		let mut locked = self.locked(locked_tables);
+		let comp = Compress::new(crate::compress::CompressionType::NoCompression, u32::MAX);
+		locked.compression = &comp;
 		apply(locked)
 	}
 

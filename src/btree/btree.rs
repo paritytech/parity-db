@@ -34,7 +34,7 @@ pub struct BTree {
 }
 
 pub struct BTreeIterator<'a> {
-	db: &'a crate::db::DbInner, // TODO replace by BTreeTable
+	db: &'a crate::db::DbInner,
 	pub(crate) iter: BtreeIterBackend,
 	pub(crate) col: ColId,
 	pub(crate) pending_next_backend: Option<Option<(Vec<u8>, Vec<u8>)>>,
