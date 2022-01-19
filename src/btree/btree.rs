@@ -298,9 +298,9 @@ mod test {
 
 		for (key, value) in change_set.iter() {
 			if let Some(value) = value.as_ref() {
-				tree.insert(key, value, col, &mut log_overlay, origin).unwrap();
+				col.with_locked(|col| tree.insert(key, value, col, &mut log_overlay, origin)).unwrap();
 			} else {
-				tree.remove(key, col, &mut log_overlay, origin).unwrap();
+				col.with_locked(|col| tree.remove(key, col, &mut log_overlay, origin)).unwrap();
 			}
 		}
 
