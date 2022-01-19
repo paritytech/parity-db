@@ -274,14 +274,6 @@ impl BTreeTable {
 		apply(locked)
 	}
 
-	pub(crate) fn with_locked_no_comp<R>(&self, mut apply: impl FnMut(TableLocked) -> Result<R>) -> Result<R> {
-		let locked_tables = &*self.tables.read();
-		let mut locked = self.locked(locked_tables);
-		let comp = Compress::new(crate::compress::CompressionType::NoCompression, u32::MAX);
-		locked.compression = &comp;
-		apply(locked)
-	}
-
 	pub fn enact_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
 		let tables = self.tables.read();
 		match action {
@@ -328,12 +320,14 @@ impl BTreeTable {
 		btree_index: &mut BTreeIndex,
 		origin: ValueTableOrigin,
 	) -> Result<()> {
-		if let Some(ix) = self.write_plan_node(&mut btree.root, writer, btree.root_index, btree_index, record_id, origin)? {
+		let lock = self.tables.read();
+		let tables = self.locked(&*lock);
+		if let Some(ix) = Self::write_plan_node(tables, &mut btree.root, writer, btree.root_index, btree_index, record_id, origin)? {
 			btree.root_index = Some(ix);
 		}
 		for (node_index, _node) in btree.removed_children.0.drain(..) {
 			if let Some(index) = node_index {
-				self.with_locked(|tables| Column::write_existing_value_plan(
+				Column::write_existing_value_plan(
 					&TableKey::NoHash,
 					tables,
 					Address::from_u64(index),
@@ -341,7 +335,7 @@ impl BTreeTable {
 					writer,
 					origin,
 					None,
-				))?;
+				)?;
 			}
 		}
 		btree.record_id = record_id;
@@ -350,8 +344,8 @@ impl BTreeTable {
 		Ok(())
 	}
 
-	pub fn write_plan_node(
-		&self,
+	fn write_plan_node(
+		mut tables: TableLocked,
 		node: &mut Node,
 		writer: &mut LogWriter,
 		node_id: Option<u64>,
@@ -362,7 +356,7 @@ impl BTreeTable {
 		for child in node.children.as_mut().iter_mut() {
 			// Only modified nodes are cached in children
 			if let Some(child_node) = child.node.as_mut() {
-				if let Some(index) = self.write_plan_node(child_node, writer, child.entry_index, btree, record_id, origin)? {
+				if let Some(index) = Self::write_plan_node(tables, child_node, writer, child.entry_index, btree, record_id, origin)? {
 					child.entry_index = Some(index);
 					node.changed = true;
 				} else {
@@ -408,10 +402,12 @@ impl BTreeTable {
 			}
 		}
 	
+		let old_comp = tables.compression;
+		tables.compression = &crate::compress::NO_COMPRESSION;
 		let mut result = None;
 		if let Some(existing) = node_id {
 			let k = TableKey::NoHash;
-			if let (_, Some(new_index)) = self.with_locked_no_comp(|tables| Column::write_existing_value_plan(
+			if let (_, Some(new_index)) = Column::write_existing_value_plan(
 				&k,
 				tables,
 				Address::from_u64(existing),
@@ -419,20 +415,21 @@ impl BTreeTable {
 				writer,
 				origin,
 				None,
-			))? {
+			)? {
 				result = Some(new_index.as_u64())
 			}
 		} else {
 			let k = TableKey::NoHash;
-			result = Some(self.with_locked_no_comp(|tables| Column::write_new_value_plan(
+			result = Some(Column::write_new_value_plan(
 				&k,
 				tables,
 				entry.encoded.as_ref(),
 				writer,
 				origin,
 				None,
-			))?.as_u64());
+			)?.as_u64());
 		}
+		tables.compression = old_comp;
 
 		Ok(result)
 	}

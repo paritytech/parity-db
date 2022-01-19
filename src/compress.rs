@@ -44,6 +44,11 @@ impl Compress {
 	}
 }
 
+pub(crate) const NO_COMPRESSION: Compress = Compress {
+	inner: Compressor::NoCompression(NoCompression),
+	treshold: u32::MAX,
+};
+
 enum Compressor {
 	NoCompression(NoCompression),
 	Lz4(lz4::Lz4),
