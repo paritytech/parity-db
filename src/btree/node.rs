@@ -461,26 +461,13 @@ pub struct ChildState {
 #[derive(Clone)]
 pub struct Child {
 	pub(super) state: ChildState,
-	pub(super) node: Option<Box<Node>>, // lazy fetch.
+//	pub(super) node: Option<Box<Node>>, // lazy fetch.
 	pub(super) entry_index: Option<u64>, // no index is new.
 }
 impl Default for Child {
 	fn default() -> Self {
 		let state = ChildState::default();
-		Child { state, node: None, entry_index: None }
-	}
-}
-
-impl Child {
-	fn new(node: Box<Node>, entry_index: Option<u64>) -> Self {
-		let mut state = ChildState::default();
-		state.fetched = true;
-		state.moved = true;
-		Child {
-			state,
-			node: Some(node),
-			entry_index,
-		}
+		Child { state, entry_index: None }
 	}
 }
 
@@ -551,9 +538,8 @@ impl Node {
 		child
 	}
 
-	pub fn fetch_child(&mut self, at: usize, values: TableLocked, log: &impl LogQuery) -> Result<Option<&mut Self>> {
-		let child = self.get_fetched_child_index(at, values, log)?;
-		Ok(child.node.as_mut().map(|n| n.as_mut()))
+	pub fn fetch_child(&mut self, at: usize, values: TableLocked, log: &impl LogQuery) -> Result<Option<Self>> {
+		self.force_fetch_node_at(at, log, values)
 	}
 
 	pub fn has_separator(&mut self, at: usize) -> bool {
@@ -576,11 +562,6 @@ impl Node {
 		sep.modified = true;
 		self.changed = true;
 		self.separators.as_mut()[at] = sep;
-	}
-
-	pub fn new_child(mut child: Box<Self>, index: Option<u64>) -> Child {
-		child.changed = true;
-		Child::new(child, index)
 	}
 
 	pub fn set_child(&mut self, at: usize, mut child: Child) {
@@ -703,7 +684,7 @@ impl Node {
 				from + 1
 			};
 			let mut current = self.remove_child(i);
-			while current.entry_index.is_some() || current.node.is_some() {
+			while current.entry_index.is_some() {
 				current.state.moved = true;
 				i += 1;
 				if i == ORDER_CHILD {
@@ -733,7 +714,7 @@ impl Node {
 			};
 			while i < ORDER_CHILD - 1 {
 				self.children.as_mut()[i] = self.remove_child(i + 1);
-				if self.children.as_mut()[i].entry_index.is_none() && self.children.as_mut()[i].node.is_none() {
+				if self.children.as_mut()[i].entry_index.is_none() {
 					break;
 				}
 				i += 1;
@@ -780,17 +761,5 @@ impl Node {
 			return Ok(Some(Self::from_encoded(entry)));
 		}
 		Ok(None)
-	}
-
-	fn get_fetched_child_index(&mut self, i: usize, values: TableLocked, log: &impl LogQuery) -> Result<&mut Child> {
-		let mut child = &mut self.children[i];
-		if !child.state.fetched {
-			if let Some(ix) = child.entry_index {
-				child.state.fetched = true;
-				let entry = BTreeTable::get_index(ix, log, values)?;
-				child.node = Some(Box::new(Self::from_encoded(entry)));
-			}
-		}
-		Ok(child)
 	}
 }

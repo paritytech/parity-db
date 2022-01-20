@@ -342,6 +342,26 @@ impl BTreeTable {
 		Ok(())
 	}
 
+	fn write_plan_remove_node(
+		mut tables: TableLocked,
+		writer: &mut LogWriter,
+		node_index: u64,
+		btree: &mut BTreeIndex,
+		record_id: u64,
+		origin: ValueTableOrigin,
+	) -> Result<()> {
+		Column::write_existing_value_plan(
+			&TableKey::NoHash,
+			tables,
+			Address::from_u64(node_index),
+			None,
+			writer,
+			origin,
+			None,
+		)?;
+		Ok(())
+	}
+	
 	fn write_plan_node(
 		mut tables: TableLocked,
 		node: &mut Node,
@@ -352,7 +372,7 @@ impl BTreeTable {
 		origin: ValueTableOrigin,
 	) -> Result<Option<u64>> {
 		for child in node.children.as_mut().iter_mut() {
-			// Only modified nodes are cached in children
+/*			// Only modified nodes are cached in children
 			if let Some(child_node) = child.node.as_mut() {
 				if let Some(index) = Self::write_plan_node(tables, child_node, writer, child.entry_index, btree, record_id, origin)? {
 					child.entry_index = Some(index);
@@ -362,10 +382,9 @@ impl BTreeTable {
 						node.changed = true;
 					}
 				}
-			} else {
-				if child.state.moved {
-					node.changed = true;
-				}
+			} else {*/
+			if child.state.moved {
+				node.changed = true;
 			}
 		}
 
@@ -511,11 +530,19 @@ pub mod commit_overlay {
 		) -> Result<()> {
 			let origin = crate::column::ValueTableOrigin::BTree(btree.id);
 			let record_id = writer.record_id();
+	
 			// This is racy but we have a single thread writing plan, so only a single writing btree at a
 			// time.
 			let locked_tables = btree.tables.read();
 			let locked = btree.locked(&*locked_tables);
 			let mut tree = new_btree_inner(locked, writer, record_id)?;
+
+			let mut btree_index = BTreeIndex {
+				root: tree.root_index.unwrap_or(0),
+				depth: tree.depth,
+			};
+			let old_btree_index = btree_index.clone();
+
 			for change in self.changes.iter() {
 				match change {
 					(key, None) => {
@@ -527,12 +554,6 @@ pub mod commit_overlay {
 				}
 				*ops += 1;
 			}
-			let mut btree_index = BTreeIndex {
-				root: tree.root_index.unwrap_or(0),
-				depth: tree.depth,
-			};
-			let old_btree_index = btree_index.clone();
-
 			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_index, origin)?;
 
 			if old_btree_index != btree_index {
