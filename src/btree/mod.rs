@@ -79,7 +79,7 @@ pub struct BTreeIndex {
 	pub depth: u32,
 }
 
-const ORDER: usize = 2; // TODO reset to 8 or best bench
+const ORDER: usize = 8;
 const ORDER_CHILD: usize = ORDER + 1;
 
 struct Entry {
@@ -535,7 +535,7 @@ pub mod commit_overlay {
 				}
 				*ops += 1;
 			}
-			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_index, origin)?; // TODO useless
+			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_index, origin)?;
 
 			if old_btree_index != btree_index {
 				let mut entry = Entry::empty();
