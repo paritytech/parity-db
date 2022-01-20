@@ -320,6 +320,22 @@ impl Node {
 		rebalance
 	}
 
+	pub fn root_rebalance(
+		&mut self,
+		values: TableLocked,
+		log: &mut LogWriter,
+	) -> Result<Option<(Option<u64>, Box<Node>)>> {
+		if self.number_separator() == 0 {
+			if self.fetch_child(0, values, log)?.is_some() {
+				let mut child = self.remove_child(0);
+				if let Some(node) = child.node.take() {
+					return Ok(Some((child.entry_index, node)))
+				}
+			}
+		}
+		Ok(None)
+	}
+
 	pub fn remove_last(
 		&mut self,
 		depth: u32,
