@@ -228,7 +228,7 @@ impl BTree {
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<()> {
-		match self.root.insert(self.depth, key, value, self.record_id, btree, log, origin, &mut self.removed_children)? {
+		match self.root.insert(self.depth, key, value, btree, log, origin, &mut self.removed_children)? {
 			Some((sep, right)) => {
 				// add one level
 				self.depth += 1;
@@ -265,7 +265,7 @@ impl BTree {
 	}
 
 	pub fn remove(&mut self, key: &[u8], btree: TableLocked, log: &mut LogWriter, origin: ValueTableOrigin) -> Result<()> {
-		if self.root.remove(self.depth, key, self.record_id, btree, log, origin, &mut self.removed_children)? {
+		if self.root.remove(self.depth, key, btree, log, origin, &mut self.removed_children)? {
 			if let Some((node_index, node)) = self.root.root_rebalance(btree, log)? {
 				self.depth -= 1;
 				self.removed_children.push(self.root_index, Some(std::mem::replace(&mut self.root, node)));

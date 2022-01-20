@@ -320,7 +320,7 @@ impl BTreeTable {
 		btree_index: &mut BTreeIndex,
 		origin: ValueTableOrigin,
 	) -> Result<()> {
-		if let Some(ix) = Self::write_plan_node(tables, &mut btree.root, writer, btree.root_index, btree_index, record_id, origin)? {
+		if let Some(ix) = Self::write_plan_node(tables, &mut btree.root, writer, btree.root_index, origin)? {
 			btree.root_index = Some(ix);
 		}
 		for (node_index, _node) in btree.removed_children.0.drain(..) {
@@ -347,14 +347,12 @@ impl BTreeTable {
 		node: &mut Node,
 		writer: &mut LogWriter,
 		node_id: Option<u64>,
-		btree: &mut BTreeIndex,
-		record_id: u64,
 		origin: ValueTableOrigin,
 	) -> Result<Option<u64>> {
 		for child in node.children.as_mut().iter_mut() {
 			// Only modified nodes are cached in children
 			if let Some(child_node) = child.node.as_mut() {
-				if let Some(index) = Self::write_plan_node(tables, child_node, writer, child.entry_index, btree, record_id, origin)? {
+				if let Some(index) = Self::write_plan_node(tables, child_node, writer, child.entry_index, origin)? {
 					child.entry_index = Some(index);
 					node.changed = true;
 				} else {

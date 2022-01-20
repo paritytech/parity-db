@@ -26,7 +26,7 @@ use crate::index::Address;
 use crate::btree::btree::RemovedChildren;
 
 impl Node {
-	fn last_separator_index(&mut self) -> Option<usize> {
+	fn last_separator_index(&self) -> Option<usize> {
 		let i = self.number_separator();
 		if i == 0 {
 			None
@@ -40,7 +40,6 @@ impl Node {
 		depth: u32,
 		key: &[u8],
 		value: &[u8],
-		record_id: u64,
 		btree: TableLocked,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
@@ -53,7 +52,7 @@ impl Node {
 		if !at {
 			if has_child {
 				return Ok(if let Some(child) = self.fetch_child(i, btree, log)? {
-					match child.insert(depth - 1, key, value, record_id, btree, log, origin, removed_node)? {
+					match child.insert(depth - 1, key, value, btree, log, origin, removed_node)? {
 						Some((sep, right)) => {
 							// insert from child
 							self.insert_node(depth, i, sep, right, removed_node)?
@@ -145,7 +144,6 @@ impl Node {
 		&mut self,
 		depth: u32,
 		key: &[u8],
-		record_id: u64,
 		values: TableLocked,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
@@ -170,7 +168,7 @@ impl Node {
 			if depth != 0 {
 				// replace by bigger value in left child.
 				if let Some(child) = self.fetch_child(i, values, log)? {
-					let (need_balance, sep) = child.remove_last(depth - 1, record_id, values, log, origin, removed)?;
+					let (need_balance, sep) = child.remove_last(depth - 1, values, log, origin, removed)?;
 					if let Some(sep) = sep {
 						self.set_separator(i, sep);
 					}
@@ -186,7 +184,7 @@ impl Node {
 				return Ok(false);
 			}
 			if let Some(child) = self.fetch_child(i, values, log)? {
-				let need_rebalance = child.remove(depth - 1, key, record_id, values, log, origin, removed)?;
+				let need_rebalance = child.remove(depth - 1, key, values, log, origin, removed)?;
 				if need_rebalance {
 					self.rebalance(depth, i, values, log, removed)?;
 					return Ok(self.need_rebalance());
@@ -339,7 +337,6 @@ impl Node {
 	pub fn remove_last(
 		&mut self,
 		depth: u32,
-		record_id: u64,
 		values: TableLocked,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
@@ -357,7 +354,7 @@ impl Node {
 			Ok((self.need_rebalance(), Some(result)))
 		} else {
 			if let Some(child) = self.fetch_child(i + 1, values, log)? {
-				let result = child.remove_last(depth - 1, record_id, values, log, origin, removed)?;
+				let result = child.remove_last(depth - 1, values, log, origin, removed)?;
 				if result.0 {
 					self.rebalance(depth, i + 1, values, log, removed)?;
 					Ok((self.need_rebalance(), result.1))
@@ -572,19 +569,19 @@ impl Node {
 		Ok(child.node.as_mut().map(|n| n.as_mut()))
 	}
 
-	pub fn has_separator(&mut self, at: usize) -> bool {
+	pub fn has_separator(&self, at: usize) -> bool {
 		self.separators[at].separator.is_some()
 	}
 
-	pub fn separator_key(&mut self, at: usize) -> Option<Vec<u8>> {
+	pub fn separator_key(&self, at: usize) -> Option<Vec<u8>> {
 		self.separators[at].separator.as_ref().map(|s| s.key.clone())
 	}
 
-	pub fn separator_value_index(&mut self, at: usize) -> Option<u64> {
+	pub fn separator_value_index(&self, at: usize) -> Option<u64> {
 		self.separators[at].separator.as_ref().map(|s| s.value)
 	}
 
-	pub fn separator_address(&mut self, at: usize) -> Option<Address> {
+	pub fn separator_address(&self, at: usize) -> Option<Address> {
 		self.separators[at].separator.as_ref().map(|s| Address::from_u64(s.value))
 	}
 	
@@ -757,7 +754,7 @@ impl Node {
 		}
 	}
 
-	fn number_separator(&mut self) -> usize {
+	fn number_separator(&self) -> usize {
 		let mut i = 0;
 		while self.separators[i].separator.is_some() {
 			i += 1;
@@ -770,7 +767,7 @@ impl Node {
 
 	// Return true if match and matched position.
 	// Return index of first element bigger than key otherwhise.
-	fn position(&mut self, key: &[u8]) -> Result<(bool, usize)> {
+	fn position(&self, key: &[u8]) -> Result<(bool, usize)> {
 		let mut i = 0;
 		while let Some(separator) = self.separators[i].separator.as_ref() {
 			match key[..].cmp(&separator.key[..]) {
