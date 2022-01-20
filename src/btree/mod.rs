@@ -79,7 +79,7 @@ pub struct BTreeIndex {
 	pub depth: u32,
 }
 
-const ORDER: usize = 8;
+const ORDER: usize = 2; // TODO reset to 8 or best bench
 const ORDER_CHILD: usize = ORDER + 1;
 
 struct Entry {
@@ -243,10 +243,8 @@ impl BTreeTable {
 			return Ok(None);
 		}
 		let record_id = 0; // lifetime of Btree is the query, so no invalidate.
-		let root = Self::get_index(btree_index.root, log, values)?;
-		let root = Node::from_encoded(root);
 		// keeping log locked when parsing tree.
-		let mut tree = BTree::new(Some(btree_index.root), root, btree_index.depth, record_id);
+		let mut tree = BTree::new(Some(btree_index.root), btree_index.depth, record_id);
 		tree.get_with_lock_no_cache(key, values, log)
 	}
 
@@ -320,21 +318,9 @@ impl BTreeTable {
 		btree_index: &mut BTreeIndex,
 		origin: ValueTableOrigin,
 	) -> Result<()> {
-		if let Some(ix) = Self::write_plan_node(tables, btree.root.clone(), writer, btree.root_index, origin)? {
+		let root = BTree::fetch_root(btree.root_index.unwrap_or(HEADER_POSITION), tables, writer)?;
+		if let Some(ix) = Self::write_plan_node(tables, root, writer, btree.root_index, origin)? {
 			btree.root_index = Some(ix);
-		}
-		for (node_index, _node) in btree.removed_children.0.drain(..) {
-			if let Some(index) = node_index {
-				Column::write_existing_value_plan(
-					&TableKey::NoHash,
-					tables,
-					Address::from_u64(index),
-					None,
-					writer,
-					origin,
-					None,
-				)?;
-			}
 		}
 		btree.record_id = record_id;
 		btree_index.root = btree.root_index.unwrap_or(0);
@@ -362,7 +348,7 @@ impl BTreeTable {
 	
 	fn write_plan_node(
 		mut tables: TableLocked,
-		mut node: Box<Node>,
+		mut node: Node,
 		writer: &mut LogWriter,
 		node_id: Option<u64>,
 		origin: ValueTableOrigin,
@@ -455,13 +441,12 @@ pub fn new_btree_inner(
 ) -> Result<btree::BTree> {
 	let btree_index = BTreeTable::btree_index(log, values)?;
 
-	let (root_index, root) = if btree_index.root == HEADER_POSITION {
-		(None, Node::new())
+	let root_index = if btree_index.root == HEADER_POSITION {
+		None
 	} else {
-		let root = BTreeTable::get_index(btree_index.root, log, values)?;
-		(Some(btree_index.root), Node::from_encoded(root))
+		Some(btree_index.root)
 	};
-	Ok(btree::BTree::new(root_index, root, btree_index.depth, record_id))
+	Ok(btree::BTree::new(root_index, btree_index.depth, record_id))
 }
 
 pub mod commit_overlay {
@@ -550,7 +535,7 @@ pub mod commit_overlay {
 				}
 				*ops += 1;
 			}
-			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_index, origin)?;
+			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_index, origin)?; // TODO useless
 
 			if old_btree_index != btree_index {
 				let mut entry = Entry::empty();

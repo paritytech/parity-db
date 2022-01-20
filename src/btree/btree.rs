@@ -27,9 +27,7 @@ use parking_lot::RwLock;
 
 pub struct BTree {
 	pub(super) depth: u32,
-	pub(super) root: Box<Node>,
 	pub(super) root_index: Option<u64>,
-	pub(super) removed_children: RemovedChildren,
 	pub(super) record_id: u64,
 }
 
@@ -104,34 +102,6 @@ pub struct BTreeIter {
 	pub last_key: Option<Vec<u8>>,
 }
 
-pub struct RemovedChildren(pub(super) Vec<(Option<u64>, Option<Box<Node>>)>);
-
-impl RemovedChildren {
-	pub fn push(&mut self, index: Option<u64>, node: Option<Box<Node>>) {
-		self.0.push((index, node));
-	}
-
-	pub fn available(&mut self) -> (Option<u64>, Option<Box<Node>>) {
-		let mut index = None;
-		let mut node = None;
-		for i in self.0.iter_mut().rev() {
-			if index.is_none() && i.0.is_some() {
-				index = i.0.take();
-			}
-			if node.is_none() && i.1.is_some() {
-				node = i.1.take();
-			}
-			if index.is_some() && node.is_some() {
-				break;
-			}
-		}
-		while let Some(&(None, None)) = self.0.last() {
-			self.0.pop();
-		}
-		(index, node)
-	}
-}
-
 impl BTreeIter {
 	pub fn next(&mut self, btree: &mut BTree, col: &BTreeTable, log: &impl LogQuery) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 		if self.next_separator && self.state.is_empty() {
@@ -145,7 +115,10 @@ impl BTreeIter {
 		}
 		if !self.next_separator {
 			if self.state.is_empty() {
-				self.state.push((0, btree.root.as_ref().clone()));
+				let root = col.with_locked(|tables| {
+					BTree::fetch_root(btree.root_index.unwrap_or(HEADER_POSITION), tables, log)
+				})?;
+				self.state.push((0, root));
 			}
 			while let Some((ix, node)) = self.state.last_mut() {
 
@@ -183,7 +156,10 @@ impl BTreeIter {
 		self.state.clear();
 		self.record_id = btree.record_id;
 		self.last_key = Some(key.to_vec());
-		if col.with_locked(|b| Node::seek(btree.root.as_ref().clone(), key.as_ref(), b, log, btree.depth, &mut self.state))? {
+		if col.with_locked(|b| {
+			let root = BTree::fetch_root(btree.root_index.unwrap_or(HEADER_POSITION), b, log)?;
+			Node::seek(root, key.as_ref(), b, log, btree.depth, &mut self.state)
+		})? {
 			// on value
 			if after {
 				if let Some((ix, _node)) = self.state.last_mut() {
@@ -201,12 +177,10 @@ impl BTreeIter {
 }
 
 impl BTree {
-	pub fn new(root_index: Option<u64>, root: Node, depth: u32, record_id: u64) -> Self {
+	pub fn new(root_index: Option<u64>, depth: u32, record_id: u64) -> Self {
 		BTree {
-			root: Box::new(root),
 			root_index,
 			depth,
-			removed_children: RemovedChildren(Default::default()),
 			record_id,
 		}
 	}
@@ -228,36 +202,52 @@ impl BTree {
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<()> {
-		match self.root.insert(self.depth, key, value, btree, log, origin, &mut self.removed_children)? {
+		let mut root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), btree, log)?;
+
+		match root.insert(self.depth, key, value, btree, log, origin)? {
 			Some((sep, right)) => {
 				// add one level
 				self.depth += 1;
-				let left = std::mem::replace(&mut self.root, Box::new(Node::new()));
+				let left = std::mem::replace(&mut root, Node::new());
+				let left_index = self.root_index.take();
 				let new_index = BTreeTable::write_plan_node(
 					btree,
 					left,
 					log,
-					self.root_index.clone(),
+					left_index,
 					origin,
 				)?;
 				let new_index = if new_index.is_some() {
 					new_index
 				} else {
-					self.root_index.take()
+					left_index
 				};
-				self.root.set_child(0, Node::new_child(new_index));
-				self.root_index = None;
-				self.root.set_child(1, right);
-				self.root.set_separator(0, sep);
-				Ok(())
+				root.set_child(0, Node::new_child(new_index));
+				root.set_child(1, right);
+				root.set_separator(0, sep);
 			},
-			None => Ok(()),
+			None => (),
 		}
+		if root.changed {
+			let new_index = BTreeTable::write_plan_node(
+				btree,
+				root,
+				log,
+				self.root_index,
+				origin,
+			)?;
+
+			if new_index.is_some() {
+				self.root_index = new_index;
+			}
+		}
+		Ok(())
 	}
 
 	#[cfg(test)]
-	pub fn get(&mut self, key: &[u8], btree: TableLocked, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
-		if let Some(address) = self.root.get(key, btree, log)? {
+	pub fn get(&self, key: &[u8], btree: TableLocked, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
+		let root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), btree, log)?;
+		if let Some(address) = root.get(key, btree, log)? {
 			let key_query = TableKeyQuery::Fetch(None);
 			let r = Column::get_at_value_index_locked(key_query, address, btree, log)?;
 			Ok(r.map(|r| r.1))
@@ -266,8 +256,15 @@ impl BTree {
 		}
 	}
 
+	#[cfg(test)]
+	pub fn is_balanced(&self, tables: TableLocked, log: &impl LogQuery) -> Result<bool> {
+		let root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), tables, log)?;
+		root.is_balanced(tables, log, 0)
+	}
+
 	pub fn get_with_lock_no_cache(&mut self, key: &[u8], values: TableLocked, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
-		if let Some(address) = self.root.get_no_cache(key, values, log)? {
+		let root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), values, log)?;
+		if let Some(address) = root.get_no_cache(key, values, log)? {
 			let key_query = TableKeyQuery::Fetch(None);
 			let r = Column::get_at_value_index_locked(key_query, address, values, log)?;
 			Ok(r.map(|r| r.1))
@@ -277,245 +274,46 @@ impl BTree {
 	}
 
 	pub fn remove(&mut self, key: &[u8], btree: TableLocked, log: &mut LogWriter, origin: ValueTableOrigin) -> Result<()> {
-		if self.root.remove(self.depth, key, btree, log, origin, &mut self.removed_children)? {
-			if let Some((node_index, node)) = self.root.root_rebalance(btree, log)? {
+		let mut root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), btree, log)?;
+		if root.remove(self.depth, key, btree, log, origin)? {
+			if let Some((node_index, node)) = root.root_rebalance(btree, log)? {
 				self.depth -= 1;
-				self.removed_children.push(self.root_index, Some(std::mem::replace(&mut self.root, Box::new(node))));
+				if let Some(index) = self.root_index.take() {
+					BTreeTable::write_plan_remove_node(
+						btree,
+						log,
+						index,
+						origin,
+					)?;
+				}
 				self.root_index = node_index;
+				root = node;
 			}
+		}
+		if root.changed {
+			let new_index = BTreeTable::write_plan_node(
+				btree,
+				root,
+				log,
+				self.root_index.clone(),
+				origin,
+			)?;
+			let new_index = if new_index.is_some() {
+				new_index
+			} else {
+				self.root_index.take()
+			};
+			self.root_index = new_index;
 		}
 		Ok(())
 	}
-}
 
-#[cfg(test)]
-mod test {
-	use super::*;
-	use tempfile::tempdir;
-	use parking_lot::RwLock;
-	use crate::log::LogOverlays;
-	use std::collections::BTreeMap;
-
-	fn test_basic(change_set: &[(Vec<u8>, Option<Vec<u8>>)]) {
-		let record_id = 1;
-		let col_nb = 0usize;
-		let tmp = tempdir().unwrap();
-		let mut options = crate::options::Options::with_columns(tmp.path(), 1);
-		options.columns[col_nb].btree_index = true;
-		let origin = crate::column::ValueTableOrigin::BTree(crate::btree::BTreeTableId::new(col_nb as u8));
-		let db = crate::Db::open_or_create(&options).unwrap();
-
-		let root = Node::new();
-		let mut tree = BTree::new(None, root, 0, record_id);
-		let overlays = RwLock::new(LogOverlays::default());
-		let mut log_overlay = LogWriter::new(&overlays, record_id);
-		let col = match db.column(col_nb) {
-			Column::Hash(_) => unreachable!(),
-			Column::Tree(col) => col,
-		};
-
-		for (key, value) in change_set.iter() {
-			if let Some(value) = value.as_ref() {
-				col.with_locked(|col| tree.insert(key, value, col, &mut log_overlay, origin)).unwrap();
-			} else {
-				col.with_locked(|col| tree.remove(key, col, &mut log_overlay, origin)).unwrap();
-			}
-		}
-
-		let state: BTreeMap<Vec<u8>, Option<Vec<u8>>> = change_set.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-		for (key, value) in state.iter() {
-			assert_eq!(&col.with_locked(|col| tree.get(key, col, &log_overlay)).unwrap(), value);
-		}
-		assert!(col.with_locked(|col| tree.root.is_balanced(col, &log_overlay, 0)).unwrap());
-	}
-
-	#[test]
-	fn test_simple() {
-		test_basic(&[
-			(b"key1".to_vec(), Some(b"value1".to_vec())),
-			(b"key2".to_vec(), Some(b"value2".to_vec())),
-		]);
-		test_basic(&[
-			(b"key1".to_vec(), Some(b"value1".to_vec())),
-			(b"key2".to_vec(), Some(b"value2".to_vec())),
-			(b"key3".to_vec(), Some(b"value3".to_vec())),
-		]);
-		test_basic(&[
-			(b"key1".to_vec(), Some(b"value1".to_vec())),
-			(b"key3".to_vec(), Some(b"value3".to_vec())),
-			(b"key2".to_vec(), Some(b"value2".to_vec())),
-		]);
-		test_basic(&[
-			(b"key3".to_vec(), Some(b"value3".to_vec())),
-			(b"key2".to_vec(), Some(b"value2".to_vec())),
-			(b"key1".to_vec(), Some(b"value1".to_vec())),
-		]);
-		test_basic(&[
-			(b"key1".to_vec(), Some(b"value1".to_vec())),
-			(b"key2".to_vec(), Some(b"value2".to_vec())),
-			(b"key3".to_vec(), Some(b"value3".to_vec())),
-			(b"key4".to_vec(), Some(b"value4".to_vec())),
-		]);
-		test_basic(&[
-			(b"key1".to_vec(), Some(b"value1".to_vec())),
-			(b"key2".to_vec(), Some(b"value2".to_vec())),
-			(b"key3".to_vec(), Some(b"value3".to_vec())),
-			(b"key4".to_vec(), Some(b"value4".to_vec())),
-			(b"key5".to_vec(), Some(b"value5".to_vec())),
-		]);
-		test_basic(&[
-			(b"key5".to_vec(), Some(b"value5".to_vec())),
-			(b"key3".to_vec(), Some(b"value3".to_vec())),
-			(b"key4".to_vec(), Some(b"value4".to_vec())),
-			(b"key2".to_vec(), Some(b"value2".to_vec())),
-			(b"key1".to_vec(), Some(b"value1".to_vec())),
-		]);
-		test_basic(&[
-			(b"key5".to_vec(), Some(b"value5".to_vec())),
-			(b"key3".to_vec(), Some(b"value3".to_vec())),
-			(b"key4".to_vec(), Some(b"value4".to_vec())),
-			(b"key2".to_vec(), Some(b"value2".to_vec())),
-			(b"key1".to_vec(), Some(b"value1".to_vec())),
-			(b"key11".to_vec(), Some(b"value31".to_vec())),
-			(b"key12".to_vec(), Some(b"value32".to_vec())),
-		]);
-		test_basic(&[
-			(b"key5".to_vec(), Some(b"value5".to_vec())),
-			(b"key3".to_vec(), Some(b"value3".to_vec())),
-			(b"key4".to_vec(), Some(b"value4".to_vec())),
-			(b"key2".to_vec(), Some(b"value2".to_vec())),
-			(b"key1".to_vec(), Some(b"value1".to_vec())),
-			(b"key51".to_vec(), Some(b"value31".to_vec())),
-			(b"key52".to_vec(), Some(b"value32".to_vec())),
-		]);
-		test_basic(&[
-			(b"key5".to_vec(), Some(b"value5".to_vec())),
-			(b"key3".to_vec(), Some(b"value3".to_vec())),
-			(b"key4".to_vec(), Some(b"value4".to_vec())),
-			(b"key2".to_vec(), Some(b"value2".to_vec())),
-			(b"key1".to_vec(), Some(b"value1".to_vec())),
-			(b"key31".to_vec(), Some(b"value31".to_vec())),
-			(b"key32".to_vec(), Some(b"value32".to_vec())),
-		]);
-		test_basic(&[
-			(b"key1".to_vec(), Some(b"value5".to_vec())),
-			(b"key2".to_vec(), Some(b"value3".to_vec())),
-			(b"key3".to_vec(), Some(b"value4".to_vec())),
-			(b"key4".to_vec(), Some(b"value7".to_vec())),
-			(b"key5".to_vec(), Some(b"value2".to_vec())),
-			(b"key6".to_vec(), Some(b"value1".to_vec())),
-			(b"key3".to_vec(), None),
-		]);
-		test_basic(&[
-			(b"key1".to_vec(), Some(b"value5".to_vec())),
-			(b"key2".to_vec(), Some(b"value3".to_vec())),
-			(b"key3".to_vec(), Some(b"value4".to_vec())),
-			(b"key4".to_vec(), Some(b"value7".to_vec())),
-			(b"key5".to_vec(), Some(b"value2".to_vec())),
-			(b"key0".to_vec(), Some(b"value1".to_vec())),
-			(b"key3".to_vec(), None),
-		]);
-		test_basic(&[
-			(b"key1".to_vec(), Some(b"value5".to_vec())),
-			(b"key2".to_vec(), Some(b"value3".to_vec())),
-			(b"key3".to_vec(), Some(b"value4".to_vec())),
-			(b"key4".to_vec(), Some(b"value7".to_vec())),
-			(b"key5".to_vec(), Some(b"value2".to_vec())),
-			(b"key3".to_vec(), None),
-		]);
-		test_basic(&[
-			(b"key1".to_vec(), Some(b"value5".to_vec())),
-			(b"key4".to_vec(), Some(b"value3".to_vec())),
-			(b"key5".to_vec(), Some(b"value4".to_vec())),
-			(b"key6".to_vec(), Some(b"value4".to_vec())),
-			(b"key7".to_vec(), Some(b"value2".to_vec())),
-			(b"key8".to_vec(), Some(b"value1".to_vec())),
-			(b"key5".to_vec(), None),
-		]);
-		test_basic(&[
-			(b"key1".to_vec(), Some(b"value5".to_vec())),
-			(b"key4".to_vec(), Some(b"value3".to_vec())),
-			(b"key5".to_vec(), Some(b"value4".to_vec())),
-			(b"key7".to_vec(), Some(b"value2".to_vec())),
-			(b"key8".to_vec(), Some(b"value1".to_vec())),
-			(b"key3".to_vec(), None),
-		]);
-		test_basic(&[
-			(b"key5".to_vec(), Some(b"value5".to_vec())),
-			(b"key3".to_vec(), Some(b"value3".to_vec())),
-			(b"key4".to_vec(), Some(b"value4".to_vec())),
-			(b"key2".to_vec(), Some(b"value2".to_vec())),
-			(b"key1".to_vec(), Some(b"value1".to_vec())),
-			(b"key5".to_vec(), None),
-			(b"key3".to_vec(), None),
-		]);
-		test_basic(&[
-			(b"key5".to_vec(), Some(b"value5".to_vec())),
-			(b"key3".to_vec(), Some(b"value3".to_vec())),
-			(b"key4".to_vec(), Some(b"value4".to_vec())),
-			(b"key2".to_vec(), Some(b"value2".to_vec())),
-			(b"key1".to_vec(), Some(b"value1".to_vec())),
-			(b"key5".to_vec(), None),
-			(b"key3".to_vec(), None),
-			(b"key2".to_vec(), None),
-			(b"key4".to_vec(), None),
-		]);
-		test_basic(&[
-			(b"key5".to_vec(), Some(b"value5".to_vec())),
-			(b"key3".to_vec(), Some(b"value3".to_vec())),
-			(b"key4".to_vec(), Some(b"value4".to_vec())),
-			(b"key2".to_vec(), Some(b"value2".to_vec())),
-			(b"key1".to_vec(), Some(b"value1".to_vec())),
-			(b"key5".to_vec(), None),
-			(b"key3".to_vec(), None),
-			(b"key2".to_vec(), None),
-			(b"key4".to_vec(), None),
-			(b"key1".to_vec(), None),
-		]);
-		test_basic(&[
-			([5u8; 250].to_vec(), Some(b"value5".to_vec())),
-			([5u8; 200].to_vec(), Some(b"value3".to_vec())),
-			([5u8; 100].to_vec(), Some(b"value4".to_vec())),
-			([5u8; 150].to_vec(), Some(b"value2".to_vec())),
-			([5u8; 101].to_vec(), Some(b"value1".to_vec())),
-			([5u8; 250].to_vec(), None),
-			([5u8; 101].to_vec(), None),
-		]);
-	}
-
-	#[test]
-	fn test_random() {
-		for i in 0..100 {
-			test_random_inner(60, 60, i);
-		}
-		for i in 0..500 {
-			test_random_inner(20, 60, i);
-		}
-	}
-	fn test_random_inner(size: usize, key_size: usize, seed: u64) {
-		use rand::{RngCore, SeedableRng};
-		let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
-		let mut data = Vec::<(Vec<u8>, Option<Vec<u8>>)>::new();
-		for i in 0..size {
-			let nb_delete: u32 = rng.next_u32(); // should be out of loop, yet it makes alternance insert/delete in some case.
-			let nb_delete = (nb_delete as usize % size) / 2;
-			let mut key = vec![0u8; key_size];
-			rng.fill_bytes(&mut key[..]);
-			let value = if i > size - nb_delete {
-				let random_key = rng.next_u32();
-				let random_key = (random_key % 4) > 0;
-				if !random_key {
-					key = data[i - size / 2].0.clone();
-				}
-				None
-			} else {
-				Some(key.clone())
-			};
-			let var_keysize = rng.next_u32();
-			let var_keysize = var_keysize as usize % (key_size / 2);
-			key.truncate(key_size - var_keysize);
-			data.push((key, value));
-		}
-		test_basic(data.as_slice());
+	pub fn fetch_root(root: u64, tables: TableLocked, log: &impl LogQuery) -> Result<Node> {
+		Ok(if root == HEADER_POSITION {
+			Node::new()
+		} else {
+			let root = BTreeTable::get_index(root, log, tables)?;
+			Node::from_encoded(root)
+		})
 	}
 }

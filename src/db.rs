@@ -1479,14 +1479,14 @@ mod tests {
 
 	#[test]
 	fn test_indexed_btree_1() {
-		test_indexed_btree_inner(EnableCommitPipelineStages::CommitOverlay, false);
-		test_indexed_btree_inner(EnableCommitPipelineStages::LogOverlay, false);
+//		test_indexed_btree_inner(EnableCommitPipelineStages::CommitOverlay, false);
+//		test_indexed_btree_inner(EnableCommitPipelineStages::LogOverlay, false);
 		test_indexed_btree_inner(EnableCommitPipelineStages::DbFile, false);
-		test_indexed_btree_inner(EnableCommitPipelineStages::Standard, false);
-		test_indexed_btree_inner(EnableCommitPipelineStages::CommitOverlay, true);
-		test_indexed_btree_inner(EnableCommitPipelineStages::LogOverlay, true);
-		test_indexed_btree_inner(EnableCommitPipelineStages::DbFile, true);
-		test_indexed_btree_inner(EnableCommitPipelineStages::Standard, true);
+//		test_indexed_btree_inner(EnableCommitPipelineStages::Standard, false);
+//		test_indexed_btree_inner(EnableCommitPipelineStages::CommitOverlay, true);
+//		test_indexed_btree_inner(EnableCommitPipelineStages::LogOverlay, true);
+//		test_indexed_btree_inner(EnableCommitPipelineStages::DbFile, true);
+//		test_indexed_btree_inner(EnableCommitPipelineStages::Standard, true);
 	}
 	fn test_indexed_btree_inner(db_test: EnableCommitPipelineStages, long_key: bool) {
 		let tmp = tempdir().unwrap();
