@@ -1479,14 +1479,14 @@ mod tests {
 
 	#[test]
 	fn test_indexed_btree_1() {
-//		test_indexed_btree_inner(EnableCommitPipelineStages::CommitOverlay, false);
-//		test_indexed_btree_inner(EnableCommitPipelineStages::LogOverlay, false);
+		test_indexed_btree_inner(EnableCommitPipelineStages::CommitOverlay, false);
+		test_indexed_btree_inner(EnableCommitPipelineStages::LogOverlay, false);
 		test_indexed_btree_inner(EnableCommitPipelineStages::DbFile, false);
-//		test_indexed_btree_inner(EnableCommitPipelineStages::Standard, false);
-//		test_indexed_btree_inner(EnableCommitPipelineStages::CommitOverlay, true);
-//		test_indexed_btree_inner(EnableCommitPipelineStages::LogOverlay, true);
-//		test_indexed_btree_inner(EnableCommitPipelineStages::DbFile, true);
-//		test_indexed_btree_inner(EnableCommitPipelineStages::Standard, true);
+		test_indexed_btree_inner(EnableCommitPipelineStages::Standard, false);
+		test_indexed_btree_inner(EnableCommitPipelineStages::CommitOverlay, true);
+		test_indexed_btree_inner(EnableCommitPipelineStages::LogOverlay, true);
+		test_indexed_btree_inner(EnableCommitPipelineStages::DbFile, true);
+		test_indexed_btree_inner(EnableCommitPipelineStages::Standard, true);
 	}
 	fn test_indexed_btree_inner(db_test: EnableCommitPipelineStages, long_key: bool) {
 		let tmp = tempdir().unwrap();
@@ -1623,5 +1623,222 @@ mod tests {
 		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
 		assert_eq!(iter.next().unwrap(), Some((key3.clone(), b"value3".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
+	}
+
+	fn test_basic(change_set: &[(Vec<u8>, Option<Vec<u8>>)]) {
+		use std::collections::BTreeMap;
+
+		let tmp = tempdir().unwrap();
+		let col_nb = 0u8;
+		let mut options = Options::with_columns(tmp.path(), 5);
+		options.columns[col_nb as usize].btree_index = true;
+		let mut inner_options = InternalOptions::default();
+		inner_options.create = true;
+		inner_options.commit_stages = EnableCommitPipelineStages::DbFile;
+		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
+
+		let mut iter = db.iter(col_nb).unwrap();
+		assert_eq!(iter.next().unwrap(), None);
+
+		db.commit(change_set.iter().map(|(k, v)| (col_nb, k.clone(), v.clone()))).unwrap();
+		wait_on.as_ref().map(|w| w.wait_notify());
+
+		let state: BTreeMap<Vec<u8>, Option<Vec<u8>>> = change_set.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+		for (key, value) in state.iter() {
+			assert_eq!(&db.get(col_nb, &key).unwrap(), value);
+		}
+	}
+
+	#[test]
+	fn test_random() {
+		for i in 0..100 {
+			test_random_inner(60, 60, i);
+			std::thread::sleep(std::time::Duration::from_millis(10));
+		}
+
+		for i in 0..500 {
+			test_random_inner(20, 60, i);
+			std::thread::sleep(std::time::Duration::from_millis(10));
+		}
+	}
+	fn test_random_inner(size: usize, key_size: usize, seed: u64) {
+		use rand::{RngCore, SeedableRng};
+		let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
+		let mut data = Vec::<(Vec<u8>, Option<Vec<u8>>)>::new();
+		for i in 0..size {
+			let nb_delete: u32 = rng.next_u32(); // should be out of loop, yet it makes alternance insert/delete in some case.
+			let nb_delete = (nb_delete as usize % size) / 2;
+			let mut key = vec![0u8; key_size];
+			rng.fill_bytes(&mut key[..]);
+			let value = if i > size - nb_delete {
+				let random_key = rng.next_u32();
+				let random_key = (random_key % 4) > 0;
+				if !random_key {
+					key = data[i - size / 2].0.clone();
+				}
+				None
+			} else {
+				Some(key.clone())
+			};
+			let var_keysize = rng.next_u32();
+			let var_keysize = var_keysize as usize % (key_size / 2);
+			key.truncate(key_size - var_keysize);
+			data.push((key, value));
+		}
+		test_basic(&data[..]);
+	}
+
+	#[test]
+	fn test_simple() {
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+		]);
+		test_basic(&[
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key11".to_vec(), Some(b"value31".to_vec())),
+			(b"key12".to_vec(), Some(b"value32".to_vec())),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key51".to_vec(), Some(b"value31".to_vec())),
+			(b"key52".to_vec(), Some(b"value32".to_vec())),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key31".to_vec(), Some(b"value31".to_vec())),
+			(b"key32".to_vec(), Some(b"value32".to_vec())),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value5".to_vec())),
+			(b"key2".to_vec(), Some(b"value3".to_vec())),
+			(b"key3".to_vec(), Some(b"value4".to_vec())),
+			(b"key4".to_vec(), Some(b"value7".to_vec())),
+			(b"key5".to_vec(), Some(b"value2".to_vec())),
+			(b"key6".to_vec(), Some(b"value1".to_vec())),
+			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value5".to_vec())),
+			(b"key2".to_vec(), Some(b"value3".to_vec())),
+			(b"key3".to_vec(), Some(b"value4".to_vec())),
+			(b"key4".to_vec(), Some(b"value7".to_vec())),
+			(b"key5".to_vec(), Some(b"value2".to_vec())),
+			(b"key0".to_vec(), Some(b"value1".to_vec())),
+			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value5".to_vec())),
+			(b"key2".to_vec(), Some(b"value3".to_vec())),
+			(b"key3".to_vec(), Some(b"value4".to_vec())),
+			(b"key4".to_vec(), Some(b"value7".to_vec())),
+			(b"key5".to_vec(), Some(b"value2".to_vec())),
+			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value5".to_vec())),
+			(b"key4".to_vec(), Some(b"value3".to_vec())),
+			(b"key5".to_vec(), Some(b"value4".to_vec())),
+			(b"key6".to_vec(), Some(b"value4".to_vec())),
+			(b"key7".to_vec(), Some(b"value2".to_vec())),
+			(b"key8".to_vec(), Some(b"value1".to_vec())),
+			(b"key5".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value5".to_vec())),
+			(b"key4".to_vec(), Some(b"value3".to_vec())),
+			(b"key5".to_vec(), Some(b"value4".to_vec())),
+			(b"key7".to_vec(), Some(b"value2".to_vec())),
+			(b"key8".to_vec(), Some(b"value1".to_vec())),
+			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key5".to_vec(), None),
+			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key5".to_vec(), None),
+			(b"key3".to_vec(), None),
+			(b"key2".to_vec(), None),
+			(b"key4".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key5".to_vec(), None),
+			(b"key3".to_vec(), None),
+			(b"key2".to_vec(), None),
+			(b"key4".to_vec(), None),
+			(b"key1".to_vec(), None),
+		]);
+		test_basic(&[
+			([5u8; 250].to_vec(), Some(b"value5".to_vec())),
+			([5u8; 200].to_vec(), Some(b"value3".to_vec())),
+			([5u8; 100].to_vec(), Some(b"value4".to_vec())),
+			([5u8; 150].to_vec(), Some(b"value2".to_vec())),
+			([5u8; 101].to_vec(), Some(b"value1".to_vec())),
+			([5u8; 250].to_vec(), None),
+			([5u8; 101].to_vec(), None),
+		]);
 	}
 }

@@ -97,15 +97,15 @@ impl Node {
 		if !at {
 			if has_child {
 				return Ok(if let Some(mut child) = self.fetch_child(i, btree, log)? {
-					let r = match child.insert(depth - 1, key, value, btree, log, origin)? {
+					let r = child.insert(depth - 1, key, value, btree, log, origin)?;
+					self.write_child(i, child, btree, log, origin)?;
+					match r {
 						Some((sep, right)) => {
 							// insert from child
 							self.insert_node(depth, i, sep, right, btree, log, origin)?
 						},
 						r => r,
-					};
-					self.write_child(i, child, btree, log, origin)?;
-					r
+					}
 				} else {
 					None
 				});
@@ -423,7 +423,7 @@ impl Node {
 		} else {
 			if let Some(mut child) = self.fetch_child(i + 1, values, log)? {
 				let result = child.remove_last(depth - 1, values, log, origin)?;
-				self.write_child(i, child, values, log, origin)?;
+				self.write_child(i + 1, child, values, log, origin)?;
 				if result.0 {
 					self.rebalance(depth, i + 1, values, log, origin)?;
 					Ok((self.need_rebalance(), result.1))
