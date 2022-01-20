@@ -265,7 +265,13 @@ impl BTree {
 	}
 
 	pub fn remove(&mut self, key: &[u8], btree: TableLocked, log: &mut LogWriter, origin: ValueTableOrigin) -> Result<()> {
-		self.root.remove(self.depth, key, self.record_id, btree, log, origin, &mut self.removed_children)?;
+		if self.root.remove(self.depth, key, self.record_id, btree, log, origin, &mut self.removed_children)? {
+			if let Some((node_index, node)) = self.root.root_rebalance(btree, log)? {
+				self.depth -= 1;
+				self.removed_children.push(self.root_index, Some(std::mem::replace(&mut self.root, node)));
+				self.root_index = node_index;
+			}
+		}
 		Ok(())
 	}
 }
@@ -430,6 +436,29 @@ mod test {
 			(b"key1".to_vec(), Some(b"value1".to_vec())),
 			(b"key5".to_vec(), None),
 			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key5".to_vec(), None),
+			(b"key3".to_vec(), None),
+			(b"key2".to_vec(), None),
+			(b"key4".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key5".to_vec(), None),
+			(b"key3".to_vec(), None),
+			(b"key2".to_vec(), None),
+			(b"key4".to_vec(), None),
+			(b"key1".to_vec(), None),
 		]);
 		test_basic(&[
 			([5u8; 250].to_vec(), Some(b"value5".to_vec())),
