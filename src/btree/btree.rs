@@ -205,10 +205,7 @@ impl BTree {
 		let changes = &mut changes;
 
 		while changes.len() > 0 {
-			let (key, value) = &changes[0];
-			*changes = &changes[1..];
-			let value = value.as_ref().map(Vec::as_slice);
-			match root.change(self.depth, key, value, changes, btree, log, origin)? {
+			match root.change(None, self.depth, changes, btree, log, origin)? {
 				(Some((sep, right)), _) => {
 					// add one level
 					self.depth += 1;
@@ -247,6 +244,7 @@ impl BTree {
 				},
 				_ => (),
 			}
+			*changes = &changes[1..];
 		}
 
 		if root.changed {

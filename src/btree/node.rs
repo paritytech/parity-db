@@ -83,15 +83,15 @@ impl Node {
 
 	pub fn change(
 		&mut self,
+		parent: Option<(&mut Self, usize)>,
 		depth: u32,
-		key: &[u8],
-		value: Option<&[u8]>,
 		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
 		btree: TableLocked,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
 		loop {
+			let (key, value) = &changes[0];
 			let r = if let Some(value) = value {
 				self.insert(depth, key, value, changes, btree, log, origin)?
 			} else {
@@ -100,9 +100,30 @@ impl Node {
 			if r.0.is_some() || r.1 {
 				return Ok(r);
 			}
-//			if changes.len() == 0 {
+			if changes.len() == 0 {
 				break;
-//			}
+			}
+			if changes.len() == 1 {
+				break;
+			}
+			// TODO optimize position calls.
+			let key = &changes[1].0;
+			let (at, i) = self.position(key)?;
+			if at {
+				*changes = &changes[1..];
+//				value = changes[0].1.as_ref().map(Vec::as_slice);
+				continue;
+			}
+/*			if let Some((parent, p)) = parent {
+				let (at, i) = parent.position(&changes[0].0)?;
+/*			if changes[0].0 
+			let (key, value) = &changes[0];
+			*changes = &changes[1..];*/
+			break;
+			} else {
+				break;
+			}*/
+		break;
 		}
 		Ok((None, false))
 	}
@@ -124,7 +145,7 @@ impl Node {
 		if !at {
 			if has_child {
 				return Ok(if let Some(mut child) = self.fetch_child(i, btree, log)? {
-					let r = child.change(depth - 1, key, Some(value), changes, btree, log, origin)?;
+					let r = child.change(Some((self, i)), depth - 1, changes, btree, log, origin)?;
 					self.write_child(i, child, btree, log, origin)?;
 					match r {
 						(Some((sep, right)), _) => {
@@ -266,7 +287,7 @@ impl Node {
 				return Ok((None, false));
 			}
 			if let Some(mut child) = self.fetch_child(i, values, log)? {
-				let r = child.change(depth - 1, key, None, changes, values, log, origin)?;
+				let r = child.change(Some((self, i)), depth - 1, changes, values, log, origin)?;
 				self.write_child(i, child, values, log, origin)?;
 				return Ok(match r {
 					(Some((sep, right)), _) => {
