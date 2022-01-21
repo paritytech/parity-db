@@ -504,7 +504,7 @@ pub mod commit_overlay {
 		}
 
 		pub fn write_plan(
-			&self,
+			&mut self,
 			btree: &BTreeTable,
 			writer: &mut LogWriter,
 			ops: &mut u64,
@@ -524,6 +524,7 @@ pub mod commit_overlay {
 			};
 			let old_btree_index = btree_index.clone();
 
+			self.changes.sort();
 			for change in self.changes.iter() {
 				match change {
 					(key, None) => {

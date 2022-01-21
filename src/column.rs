@@ -914,17 +914,6 @@ impl HashColumn {
 	}
 }
 
-/* TODO rem
-	pub fn btree_get(&self, key: &[u8], log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
-		let tables = self.tables.read();
-		if let Some(btree) = tables.btree.as_ref() {
-			btree.get(key, log, &tables.value, &self.compression)
-		} else {
-			Err(crate::error::Error::InvalidConfiguration("Not an indexed column.".to_string()))
-		} 
-	}
-*/
-
 impl Column {
 	pub fn complete_plan(&self, log: &mut LogWriter) -> Result<()> {
 		match self {

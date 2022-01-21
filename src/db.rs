@@ -449,7 +449,7 @@ impl DbInner {
 				key_values.write_plan(&self.columns[*c as usize], &mut writer, &mut ops, &mut reindex)?;
 			}
 
-			for (c, btree) in commit.changeset.btree_indexed.iter() {
+			for (c, btree) in commit.changeset.btree_indexed.iter_mut() {
 				match &self.columns[*c as usize] {
 					Column::Hash(_column) => {
 						return Err(Error::InvalidConfiguration("Not an indexed column.".to_string()));
