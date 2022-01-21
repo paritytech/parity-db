@@ -365,6 +365,8 @@ impl BTreeTable {
 					node.changed = true;
 				}
 			}
+			child.state.fetched = false;
+			child.node = None;
 		}
 
 		for separator in node.separators.as_mut().iter_mut() {
