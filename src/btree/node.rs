@@ -91,6 +91,13 @@ impl Node {
 		origin: ValueTableOrigin,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
 		loop {
+			if changes.len() > 1 {
+				if changes[0].0 == changes[1].0 { // TODO only when advancing (here rec call useless)
+					*changes = &changes[1..];
+					continue;
+				}
+				debug_assert!(changes[0].0 < changes[1].0);
+			}
 			let (key, value) = &changes[0];
 			let r = if let Some(value) = value {
 				self.insert(depth, key, value, changes, btree, log, origin)?
@@ -100,30 +107,23 @@ impl Node {
 			if r.0.is_some() || r.1 {
 				return Ok(r);
 			}
-			if changes.len() == 0 {
-				break;
-			}
 			if changes.len() == 1 {
 				break;
 			}
-			// TODO optimize position calls.
-			let key = &changes[1].0;
-			let (at, i) = self.position(key)?;
-			if at {
-				*changes = &changes[1..];
-//				value = changes[0].1.as_ref().map(Vec::as_slice);
-				continue;
+			if let Some((parent, p)) = &parent {
+				let key = &changes[1].0;
+				let (at, i) = self.position(key)?; // TODO could start position from current
+				if at || i < self.number_separator() {
+					*changes = &changes[1..];
+					continue;
+				}
+				let (at, i) = parent.position(key)?;
+				if !at && &i == p && i < parent.number_separator() {
+					*changes = &changes[1..];
+					continue;
+				}
 			}
-/*			if let Some((parent, p)) = parent {
-				let (at, i) = parent.position(&changes[0].0)?;
-/*			if changes[0].0 
-			let (key, value) = &changes[0];
-			*changes = &changes[1..];*/
 			break;
-			} else {
-				break;
-			}*/
-		break;
 		}
 		Ok((None, false))
 	}

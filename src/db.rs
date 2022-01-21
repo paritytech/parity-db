@@ -1653,12 +1653,11 @@ mod tests {
 	fn test_random() {
 		for i in 0..100 {
 			test_random_inner(60, 60, i);
-			std::thread::sleep(std::time::Duration::from_millis(10));
+			std::thread::sleep(std::time::Duration::from_millis(30));
 		}
-
 		for i in 0..500 {
 			test_random_inner(20, 60, i);
-			std::thread::sleep(std::time::Duration::from_millis(10));
+			std::thread::sleep(std::time::Duration::from_millis(30));
 		}
 	}
 	fn test_random_inner(size: usize, key_size: usize, seed: u64) {
