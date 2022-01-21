@@ -513,7 +513,7 @@ pub mod commit_overlay {
 			};
 			let old_btree_index = btree_index.clone();
 
-			self.changes.sort();
+			self.changes.sort_by_key(|(k, _)| k.clone());
 			tree.write_sorted_changes(&mut self.changes.as_slice(), locked, writer, origin)?;
 			*ops += self.changes.len() as u64;
 			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_index, origin)?;
