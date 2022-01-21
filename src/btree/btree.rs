@@ -208,7 +208,7 @@ impl BTree {
 			let (key, value) = &changes[0];
 			*changes = &changes[1..];
 			let value = value.as_ref().map(Vec::as_slice);
-			match root.change(self.depth, key, value, btree, log, origin)? {
+			match root.change(self.depth, key, value, changes, btree, log, origin)? {
 				(Some((sep, right)), _) => {
 					// add one level
 					self.depth += 1;

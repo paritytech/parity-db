@@ -86,17 +86,27 @@ impl Node {
 		depth: u32,
 		key: &[u8],
 		value: Option<&[u8]>,
+		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
 		btree: TableLocked,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
-		if let Some(value) = value {
-			self.insert(depth, key, value, btree, log, origin)
-				.map(|r| (r, false))
-		} else {
-			self.remove(depth, key, btree, log, origin)
-				.map(|r| (None, r))
+		loop {
+			if let Some(value) = value {
+				let r = self.insert(depth, key, value, changes, btree, log, origin)?;
+				if r.0.is_some() || r.1 {
+					return Ok(r);
+				}
+			} else {
+				if self.remove(depth, key, btree, log, origin)? {
+					return Ok((None, true));
+				}
+			}
+//			if changes.len() == 0 {
+				break;
+//			}
 		}
+		Ok((None, false))
 	}
 	
 	fn insert(
@@ -104,10 +114,11 @@ impl Node {
 		depth: u32,
 		key: &[u8],
 		value: &[u8],
+		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
 		btree: TableLocked,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
-	) -> Result<Option<(Separator, Child)>> {
+	) -> Result<(Option<(Separator, Child)>, bool)> {
 		let has_child = depth != 0;
 
 		let (at, i) = self.position(key)?;
@@ -115,17 +126,21 @@ impl Node {
 		if !at {
 			if has_child {
 				return Ok(if let Some(mut child) = self.fetch_child(i, btree, log)? {
-					let r = child.insert(depth - 1, key, value, btree, log, origin)?;
+					let r = child.change(depth - 1, key, Some(value), changes, btree, log, origin)?;
 					self.write_child(i, child, btree, log, origin)?;
 					match r {
-						Some((sep, right)) => {
+						(Some((sep, right)), _) => {
 							// insert from child
-							self.insert_node(depth, i, sep, right, btree, log, origin)?
+							(self.insert_node(depth, i, sep, right, btree, log, origin)?, false)
+						},
+						(None, true) => {
+							self.rebalance(depth, i, btree, log, origin)?;
+							(None, self.need_rebalance())
 						},
 						r => r,
 					}
 				} else {
-					None
+					(None, false)
 				});
 			}
 
@@ -138,19 +153,19 @@ impl Node {
 				if insert == middle {
 					let (right, right_ix) = self.split(middle, true, None, None, has_child);
 					let right = Self::write_split_child(right_ix, right, btree, log, origin)?;
-					return Ok(Some((insert_separator, right)));
+					return Ok((Some((insert_separator, right)), false));
 				} else if insert < middle {
 					let (right, right_ix) = self.split(middle, false, None, None, has_child);
 					let sep = self.remove_separator(middle - 1);
 					self.shift_from(insert, has_child, false);
 					self.set_separator(insert, insert_separator);
 					let right = Self::write_split_child(right_ix, right, btree, log, origin)?;
-					return Ok(Some((sep, right)));
+					return Ok((Some((sep, right)), false));
 				} else {
 					let (right, right_ix) = self.split(middle + 1, false, Some((insert, insert_separator)), None, has_child);
 					let sep = self.remove_separator(middle);
 					let right = Self::write_split_child(right_ix, right, btree, log, origin)?;
-					return Ok(Some((sep, right)));
+					return Ok((Some((sep, right)), false));
 				}
 			}
 
@@ -160,7 +175,7 @@ impl Node {
 			let existing = self.separator_value_index(i);
 			self.set_separator(i, Self::create_separator(key, value, btree, log, existing, origin)?);
 		}
-		Ok(None)
+		Ok((None, false))
 	}
 
 	// TODO redundant split code with fn insert
