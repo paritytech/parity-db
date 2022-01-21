@@ -79,7 +79,7 @@ pub struct BTreeIndex {
 	pub depth: u32,
 }
 
-const ORDER: usize = 2;
+const ORDER: usize = 8;
 const ORDER_CHILD: usize = ORDER + 1;
 
 struct Entry {

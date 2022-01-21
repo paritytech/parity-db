@@ -122,6 +122,8 @@ impl Node {
 					*changes = &changes[1..];
 					continue;
 				}
+				// Could check other parents for case i == parent.number_separator.
+				// Still not that critical.
 			}
 			break;
 		}
