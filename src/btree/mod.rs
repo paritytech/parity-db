@@ -354,17 +354,6 @@ impl BTreeTable {
 		origin: ValueTableOrigin,
 	) -> Result<Option<u64>> {
 		for child in node.children.as_mut().iter_mut() {
-/*			// Only modified nodes are cached in children
-			if let Some(child_node) = child.node.as_mut() {
-				if let Some(index) = Self::write_plan_node(tables, child_node, writer, child.entry_index, record_id, origin)? {
-					child.entry_index = Some(index);
-					node.changed = true;
-				} else {
-					if child.state.moved {
-						node.changed = true;
-					}
-				}
-			} else {*/
 			if child.state.moved {
 				node.changed = true;
 			}
@@ -525,17 +514,8 @@ pub mod commit_overlay {
 			let old_btree_index = btree_index.clone();
 
 			self.changes.sort();
-			for change in self.changes.iter() {
-				match change {
-					(key, None) => {
-						tree.remove(key, locked, writer, origin)?;
-					},
-					(key, Some(value)) => {
-						tree.insert(key, value, locked, writer, origin)?;
-					},
-				}
-				*ops += 1;
-			}
+			tree.write_sorted_changes(self.changes.as_slice(), locked, writer, origin)?;
+			*ops += self.changes.len() as u64;
 			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_index, origin)?;
 
 			if old_btree_index != btree_index {

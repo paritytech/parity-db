@@ -194,40 +194,61 @@ impl BTree {
 		}
 	}
 
-	pub fn insert(
+	pub fn write_sorted_changes(
 		&mut self,
-		key: &[u8],
-		value: &[u8],
+		mut changes: &[(Vec<u8>, Option<Vec<u8>>)],
 		btree: TableLocked,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<()> {
 		let mut root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), btree, log)?;
+		let changes = &mut changes;
 
-		match root.insert(self.depth, key, value, btree, log, origin)? {
-			Some((sep, right)) => {
-				// add one level
-				self.depth += 1;
-				let left = std::mem::replace(&mut root, Node::new());
-				let left_index = self.root_index.take();
-				let new_index = BTreeTable::write_plan_node(
-					btree,
-					left,
-					log,
-					left_index,
-					origin,
-				)?;
-				let new_index = if new_index.is_some() {
-					new_index
-				} else {
-					left_index
-				};
-				root.set_child(0, Node::new_child(new_index));
-				root.set_child(1, right);
-				root.set_separator(0, sep);
-			},
-			None => (),
+		while changes.len() > 0 {
+			let (key, value) = &changes[0];
+			*changes = &changes[1..];
+			let value = value.as_ref().map(Vec::as_slice);
+			match root.change(self.depth, key, value, btree, log, origin)? {
+				(Some((sep, right)), _) => {
+					// add one level
+					self.depth += 1;
+					let left = std::mem::replace(&mut root, Node::new());
+					let left_index = self.root_index.take();
+					let new_index = BTreeTable::write_plan_node(
+						btree,
+						left,
+						log,
+						left_index,
+						origin,
+					)?;
+					let new_index = if new_index.is_some() {
+						new_index
+					} else {
+						left_index
+					};
+					root.set_child(0, Node::new_child(new_index));
+					root.set_child(1, right);
+					root.set_separator(0, sep);
+				},
+				(_, true) => {
+					if let Some((node_index, node)) = root.root_rebalance(btree, log)? {
+						self.depth -= 1;
+						if let Some(index) = self.root_index.take() {
+							BTreeTable::write_plan_remove_node(
+								btree,
+								log,
+								index,
+								origin,
+							)?;
+						}
+						self.root_index = node_index;
+						root = node;
+					}
+				},
+				_ => (),
+			}
 		}
+
 		if root.changed {
 			let new_index = BTreeTable::write_plan_node(
 				btree,
@@ -243,7 +264,7 @@ impl BTree {
 		}
 		Ok(())
 	}
-
+	
 	#[cfg(test)]
 	pub fn get(&self, key: &[u8], btree: TableLocked, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
 		let root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), btree, log)?;
@@ -271,41 +292,6 @@ impl BTree {
 		} else {
 			Ok(None)
 		}
-	}
-
-	pub fn remove(&mut self, key: &[u8], btree: TableLocked, log: &mut LogWriter, origin: ValueTableOrigin) -> Result<()> {
-		let mut root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), btree, log)?;
-		if root.remove(self.depth, key, btree, log, origin)? {
-			if let Some((node_index, node)) = root.root_rebalance(btree, log)? {
-				self.depth -= 1;
-				if let Some(index) = self.root_index.take() {
-					BTreeTable::write_plan_remove_node(
-						btree,
-						log,
-						index,
-						origin,
-					)?;
-				}
-				self.root_index = node_index;
-				root = node;
-			}
-		}
-		if root.changed {
-			let new_index = BTreeTable::write_plan_node(
-				btree,
-				root,
-				log,
-				self.root_index.clone(),
-				origin,
-			)?;
-			let new_index = if new_index.is_some() {
-				new_index
-			} else {
-				self.root_index.take()
-			};
-			self.root_index = new_index;
-		}
-		Ok(())
 	}
 
 	pub fn fetch_root(root: u64, tables: TableLocked, log: &impl LogQuery) -> Result<Node> {

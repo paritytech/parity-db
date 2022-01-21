@@ -81,7 +81,25 @@ impl Node {
 		Ok(Self::new_child(right_ix))
 	}
 
-	pub fn insert(
+	pub fn change(
+		&mut self,
+		depth: u32,
+		key: &[u8],
+		value: Option<&[u8]>,
+		btree: TableLocked,
+		log: &mut LogWriter,
+		origin: ValueTableOrigin,
+	) -> Result<(Option<(Separator, Child)>, bool)> {
+		if let Some(value) = value {
+			self.insert(depth, key, value, btree, log, origin)
+				.map(|r| (r, false))
+		} else {
+			self.remove(depth, key, btree, log, origin)
+				.map(|r| (None, r))
+		}
+	}
+	
+	fn insert(
 		&mut self,
 		depth: u32,
 		key: &[u8],
@@ -190,7 +208,7 @@ impl Node {
 		}
 	}
 
-	pub fn remove(
+	fn remove(
 		&mut self,
 		depth: u32,
 		key: &[u8],
