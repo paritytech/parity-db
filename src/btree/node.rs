@@ -92,15 +92,13 @@ impl Node {
 		origin: ValueTableOrigin,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
 		loop {
-			if let Some(value) = value {
-				let r = self.insert(depth, key, value, changes, btree, log, origin)?;
-				if r.0.is_some() || r.1 {
-					return Ok(r);
-				}
+			let r = if let Some(value) = value {
+				self.insert(depth, key, value, changes, btree, log, origin)?
 			} else {
-				if self.remove(depth, key, btree, log, origin)? {
-					return Ok((None, true));
-				}
+				self.remove(depth, key, changes, btree, log, origin)?
+			};
+			if r.0.is_some() || r.1 {
+				return Ok(r);
 			}
 //			if changes.len() == 0 {
 				break;
@@ -227,10 +225,11 @@ impl Node {
 		&mut self,
 		depth: u32,
 		key: &[u8],
+		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
 		values: TableLocked,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
-	) -> Result<bool> {
+	) -> Result<(Option<(Separator, Child)>, bool)> {
 		let has_child = depth != 0;
 		let (at, i) = self.position(key)?;
 		if at {
@@ -264,23 +263,28 @@ impl Node {
 			}
 		} else {
 			if !has_child {
-				return Ok(false);
+				return Ok((None, false));
 			}
 			if let Some(mut child) = self.fetch_child(i, values, log)? {
-				let need_rebalance = child.remove(depth - 1, key, values, log, origin)?;
+				let r = child.change(depth - 1, key, None, changes, values, log, origin)?;
 				self.write_child(i, child, values, log, origin)?;
-				if need_rebalance {
-					self.rebalance(depth, i, values, log, origin)?;
-					return Ok(self.need_rebalance());
-				} else {
-					return Ok(false);
-				}
+				return Ok(match r {
+					(Some((sep, right)), _) => {
+						// insert from child
+						(self.insert_node(depth, i, sep, right, values, log, origin)?, false)
+					},
+					(None, true) => {
+						self.rebalance(depth, i, values, log, origin)?;
+						(None, self.need_rebalance())
+					},
+					r => r,
+				});
 			} else {
-				return Ok(false);
+				return Ok((None, false));
 			}
 		}
 
-		Ok(self.need_rebalance())
+		Ok((None, self.need_rebalance()))
 	}
 
 	pub fn rebalance(
