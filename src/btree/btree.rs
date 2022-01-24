@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-//! BTree structure.
+//! Btree overlay definition and methods.
 
 use super::*;
 use crate::table::key::TableKeyQuery;
@@ -22,8 +22,6 @@ use crate::log::{LogWriter, LogQuery};
 use crate::column::Column;
 use crate::error::{Error, Result};
 use parking_lot::RwLock;
-
-/// In memory local btree overlay.
 
 pub struct BTree {
 	pub(super) depth: u32,
@@ -55,7 +53,7 @@ impl<'a> BTreeIterator<'a> {
 			Column::Tree(col) => col,
 		};
 		let record_id = log.read().last_record_id(col);
-		let tree = column.with_locked(|btree| new_btree_inner(btree, log, record_id))?;
+		let tree = column.with_locked(|btree| BTree::open(btree, log, record_id))?;
 		let iter = tree.iter();
 		Ok(BTreeIterator {
 			db,
@@ -78,7 +76,7 @@ impl<'a> BTreeIterator<'a> {
 	pub fn next_backend(&mut self, record_id: u64, col: &BTreeTable, log: &impl LogQuery) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
 		if record_id != tree.record_id {
-			let new_tree = col.with_locked(|btree| new_btree_inner(btree, log, record_id))?;
+			let new_tree = col.with_locked(|btree| BTree::open(btree, log, record_id))?;
 			*tree = new_tree;
 		}
 		iter.next(tree, col, log)
@@ -87,7 +85,7 @@ impl<'a> BTreeIterator<'a> {
 	pub fn seek_backend(&mut self, key: Vec<u8>, record_id: u64, col: &BTreeTable, log: &impl LogQuery, after: bool) -> Result<()> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
 		if record_id != tree.record_id {
-			let new_tree = col.with_locked(|btree| new_btree_inner(btree, log, record_id))?;
+			let new_tree = col.with_locked(|btree| BTree::open(btree, log, record_id))?;
 			*tree = new_tree;
 		}
 		iter.seek(key, tree, col, log, after)
@@ -121,9 +119,8 @@ impl BTreeIter {
 				self.state.push((0, root));
 			}
 			while let Some((ix, node)) = self.state.last_mut() {
-
 				if let Some(child) = col.with_locked(|btree| {
-					node.force_fetch_node_at(*ix, log, btree)
+					node.fetch_child(*ix, btree, log)
 				})? {
 					self.state.push((0, child));
 				} else {
@@ -185,6 +182,21 @@ impl BTree {
 		}
 	}
 
+	pub fn open(
+		values: TableLocked,
+		log: &impl LogQuery,
+		record_id: u64,
+	) -> Result<Self> {
+		let btree_index = BTreeTable::btree_index(log, values)?;
+
+		let root_index = if btree_index.root == HEADER_POSITION {
+			None
+		} else {
+			Some(btree_index.root)
+		};
+		Ok(btree::BTree::new(root_index, btree_index.depth, record_id))
+	}
+
 	pub fn iter(&self) -> BTreeIter {
 		BTreeIter {
 			last_key: None,
@@ -228,7 +240,7 @@ impl BTree {
 					root.set_separator(0, sep);
 				},
 				(_, true) => {
-					if let Some((node_index, node)) = root.root_rebalance(btree, log)? {
+					if let Some((node_index, node)) = root.need_remove_root(btree, log)? {
 						self.depth -= 1;
 						if let Some(index) = self.root_index.take() {
 							BTreeTable::write_plan_remove_node(
@@ -264,26 +276,14 @@ impl BTree {
 	}
 	
 	#[cfg(test)]
-	pub fn get(&self, key: &[u8], btree: TableLocked, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
-		let root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), btree, log)?;
-		if let Some(address) = root.get(key, btree, log)? {
-			let key_query = TableKeyQuery::Fetch(None);
-			let r = Column::get_at_value_index(key_query, address, btree, log)?;
-			Ok(r.map(|r| r.1))
-		} else {
-			Ok(None)
-		}
-	}
-
-	#[cfg(test)]
 	pub fn is_balanced(&self, tables: TableLocked, log: &impl LogQuery) -> Result<bool> {
 		let root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), tables, log)?;
 		root.is_balanced(tables, log, 0)
 	}
 
-	pub fn get_with_lock_no_cache(&mut self, key: &[u8], values: TableLocked, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
+	pub fn get(&mut self, key: &[u8], values: TableLocked, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
 		let root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), values, log)?;
-		if let Some(address) = root.get_no_cache(key, values, log)? {
+		if let Some(address) = root.get(key, values, log)? {
 			let key_query = TableKeyQuery::Fetch(None);
 			let r = Column::get_at_value_index(key_query, address, values, log)?;
 			Ok(r.map(|r| r.1))

@@ -123,7 +123,8 @@ impl Node {
 					continue;
 				}
 				// Could check other parents for case i == parent.number_separator.
-				// Still not that critical.
+				// Would mean unsafe Vec<*mut>, or other complex design: skipping
+				// this case.
 			}
 			break;
 		}
@@ -193,13 +194,12 @@ impl Node {
 			self.shift_from(i, has_child, false);
 			self.set_separator(i, Self::create_separator(key, value, btree, log, None, origin)?);
 		} else {
-			let existing = self.separator_value_index(i);
+			let existing = self.separator_address(i);
 			self.set_separator(i, Self::create_separator(key, value, btree, log, existing, origin)?);
 		}
 		Ok((None, false))
 	}
 
-	// TODO redundant split code with fn insert
 	pub fn insert_node(
 		&mut self,
 		depth: u32,
@@ -256,12 +256,12 @@ impl Node {
 		let has_child = depth != 0;
 		let (at, i) = self.position(key)?;
 		if at {
-			let existing = self.separator_value_index(i);
+			let existing = self.separator_address(i);
 			if let Some(existing) = existing {
 				Column::write_existing_value_plan(
 					&TableKey::NoHash,
 					values,
-					Address::from_u64(existing),
+					existing,
 					None,
 					log,
 					origin,
@@ -446,15 +446,14 @@ impl Node {
 		rebalance
 	}
 
-	pub fn root_rebalance(
+	pub fn need_remove_root(
 		&mut self,
 		values: TableLocked,
 		log: &mut LogWriter,
 	) -> Result<Option<(Option<u64>, Node)>> {
 		if self.number_separator() == 0 {
-			// TODO also remove root node from btree
 			if self.fetch_child(0, values, log)?.is_some() {
-				if let Some(node) = self.force_fetch_node_at(0, log, values)? {
+				if let Some(node) = self.fetch_child(0, values, log)? {
 					let child = self.remove_child(0);
 					return Ok(Some((child.entry_index, node)))
 				}
@@ -496,27 +495,13 @@ impl Node {
 		}
 	}
 
-	pub fn get_no_cache(&self, key: &[u8], values: TableLocked, log: &impl LogQuery) -> Result<Option<Address>> {
+	pub fn get(&self, key: &[u8], values: TableLocked, log: &impl LogQuery) -> Result<Option<Address>> {
 		let (at, i) = self.position(key)?;
 		if at {
 			Ok(self.separator_address(i))
 		} else {
-			if let Some(child) = self.force_fetch_node_at(i, log, values)? {
-				return child.get_no_cache(key, values, log);
-			}
-
-			Ok(None)
-		}
-	}
-
-	#[cfg(test)]
-	pub fn get(&self, key: &[u8], btree: TableLocked, log: &impl LogQuery) -> Result<Option<Address>> {
-		let (at, i) = self.position(key)?;
-		if at {
-			Ok(self.separator_address(i))
-		} else {
-			if let Some(child) = self.fetch_child(i, btree, log)? {
-				return child.get(key, btree, log);
+			if let Some(child) = self.fetch_child(i, values, log)? {
+				return child.get(key, values, log);
 			}
 
 			Ok(None)
@@ -530,7 +515,7 @@ impl Node {
 			Ok(true)
 		} else {
 			if depth != 0 {
-				if let Some(child) = from.force_fetch_node_at(i, log, values)? {
+				if let Some(child) = from.fetch_child(i, values, log)? {
 					stack.push((i, from));
 					return Self::seek(child, key, values, log, depth - 1, stack);
 				}
@@ -602,9 +587,9 @@ pub struct ChildState {
 #[derive(Clone)]
 pub struct Child {
 	pub(super) state: ChildState,
-//	pub(super) node: Option<Box<Node>>, // lazy fetch.
-	pub(super) entry_index: Option<u64>, // no index is new.
+	pub(super) entry_index: Option<u64>,
 }
+
 impl Default for Child {
 	fn default() -> Self {
 		let state = ChildState::default();
@@ -677,20 +662,12 @@ impl Node {
 		child
 	}
 
-	pub fn fetch_child(&self, at: usize, values: TableLocked, log: &impl LogQuery) -> Result<Option<Self>> {
-		self.force_fetch_node_at(at, log, values)
-	}
-
 	pub fn has_separator(&self, at: usize) -> bool {
 		self.separators[at].separator.is_some()
 	}
 
 	pub fn separator_key(&self, at: usize) -> Option<Vec<u8>> {
 		self.separators[at].separator.as_ref().map(|s| s.key.clone())
-	}
-
-	pub fn separator_value_index(&self, at: usize) -> Option<u64> {
-		self.separators[at].separator.as_ref().map(|s| s.value)
 	}
 
 	pub fn separator_address(&self, at: usize) -> Option<Address> {
@@ -723,7 +700,7 @@ impl Node {
 		value: &[u8],
 		btree: TableLocked,
 		log: &mut LogWriter,
-		existing: Option<u64>,
+		existing: Option<Address>,
 		origin: ValueTableOrigin,
 	) -> Result<Separator> {
 		let key = key.to_vec();
@@ -731,12 +708,12 @@ impl Node {
 			Column::write_existing_value_plan(
 				&TableKey::NoHash,
 				btree,
-				Address::from_u64(address),
+				address,
 				Some(value),
 				log,
 				origin,
 				None,
-			)?.1.map(|a| a.as_u64()).unwrap_or(address)
+			)?.1.map(|a| a.as_u64()).unwrap_or(address.as_u64())
 		} else {
 			Column::write_new_value_plan(
 				&TableKey::NoHash,
@@ -894,7 +871,7 @@ impl Node {
 		Ok((false, i))
 	}
 
-	pub fn force_fetch_node_at(&self, i: usize, log: &impl LogQuery, values: TableLocked) -> Result<Option<Self>> {
+	pub fn fetch_child(&self, i: usize, values: TableLocked, log: &impl LogQuery) -> Result<Option<Self>> {
 		if let Some(ix) = self.children[i].entry_index {
 			let entry = BTreeTable::get_index(ix, log, values)?;
 			return Ok(Some(Self::from_encoded(entry)));

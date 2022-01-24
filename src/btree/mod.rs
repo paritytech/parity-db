@@ -50,6 +50,8 @@ pub use btree::BTreeIterator;
 mod btree;
 mod node;
 
+const ORDER: usize = 8;
+const ORDER_CHILD: usize = ORDER + 1;
 pub(crate) const HEADER_POSITION: u64 = 0;
 pub(crate) const HEADER_SIZE: u64 = 8 + 4;
 pub(crate) const ENTRY_CAPACITY: usize = ORDER * 33 + ORDER * 8 + ORDER_CHILD * 8;
@@ -78,9 +80,6 @@ pub struct BTreeIndex {
 	pub root: u64,
 	pub depth: u32,
 }
-
-const ORDER: usize = 8;
-const ORDER_CHILD: usize = ORDER + 1;
 
 struct Entry {
 	encoded: LogEntry<Vec<u8>>,
@@ -223,7 +222,7 @@ impl BTreeTable {
 		})
 	}
 
-	pub(crate) fn get_at_value_index(&self, key: TableKeyQuery, address: Address, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
+	fn get_at_value_index(&self, key: TableKeyQuery, address: Address, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
 		let tables = self.tables.read();
 		let btree = self.locked(&*tables);
 		Column::get_at_value_index(key, address, btree, log)
@@ -245,7 +244,7 @@ impl BTreeTable {
 		let record_id = 0; // lifetime of Btree is the query, so no invalidate.
 		// keeping log locked when parsing tree.
 		let mut tree = BTree::new(Some(btree_index.root), btree_index.depth, record_id);
-		tree.get_with_lock_no_cache(key, values, log)
+		tree.get(key, values, log)
 	}
 
 	fn get_index(at: u64, log: &impl LogQuery, tables: TableLocked) -> Result<Vec<u8>> {
@@ -257,7 +256,7 @@ impl BTreeTable {
 		}
 	}
 
-	pub(crate) fn locked<'a>(&'a self, tables: &'a Vec<ValueTable>) -> TableLocked<'a> {
+	fn locked<'a>(&'a self, tables: &'a Vec<ValueTable>) -> TableLocked<'a> {
 		TableLocked {
 			tables,
 			preimage: self.preimage,
@@ -423,21 +422,6 @@ impl BTreeTable {
 	}
 }
 
-pub fn new_btree_inner(
-	values: TableLocked,
-	log: &impl LogQuery,
-	record_id: u64,
-) -> Result<btree::BTree> {
-	let btree_index = BTreeTable::btree_index(log, values)?;
-
-	let root_index = if btree_index.root == HEADER_POSITION {
-		None
-	} else {
-		Some(btree_index.root)
-	};
-	Ok(btree::BTree::new(root_index, btree_index.depth, record_id))
-}
-
 pub mod commit_overlay {
 	use super::*;
 	use crate::db::BTreeCommitOverlay;
@@ -455,7 +439,7 @@ pub mod commit_overlay {
 		}
 
 		pub fn push(&mut self, k: &[u8], v: Option<Vec<u8>>) {
-			// no key hashing
+			// No key hashing
 			self.changes.push((k.to_vec(), v));
 		}
 
@@ -501,11 +485,9 @@ pub mod commit_overlay {
 			let origin = crate::column::ValueTableOrigin::BTree(btree.id);
 			let record_id = writer.record_id();
 	
-			// This is racy but we have a single thread writing plan, so only a single writing btree at a
-			// time.
 			let locked_tables = btree.tables.read();
 			let locked = btree.locked(&*locked_tables);
-			let mut tree = new_btree_inner(locked, writer, record_id)?;
+			let mut tree = BTree::open(locked, writer, record_id)?;
 
 			let mut btree_index = BTreeIndex {
 				root: tree.root_index.unwrap_or(0),
