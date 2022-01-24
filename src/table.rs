@@ -510,6 +510,16 @@ impl ValueTable {
 		Ok(None)
 	}
 
+	pub fn has_key_at(&self, index: u64, key: &TableKey, log: &LogWriter) -> Result<bool> {
+		match key {
+			TableKey::Partial(k) => Ok(match self.partial_key_at(index, log)? {
+				Some(existing_key) => &existing_key[..] == key::partial_key(k),
+				None => false,
+			}),
+			TableKey::NoHash => Ok(!self.is_tombstone(index, log)?),
+		}
+	}
+
 	pub fn partial_key_at(&self, index: u64, log: &impl LogQuery) -> Result<Option<[u8; PARTIAL_SIZE]>> {
 		let mut query_key = Default::default();
 		let (rc, _compressed) = self.for_parts(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index, log, |_buf| false)?;
@@ -520,7 +530,7 @@ impl ValueTable {
 		})
 	}
 
-	pub fn is_tombstone<Q: LogQuery>(&self, index: u64, log: &Q) -> Result<bool> {
+	pub fn is_tombstone(&self, index: u64, log: &impl LogQuery) -> Result<bool> {
 		let mut buf = PartialKeyEntry::new_uninit();
 		let buf = if log.value(self.id, index, buf.as_mut()) {
 			&mut buf
@@ -899,7 +909,7 @@ impl ValueTable {
 		self.complete_plan(&mut log)?;
 		assert!(at == 1);
 		let log = log.drain();
-		let change = log.local_values.get(&self.id).expect("entry written above");
+		let change = log.local_values_changes(self.id).expect("entry written above");
 		for (at, (_rec_id, entry)) in change.map.iter() {
 			self.file.write_at(entry.as_slice(), *at * (self.entry_size as u64))?;
 		}
@@ -908,9 +918,8 @@ impl ValueTable {
 }
 
 pub mod key {
-	use super::{FullEntry, ValueTable};
+	use super::FullEntry;
 	use crate::{Result, Key};
-	use crate::log::LogWriter;
 
 	pub const PARTIAL_SIZE: usize = 26;
 
@@ -975,16 +984,6 @@ pub mod key {
 					buf.write_slice(partial_key(k));
 				},
 				TableKey::NoHash => (),
-			}
-		}
-
-		pub fn has_key_at(&self, index: u64, table: &ValueTable, log: &LogWriter) -> Result<bool> {
-			match self {
-				TableKey::Partial(k) => Ok(match table.partial_key_at(index, log)? {
-					Some(existing_key) => &existing_key[..] == partial_key(k),
-					None => false,
-				}),
-				TableKey::NoHash => Ok(!table.is_tombstone(index, log)?),
 			}
 		}
 	}

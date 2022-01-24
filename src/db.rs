@@ -203,7 +203,7 @@ impl DbInner {
 				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
 					return Ok(l.cloned());
 				}
-				// We lock log as btree structure changed while reading it would be an issue.
+				// We lock log, if btree structure changed while reading that would be an issue.
 				let log = self.log.overlays().read();
 				column.with_locked(|btree| BTreeTable::get(key, &*log, btree))
 			},
@@ -224,7 +224,15 @@ impl DbInner {
 				let key = TableKey::Partial(key);
 				column.get_size(&key, log)
 			},
-			Column::Tree(_column) => unimplemented!("TODO any use over simply using get"),
+			Column::Tree(column) => {
+				let overlay = self.commit_overlay.read();
+				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
+					return Ok(l.map(|v| v.len() as u32));
+				}
+				let log = self.log.overlays().read();
+				let l = column.with_locked(|btree| BTreeTable::get(key, &*log, btree))?;
+				Ok(l.map(|v| v.len() as u32))
+			},
 		}
 	}
 
@@ -240,7 +248,8 @@ impl DbInner {
 		let log = self.log.overlays().read();
 		let record_id = log.last_record_id(iter.col);
 		let commit_overlay = self.commit_overlay.read();
-		let next_commit_overlay = commit_overlay.get(col as usize).and_then(|o| o.btree_next(&iter.overlay_last_key, iter.from_seek));
+		let next_commit_overlay = commit_overlay.get(col as usize)
+			.and_then(|o| o.btree_next(&iter.overlay_last_key, iter.from_seek));
 		// No consistency over iteration, allows dropping lock to overlay.
 		std::mem::drop(commit_overlay);
 		let next_backend = if let Some(n) = iter.pending_next_backend.take() {
@@ -315,7 +324,7 @@ impl DbInner {
 	}
 
 	pub(crate) fn btree_iter_seek(&self, iter: &mut crate::BTreeIterator, key: &[u8], after: bool) -> Result<()> {
-		// seek require log do not change
+		// Seek require log do not change, locking.
 		let log = self.log.overlays().read();
 		let record_id = log.last_record_id(iter.col);
 		iter.from_seek = !after;
@@ -449,7 +458,7 @@ impl DbInner {
 				key_values.write_plan(&self.columns[*c as usize], &mut writer, &mut ops, &mut reindex)?;
 			}
 
-			for (c, btree) in commit.changeset.btree_indexed.iter() {
+			for (c, btree) in commit.changeset.btree_indexed.iter_mut() {
 				match &self.columns[*c as usize] {
 					Column::Hash(_column) => {
 						return Err(Error::InvalidConfiguration("Not an indexed column.".to_string()));
@@ -855,11 +864,6 @@ pub struct Db {
 }
 
 impl Db {
-	#[cfg(test)]
-	pub fn column(&self, at: usize) -> &Column {
-		&self.inner.columns[at]
-	}
-
 	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Result<Db> {
 		let options = Options::with_columns(path, num_columns);
 		let mut inner_options = InternalOptions::default();
@@ -1623,5 +1627,221 @@ mod tests {
 		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
 		assert_eq!(iter.next().unwrap(), Some((key3.clone(), b"value3".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
+	}
+
+	fn test_basic(change_set: &[(Vec<u8>, Option<Vec<u8>>)]) {
+		use std::collections::BTreeMap;
+
+		let tmp = tempdir().unwrap();
+		let col_nb = 0u8;
+		let mut options = Options::with_columns(tmp.path(), 5);
+		options.columns[col_nb as usize].btree_index = true;
+		let mut inner_options = InternalOptions::default();
+		inner_options.create = true;
+		inner_options.commit_stages = EnableCommitPipelineStages::DbFile;
+		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
+
+		let mut iter = db.iter(col_nb).unwrap();
+		assert_eq!(iter.next().unwrap(), None);
+
+		db.commit(change_set.iter().map(|(k, v)| (col_nb, k.clone(), v.clone()))).unwrap();
+		wait_on.as_ref().map(|w| w.wait_notify());
+
+		let state: BTreeMap<Vec<u8>, Option<Vec<u8>>> = change_set.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+		for (key, value) in state.iter() {
+			assert_eq!(&db.get(col_nb, &key).unwrap(), value);
+		}
+	}
+
+	#[test]
+	fn test_random() {
+		for i in 0..100 {
+			test_random_inner(60, 60, i);
+			std::thread::sleep(std::time::Duration::from_millis(30));
+		}
+		for i in 0..500 {
+			test_random_inner(20, 60, i);
+			std::thread::sleep(std::time::Duration::from_millis(30));
+		}
+	}
+	fn test_random_inner(size: usize, key_size: usize, seed: u64) {
+		use rand::{RngCore, SeedableRng};
+		let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
+		let mut data = Vec::<(Vec<u8>, Option<Vec<u8>>)>::new();
+		for i in 0..size {
+			let nb_delete: u32 = rng.next_u32(); // should be out of loop, yet it makes alternance insert/delete in some case.
+			let nb_delete = (nb_delete as usize % size) / 2;
+			let mut key = vec![0u8; key_size];
+			rng.fill_bytes(&mut key[..]);
+			let value = if i > size - nb_delete {
+				let random_key = rng.next_u32();
+				let random_key = (random_key % 4) > 0;
+				if !random_key {
+					key = data[i - size / 2].0.clone();
+				}
+				None
+			} else {
+				Some(key.clone())
+			};
+			let var_keysize = rng.next_u32();
+			let var_keysize = var_keysize as usize % (key_size / 2);
+			key.truncate(key_size - var_keysize);
+			data.push((key, value));
+		}
+		test_basic(&data[..]);
+	}
+
+	#[test]
+	fn test_simple() {
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+		]);
+		test_basic(&[
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key11".to_vec(), Some(b"value31".to_vec())),
+			(b"key12".to_vec(), Some(b"value32".to_vec())),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key51".to_vec(), Some(b"value31".to_vec())),
+			(b"key52".to_vec(), Some(b"value32".to_vec())),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key31".to_vec(), Some(b"value31".to_vec())),
+			(b"key32".to_vec(), Some(b"value32".to_vec())),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value5".to_vec())),
+			(b"key2".to_vec(), Some(b"value3".to_vec())),
+			(b"key3".to_vec(), Some(b"value4".to_vec())),
+			(b"key4".to_vec(), Some(b"value7".to_vec())),
+			(b"key5".to_vec(), Some(b"value2".to_vec())),
+			(b"key6".to_vec(), Some(b"value1".to_vec())),
+			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value5".to_vec())),
+			(b"key2".to_vec(), Some(b"value3".to_vec())),
+			(b"key3".to_vec(), Some(b"value4".to_vec())),
+			(b"key4".to_vec(), Some(b"value7".to_vec())),
+			(b"key5".to_vec(), Some(b"value2".to_vec())),
+			(b"key0".to_vec(), Some(b"value1".to_vec())),
+			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value5".to_vec())),
+			(b"key2".to_vec(), Some(b"value3".to_vec())),
+			(b"key3".to_vec(), Some(b"value4".to_vec())),
+			(b"key4".to_vec(), Some(b"value7".to_vec())),
+			(b"key5".to_vec(), Some(b"value2".to_vec())),
+			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value5".to_vec())),
+			(b"key4".to_vec(), Some(b"value3".to_vec())),
+			(b"key5".to_vec(), Some(b"value4".to_vec())),
+			(b"key6".to_vec(), Some(b"value4".to_vec())),
+			(b"key7".to_vec(), Some(b"value2".to_vec())),
+			(b"key8".to_vec(), Some(b"value1".to_vec())),
+			(b"key5".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value5".to_vec())),
+			(b"key4".to_vec(), Some(b"value3".to_vec())),
+			(b"key5".to_vec(), Some(b"value4".to_vec())),
+			(b"key7".to_vec(), Some(b"value2".to_vec())),
+			(b"key8".to_vec(), Some(b"value1".to_vec())),
+			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key5".to_vec(), None),
+			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key5".to_vec(), None),
+			(b"key3".to_vec(), None),
+			(b"key2".to_vec(), None),
+			(b"key4".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key5".to_vec(), None),
+			(b"key3".to_vec(), None),
+			(b"key2".to_vec(), None),
+			(b"key4".to_vec(), None),
+			(b"key1".to_vec(), None),
+		]);
+		test_basic(&[
+			([5u8; 250].to_vec(), Some(b"value5".to_vec())),
+			([5u8; 200].to_vec(), Some(b"value3".to_vec())),
+			([5u8; 100].to_vec(), Some(b"value4".to_vec())),
+			([5u8; 150].to_vec(), Some(b"value2".to_vec())),
+			([5u8; 101].to_vec(), Some(b"value1".to_vec())),
+			([5u8; 250].to_vec(), None),
+			([5u8; 101].to_vec(), None),
+		]);
 	}
 }

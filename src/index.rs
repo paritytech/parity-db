@@ -99,7 +99,7 @@ impl Address {
 		Address((offset << SIZE_TIERS_BITS) | size_tier as u64)
 	}
 
-	pub fn from_u64(a: u64) -> Address {
+	pub const fn from_u64(a: u64) -> Address {
 		Address(a)
 	}
 
