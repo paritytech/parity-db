@@ -25,7 +25,7 @@ use parking_lot::RwLock;
 
 pub struct BTree {
 	pub(super) depth: u32,
-	pub(super) root_index: Option<u64>,
+	pub(super) root_index: Option<Address>,
 	pub(super) record_id: u64,
 }
 
@@ -174,7 +174,7 @@ impl BTreeIter {
 }
 
 impl BTree {
-	pub fn new(root_index: Option<u64>, depth: u32, record_id: u64) -> Self {
+	pub fn new(root_index: Option<Address>, depth: u32, record_id: u64) -> Self {
 		BTree {
 			root_index,
 			depth,
@@ -292,7 +292,7 @@ impl BTree {
 		}
 	}
 
-	pub fn fetch_root(root: u64, tables: TableLocked, log: &impl LogQuery) -> Result<Node> {
+	pub fn fetch_root(root: Address, tables: TableLocked, log: &impl LogQuery) -> Result<Node> {
 		Ok(if root == HEADER_POSITION {
 			Node::new()
 		} else {

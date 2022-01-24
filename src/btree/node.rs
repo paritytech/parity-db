@@ -60,7 +60,7 @@ impl Node {
 	}
 
 	pub fn write_split_child(
-		right_ix: Option<u64>,
+		right_ix: Option<Address>,
 		right: Node,
 		btree: TableLocked,
 		log: &mut LogWriter,
@@ -450,7 +450,7 @@ impl Node {
 		&mut self,
 		values: TableLocked,
 		log: &mut LogWriter,
-	) -> Result<Option<(Option<u64>, Node)>> {
+	) -> Result<Option<(Option<Address>, Node)>> {
 		if self.number_separator() == 0 {
 			if self.fetch_child(0, values, log)?.is_some() {
 				if let Some(node) = self.fetch_child(0, values, log)? {
@@ -576,24 +576,18 @@ impl Default for Separator {
 #[derive(Clone)]
 pub struct SeparatorInner {
 	pub key: Vec<u8>,
-	pub value: u64,
-}
-
-#[derive(Clone, Default)]
-pub struct ChildState {
-	pub moved: bool,
+	pub value: Address,
 }
 
 #[derive(Clone)]
 pub struct Child {
-	pub(super) state: ChildState,
-	pub(super) entry_index: Option<u64>,
+	pub(super) moved: bool,
+	pub(super) entry_index: Option<Address>,
 }
 
 impl Default for Child {
 	fn default() -> Self {
-		let state = ChildState::default();
-		Child { state, entry_index: None }
+		Child { moved: false, entry_index: None }
 	}
 }
 
@@ -652,13 +646,11 @@ impl Node {
 
 	pub fn remove_child(&mut self, at: usize) -> Child {
 		self.changed = true;
-		let mut state = ChildState::default();
-		state.moved = true;
 		let mut child = std::mem::replace(&mut self.children[at], Child {
-			state,
+			moved: true,
 			entry_index: None,
 		});
-		child.state.moved = true;
+		child.moved = true;
 		child
 	}
 
@@ -671,7 +663,7 @@ impl Node {
 	}
 
 	pub fn separator_address(&self, at: usize) -> Option<Address> {
-		self.separators[at].separator.as_ref().map(|s| Address::from_u64(s.value))
+		self.separators[at].separator.as_ref().map(|s| s.value)
 	}
 	
 	pub fn set_separator(&mut self, at: usize, mut sep: Separator) {
@@ -680,17 +672,15 @@ impl Node {
 		self.separators.as_mut()[at] = sep;
 	}
 
-	pub fn new_child(index: Option<u64>) -> Child {
+	pub fn new_child(index: Option<Address>) -> Child {
 		Child {
-			state: ChildState {
-				moved: true,
-			},
+			moved: true,
 			entry_index: index,
 		}
 	}
 
 	pub fn set_child(&mut self, at: usize, mut child: Child) {
-		child.state.moved = true;
+		child.moved = true;
 		self.changed = true;
 		self.children.as_mut()[at] = child;
 	}
@@ -713,7 +703,7 @@ impl Node {
 				log,
 				origin,
 				None,
-			)?.1.map(|a| a.as_u64()).unwrap_or(address.as_u64())
+			)?.1.unwrap_or(address)
 		} else {
 			Column::write_new_value_plan(
 				&TableKey::NoHash,
@@ -722,7 +712,7 @@ impl Node {
 				log,
 				origin,
 				None,
-			)?.as_u64()
+			)?
 		};
 		Ok(Separator {
 			modified: true,
@@ -740,7 +730,7 @@ impl Node {
 		mut insert_right: Option<(usize, Separator)>,
 		mut insert_right_child: Option<(usize, Child)>,
 		has_child: bool,
-	) -> (Self, Option<u64>) {
+	) -> (Self, Option<Address>) {
 		let (right_ix, mut right) = (None, Self::new());
 		let mut offset = 0;
 		let right_start = at;
@@ -766,7 +756,7 @@ impl Node {
 				if insert_right_child.as_ref().map(|ins| ins.0 + 1 == i).unwrap_or(false) {
 					offset = 1;
 					if let Some((_, mut child)) = insert_right_child.take() {
-						child.state.moved = true;
+						child.moved = true;
 						right.children.as_mut()[i - right_start] = child;
 					}
 				}
@@ -774,7 +764,7 @@ impl Node {
 			}
 			if let Some((insert, mut child)) = insert_right_child.take() {
 				debug_assert!(insert == ORDER);
-				child.state.moved = true;
+				child.moved = true;
 				right.children.as_mut()[insert + 1 - right_start] = child;
 			}
 		}
@@ -801,7 +791,7 @@ impl Node {
 			};
 			let mut current = self.remove_child(i);
 			while current.entry_index.is_some() {
-				current.state.moved = true;
+				current.moved = true;
 				i += 1;
 				if i == ORDER_CHILD {
 					break;
