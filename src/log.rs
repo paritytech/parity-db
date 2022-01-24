@@ -79,8 +79,6 @@ impl LogQuery for RwLock<LogOverlays> {
 	}
 }
 
-// TODO This is for locking log on btree access with btree iterator, could be avoided
-// by changing iterator implementation.
 impl LogQuery for LogOverlays {
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R> (&self, table: IndexTableId, index: u64, f: F) -> Option<R> {
 		self.index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, _mask, data)| f(data)))
@@ -97,7 +95,6 @@ impl LogQuery for LogOverlays {
 		}
 	}
 }
-
 
 #[derive(Default)]
 pub struct Cleared {
@@ -203,7 +200,7 @@ impl<'a> LogReader<'a> {
 			},
 			_ => {
 				Err(Error::Corruption("Bad log entry type".into()))
-			}
+			},
 		}
 	}
 
@@ -227,7 +224,7 @@ impl<'a> LogReader<'a> {
 
 pub struct LogChange {
 	local_index: HashMap<IndexTableId, IndexLogOverlay>,
-	pub(crate) local_values: HashMap<ValueTableId, ValueLogOverlay>, // TODO remove pub
+	local_values: HashMap<ValueTableId, ValueLogOverlay>,
 	record_id: u64,
 	dropped_tables: Vec<IndexTableId>,
 }
@@ -244,11 +241,13 @@ impl LogChange {
 		}
 	}
 
-	pub fn to_file(self, file: &mut std::io::BufWriter<std::fs::File>) -> Result<(
-		HashMap<IndexTableId, IndexLogOverlay>,
-		HashMap<ValueTableId, ValueLogOverlay>,
-		u64,
-	)> {
+	pub fn local_values_changes(&self, id: ValueTableId) -> Option<&ValueLogOverlay> {
+		self.local_values.get(&id)
+	}
+
+	pub fn to_file(self, file: &mut std::io::BufWriter<std::fs::File>)
+		-> Result<(HashMap<IndexTableId, IndexLogOverlay>, HashMap<ValueTableId, ValueLogOverlay>, u64)>
+	{
 		let mut crc32 = crc32fast::Hasher::new();
 		let mut bytes: u64 = 0;
 
@@ -625,7 +624,6 @@ impl Log {
 		}
 		// Cleanup index overlays
 		overlays.index.retain(|_, overlay| !overlay.map.is_empty());
-		// do not retain btree, we need to keep latest record id for iterator.
 	}
 
 	pub fn flush_one(&self, min_size: u64) -> Result<(bool, bool, bool)> {

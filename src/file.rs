@@ -26,9 +26,9 @@ fn disable_read_ahead(file: &std::fs::File) -> Result<()> {
 	use std::os::unix::io::AsRawFd;
 	let err = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_RANDOM) };
 	if err != 0 {
-			Err(std::io::Error::from_raw_os_error(err))?
+		Err(std::io::Error::from_raw_os_error(err))?
 	} else {
-			Ok(())
+		Ok(())
 	}
 }
 

@@ -211,7 +211,7 @@ impl BTreeTable {
 		let mut depth = 0;
 		if let Some(address) = Self::btree_index_address(values.tables) {
 			let key_query = TableKeyQuery::Fetch(None);
-			if let Some(encoded) = Column::get_at_value_index_locked(key_query, address, values, log)? {
+			if let Some(encoded) = Column::get_at_value_index(key_query, address, values, log)? {
 				let mut buf: LogEntry<Vec<u8>> = LogEntry::new(encoded.1);
 				root = buf.read_u64();
 				depth = buf.read_u32();
@@ -226,7 +226,7 @@ impl BTreeTable {
 	pub(crate) fn get_at_value_index(&self, key: TableKeyQuery, address: Address, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
 		let tables = self.tables.read();
 		let btree = self.locked(&*tables);
-		Column::get_at_value_index_locked(key, address, btree, log)
+		Column::get_at_value_index(key, address, btree, log)
 	}
 
 	pub fn flush(&self) -> Result<()> {
@@ -250,7 +250,7 @@ impl BTreeTable {
 
 	fn get_index(at: u64, log: &impl LogQuery, tables: TableLocked) -> Result<Vec<u8>> {
 		let key_query = TableKeyQuery::Check(&TableKey::NoHash);
-		if let Some((_tier, value)) = Column::get_at_value_index_locked(key_query, Address::from_u64(at), tables, log)? {
+		if let Some((_tier, value)) = Column::get_at_value_index(key_query, Address::from_u64(at), tables, log)? {
 			Ok(value)
 		} else {
 			Err(crate::error::Error::Corruption("Missing btree index".to_string()))

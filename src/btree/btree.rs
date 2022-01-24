@@ -268,7 +268,7 @@ impl BTree {
 		let root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), btree, log)?;
 		if let Some(address) = root.get(key, btree, log)? {
 			let key_query = TableKeyQuery::Fetch(None);
-			let r = Column::get_at_value_index_locked(key_query, address, btree, log)?;
+			let r = Column::get_at_value_index(key_query, address, btree, log)?;
 			Ok(r.map(|r| r.1))
 		} else {
 			Ok(None)
@@ -285,7 +285,7 @@ impl BTree {
 		let root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), values, log)?;
 		if let Some(address) = root.get_no_cache(key, values, log)? {
 			let key_query = TableKeyQuery::Fetch(None);
-			let r = Column::get_at_value_index_locked(key_query, address, values, log)?;
+			let r = Column::get_at_value_index(key_query, address, values, log)?;
 			Ok(r.map(|r| r.1))
 		} else {
 			Ok(None)

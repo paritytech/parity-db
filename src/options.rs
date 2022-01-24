@@ -64,7 +64,7 @@ pub struct ColumnOptions {
 	pub compression: CompressionType,
 	/// Minimal value size threshold to attempt compressing a value.
 	pub compression_treshold: u32,
-	/// Column is using a btree index.
+	/// Column is using a btree indexing.
 	pub btree_index: bool,
 }
 
@@ -81,7 +81,7 @@ pub struct Metadata {
 
 impl ColumnOptions {
 	fn as_string(&self) -> String {
-		format!("preimage: {}, uniform: {}, refc: {}, compression: {}, btree: {}, sizes: [{}]",
+		format!("preimage: {}, uniform: {}, refc: {}, compression: {}, ordered: {}, sizes: [{}]",
 			self.preimage,
 			self.uniform,
 			self.ref_counted,

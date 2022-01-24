@@ -203,7 +203,7 @@ impl DbInner {
 				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
 					return Ok(l.cloned());
 				}
-				// We lock log as btree structure changed while reading it would be an issue.
+				// We lock log, if btree structure changed while reading that would be an issue.
 				let log = self.log.overlays().read();
 				column.with_locked(|btree| BTreeTable::get(key, &*log, btree))
 			},
@@ -224,7 +224,15 @@ impl DbInner {
 				let key = TableKey::Partial(key);
 				column.get_size(&key, log)
 			},
-			Column::Tree(_column) => unimplemented!("TODO any use over simply using get"),
+			Column::Tree(column) => {
+				let overlay = self.commit_overlay.read();
+				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
+					return Ok(l.map(|v| v.len() as u32));
+				}
+				let log = self.log.overlays().read();
+				let l = column.with_locked(|btree| BTreeTable::get(key, &*log, btree))?;
+				Ok(l.map(|v| v.len() as u32))
+			},
 		}
 	}
 
@@ -240,7 +248,8 @@ impl DbInner {
 		let log = self.log.overlays().read();
 		let record_id = log.last_record_id(iter.col);
 		let commit_overlay = self.commit_overlay.read();
-		let next_commit_overlay = commit_overlay.get(col as usize).and_then(|o| o.btree_next(&iter.overlay_last_key, iter.from_seek));
+		let next_commit_overlay = commit_overlay.get(col as usize)
+			.and_then(|o| o.btree_next(&iter.overlay_last_key, iter.from_seek));
 		// No consistency over iteration, allows dropping lock to overlay.
 		std::mem::drop(commit_overlay);
 		let next_backend = if let Some(n) = iter.pending_next_backend.take() {
@@ -315,7 +324,7 @@ impl DbInner {
 	}
 
 	pub(crate) fn btree_iter_seek(&self, iter: &mut crate::BTreeIterator, key: &[u8], after: bool) -> Result<()> {
-		// seek require log do not change
+		// Seek require log do not change, locking.
 		let log = self.log.overlays().read();
 		let record_id = log.last_record_id(iter.col);
 		iter.from_seek = !after;
@@ -855,11 +864,6 @@ pub struct Db {
 }
 
 impl Db {
-	#[cfg(test)]
-	pub fn column(&self, at: usize) -> &Column {
-		&self.inner.columns[at]
-	}
-
 	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Result<Db> {
 		let options = Options::with_columns(path, num_columns);
 		let mut inner_options = InternalOptions::default();
