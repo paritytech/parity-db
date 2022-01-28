@@ -1654,7 +1654,7 @@ mod tests {
 			test_random_inner(60, 60, i);
 			std::thread::sleep(std::time::Duration::from_millis(30));
 		}
-		for i in 0..500 {
+		for i in 0..50 {
 			test_random_inner(20, 60, i);
 			std::thread::sleep(std::time::Duration::from_millis(30));
 		}

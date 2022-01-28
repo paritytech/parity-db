@@ -31,7 +31,7 @@ const BEGIN_RECORD: u8 = 1;
 const INSERT_INDEX: u8 = 2;
 const INSERT_VALUE: u8 = 3;
 const END_RECORD: u8 = 4;
-const DROPPED_TABLE: u8 = 5;
+const DROP_TABLE: u8 = 5;
 
 pub struct InsertIndexAction {
 	pub table: IndexTableId,
@@ -193,7 +193,7 @@ impl<'a> LogReader<'a> {
 				}
 				Ok(LogAction::EndRecord)
 			},
-			DROPPED_TABLE => {
+			DROP_TABLE => {
 				read_buf(2, &mut buf)?;
 				let table = IndexTableId::from_u16(u16::from_le_bytes(buf[0..2].try_into().unwrap()));
 				Ok(LogAction::DropTable(table))
@@ -285,7 +285,7 @@ impl LogChange {
 		}
 		for id in self.dropped_tables.iter() {
 			log::debug!(target: "parity-db", "Finalizing drop {}", id);
-			write(&DROPPED_TABLE.to_le_bytes().as_ref())?;
+			write(&DROP_TABLE.to_le_bytes().as_ref())?;
 			write(&id.as_u16().to_le_bytes())?;
 		}
 		write(&END_RECORD.to_le_bytes())?;

@@ -129,7 +129,7 @@ impl ColumnOptions {
 		let uniform = vals.get("uniform")?.parse().ok()?;
 		let ref_counted = vals.get("refc")?.parse().ok()?;
 		let compression: u8 = vals.get("compression").and_then(|c| c.parse().ok()).unwrap_or(0);
-		let btree_index = vals.get("ordered")?.parse().ok()?;
+		let btree_index = vals.get("ordered").and_then(|c| c.parse().ok()).unwrap_or(false);
 
 		Some(ColumnOptions {
 			preimage,
