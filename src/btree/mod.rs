@@ -56,25 +56,6 @@ pub(crate) const HEADER_POSITION: Address = Address::from_u64(0);
 pub(crate) const HEADER_SIZE: u64 = 8 + 4;
 pub(crate) const ENTRY_CAPACITY: usize = ORDER * 33 + ORDER * 8 + ORDER_CHILD * 8;
 
-#[derive(Clone, Copy, Eq, PartialEq, Hash)]
-pub struct BTreeTableId(u8); // contain its column id
-
-impl BTreeTableId {
-	pub fn new(col: ColId) -> Self {
-		BTreeTableId(col)
-	}
-
-	pub fn col(&self) -> ColId {
-		self.0 as ColId
-	}
-}
-
-impl std::fmt::Display for BTreeTableId {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "{:02}", self.col())
-	}
-}
-
 #[derive(Clone, PartialEq)]
 pub struct BTreeIndex {
 	pub root: Address,
@@ -161,7 +142,7 @@ impl Entry {
 }
 
 pub struct BTreeTable {
-	id: BTreeTableId,
+	id: ColId,
 	tables: RwLock<Vec<ValueTable>>,
 	preimage: bool,
 	ref_counted: bool,
@@ -170,7 +151,7 @@ pub struct BTreeTable {
 
 impl BTreeTable {
 	pub fn open(
-		id: BTreeTableId,
+		id: ColId,
 		values: Vec<ValueTable>,
 		metadata: &crate::options::Metadata,
 	) -> Result<Self> {
@@ -186,8 +167,7 @@ impl BTreeTable {
 				values[size_tier].init_with_entry(&*entry.encoded.inner_mut())?;
 			}
 		}
-		let col = id.col();
-		let options = &metadata.columns[col as usize];
+		let options = &metadata.columns[id as usize];
 		Ok(BTreeTable {
 			id,
 			tables: RwLock::new(values),

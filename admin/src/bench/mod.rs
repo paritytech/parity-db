@@ -108,7 +108,7 @@ pub struct Stress {
 
 	/// Use btree index.
 	#[structopt(long)]
-	pub indexed: bool,
+	pub ordered: bool,
 }
 
 #[derive(Clone)]
@@ -121,7 +121,7 @@ pub struct Args {
 	pub append: bool,
 	pub no_check: bool,
 	pub compress: bool,
-	pub indexed: bool,
+	pub ordered: bool,
 }
 
 impl Stress {
@@ -135,7 +135,7 @@ impl Stress {
 			archive: self.archive,
 			no_check: self.no_check,
 			compress: self.compress,
-			indexed: self.indexed,
+			ordered: self.ordered,
 		}
 	}
 }

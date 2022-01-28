@@ -26,7 +26,7 @@ use crate::{
 	display::hex,
 	index::{IndexTable, TableId as IndexTableId, PlanOutcome, Address},
 	options::{Options, ColumnOptions, Metadata},
-	btree::{BTreeTable, BTreeTableId},
+	btree::BTreeTable,
 	stats::ColumnStats,
 	db::check::CheckDisplay,
 };
@@ -90,7 +90,7 @@ enum IterStateOrCorrupted {
 #[derive(Clone, Copy)]
 pub enum ValueTableOrigin {
 	Index(IndexTableId),
-	BTree(BTreeTableId),
+	BTree(ColId),
 }
 
 impl std::fmt::Display for ValueTableOrigin {
@@ -205,8 +205,7 @@ impl Column {
 			.map(|i| Self::open_table(arc_path.clone(), col, i as u8, column_options, db_version)).collect::<Result<_>>()?;
 
 		if column_options.btree_index {
-			let id = BTreeTableId::new(col);
-			Ok(Column::Tree(BTreeTable::open(id, value, metadata)?))
+			Ok(Column::Tree(BTreeTable::open(col, value, metadata)?))
 		} else {
 			Ok(Column::Hash(HashColumn::open_hashed(col, value, options, metadata)?))
 		}

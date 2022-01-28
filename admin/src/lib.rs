@@ -49,7 +49,7 @@ pub fn run() -> Result<(), String> {
 		options
 	} else {
 		let mut options = parity_db::Options::with_columns(db_path.as_path(), nb_column);
-		if cli.subcommand.indexed() {
+		if cli.subcommand.ordered() {
 			for c in options.columns.iter_mut() {
 				c.btree_index = true;
 			}
@@ -198,14 +198,15 @@ pub enum SubCommand {
 }
 
 impl SubCommand {
-	fn indexed(&self) -> bool {
+	fn ordered(&self) -> bool {
 		if let SubCommand::Stress(arg) = self {
-			arg.indexed
+			arg.ordered
 		} else {
 			false
 		}
 	}
 }
+
 impl Cli {
 	fn shared(&self) -> &Shared {
 		match &self.subcommand {
