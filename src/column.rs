@@ -38,9 +38,9 @@ const MAX_REBALANCE_BATCH: usize = 8192;
 pub type ColId = u8;
 pub type Salt = [u8; 32];
 
-pub(crate) struct Tables {
-	pub(crate) index: IndexTable,
-	pub(crate) value: Vec<ValueTable>,
+struct Tables {
+	index: IndexTable,
+	value: Vec<ValueTable>,
 }
 
 struct Reindex {
@@ -195,7 +195,7 @@ impl Column {
 		if column_options.btree_index {
 			Ok(Column::Tree(BTreeTable::open(col, value, metadata)?))
 		} else {
-			Ok(Column::Hash(HashColumn::open_hashed(col, value, options, metadata)?))
+			Ok(Column::Hash(HashColumn::open(col, value, options, metadata)?))
 		}
 	}
 
@@ -213,7 +213,7 @@ impl Column {
 }
 
 impl HashColumn {
-	fn open_hashed(col: ColId, value: Vec<ValueTable>, options: &Options, metadata: &Metadata) -> Result<HashColumn> {
+	fn open(col: ColId, value: Vec<ValueTable>, options: &Options, metadata: &Metadata) -> Result<HashColumn> {
 		let (index, reindexing, stats) = Self::open_index(&options.path, col)?;
 		let collect_stats = options.stats;
 		let path = &options.path;
