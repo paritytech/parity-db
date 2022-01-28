@@ -106,6 +106,10 @@ impl ColumnOptions {
 				return false;
 			}
 		}
+		if self.btree_index && self.preimage {
+			log::error!(target: "parity-db", "Using `preimage` option on an indexed column is invalid");
+			return false;
+		}
 		true
 	}
 

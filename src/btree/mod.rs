@@ -148,7 +148,6 @@ impl Entry {
 pub struct BTreeTable {
 	id: ColId,
 	tables: RwLock<Vec<ValueTable>>,
-	preimage: bool,
 	ref_counted: bool,
 	compression: Compress,
 }
@@ -173,7 +172,6 @@ impl BTreeTable {
 		Ok(BTreeTable {
 			id,
 			tables: RwLock::new(values),
-			preimage: options.preimage,
 			ref_counted: options.ref_counted,
 			compression: Compress::new(options.compression, options.compression_treshold),
 		})
@@ -231,8 +229,8 @@ impl BTreeTable {
 	fn locked<'a>(&'a self, tables: &'a Vec<ValueTable>) -> TablesRef<'a> {
 		TablesRef {
 			tables,
-			preimage: self.preimage,
 			ref_counted: self.ref_counted,
+			preimage: false,
 			compression: &self.compression,
 		}
 	}
