@@ -17,11 +17,13 @@
 //! Btree overlay definition and methods.
 
 use super::*;
+use crate::db::CommitOverlay;
 use crate::table::key::TableKeyQuery;
 use crate::log::{LogWriter, LogQuery};
 use crate::column::Column;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use parking_lot::RwLock;
+use crate::btree::BTreeTable;
 
 pub struct BTree {
 	pub(super) depth: u32,
@@ -30,47 +32,123 @@ pub struct BTree {
 }
 
 pub struct BTreeIterator<'a> {
-	pub(crate) db: &'a crate::db::DbInner,
-	pub(crate) iter: BtreeIterBackend,
-	pub(crate) col: ColId,
-	pub(crate) pending_next_backend: Option<Option<(Vec<u8>, Vec<u8>)>>,
-	pub(crate) overlay_last_key: Option<Vec<u8>>,
-	pub(crate) from_seek: bool,
+	table: &'a BTreeTable,
+	log: &'a RwLock<crate::log::LogOverlays>,
+	commit_overlay: &'a RwLock<Vec<CommitOverlay>>,
+	iter: BtreeIterBackend,
+	col: ColId,
+	pending_next_backend: Option<Option<(Vec<u8>, Vec<u8>)>>,
+	overlay_last_key: Option<Vec<u8>>,
+	from_seek: bool,
 }
 
 pub struct BtreeIterBackend(BTree, BTreeIterState);
 
 impl<'a> BTreeIterator<'a> {
 	pub(crate) fn new(
-		db: &'a crate::db::DbInner,
+		table: &'a BTreeTable,
 		col: ColId, 
-		log: &RwLock<crate::log::LogOverlays>,
+		log: &'a RwLock<crate::log::LogOverlays>,
+		commit_overlay: &'a RwLock<Vec<CommitOverlay>>,
 	) -> Result<Self> {
-		let column = match db.column(col) {
-			Column::Hash(_) => {
-				return Err(Error::InvalidConfiguration("Not an indexed column.".to_string()));
-			},
-			Column::Tree(col) => col,
-		};
 		let record_id = log.read().last_record_id(col);
-		let tree = column.with_locked(|btree| BTree::open(btree, log, record_id))?;
+		let tree = table.with_locked(|btree| BTree::open(btree, log, record_id))?;
 		let iter = tree.iter();
 		Ok(BTreeIterator {
-			db,
+			table,
 			iter: BtreeIterBackend(tree, iter),
 			col,
 			pending_next_backend: None,
 			overlay_last_key: None,
 			from_seek: false,
+			log,
+			commit_overlay,
 		})
 	}
 
 	pub fn seek(&mut self, key: &[u8]) -> Result<()> {
-		self.db.btree_iter_seek(self, key, false)
+		let after = false;
+		// seek require log do not change
+		let log = self.log.read();
+		let record_id = log.last_record_id(self.col);
+		self.from_seek = !after;
+		self.overlay_last_key = Some(key.to_vec());
+		self.pending_next_backend = None;
+		self.seek_backend(key.to_vec(), record_id, self.table, &*log, after)
 	}
 
 	pub fn next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-		self.db.btree_iter_next(self)
+		let col = self.col;
+
+		// Lock log over function call (no btree struct change).
+		let log = self.log.read();
+		let record_id = log.last_record_id(self.col);
+		let commit_overlay = self.commit_overlay.read();
+		let next_commit_overlay = commit_overlay.get(col as usize).and_then(|o| o.btree_next(&self.overlay_last_key, self.from_seek));
+		// No consistency over iteration, allows dropping lock to overlay.
+		std::mem::drop(commit_overlay);
+		let next_backend = if let Some(n) = self.pending_next_backend.take() {
+			n
+		} else {
+			self.next_backend(record_id, self.table, &*log)?
+		};
+
+		match (next_commit_overlay, next_backend) {
+			(Some((commit_key, commit_value)), Some((backend_key, backend_value))) => {
+				match commit_key.cmp(&backend_key) {
+					std::cmp::Ordering::Less => {
+						if let Some(value) = commit_value {
+							self.overlay_last_key = Some(commit_key.clone());
+							self.from_seek = false;
+							self.pending_next_backend = Some(Some((backend_key, backend_value)));
+							return Ok(Some((commit_key, value)));
+						} else {
+							self.overlay_last_key = Some(commit_key);
+							self.from_seek = false;
+							self.pending_next_backend = Some(Some((backend_key, backend_value)));
+							std::mem::drop(log);
+							return self.next();
+						}
+					},
+					std::cmp::Ordering::Greater => {
+						return Ok(Some((backend_key, backend_value)));
+					},
+					std::cmp::Ordering::Equal => {
+						if let Some(value) = commit_value {
+							self.overlay_last_key = Some(commit_key);
+							self.from_seek = false;
+							return Ok(Some((backend_key, value)));
+						} else {
+							self.overlay_last_key = Some(commit_key);
+							self.from_seek = false;
+							std::mem::drop(log);
+							return self.next();
+						}
+					},
+				}
+			},
+			(Some((commit_key, commit_value)), None) => {
+				if let Some(value) = commit_value {
+					self.overlay_last_key = Some(commit_key.clone());
+					self.from_seek = false;
+					self.pending_next_backend = Some(None);
+					return Ok(Some((commit_key, value)));
+				} else {
+					self.overlay_last_key = Some(commit_key);
+					self.from_seek = false;
+					self.pending_next_backend = Some(None);
+					std::mem::drop(log);
+					return self.next();
+				}
+			},
+			(None, Some((backend_key, backend_value))) => {
+				return Ok(Some((backend_key, backend_value)));
+			},
+			(None, None) => {
+				self.pending_next_backend = Some(None);
+				return Ok(None);
+			},
+		}
 	}
 
 	pub fn next_backend(&mut self, record_id: u64, col: &BTreeTable, log: &impl LogQuery) -> Result<Option<(Vec<u8>, Vec<u8>)>> {

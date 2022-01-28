@@ -234,105 +234,13 @@ impl DbInner {
 	}
 
 	pub fn btree_iter(&self, col: ColId) -> Result<crate::btree::BTreeIterator> {
-		let log = self.log.overlays();
-		crate::btree::BTreeIterator::new(self, col, log)
-	}
-
-	pub fn btree_iter_next(&self, iter: &mut crate::BTreeIterator) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-		let col = iter.col;
-
-		// Lock log over function call (no btree struct change).
-		let log = self.log.overlays().read();
-		let record_id = log.last_record_id(iter.col);
-		let commit_overlay = self.commit_overlay.read();
-		let next_commit_overlay = commit_overlay.get(col as usize)
-			.and_then(|o| o.btree_next(&iter.overlay_last_key, iter.from_seek));
-		// No consistency over iteration, allows dropping lock to overlay.
-		std::mem::drop(commit_overlay);
-		let next_backend = if let Some(n) = iter.pending_next_backend.take() {
-			n
-		} else {
-			match &self.columns[col as usize] {
-				Column::Hash(_column) => {
-					return Err(Error::InvalidConfiguration("Not an indexed column.".to_string()));
-				},
-				Column::Tree(column) => {
-					iter.next_backend(record_id, column, &*log)?
-				},
-			}
-		};
-
-		match (next_commit_overlay, next_backend) {
-			(Some((commit_key, commit_value)), Some((backend_key, backend_value))) => {
-				match commit_key.cmp(&backend_key) {
-					std::cmp::Ordering::Less => {
-						if let Some(value) = commit_value {
-							iter.overlay_last_key = Some(commit_key.clone());
-							iter.from_seek = false;
-							iter.pending_next_backend = Some(Some((backend_key, backend_value)));
-							return Ok(Some((commit_key, value)));
-						} else {
-							iter.overlay_last_key = Some(commit_key);
-							iter.from_seek = false;
-							iter.pending_next_backend = Some(Some((backend_key, backend_value)));
-							std::mem::drop(log);
-							return self.btree_iter_next(iter);
-						}
-					},
-					std::cmp::Ordering::Greater => {
-						return Ok(Some((backend_key, backend_value)));
-					},
-					std::cmp::Ordering::Equal => {
-						if let Some(value) = commit_value {
-							iter.overlay_last_key = Some(commit_key);
-							iter.from_seek = false;
-							return Ok(Some((backend_key, value)));
-						} else {
-							iter.overlay_last_key = Some(commit_key);
-							iter.from_seek = false;
-							std::mem::drop(log);
-							return self.btree_iter_next(iter);
-						}
-					},
-				}
-			},
-			(Some((commit_key, commit_value)), None) => {
-				if let Some(value) = commit_value {
-					iter.overlay_last_key = Some(commit_key.clone());
-					iter.from_seek = false;
-					iter.pending_next_backend = Some(None);
-					return Ok(Some((commit_key, value)));
-				} else {
-					iter.overlay_last_key = Some(commit_key);
-					iter.from_seek = false;
-					iter.pending_next_backend = Some(None);
-					std::mem::drop(log);
-					return self.btree_iter_next(iter);
-				}
-			},
-			(None, Some((backend_key, backend_value))) => {
-				return Ok(Some((backend_key, backend_value)));
-			},
-			(None, None) => {
-				iter.pending_next_backend = Some(None);
-				return Ok(None);
-			},
-		}
-	}
-
-	pub fn btree_iter_seek(&self, iter: &mut crate::BTreeIterator, key: &[u8], after: bool) -> Result<()> {
-		// Seek require log do not change, locking.
-		let log = self.log.overlays().read();
-		let record_id = log.last_record_id(iter.col);
-		iter.from_seek = !after;
-		iter.overlay_last_key = Some(key.to_vec());
-		iter.pending_next_backend = None;
-		match &self.columns[iter.col as usize] {
+		match &self.columns[col as usize] {
 			Column::Hash(_column) => {
 				return Err(Error::InvalidConfiguration("Not an indexed column.".to_string()));
 			},
 			Column::Tree(column) => {
-				iter.seek_backend(key.to_vec(), record_id, column, &*log, after)
+				let log = self.log.overlays();
+				crate::btree::BTreeIterator::new(column, col, log, &self.commit_overlay)
 			},
 		}
 	}
@@ -844,10 +752,6 @@ impl DbInner {
 			Column::Tree(_) => unimplemented!(),
 		}
 	}
-
-	pub fn column(&self, c: ColId) -> &Column {
-		&self.columns[c as usize]
-	}
 }
 
 pub struct Db {
@@ -1085,7 +989,7 @@ impl Drop for Db {
 pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<Value>), crate::IdentityBuildHasher>;
 pub type BTreeCommitOverlay = BTreeMap<Vec<u8>, (u64, Option<Value>)>;
 
-struct CommitOverlay {
+pub struct CommitOverlay {
 	indexed: IndexedCommitOverlay,
 	btree_indexed: BTreeCommitOverlay,
 }
@@ -1121,7 +1025,7 @@ impl CommitOverlay {
 		self.btree_indexed.get(key).map(|(_, v)| v.as_ref())
 	}
 
-	fn btree_next(&self, last_key: &Option<Vec<u8>>, from_seek: bool) -> Option<(Value, Option<Value>)> {
+	pub fn btree_next(&self, last_key: &Option<Vec<u8>>, from_seek: bool) -> Option<(Value, Option<Value>)> {
 		if let Some(key) = last_key.as_ref() {
 			let mut iter = self.btree_indexed.range::<Vec<u8>, _>(key..);
 			if let Some((k, (_, v))) = iter.next() {
