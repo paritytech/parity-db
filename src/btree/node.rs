@@ -44,7 +44,7 @@ impl Node {
 	) -> Result<()> {
 		if child.changed {
 			let child_index = self.children[i].entry_index;
-			let new_index = BTreeTable::write_plan_node(
+			let new_index = BTreeTable::write_node_plan(
 				btree,
 				child,
 				log,
@@ -66,7 +66,7 @@ impl Node {
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<Child> {
-		let new_index = BTreeTable::write_plan_node(
+		let new_index = BTreeTable::write_node_plan(
 			btree,
 			right,
 			log,

@@ -293,7 +293,7 @@ impl BTreeTable {
 		origin: ValueTableOrigin,
 	) -> Result<()> {
 		let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), tables, writer)?;
-		if let Some(ix) = Self::write_plan_node(tables, root, writer, btree.root_index, origin)? {
+		if let Some(ix) = Self::write_node_plan(tables, root, writer, btree.root_index, origin)? {
 			btree.root_index = Some(ix);
 		}
 		btree.record_id = record_id;
@@ -320,7 +320,7 @@ impl BTreeTable {
 		Ok(())
 	}
 
-	fn write_plan_node(
+	fn write_node_plan(
 		mut tables: TablesRef,
 		mut node: Node,
 		writer: &mut LogWriter,

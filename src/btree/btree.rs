@@ -223,7 +223,7 @@ impl BTree {
 					self.depth += 1;
 					let left = std::mem::replace(&mut root, Node::new());
 					let left_index = self.root_index.take();
-					let new_index = BTreeTable::write_plan_node(
+					let new_index = BTreeTable::write_node_plan(
 						btree,
 						left,
 						log,
@@ -260,7 +260,7 @@ impl BTree {
 		}
 
 		if root.changed {
-			let new_index = BTreeTable::write_plan_node(
+			let new_index = BTreeTable::write_node_plan(
 				btree,
 				root,
 				log,
