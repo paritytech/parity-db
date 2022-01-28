@@ -1254,6 +1254,7 @@ impl EnableCommitPipelineStages {
 mod tests {
 	use super::{Db, Options, EnableCommitPipelineStages, InternalOptions};
 	use tempfile::tempdir;
+	use std::collections::BTreeMap;
 
 	#[test]
 	fn test_db_open_should_fail() {
@@ -1529,8 +1530,6 @@ mod tests {
 	}
 
 	fn test_basic(change_set: &[(Vec<u8>, Option<Vec<u8>>)]) {
-		use std::collections::BTreeMap;
-
 		let tmp = tempdir().unwrap();
 		let col_nb = 0u8;
 		let mut options = Options::with_columns(tmp.path(), 5);
@@ -1742,5 +1741,121 @@ mod tests {
 			([5u8; 250].to_vec(), None),
 			([5u8; 101].to_vec(), None),
 		]);
+	}
+
+	#[test]
+	fn test_btree_iter() {
+		let col_nb = 0;
+		let mut data_start = Vec::new();
+		for i in 0u8..100 {
+			let mut key = b"key0".to_vec();
+			key[3] = i;
+			let mut value = b"val0".to_vec();
+			value[3] = i;
+			data_start.push((col_nb, key, Some(value)));
+		}
+		let mut data_change = Vec::new();
+		for i in 0u8..100 {
+			let mut key = b"key0".to_vec();
+			if i % 2 == 0 {
+				key[2] = i;
+				let mut value = b"val0".to_vec();
+				value[2] = i;
+				data_change.push((col_nb, key, Some(value)));
+			} else if i % 3 == 0 {
+				key[3] = i;
+				data_change.push((col_nb, key, None));
+			} else {
+				key[3] = i;
+				let mut value = b"val0".to_vec();
+				value[2] = i;
+				data_change.push((col_nb, key, Some(value)));
+			}
+		}
+
+		let start_state: BTreeMap<Vec<u8>, Vec<u8>> = data_start.iter().cloned()
+			.map(|(_c, k, v)| (k, v.unwrap())).collect();
+		let mut end_state: BTreeMap<Vec<u8>, Vec<u8>> = start_state.clone();
+		for (_c, k, v) in data_change.iter() {
+			if let Some(v) = v {
+				end_state.insert(k.clone(), v.clone());
+			} else {
+				end_state.remove(k);
+			}
+		}
+
+		for stage in [
+			EnableCommitPipelineStages::CommitOverlay,
+			EnableCommitPipelineStages::LogOverlay,
+			EnableCommitPipelineStages::DbFile,
+			EnableCommitPipelineStages::Standard,
+		] {
+			for i in 0..10 {
+				test_btree_iter_inner(stage, &data_start, &data_change, &start_state, &end_state, i * 5);
+			}
+			let data_start = vec![
+				(0, b"key1".to_vec(), Some(b"val1".to_vec())),
+				(0, b"key3".to_vec(), Some(b"val3".to_vec())),
+			];
+			let data_change = vec![
+				(0, b"key2".to_vec(), Some(b"val2".to_vec())),
+			];
+			let start_state: BTreeMap<Vec<u8>, Vec<u8>> = data_start.iter().cloned()
+				.map(|(_c, k, v)| (k, v.unwrap())).collect();
+			let mut end_state: BTreeMap<Vec<u8>, Vec<u8>> = start_state.clone();
+			for (_c, k, v) in data_change.iter() {
+				if let Some(v) = v {
+					end_state.insert(k.clone(), v.clone());
+				} else {
+					end_state.remove(k);
+				}
+			}
+			test_btree_iter_inner(stage, &data_start, &data_change, &start_state, &end_state, 1);
+		}
+	}
+	fn test_btree_iter_inner(
+		db_test: EnableCommitPipelineStages,
+		data_start: &Vec<(u8, Vec<u8>, Option<Vec<u8>>)>,
+		data_change: &Vec<(u8, Vec<u8>, Option<Vec<u8>>)>,
+		start_state: &BTreeMap<Vec<u8>, Vec<u8>>,
+		end_state: &BTreeMap<Vec<u8>, Vec<u8>>,
+		commit_at: usize,
+	) {
+		let tmp = tempdir().unwrap();
+		let mut options = Options::with_columns(tmp.path(), 5);
+		let col_nb = 0;
+		options.columns[col_nb as usize].btree_index = true;
+		let mut inner_options = InternalOptions::default();
+		inner_options.create = true;
+		inner_options.commit_stages = db_test;
+		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
+
+		db.commit(data_start.iter().cloned()).unwrap();
+		wait_on.as_ref().map(|w| w.wait_notify());
+
+		let mut iter = db.iter(col_nb).unwrap();
+		let mut iter_state = start_state.iter();
+		let mut last_key = Vec::new();
+		for _ in 0..commit_at {
+			let next = iter.next().unwrap();
+			if let Some((k, _)) = next.as_ref() {
+				last_key = k.clone();
+			}
+			assert_eq!(iter_state.next(), next.as_ref().map(|(k, v)| (k, v)));
+		}
+
+		db.commit(data_change.iter().cloned()).unwrap();
+		wait_on.as_ref().map(|w| w.wait_notify());
+
+		let mut iter_state = end_state.range(last_key.clone()..);
+		for _ in commit_at..100 {
+			let mut state_next = iter_state.next();
+			if let Some((k, _v)) = state_next.as_ref() {
+				if *k == &last_key {
+					state_next = iter_state.next();
+				}
+			}
+			assert_eq!(state_next, iter.next().unwrap().as_ref().map(|(k, v)| (k, v)));
+		}
 	}
 }
