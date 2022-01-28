@@ -68,7 +68,7 @@ pub struct HashColumn {
 }
 
 #[derive(Clone, Copy)]
-pub struct TableLocked<'a> {
+pub struct TablesRef<'a> {
 	pub tables: &'a Vec<ValueTable>,
 	pub compression: &'a Compress,
 	pub preimage: bool,
@@ -130,7 +130,7 @@ impl HashColumn {
 		self.get(key, log).map(|v| v.map(|v| v.len() as u32))
 	}
 
-	fn get_in_index(&self, key: &TableKey, index: &IndexTable, tables: TableLocked, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
+	fn get_in_index(&self, key: &TableKey, index: &IndexTable, tables: TablesRef, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
 		let (mut entry, mut sub_index) = index.get(key, 0, log);
 		while !entry.is_empty() {
 			let address = entry.address(index.id.index_bits());
@@ -149,8 +149,8 @@ impl HashColumn {
 		Ok(None)
 	}
 
-	pub(crate) fn locked<'a>(&'a self, tables: &'a Vec<ValueTable>) -> TableLocked<'a> {
-		TableLocked {
+	pub(crate) fn locked<'a>(&'a self, tables: &'a Vec<ValueTable>) -> TablesRef<'a> {
+		TablesRef {
 			tables,
 			preimage: self.preimage,
 			ref_counted: self.ref_counted,
@@ -160,7 +160,7 @@ impl HashColumn {
 }
 
 impl Column {
-	pub(crate) fn get_at_value_index(mut key: TableKeyQuery, address: Address, tables: TableLocked, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
+	pub(crate) fn get_at_value_index(mut key: TableKeyQuery, address: Address, tables: TablesRef, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
 		let size_tier = address.size_tier() as usize;
 		if let Some((value, compressed, _rc)) = tables.tables[size_tier].query(&mut key, address.offset(), log)? {
 			let value = if compressed {
@@ -756,7 +756,7 @@ impl HashColumn {
 impl Column {
 	pub(crate) fn write_existing_value_plan(
 		key: &TableKey,
-		tables: TableLocked,
+		tables: TablesRef,
 		address: Address,
 		value: Option<&[u8]>,
 		log: &mut LogWriter,
@@ -849,7 +849,7 @@ impl Column {
 
 	pub(crate) fn write_new_value_plan(
 		key: &TableKey,
-		tables: TableLocked,
+		tables: TablesRef,
 		val: &[u8],
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,

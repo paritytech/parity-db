@@ -39,7 +39,7 @@ use crate::table::key::{TableKey, TableKeyQuery};
 use crate::options::Options;
 use crate::index::Address;
 use crate::error::Result;
-use crate::column::{ColId, ValueTableOrigin, Column, TableLocked};
+use crate::column::{ColId, ValueTableOrigin, Column, TablesRef};
 use crate::log::{LogQuery, LogWriter, LogAction, LogReader};
 use crate::compress::Compress;
 use crate::btree::node::Node;
@@ -179,7 +179,7 @@ impl BTreeTable {
 		})
 	}
 
-	fn btree_index(log: &impl LogQuery, values: TableLocked) -> Result<BTreeIndex> {
+	fn btree_index(log: &impl LogQuery, values: TablesRef) -> Result<BTreeIndex> {
 		let mut root = NULL_ADDRESS;
 		let mut depth = 0;
 		let key_query = TableKeyQuery::Fetch(None);
@@ -208,7 +208,7 @@ impl BTreeTable {
 		Ok(())
 	}
 
-	pub fn get(key: &[u8], log: &impl LogQuery, values: TableLocked) -> Result<Option<Vec<u8>>> {
+	pub fn get(key: &[u8], log: &impl LogQuery, values: TablesRef) -> Result<Option<Vec<u8>>> {
 		let btree_index = Self::btree_index(log, values)?;
 		if btree_index.root == NULL_ADDRESS {
 			return Ok(None);
@@ -219,7 +219,7 @@ impl BTreeTable {
 		tree.get(key, values, log)
 	}
 
-	fn get_index(at: Address, log: &impl LogQuery, tables: TableLocked) -> Result<Vec<u8>> {
+	fn get_index(at: Address, log: &impl LogQuery, tables: TablesRef) -> Result<Vec<u8>> {
 		let key_query = TableKeyQuery::Check(&TableKey::NoHash);
 		if let Some((_tier, value)) = Column::get_at_value_index(key_query, at, tables, log)? {
 			Ok(value)
@@ -228,8 +228,8 @@ impl BTreeTable {
 		}
 	}
 
-	fn locked<'a>(&'a self, tables: &'a Vec<ValueTable>) -> TableLocked<'a> {
-		TableLocked {
+	fn locked<'a>(&'a self, tables: &'a Vec<ValueTable>) -> TablesRef<'a> {
+		TablesRef {
 			tables,
 			preimage: self.preimage,
 			ref_counted: self.ref_counted,
@@ -237,7 +237,7 @@ impl BTreeTable {
 		}
 	}
 
-	pub(crate) fn with_locked<R>(&self, mut apply: impl FnMut(TableLocked) -> Result<R>) -> Result<R> {
+	pub(crate) fn with_locked<R>(&self, mut apply: impl FnMut(TablesRef) -> Result<R>) -> Result<R> {
 		let locked_tables = &*self.tables.read();
 		let locked = self.locked(locked_tables);
 		apply(locked)
@@ -282,7 +282,7 @@ impl BTreeTable {
 	}
 
 	pub fn write_plan(
-		tables: TableLocked,
+		tables: TablesRef,
 		btree: &mut BTree,
 		writer: &mut LogWriter,
 		record_id: u64,
@@ -300,7 +300,7 @@ impl BTreeTable {
 	}
 
 	fn write_plan_remove_node(
-		tables: TableLocked,
+		tables: TablesRef,
 		writer: &mut LogWriter,
 		node_index: Address,
 		origin: ValueTableOrigin,
@@ -318,7 +318,7 @@ impl BTreeTable {
 	}
 
 	fn write_plan_node(
-		mut tables: TableLocked,
+		mut tables: TablesRef,
 		mut node: Node,
 		writer: &mut LogWriter,
 		node_id: Option<Address>,

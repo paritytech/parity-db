@@ -38,7 +38,7 @@ impl Node {
 		&mut self,
 		i: usize,
 		child: Self,
-		btree: TableLocked,
+		btree: TablesRef,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<()> {
@@ -62,7 +62,7 @@ impl Node {
 	pub fn write_split_child(
 		right_ix: Option<Address>,
 		right: Node,
-		btree: TableLocked,
+		btree: TablesRef,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<Child> {
@@ -86,7 +86,7 @@ impl Node {
 		parent: Option<(&mut Self, usize)>,
 		depth: u32,
 		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
-		btree: TableLocked,
+		btree: TablesRef,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
@@ -137,7 +137,7 @@ impl Node {
 		key: &[u8],
 		value: &[u8],
 		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
-		btree: TableLocked,
+		btree: TablesRef,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
@@ -206,7 +206,7 @@ impl Node {
 		at: usize,
 		separator: Separator,
 		right_child: Child,
-		btree: TableLocked,
+		btree: TablesRef,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<Option<(Separator, Child)>> {
@@ -249,7 +249,7 @@ impl Node {
 		depth: u32,
 		key: &[u8],
 		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
-		values: TableLocked,
+		values: TablesRef,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
@@ -314,7 +314,7 @@ impl Node {
 		&mut self,
 		depth: u32,
 		at: usize,
-		values: TableLocked,
+		values: TablesRef,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<()> {
@@ -448,7 +448,7 @@ impl Node {
 
 	pub fn need_remove_root(
 		&mut self,
-		values: TableLocked,
+		values: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<Option<(Option<Address>, Node)>> {
 		if self.number_separator() == 0 {
@@ -465,7 +465,7 @@ impl Node {
 	pub fn remove_last(
 		&mut self,
 		depth: u32,
-		values: TableLocked,
+		values: TablesRef,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<(bool, Option<Separator>)> {
@@ -495,7 +495,7 @@ impl Node {
 		}
 	}
 
-	pub fn get(&self, key: &[u8], values: TableLocked, log: &impl LogQuery) -> Result<Option<Address>> {
+	pub fn get(&self, key: &[u8], values: TablesRef, log: &impl LogQuery) -> Result<Option<Address>> {
 		let (at, i) = self.position(key)?;
 		if at {
 			Ok(self.separator_address(i))
@@ -508,7 +508,7 @@ impl Node {
 		}
 	}
 
-	pub fn seek(from: Self, key: &[u8], values: TableLocked, log: &impl LogQuery, depth: u32, stack: &mut Vec<(usize, Self)>) -> Result<bool> {
+	pub fn seek(from: Self, key: &[u8], values: TablesRef, log: &impl LogQuery, depth: u32, stack: &mut Vec<(usize, Self)>) -> Result<bool> {
 		let (at, i) = from.position(key)?;
 		if at {
 			stack.push((i, from));
@@ -526,7 +526,7 @@ impl Node {
 	}
 
 	#[cfg(test)]
-	pub fn is_balanced(&self, tables: TableLocked, log: &impl LogQuery, parent_size: usize) -> Result<bool> {
+	pub fn is_balanced(&self, tables: TablesRef, log: &impl LogQuery, parent_size: usize) -> Result<bool> {
 		let size = self.number_separator();
 		if parent_size != 0 && size < ORDER / 2 {
 			return Ok(false);
@@ -687,7 +687,7 @@ impl Node {
 	fn create_separator(
 		key: &[u8],
 		value: &[u8],
-		btree: TableLocked,
+		btree: TablesRef,
 		log: &mut LogWriter,
 		existing: Option<Address>,
 		origin: ValueTableOrigin,
@@ -860,7 +860,7 @@ impl Node {
 		Ok((false, i))
 	}
 
-	pub fn fetch_child(&self, i: usize, values: TableLocked, log: &impl LogQuery) -> Result<Option<Self>> {
+	pub fn fetch_child(&self, i: usize, values: TablesRef, log: &impl LogQuery) -> Result<Option<Self>> {
 		if let Some(ix) = self.children[i].entry_index {
 			let entry = BTreeTable::get_index(ix, log, values)?;
 			return Ok(Some(Self::from_encoded(entry)));

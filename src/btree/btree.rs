@@ -183,7 +183,7 @@ impl BTree {
 	}
 
 	pub fn open(
-		values: TableLocked,
+		values: TablesRef,
 		log: &impl LogQuery,
 		record_id: u64,
 	) -> Result<Self> {
@@ -209,7 +209,7 @@ impl BTree {
 	pub fn write_sorted_changes(
 		&mut self,
 		mut changes: &[(Vec<u8>, Option<Vec<u8>>)],
-		btree: TableLocked,
+		btree: TablesRef,
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<()> {
@@ -276,12 +276,12 @@ impl BTree {
 	}
 
 	#[cfg(test)]
-	pub fn is_balanced(&self, tables: TableLocked, log: &impl LogQuery) -> Result<bool> {
+	pub fn is_balanced(&self, tables: TablesRef, log: &impl LogQuery) -> Result<bool> {
 		let root = BTree::fetch_root(self.root_index.unwrap_or(NULL_ADDRESS), tables, log)?;
 		root.is_balanced(tables, log, 0)
 	}
 
-	pub fn get(&mut self, key: &[u8], values: TableLocked, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
+	pub fn get(&mut self, key: &[u8], values: TablesRef, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
 		let root = BTree::fetch_root(self.root_index.unwrap_or(NULL_ADDRESS), values, log)?;
 		if let Some(address) = root.get(key, values, log)? {
 			let key_query = TableKeyQuery::Fetch(None);
@@ -292,7 +292,7 @@ impl BTree {
 		}
 	}
 
-	pub fn fetch_root(root: Address, tables: TableLocked, log: &impl LogQuery) -> Result<Node> {
+	pub fn fetch_root(root: Address, tables: TablesRef, log: &impl LogQuery) -> Result<Node> {
 		Ok(if root == NULL_ADDRESS {
 			Node::new()
 		} else {
