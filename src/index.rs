@@ -95,7 +95,7 @@ impl Entry {
 pub struct Address(u64);
 
 impl Address {
-	pub fn new(offset: u64, size_tier: u8) -> Address {
+	pub const fn new(offset: u64, size_tier: u8) -> Address {
 		Address((offset << SIZE_TIERS_BITS) | size_tier as u64)
 	}
 

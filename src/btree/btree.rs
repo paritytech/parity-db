@@ -38,7 +38,7 @@ pub struct BTreeIterator<'a> {
 	pub(crate) from_seek: bool,
 }
 
-pub struct BtreeIterBackend(BTree, BTreeIter);
+pub struct BtreeIterBackend(BTree, BTreeIterState);
 
 impl<'a> BTreeIterator<'a> {
 	pub(crate) fn new(
@@ -92,7 +92,7 @@ impl<'a> BTreeIterator<'a> {
 	}
 }
 
-pub struct BTreeIter {
+pub struct BTreeIterState {
 	state: Vec<(usize, Node)>,
 	next_separator: bool,
 	pub record_id: u64,
@@ -100,7 +100,7 @@ pub struct BTreeIter {
 	pub last_key: Option<Vec<u8>>,
 }
 
-impl BTreeIter {
+impl BTreeIterState {
 	pub fn next(&mut self, btree: &mut BTree, col: &BTreeTable, log: &impl LogQuery) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 		if self.next_separator && self.state.is_empty() {
 			return Ok(None);
@@ -114,7 +114,7 @@ impl BTreeIter {
 		if !self.next_separator {
 			if self.state.is_empty() {
 				let root = col.with_locked(|tables| {
-					BTree::fetch_root(btree.root_index.unwrap_or(HEADER_POSITION), tables, log)
+					BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), tables, log)
 				})?;
 				self.state.push((0, root));
 			}
@@ -154,7 +154,7 @@ impl BTreeIter {
 		self.record_id = btree.record_id;
 		self.last_key = Some(key.to_vec());
 		if col.with_locked(|b| {
-			let root = BTree::fetch_root(btree.root_index.unwrap_or(HEADER_POSITION), b, log)?;
+			let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), b, log)?;
 			Node::seek(root, key.as_ref(), b, log, btree.depth, &mut self.state)
 		})? {
 			// on value
@@ -189,7 +189,7 @@ impl BTree {
 	) -> Result<Self> {
 		let btree_index = BTreeTable::btree_index(log, values)?;
 
-		let root_index = if btree_index.root == HEADER_POSITION {
+		let root_index = if btree_index.root == NULL_ADDRESS {
 			None
 		} else {
 			Some(btree_index.root)
@@ -197,8 +197,8 @@ impl BTree {
 		Ok(btree::BTree::new(root_index, btree_index.depth, record_id))
 	}
 
-	pub fn iter(&self) -> BTreeIter {
-		BTreeIter {
+	pub fn iter(&self) -> BTreeIterState {
+		BTreeIterState {
 			last_key: None,
 			next_separator: false,
 			state: vec![],
@@ -213,7 +213,7 @@ impl BTree {
 		log: &mut LogWriter,
 		origin: ValueTableOrigin,
 	) -> Result<()> {
-		let mut root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), btree, log)?;
+		let mut root = BTree::fetch_root(self.root_index.unwrap_or(NULL_ADDRESS), btree, log)?;
 		let changes = &mut changes;
 
 		while changes.len() > 0 {
@@ -277,12 +277,12 @@ impl BTree {
 
 	#[cfg(test)]
 	pub fn is_balanced(&self, tables: TableLocked, log: &impl LogQuery) -> Result<bool> {
-		let root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), tables, log)?;
+		let root = BTree::fetch_root(self.root_index.unwrap_or(NULL_ADDRESS), tables, log)?;
 		root.is_balanced(tables, log, 0)
 	}
 
 	pub fn get(&mut self, key: &[u8], values: TableLocked, log: &impl LogQuery) -> Result<Option<Vec<u8>>> {
-		let root = BTree::fetch_root(self.root_index.unwrap_or(HEADER_POSITION), values, log)?;
+		let root = BTree::fetch_root(self.root_index.unwrap_or(NULL_ADDRESS), values, log)?;
 		if let Some(address) = root.get(key, values, log)? {
 			let key_query = TableKeyQuery::Fetch(None);
 			let r = Column::get_at_value_index(key_query, address, values, log)?;
@@ -293,7 +293,7 @@ impl BTree {
 	}
 
 	pub fn fetch_root(root: Address, tables: TableLocked, log: &impl LogQuery) -> Result<Node> {
-		Ok(if root == HEADER_POSITION {
+		Ok(if root == NULL_ADDRESS {
 			Node::new()
 		} else {
 			let root = BTreeTable::get_index(root, log, tables)?;

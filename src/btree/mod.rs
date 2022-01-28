@@ -25,16 +25,16 @@
 // DEPTH: u32 LE current tree depth.
 //
 // Complete entry:
-// [CHILD: 8]: Internal index of child node, 0 for undefined (points to the metadata).
-// [VALUE_PTR: 8]: Pointer to the value table for this key. If 0, no value (key should be 0 length
-// [KEY_HEADER: 1]: header of key, contains length up to 254. If 255, then the length is u32
+// [CHILD: 8]: Child node address, 0 for undefined (points to the metadata).
+// [VALUE_PTR: 8]: Address of the value for this key. 0, for no value.
+// [KEY_HEADER: 1]: Header of key, contains length up to 254. If 255, then the length is u32
 // encoded on the next 4 bytes.
 // [KEY: KEYSIZE]: stored key.
 //
-// This sequence is repeated ORDER time and a last CHILD index is added.
+// This sequence is repeated ORDER times, followed by an additional CHILD index.
 
 use node::SeparatorInner;
-use crate::table::{Entry as LogEntry, ValueTable, Value};
+use crate::table::{Entry as ValueTableEntry, ValueTable, Value};
 use crate::table::key::{TableKey, TableKeyQuery};
 use crate::options::Options;
 use crate::index::Address;
@@ -52,8 +52,12 @@ mod node;
 
 const ORDER: usize = 8;
 const ORDER_CHILD: usize = ORDER + 1;
-pub(crate) const HEADER_POSITION: Address = Address::from_u64(0);
+pub(crate) const NULL_ADDRESS: Address = Address::from_u64(0);
 pub(crate) const HEADER_SIZE: u64 = 8 + 4;
+pub(crate) const HEADER_ADDRESS: Address = {
+	debug_assert!(HEADER_SIZE < crate::table::MIN_ENTRY_SIZE as u64);
+	Address::new(1, 0)
+};
 pub(crate) const ENTRY_CAPACITY: usize = ORDER * 33 + ORDER * 8 + ORDER_CHILD * 8;
 
 #[derive(Clone, PartialEq)]
@@ -63,7 +67,7 @@ pub struct BTreeIndex {
 }
 
 struct Entry {
-	encoded: LogEntry<Vec<u8>>,
+	encoded: ValueTableEntry<Vec<u8>>,
 }
 
 impl Entry {
@@ -73,7 +77,7 @@ impl Entry {
 
 	fn from_encoded(enc: Vec<u8>) -> Self {
 		Entry {
-			encoded: LogEntry::new(enc),
+			encoded: ValueTableEntry::new(enc),
 		}
 	}
 
@@ -155,17 +159,15 @@ impl BTreeTable {
 		values: Vec<ValueTable>,
 		metadata: &crate::options::Metadata,
 	) -> Result<Self> {
-		if let Some(address) = Self::btree_index_address(&values) {
-			let size_tier = address.size_tier() as usize;
-			if !values[size_tier].is_init() {
-				let btree_index = BTreeIndex {
-					root: HEADER_POSITION,
-					depth: 0,
-				};
-				let mut entry = Entry::empty();
-				entry.write_header(&btree_index);
-				values[size_tier].init_with_entry(&*entry.encoded.inner_mut())?;
-			}
+		let size_tier = HEADER_ADDRESS.size_tier() as usize;
+		if !values[size_tier].is_init() {
+			let btree_index = BTreeIndex {
+				root: NULL_ADDRESS,
+				depth: 0,
+			};
+			let mut entry = Entry::empty();
+			entry.write_header(&btree_index);
+			values[size_tier].init_with_entry(&*entry.encoded.inner_mut())?;
 		}
 		let options = &metadata.columns[id as usize];
 		Ok(BTreeTable {
@@ -177,25 +179,14 @@ impl BTreeTable {
 		})
 	}
 
-	fn btree_index_address(values: &Vec<ValueTable>) -> Option<Address> {
-		for (tier, v) in values.iter().enumerate() {
-			if v.value_size(&TableKey::NoHash).map(|s| s >= HEADER_SIZE as u16).unwrap_or(true) {
-				return Some(Address::new(1, tier as u8));
-			}
-		}
-		None
-	}
-
 	fn btree_index(log: &impl LogQuery, values: TableLocked) -> Result<BTreeIndex> {
-		let mut root = HEADER_POSITION;
+		let mut root = NULL_ADDRESS;
 		let mut depth = 0;
-		if let Some(address) = Self::btree_index_address(values.tables) {
-			let key_query = TableKeyQuery::Fetch(None);
-			if let Some(encoded) = Column::get_at_value_index(key_query, address, values, log)? {
-				let mut buf: LogEntry<Vec<u8>> = LogEntry::new(encoded.1);
-				root = Address::from_u64(buf.read_u64());
-				depth = buf.read_u32();
-			}
+		let key_query = TableKeyQuery::Fetch(None);
+		if let Some(encoded) = Column::get_at_value_index(key_query, HEADER_ADDRESS, values, log)? {
+			let mut buf: ValueTableEntry<Vec<u8>> = ValueTableEntry::new(encoded.1);
+			root = Address::from_u64(buf.read_u64());
+			depth = buf.read_u32();
 		}
 		Ok(BTreeIndex {
 			root,
@@ -219,7 +210,7 @@ impl BTreeTable {
 
 	pub fn get(key: &[u8], log: &impl LogQuery, values: TableLocked) -> Result<Option<Vec<u8>>> {
 		let btree_index = Self::btree_index(log, values)?;
-		if btree_index.root == HEADER_POSITION {
+		if btree_index.root == NULL_ADDRESS {
 			return Ok(None);
 		}
 		let record_id = 0; // lifetime of Btree is the query, so no invalidate.
@@ -298,12 +289,12 @@ impl BTreeTable {
 		btree_index: &mut BTreeIndex,
 		origin: ValueTableOrigin,
 	) -> Result<()> {
-		let root = BTree::fetch_root(btree.root_index.unwrap_or(HEADER_POSITION), tables, writer)?;
+		let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), tables, writer)?;
 		if let Some(ix) = Self::write_plan_node(tables, root, writer, btree.root_index, origin)? {
 			btree.root_index = Some(ix);
 		}
 		btree.record_id = record_id;
-		btree_index.root = btree.root_index.unwrap_or(HEADER_POSITION);
+		btree_index.root = btree.root_index.unwrap_or(NULL_ADDRESS);
 		btree_index.depth = btree.depth;
 		Ok(())
 	}
@@ -356,7 +347,7 @@ impl BTreeTable {
 			if let Some(index) = node.children.as_mut()[i_children].entry_index {
 				entry.write_child_index(index);
 			} else {
-				entry.write_child_index(HEADER_POSITION);
+				entry.write_child_index(NULL_ADDRESS);
 			}
 			i_children += 1;
 			if i_children == ORDER_CHILD {
@@ -471,7 +462,7 @@ pub mod commit_overlay {
 			let mut tree = BTree::open(locked, writer, record_id)?;
 
 			let mut btree_index = BTreeIndex {
-				root: tree.root_index.unwrap_or(HEADER_POSITION),
+				root: tree.root_index.unwrap_or(NULL_ADDRESS),
 				depth: tree.depth,
 			};
 			let old_btree_index = btree_index.clone();
@@ -484,17 +475,15 @@ pub mod commit_overlay {
 			if old_btree_index != btree_index {
 				let mut entry = Entry::empty();
 				entry.write_header(&btree_index);
-				if let Some(address) = BTreeTable::btree_index_address(locked.tables) {
-					Column::write_existing_value_plan(
-						&TableKey::NoHash,
-						locked,
-						address,
-						Some(&entry.encoded.as_ref()[..HEADER_SIZE as usize]),
-						writer,
-						origin,
-						None,
-					)?;
-				}
+				Column::write_existing_value_plan(
+					&TableKey::NoHash,
+					locked,
+					HEADER_ADDRESS,
+					Some(&entry.encoded.as_ref()[..HEADER_SIZE as usize]),
+					writer,
+					origin,
+					None,
+				)?;
 			}
 			Ok(())
 		}
