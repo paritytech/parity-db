@@ -211,13 +211,12 @@ impl BTree {
 		mut changes: &[(Vec<u8>, Option<Vec<u8>>)],
 		btree: TablesRef,
 		log: &mut LogWriter,
-		origin: ValueTableOrigin,
 	) -> Result<()> {
 		let mut root = BTree::fetch_root(self.root_index.unwrap_or(NULL_ADDRESS), btree, log)?;
 		let changes = &mut changes;
 
 		while changes.len() > 0 {
-			match root.change(None, self.depth, changes, btree, log, origin)? {
+			match root.change(None, self.depth, changes, btree, log)? {
 				(Some((sep, right)), _) => {
 					// add one level
 					self.depth += 1;
@@ -228,7 +227,6 @@ impl BTree {
 						left,
 						log,
 						left_index,
-						origin,
 					)?;
 					let new_index = if new_index.is_some() {
 						new_index
@@ -247,7 +245,6 @@ impl BTree {
 								btree,
 								log,
 								index,
-								origin,
 							)?;
 						}
 						self.root_index = node_index;
@@ -265,7 +262,6 @@ impl BTree {
 				root,
 				log,
 				self.root_index,
-				origin,
 			)?;
 
 			if new_index.is_some() {

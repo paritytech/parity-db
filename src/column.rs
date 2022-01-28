@@ -54,6 +54,7 @@ pub enum Column {
 }
 
 pub struct HashColumn {
+	col: ColId,
 	tables: RwLock<Tables>,
 	reindex: RwLock<Reindex>,
 	path: std::path::PathBuf,
@@ -71,6 +72,7 @@ pub struct HashColumn {
 pub struct TablesRef<'a> {
 	pub tables: &'a Vec<ValueTable>,
 	pub compression: &'a Compress,
+	pub col: ColId,
 	pub preimage: bool,
 	pub ref_counted: bool,
 }
@@ -85,21 +87,6 @@ pub struct IterState {
 enum IterStateOrCorrupted {
 	Item(IterState),
 	Corrupted(crate::index::Entry, Option<Error>),
-}
-
-#[derive(Clone, Copy)]
-pub enum ValueTableOrigin {
-	Index(IndexTableId),
-	BTree(ColId),
-}
-
-impl std::fmt::Display for ValueTableOrigin {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		match self {
-			ValueTableOrigin::Index(id) => write!(f, "{}", id),
-			ValueTableOrigin::BTree(id) => write!(f, "btree {}", id),
-		}
-	}
 }
 
 impl HashColumn {
@@ -153,6 +140,7 @@ impl HashColumn {
 		TablesRef {
 			tables,
 			preimage: self.preimage,
+			col: self.col,
 			ref_counted: self.ref_counted,
 			compression: &self.compression,
 		}
@@ -232,6 +220,7 @@ impl HashColumn {
 		let options = &metadata.columns[col as usize];
 		let db_version = metadata.version;
 		Ok(HashColumn {
+			col,
 			tables: RwLock::new(Tables { index, value }),
 			reindex: RwLock::new(Reindex {
 				queue: reindexing,
@@ -386,14 +375,13 @@ impl HashColumn {
 		//TODO: return sub-chunk position in index.get
 		let existing = Self::search_all_indexes(key, &*tables, &*reindex, log)?;
 		if let Some((table, sub_index, existing_address)) = existing {
-			self.write_plan_existing(&*tables, key, value, log, table, sub_index, existing_address, ValueTableOrigin::Index(tables.index.id))
+			self.write_plan_existing(&*tables, key, value, log, table, sub_index, existing_address)
 		} else {
-			let origin = ValueTableOrigin::Index(tables.index.id);
 			if let Some(value) = value {
-				let (r, _, _) = self.write_plan_new(tables, reindex, key, value, log, origin)?;
+				let (r, _, _) = self.write_plan_new(tables, reindex, key, value, log)?;
 				Ok(r)
 			} else {
-				log::trace!(target: "parity-db", "{}: Deletion missed {}", origin, key);
+				log::trace!(target: "parity-db", "{}: Deletion missed {}", tables.index.id, key);
 				if self.collect_stats {
 					self.stats.remove_miss();
 				}
@@ -411,7 +399,6 @@ impl HashColumn {
 		table: &IndexTable,
 		sub_index: usize,
 		existing_address: Address,
-		origin: ValueTableOrigin,
 	) -> Result<PlanOutcome> {
 		let stats = if self.collect_stats {
 			Some(&self.stats)
@@ -425,7 +412,6 @@ impl HashColumn {
 			existing_address,
 			value,
 			log,
-			origin,
 			stats,
 		)? {
 			(Some(outcome), _) => return Ok(outcome),
@@ -449,7 +435,6 @@ impl HashColumn {
 		key: &TableKey,
 		value: &[u8],
 		log: &mut LogWriter,
-		origin: ValueTableOrigin,
 	) -> Result<(PlanOutcome, RwLockUpgradableReadGuard<'a, Tables>, RwLockUpgradableReadGuard<'b, Reindex>)> {
 		let stats = if self.collect_stats {
 			Some(&self.stats)
@@ -457,12 +442,12 @@ impl HashColumn {
 			None
 		};
 
-		let address = Column::write_new_value_plan(key, self.locked(&tables.value), value, log, origin.clone(), stats)?;
+		let address = Column::write_new_value_plan(key, self.locked(&tables.value), value, log, stats)?;
 		match tables.index.write_insert_plan(key, address, None, log)? {
 			PlanOutcome::NeedReindex => {
 				log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, key);
 				let (tables, reindex) = Self::trigger_reindex(tables, reindex, self.path.as_path());
-				let (_, t, r) = self.write_plan_new(tables, reindex, key, value, log, origin)?;
+				let (_, t, r) = self.write_plan_new(tables, reindex, key, value, log)?;
 				Ok((PlanOutcome::NeedReindex, t, r))
 			}
 			_ => Ok((PlanOutcome::Written, tables, reindex)),
@@ -763,13 +748,12 @@ impl Column {
 		address: Address,
 		value: Option<&[u8]>,
 		log: &mut LogWriter,
-		origin: ValueTableOrigin,
 		stats: Option<&ColumnStats>,
 	) -> Result<(Option<PlanOutcome>, Option<Address>)> {
 		let tier = address.size_tier() as usize;
 		if let Some(val) = value.as_ref() {
 			if tables.ref_counted {
-				log::trace!(target: "parity-db", "{}: Increment ref {}", origin, key);
+				log::trace!(target: "parity-db", "{}: Increment ref {}", tables.col, key);
 				tables.tables[tier].write_inc_ref(address.offset(), log)?;
 				return Ok((Some(PlanOutcome::Written), None));
 			}
@@ -798,12 +782,12 @@ impl Column {
 				}
 			}
 			if tier == target_tier {
-				log::trace!(target: "parity-db", "{}: Replacing {}", origin, key);
+				log::trace!(target: "parity-db", "{}: Replacing {}", tables.col, key);
 
 				tables.tables[target_tier].write_replace_plan(address.offset(), key, &cval, log, compressed)?;
 				return Ok((Some(PlanOutcome::Written), None));
 			} else {
-				log::trace!(target: "parity-db", "{}: Replacing in a new table {}", origin, key);
+				log::trace!(target: "parity-db", "{}: Replacing in a new table {}", tables.col, key);
 
 				tables.tables[tier].write_remove_plan(address.offset(), log)?;
 				let new_offset = tables.tables[target_tier].write_insert_plan(key, &cval, log, compressed)?;
@@ -830,10 +814,10 @@ impl Column {
 			};
 			let remove = if tables.ref_counted {
 				let removed = !tables.tables[tier].write_dec_ref(address.offset(), log)?;
-				log::trace!(target: "parity-db", "{}: Dereference {}, deleted={}", origin, key, removed);
+				log::trace!(target: "parity-db", "{}: Dereference {}, deleted={}", tables.col, key, removed);
 				removed
 			} else {
-				log::trace!(target: "parity-db", "{}: Deleting {}", origin, key);
+				log::trace!(target: "parity-db", "{}: Deleting {}", tables.col, key);
 				tables.tables[tier].write_remove_plan(address.offset(), log)?;
 				true
 			};
@@ -855,7 +839,6 @@ impl Column {
 		tables: TablesRef,
 		val: &[u8],
 		log: &mut LogWriter,
-		origin: ValueTableOrigin,
 		stats: Option<&ColumnStats>,
 	) -> Result<Address> {
 		let (cval, target_tier) = Column::compress(tables.compression, key, &val, tables.tables);
@@ -863,7 +846,7 @@ impl Column {
 			.map(|cval| (cval.as_slice(), true))
 			.unwrap_or((val, false));
 
-		log::trace!(target: "parity-db", "{}: Inserting new {}, size = {}", origin, key, cval.len());
+		log::trace!(target: "parity-db", "{}: Inserting new {}, size = {}", tables.col, key, cval.len());
 		let offset = tables.tables[target_tier].write_insert_plan(key, &cval, log, compressed)?;
 		let address = Address::new(offset, target_tier as u8);
 

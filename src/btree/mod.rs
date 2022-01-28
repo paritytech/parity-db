@@ -39,7 +39,7 @@ use crate::table::key::{TableKey, TableKeyQuery};
 use crate::options::Options;
 use crate::index::Address;
 use crate::error::{Error, Result};
-use crate::column::{ColId, ValueTableOrigin, Column, TablesRef};
+use crate::column::{ColId, Column, TablesRef};
 use crate::log::{LogQuery, LogWriter, LogAction, LogReader};
 use crate::compress::Compress;
 use crate::btree::node::Node;
@@ -232,6 +232,7 @@ impl BTreeTable {
 			ref_counted: self.ref_counted,
 			preimage: false,
 			compression: &self.compression,
+			col: self.id,
 		}
 	}
 
@@ -288,10 +289,9 @@ impl BTreeTable {
 		writer: &mut LogWriter,
 		record_id: u64,
 		btree_header: &mut BTreeHeader,
-		origin: ValueTableOrigin,
 	) -> Result<()> {
 		let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), tables, writer)?;
-		if let Some(ix) = Self::write_node_plan(tables, root, writer, btree.root_index, origin)? {
+		if let Some(ix) = Self::write_node_plan(tables, root, writer, btree.root_index)? {
 			btree.root_index = Some(ix);
 		}
 		btree.record_id = record_id;
@@ -304,7 +304,6 @@ impl BTreeTable {
 		tables: TablesRef,
 		writer: &mut LogWriter,
 		node_index: Address,
-		origin: ValueTableOrigin,
 	) -> Result<()> {
 		Column::write_existing_value_plan(
 			&TableKey::NoHash,
@@ -312,7 +311,6 @@ impl BTreeTable {
 			node_index,
 			None,
 			writer,
-			origin,
 			None,
 		)?;
 		Ok(())
@@ -323,7 +321,6 @@ impl BTreeTable {
 		mut node: Node,
 		writer: &mut LogWriter,
 		node_id: Option<Address>,
-		origin: ValueTableOrigin,
 	) -> Result<Option<Address>> {
 		for child in node.children.as_mut().iter_mut() {
 			if child.moved {
@@ -373,7 +370,6 @@ impl BTreeTable {
 					existing,
 					Some(entry.encoded.as_ref()),
 					writer,
-					origin,
 					None,
 				)? {
 					Some(new_index)
@@ -387,7 +383,6 @@ impl BTreeTable {
 					tables,
 					entry.encoded.as_ref(),
 					writer,
-					origin,
 					None,
 				)?)
 			})
@@ -459,7 +454,6 @@ pub mod commit_overlay {
 			writer: &mut LogWriter,
 			ops: &mut u64,
 		) -> Result<()> {
-			let origin = crate::column::ValueTableOrigin::BTree(btree.id);
 			let record_id = writer.record_id();
 
 			let locked_tables = btree.tables.read();
@@ -473,9 +467,9 @@ pub mod commit_overlay {
 			let old_btree_header = btree_header.clone();
 
 			self.changes.sort_by_key(|(k, _)| k.clone());
-			tree.write_sorted_changes(&mut self.changes.as_slice(), locked, writer, origin)?;
+			tree.write_sorted_changes(&mut self.changes.as_slice(), locked, writer)?;
 			*ops += self.changes.len() as u64;
-			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_header, origin)?;
+			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_header)?;
 
 			if old_btree_header != btree_header {
 				let mut entry = Entry::empty();
@@ -486,7 +480,6 @@ pub mod commit_overlay {
 					HEADER_ADDRESS,
 					Some(&entry.encoded.as_ref()[..HEADER_SIZE as usize]),
 					writer,
-					origin,
 					None,
 				)?;
 			}
