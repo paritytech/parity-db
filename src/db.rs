@@ -42,7 +42,7 @@ use crate::{
 	log::{Log, LogAction},
 	index::PlanOutcome,
 	options::Options,
-	btree::{BTreeTable, commit_overlay::{BTreeChangeSet}},
+	btree::{BTreeIterator, BTreeTable, commit_overlay::{BTreeChangeSet}},
 };
 
 // These are in memory, so we use usize
@@ -233,14 +233,14 @@ impl DbInner {
 		}
 	}
 
-	pub fn btree_iter(&self, col: ColId) -> Result<crate::btree::BTreeIterator> {
+	pub fn btree_iter(&self, col: ColId) -> Result<BTreeIterator> {
 		match &self.columns[col as usize] {
 			Column::Hash(_column) => {
 				return Err(Error::InvalidConfiguration("Not an indexed column.".to_string()));
 			},
 			Column::Tree(column) => {
 				let log = self.log.overlays();
-				crate::btree::BTreeIterator::new(column, col, log, &self.commit_overlay)
+				BTreeIterator::new(column, col, log, &self.commit_overlay)
 			},
 		}
 	}
@@ -874,7 +874,7 @@ impl Db {
 		self.inner.get_size(col, key)
 	}
 
-	pub fn iter(&self, col: ColId) -> Result<crate::btree::BTreeIterator> {
+	pub fn iter(&self, col: ColId) -> Result<BTreeIterator> {
 		self.inner.btree_iter(col)
 	}
 

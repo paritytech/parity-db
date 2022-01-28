@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright 2022 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -45,10 +45,11 @@ use crate::compress::Compress;
 use crate::btree::node::Node;
 use crate::btree::btree::BTree;
 use parking_lot::RwLock;
-pub use btree::BTreeIterator;
+pub use iter::BTreeIterator;
 
 mod btree;
 mod node;
+mod iter;
 
 const ORDER: usize = 8;
 const ORDER_CHILD: usize = ORDER + 1;
