@@ -940,10 +940,14 @@ pub mod key {
 			}
 		}
 
+		pub fn index_from_partial(partial: &[u8]) -> u64 {
+			u64::from_be_bytes((partial[0..8]).try_into().unwrap())
+		}
+
 		pub fn index(&self) -> Option<u64> {
 			match self {
 				TableKey::Partial(k) => {
-					Some(u64::from_be_bytes((k[0..8]).try_into().unwrap()))
+					Some(Self::index_from_partial(k))
 				},
 				TableKey::NoHash => {
 					None
