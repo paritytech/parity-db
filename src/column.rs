@@ -90,7 +90,7 @@ enum IterStateOrCorrupted {
 }
 
 impl HashColumn {
-	pub(crate) fn get(&self, key: &Key, log: &impl LogQuery) -> Result<Option<Value>> {
+	pub fn get(&self, key: &Key, log: &impl LogQuery) -> Result<Option<Value>> {
 		let tables = self.tables.read();
 		let values = self.locked(&tables.value);
 		if let Some((tier, value)) = self.get_in_index(key, &tables.index, values, log)? {
@@ -113,7 +113,7 @@ impl HashColumn {
 		Ok(None)
 	}
 
-	pub(crate) fn get_size(&self, key: &Key, log: &RwLock<LogOverlays>) -> Result<Option<u32>> {
+	pub fn get_size(&self, key: &Key, log: &RwLock<LogOverlays>) -> Result<Option<u32>> {
 		self.get(key, log).map(|v| v.map(|v| v.len() as u32))
 	}
 
@@ -136,7 +136,7 @@ impl HashColumn {
 		Ok(None)
 	}
 
-	pub(crate) fn locked<'a>(&'a self, tables: &'a Vec<ValueTable>) -> TablesRef<'a> {
+	pub fn locked<'a>(&'a self, tables: &'a Vec<ValueTable>) -> TablesRef<'a> {
 		TablesRef {
 			tables,
 			preimage: self.preimage,
@@ -148,7 +148,7 @@ impl HashColumn {
 }
 
 impl Column {
-	pub(crate) fn get_value(mut key: TableKeyQuery, address: Address, tables: TablesRef, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
+	pub fn get_value(mut key: TableKeyQuery, address: Address, tables: TablesRef, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
 		let size_tier = address.size_tier() as usize;
 		if let Some((value, compressed, _rc)) = tables.tables[size_tier].query(&mut key, address.offset(), log)? {
 			let value = if compressed {
@@ -161,7 +161,7 @@ impl Column {
 		Ok(None)
 	}
 
-	pub(crate) fn compress(compression: &Compress, key: &TableKey, value: &[u8], tables: &Vec<ValueTable>) -> (Option<Vec<u8>>, usize) {
+	pub fn compress(compression: &Compress, key: &TableKey, value: &[u8], tables: &Vec<ValueTable>) -> (Option<Vec<u8>>, usize) {
 		let (len, result) = if value.len() > compression.treshold as usize {
 			let cvalue = compression.compress(value);
 			if cvalue.len() < value.len() {
@@ -305,7 +305,7 @@ impl HashColumn {
 		)
 	}
 
-	pub(crate) fn write_reindex_plan(&self, key: &Key, address: Address, log: &mut LogWriter) -> Result<PlanOutcome> {
+	pub fn write_reindex_plan(&self, key: &Key, address: Address, log: &mut LogWriter) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
 		if Self::search_index(key, &tables.index, &*tables, log)?.is_some() {
@@ -365,7 +365,7 @@ impl HashColumn {
 			Ok(None)
 	}
 
-	pub(crate) fn write_plan(
+	pub fn write_plan(
 		&self,
 		key: &Key,
 		value: Option<&[u8]>,
@@ -745,7 +745,7 @@ impl HashColumn {
 }
 
 impl Column {
-	pub(crate) fn write_existing_value_plan(
+	pub fn write_existing_value_plan(
 		key: &TableKey,
 		tables: TablesRef,
 		address: Address,
@@ -837,7 +837,7 @@ impl Column {
 		}
 	}
 
-	pub(crate) fn write_new_value_plan(
+	pub fn write_new_value_plan(
 		key: &TableKey,
 		tables: TablesRef,
 		val: &[u8],
@@ -908,7 +908,7 @@ impl Column {
 		}
 	}
 
-	pub(crate) fn check_from_index(&self, log: &Log, check_param: &crate::CheckOptions, col: ColId) -> Result<()> {
+	pub fn check_from_index(&self, log: &Log, check_param: &crate::CheckOptions, col: ColId) -> Result<()> {
 		match self {
 			Column::Hash(column) => column.check_from_index(log, check_param, col),
 			Column::Tree(_column) => Ok(()),

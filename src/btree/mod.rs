@@ -52,13 +52,13 @@ mod node;
 
 const ORDER: usize = 8;
 const ORDER_CHILD: usize = ORDER + 1;
-pub(crate) const NULL_ADDRESS: Address = Address::from_u64(0);
-pub(crate) const HEADER_SIZE: u64 = 8 + 4;
-pub(crate) const HEADER_ADDRESS: Address = {
+const NULL_ADDRESS: Address = Address::from_u64(0);
+const HEADER_SIZE: u64 = 8 + 4;
+const HEADER_ADDRESS: Address = {
 	debug_assert!(HEADER_SIZE < crate::table::MIN_ENTRY_SIZE as u64);
 	Address::new(1, 0)
 };
-pub(crate) const ENTRY_CAPACITY: usize = ORDER * 33 + ORDER * 8 + ORDER_CHILD * 8;
+const ENTRY_CAPACITY: usize = ORDER * 33 + ORDER * 8 + ORDER_CHILD * 8;
 
 #[derive(Clone, PartialEq)]
 pub struct BTreeHeader {
@@ -236,7 +236,7 @@ impl BTreeTable {
 		}
 	}
 
-	pub(crate) fn with_locked<R>(&self, mut apply: impl FnMut(TablesRef) -> Result<R>) -> Result<R> {
+	pub fn with_locked<R>(&self, mut apply: impl FnMut(TablesRef) -> Result<R>) -> Result<R> {
 		let locked_tables = &*self.tables.read();
 		let locked = self.locked(locked_tables);
 		apply(locked)

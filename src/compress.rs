@@ -36,7 +36,7 @@ pub struct Compress {
 }
 
 impl Compress {
-	pub(crate) fn new(kind: CompressionType, treshold: u32) -> Self {
+	pub fn new(kind: CompressionType, treshold: u32) -> Self {
 		Compress {
 			inner: kind.into(),
 			treshold,
@@ -44,7 +44,7 @@ impl Compress {
 	}
 }
 
-pub(crate) const NO_COMPRESSION: Compress = Compress {
+pub const NO_COMPRESSION: Compress = Compress {
 	inner: Compressor::NoCompression(NoCompression),
 	treshold: u32::MAX,
 };
@@ -91,7 +91,7 @@ impl From<&Compress> for CompressionType {
 }
 
 impl Compress {
-	pub(crate) fn compress(&self, buf: &[u8]) -> Vec<u8> {
+	pub fn compress(&self, buf: &[u8]) -> Vec<u8> {
 		match &self.inner {
 			Compressor::NoCompression(inner) => inner.compress(buf),
 			Compressor::Lz4(inner) => inner.compress(buf),
@@ -101,7 +101,7 @@ impl Compress {
 		}
 	}
 
-	pub(crate) fn decompress(&self, buf: &[u8]) -> Result<Vec<u8>> {
+	pub fn decompress(&self, buf: &[u8]) -> Result<Vec<u8>> {
 		Ok(match &self.inner {
 			Compressor::NoCompression(inner) => inner.decompress(buf)?,
 			Compressor::Lz4(inner) => inner.decompress(buf)?,

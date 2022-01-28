@@ -79,7 +79,7 @@ struct CommitQueue {
 	commits: VecDeque<Commit>,
 }
 
-pub(crate) struct DbInner {
+pub struct DbInner {
 	columns: Vec<Column>,
 	options: Options,
 	shutdown: AtomicBool,
@@ -238,7 +238,7 @@ impl DbInner {
 		crate::btree::BTreeIterator::new(self, col, log)
 	}
 
-	pub(crate) fn btree_iter_next(&self, iter: &mut crate::BTreeIterator) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+	pub fn btree_iter_next(&self, iter: &mut crate::BTreeIterator) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 		let col = iter.col;
 
 		// Lock log over function call (no btree struct change).
@@ -320,7 +320,7 @@ impl DbInner {
 		}
 	}
 
-	pub(crate) fn btree_iter_seek(&self, iter: &mut crate::BTreeIterator, key: &[u8], after: bool) -> Result<()> {
+	pub fn btree_iter_seek(&self, iter: &mut crate::BTreeIterator, key: &[u8], after: bool) -> Result<()> {
 		// Seek require log do not change, locking.
 		let log = self.log.overlays().read();
 		let record_id = log.last_record_id(iter.col);
@@ -845,7 +845,7 @@ impl DbInner {
 		}
 	}
 
-	pub(crate) fn column(&self, c: ColId) -> &Column {
+	pub fn column(&self, c: ColId) -> &Column {
 		&self.columns[c as usize]
 	}
 }
@@ -982,7 +982,7 @@ impl Db {
 		self.inner.commit(tx)
 	}
 
-	pub(crate) fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
+	pub fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
 		self.inner.commit_raw(commit)
 	}
 
@@ -990,7 +990,7 @@ impl Db {
 		self.inner.columns.len() as u8
 	}
 
-	pub(crate) fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
+	pub fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
 		self.inner.iter_column_while(c, f)
 	}
 
@@ -1082,8 +1082,8 @@ impl Drop for Db {
 	}
 }
 
-pub(crate) type IndexedCommitOverlay = HashMap<Key, (u64, Option<Value>), crate::IdentityBuildHasher>;
-pub(crate) type BTreeCommitOverlay = BTreeMap<Vec<u8>, (u64, Option<Value>)>;
+pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<Value>), crate::IdentityBuildHasher>;
+pub type BTreeCommitOverlay = BTreeMap<Vec<u8>, (u64, Option<Value>)>;
 
 struct CommitOverlay {
 	indexed: IndexedCommitOverlay,
@@ -1140,8 +1140,8 @@ impl CommitOverlay {
 
 #[derive(Default)]
 pub struct CommitChangeSet {
-	pub(crate) indexed: HashMap<ColId, IndexedChangeSet>,
-	pub(crate) btree_indexed: HashMap<ColId, BTreeChangeSet>,
+	pub indexed: HashMap<ColId, IndexedChangeSet>,
+	pub btree_indexed: HashMap<ColId, BTreeChangeSet>,
 }
 
 pub struct IndexedChangeSet {
@@ -1150,7 +1150,7 @@ pub struct IndexedChangeSet {
 }
 
 impl IndexedChangeSet {
-	pub(crate) fn new(col: ColId) -> Self {
+	pub fn new(col: ColId) -> Self {
 		IndexedChangeSet { col, changes: Default::default() }
 	}
 

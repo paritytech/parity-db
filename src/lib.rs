@@ -36,7 +36,7 @@ pub use compress::CompressionType;
 pub use btree::BTreeIterator;
 
 #[derive(Default)]
-struct IdentityKeyHash(u64);
+pub struct IdentityKeyHash(u64);
 type IdentityBuildHasher = std::hash::BuildHasherDefault<IdentityKeyHash>;
 
 impl std::hash::Hasher for IdentityKeyHash {

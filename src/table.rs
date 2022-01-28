@@ -162,37 +162,37 @@ impl Header {
 	}
 }
 
-pub(crate) struct Entry<B: AsRef<[u8]> + AsMut<[u8]>>(usize, B);
-type FullEntry = Entry<[u8; MAX_ENTRY_BUF_SIZE]>;
+pub struct Entry<B: AsRef<[u8]> + AsMut<[u8]>>(usize, B);
+pub type FullEntry = Entry<[u8; MAX_ENTRY_BUF_SIZE]>;
 type PartialEntry = Entry<[u8; 10]>;
 type PartialKeyEntry = Entry<[u8; 40]>; // 2 + 4 + 26 + 8
 
 impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	#[inline(always)]
-	pub(crate) fn new_uninit() -> Self {
+	pub fn new_uninit() -> Self {
 		Entry(0, unsafe { MaybeUninit::uninit().assume_init() })
 	}
 
 	#[inline(always)]
-	pub(crate) fn new(data: B) -> Self {
+	pub fn new(data: B) -> Self {
 		Entry(0, data)
 	}
 
-	pub(crate) fn set_offset(&mut self, offset: usize) {
+	pub fn set_offset(&mut self, offset: usize) {
 		self.0 = offset;
 	}
 
-	pub(crate) fn offset(&self) -> usize {
+	pub fn offset(&self) -> usize {
 		self.0
 	}
 
-	pub(crate) fn write_slice(&mut self, buf: &[u8]) {
+	pub fn write_slice(&mut self, buf: &[u8]) {
 		let start = self.0;
 		self.0 += buf.len();
 		self.1.as_mut()[start..self.0].copy_from_slice(buf);
 	}
 
-	pub(crate) fn read_slice(&mut self, size: usize) -> &[u8] {
+	pub fn read_slice(&mut self, size: usize) -> &[u8] {
 		let start = self.0;
 		self.0 += size;
 		&self.1.as_ref()[start..self.0]
@@ -252,7 +252,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 		self.write_slice(&size.to_le_bytes());
 	}
 
-	pub(crate) fn read_u64(&mut self) -> u64 {
+	pub fn read_u64(&mut self) -> u64 {
 		u64::from_le_bytes(self.read_slice(8).try_into().unwrap())
 	}
 
@@ -260,15 +260,15 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 		self.read_u64()
 	}
 
-	pub(crate) fn skip_u64(&mut self) {
+	pub fn skip_u64(&mut self) {
 		self.0 += 8;
 	}
 
-	pub(crate) fn skip_next(&mut self) {
+	pub fn skip_next(&mut self) {
 		self.skip_u64()
 	}
 
-	pub(crate) fn write_u64(&mut self, next_index: u64) {
+	pub fn write_u64(&mut self, next_index: u64) {
 		self.write_slice(&next_index.to_le_bytes());
 	}
 
@@ -276,11 +276,11 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 		self.write_u64(next_index)
 	}
 
-	pub(crate) fn read_u32(&mut self) -> u32 {
+	pub fn read_u32(&mut self) -> u32 {
 		u32::from_le_bytes(self.read_slice(REFS_SIZE).try_into().unwrap())
 	}
 
-	pub(crate) fn write_u32(&mut self, next_index: u32) {
+	pub fn write_u32(&mut self, next_index: u32) {
 		self.write_slice(&next_index.to_le_bytes());
 	}
 
@@ -300,7 +300,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 		&self.1.as_ref()[self.0..end]
 	}
 
-	pub(crate) fn inner_mut(&mut self) -> &mut B {
+	pub fn inner_mut(&mut self) -> &mut B {
 		&mut self.1
 	}
 }
@@ -377,7 +377,7 @@ impl ValueTable {
 		})
 	}
 
-	pub(crate) fn value_size(&self, key: &TableKey) -> Option<u16> {
+	pub fn value_size(&self, key: &TableKey) -> Option<u16> {
 		let base = self.entry_size - SIZE_SIZE as u16 - self.ref_size() as u16;
 		let k_encoded = key.encoded_size() as u16;
 		if base < k_encoded {
@@ -470,7 +470,7 @@ impl ValueTable {
 		Ok((rc, compressed))
 	}
 
-	pub(crate) fn get(&self, key: &TableKey, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool)>> {
+	pub fn get(&self, key: &TableKey, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool)>> {
 		if let Some((value, compressed, _)) = self.query(&mut TableKeyQuery::Check(key), index, log)? {
 			Ok(Some((value, compressed)))
 		} else {
@@ -478,7 +478,7 @@ impl ValueTable {
 		}
 	}
 
-	pub(crate) fn query(&self, key: &mut TableKeyQuery, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool, u32)>> {
+	pub fn query(&self, key: &mut TableKeyQuery, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool, u32)>> {
 		let mut result = Vec::new();
 		let (rc, compressed) = self.for_parts(key, index, log, |buf| {
 			result.extend_from_slice(buf);
@@ -498,7 +498,7 @@ impl ValueTable {
 		Ok(None)
 	}
 
-	pub(crate) fn size(&self, key: &TableKey, index: u64, log: &impl LogQuery) -> Result<Option<(u32, bool)>> {
+	pub fn size(&self, key: &TableKey, index: u64, log: &impl LogQuery) -> Result<Option<(u32, bool)>> {
 		let mut result = 0;
 		let (rc, compressed) = self.for_parts(&mut TableKeyQuery::Check(key), index, log, |buf| {
 			result += buf.len() as u32;
@@ -700,11 +700,11 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub(crate) fn write_insert_plan(&self, key: &TableKey, value: &[u8], log: &mut LogWriter, compressed: bool) -> Result<u64> {
+	pub fn write_insert_plan(&self, key: &TableKey, value: &[u8], log: &mut LogWriter, compressed: bool) -> Result<u64> {
 		self.overwrite_chain(key, value, log, None, compressed)
 	}
 
-	pub(crate) fn write_replace_plan(&self, index: u64, key: &TableKey, value: &[u8], log: &mut LogWriter, compressed: bool) -> Result<()> {
+	pub fn write_replace_plan(&self, index: u64, key: &TableKey, value: &[u8], log: &mut LogWriter, compressed: bool) -> Result<()> {
 		self.overwrite_chain(key, value, log, Some(index), compressed)?;
 		Ok(())
 	}
@@ -965,7 +965,7 @@ pub mod key {
 			}
 		}
 
-		pub(crate) fn fetch_partial(buf: &mut super::FullEntry)-> Result<[u8; PARTIAL_SIZE]> {
+		pub fn fetch_partial(buf: &mut super::FullEntry)-> Result<[u8; PARTIAL_SIZE]> {
 			let mut result = [0u8; PARTIAL_SIZE];
 			if buf.1.len() >= PARTIAL_SIZE {
 				let pks = buf.read_partial();
@@ -975,14 +975,14 @@ pub mod key {
 			Err(crate::error::Error::InvalidValueData)
 		}
 
-		pub(crate) fn fetch(&self, buf: &mut super::FullEntry)-> Result<Option<[u8; PARTIAL_SIZE]>> {
+		pub fn fetch(&self, buf: &mut super::FullEntry)-> Result<Option<[u8; PARTIAL_SIZE]>> {
 			match self {
 				TableKey::Partial(_k) => Ok(Some(Self::fetch_partial(buf)?)),
 				TableKey::NoHash => Ok(None),
 			}
 		}
 
-		pub(crate) fn write(&self, buf: &mut FullEntry) {
+		pub fn write(&self, buf: &mut FullEntry) {
 			match self {
 				TableKey::Partial(k) => {
 					buf.write_slice(partial_key(k));
@@ -1001,7 +1001,7 @@ pub mod key {
 		}
 	}
 
-	pub(crate) enum TableKeyQuery<'a> {
+	pub enum TableKeyQuery<'a> {
 		Check(&'a TableKey),
 		Fetch(Option<&'a mut [u8; PARTIAL_SIZE]>),
 	}

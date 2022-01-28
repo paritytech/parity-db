@@ -64,7 +64,7 @@ pub struct LogOverlays {
 }
 
 impl LogOverlays {
-	pub(crate) fn last_record_id(&self, col: ColId) -> u64 {
+	pub fn last_record_id(&self, col: ColId) -> u64 {
 		self.last_record_id.get(&col).cloned().unwrap_or(u64::MAX)
 	}
 }
@@ -303,7 +303,7 @@ pub struct LogWriter<'a> {
 }
 
 impl<'a> LogWriter<'a> {
-	pub(crate) fn new(
+	pub fn new(
 		overlays: &'a RwLock<LogOverlays>,
 		record_id: u64,
 	) -> LogWriter<'a> {

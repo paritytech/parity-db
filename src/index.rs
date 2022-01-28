@@ -271,7 +271,7 @@ impl IndexTable {
 		key
 	}
 
-	pub(crate) fn get(&self, key: &Key, sub_index: usize, log: &impl LogQuery) -> (Entry, usize) {
+	pub fn get(&self, key: &Key, sub_index: usize, log: &impl LogQuery) -> (Entry, usize) {
 		log::trace!(target: "parity-db", "{}: Querying {}", self.id, hex(key));
 		let key = TableKey::index_from_partial(key);
 		let chunk_index = self.chunk_index(key);
@@ -371,7 +371,7 @@ impl IndexTable {
 		return Ok(PlanOutcome::NeedReindex);
 	}
 
-	pub(crate) fn write_insert_plan(&self, key: &Key, address: Address, sub_index: Option<usize>, log: &mut LogWriter) -> Result<PlanOutcome> {
+	pub fn write_insert_plan(&self, key: &Key, address: Address, sub_index: Option<usize>, log: &mut LogWriter) -> Result<PlanOutcome> {
 		log::trace!(target: "parity-db", "{}: Inserting {} -> {}", self.id, hex(key), address);
 		let key = TableKey::index_from_partial(key);
 		let chunk_index = self.chunk_index(key);
@@ -407,7 +407,7 @@ impl IndexTable {
 		Ok(PlanOutcome::Skipped)
 	}
 
-	pub(crate) fn write_remove_plan(&self, key: &Key, sub_index: usize, log: &mut LogWriter) -> Result<PlanOutcome> {
+	pub fn write_remove_plan(&self, key: &Key, sub_index: usize, log: &mut LogWriter) -> Result<PlanOutcome> {
 		log::trace!(target: "parity-db", "{}: Removing {}", self.id, hex(key));
 		let key = TableKey::index_from_partial(key);
 
