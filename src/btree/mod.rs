@@ -366,34 +366,38 @@ impl BTreeTable {
 
 		let old_comp = tables.compression;
 		tables.compression = &crate::compress::NO_COMPRESSION;
-		let mut result = None;
-		if let Some(existing) = node_id {
-			let k = TableKey::NoHash;
-			if let (_, Some(new_index)) = Column::write_existing_value_plan(
-				&k,
-				tables,
-				existing,
-				Some(entry.encoded.as_ref()),
-				writer,
-				origin,
-				None,
-			)? {
-				result = Some(new_index)
-			}
-		} else {
-			let k = TableKey::NoHash;
-			result = Some(Column::write_new_value_plan(
-				&k,
-				tables,
-				entry.encoded.as_ref(),
-				writer,
-				origin,
-				None,
-			)?);
-		}
+		let mut write_node = || {
+			Ok(if let Some(existing) = node_id {
+				let k = TableKey::NoHash;
+				if let (_, Some(new_index)) = Column::write_existing_value_plan(
+					&k,
+					tables,
+					existing,
+					Some(entry.encoded.as_ref()),
+					writer,
+					origin,
+					None,
+				)? {
+					Some(new_index)
+				} else {
+					None
+				}
+			} else {
+				let k = TableKey::NoHash;
+				Some(Column::write_new_value_plan(
+					&k,
+					tables,
+					entry.encoded.as_ref(),
+					writer,
+					origin,
+					None,
+				)?)
+			})
+		};
+		let result = write_node();
 		tables.compression = old_comp;
 
-		Ok(result)
+		result
 	}
 }
 
