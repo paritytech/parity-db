@@ -862,7 +862,7 @@ impl Node {
 
 	pub fn fetch_child(&self, i: usize, values: TablesRef, log: &impl LogQuery) -> Result<Option<Self>> {
 		if let Some(ix) = self.children[i].entry_index {
-			let entry = BTreeTable::get_index(ix, log, values)?;
+			let entry = BTreeTable::get_encoded_entry(ix, log, values)?;
 			return Ok(Some(Self::from_encoded(entry)));
 		}
 		Ok(None)

@@ -134,7 +134,7 @@ impl HashColumn {
 		let (mut entry, mut sub_index) = index.get(key, 0, log);
 		while !entry.is_empty() {
 			let address = entry.address(index.id.index_bits());
-			let value = Column::get_at_value_index(TableKeyQuery::Check(key), address, tables, log)?;
+			let value = Column::get_value(TableKeyQuery::Check(key), address, tables, log)?;
 			match value {
 				Some(result) => {
 					return Ok(Some(result));
@@ -160,7 +160,7 @@ impl HashColumn {
 }
 
 impl Column {
-	pub(crate) fn get_at_value_index(mut key: TableKeyQuery, address: Address, tables: TablesRef, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
+	pub(crate) fn get_value(mut key: TableKeyQuery, address: Address, tables: TablesRef, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
 		let size_tier = address.size_tier() as usize;
 		if let Some((value, compressed, _rc)) = tables.tables[size_tier].query(&mut key, address.offset(), log)? {
 			let value = if compressed {
@@ -519,7 +519,10 @@ impl HashColumn {
 			LogAction::InsertValue(record) => {
 				tables.value[record.table.size_tier() as usize].validate_plan(record.index, log)?;
 			},
-			_ => panic!("Unexpected log action"),
+			_ => {
+				log::error!(target: "parity-db", "Unexpected log action");
+				return Err(Error::Corruption("Unexpected log action".to_string()));
+			},
 		}
 		Ok(())
 	}

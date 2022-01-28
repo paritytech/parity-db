@@ -38,7 +38,7 @@ use crate::table::{Entry as ValueTableEntry, ValueTable, Value};
 use crate::table::key::{TableKey, TableKeyQuery};
 use crate::options::Options;
 use crate::index::Address;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::column::{ColId, ValueTableOrigin, Column, TablesRef};
 use crate::log::{LogQuery, LogWriter, LogAction, LogReader};
 use crate::compress::Compress;
@@ -61,7 +61,7 @@ pub(crate) const HEADER_ADDRESS: Address = {
 pub(crate) const ENTRY_CAPACITY: usize = ORDER * 33 + ORDER * 8 + ORDER_CHILD * 8;
 
 #[derive(Clone, PartialEq)]
-pub struct BTreeIndex {
+pub struct BTreeHeader {
 	pub root: Address,
 	pub depth: u32,
 }
@@ -137,11 +137,11 @@ impl Entry {
 		self.encoded.write_u64(index.as_u64());
 	}
 
-	fn write_header(&mut self, btree_index: &BTreeIndex) {
+	fn write_header(&mut self, btree_header: &BTreeHeader) {
 		self.encoded.set_offset(0);
 		self.encoded.inner_mut().resize(8 + 4, 0);
-		self.encoded.write_u64(btree_index.root.as_u64());
-		self.encoded.write_u32(btree_index.depth);
+		self.encoded.write_u64(btree_header.root.as_u64());
+		self.encoded.write_u32(btree_header.depth);
 	}
 }
 
@@ -161,12 +161,12 @@ impl BTreeTable {
 	) -> Result<Self> {
 		let size_tier = HEADER_ADDRESS.size_tier() as usize;
 		if !values[size_tier].is_init() {
-			let btree_index = BTreeIndex {
+			let btree_header = BTreeHeader {
 				root: NULL_ADDRESS,
 				depth: 0,
 			};
 			let mut entry = Entry::empty();
-			entry.write_header(&btree_index);
+			entry.write_header(&btree_header);
 			values[size_tier].init_with_entry(&*entry.encoded.inner_mut())?;
 		}
 		let options = &metadata.columns[id as usize];
@@ -179,16 +179,16 @@ impl BTreeTable {
 		})
 	}
 
-	fn btree_index(log: &impl LogQuery, values: TablesRef) -> Result<BTreeIndex> {
+	fn btree_header(log: &impl LogQuery, values: TablesRef) -> Result<BTreeHeader> {
 		let mut root = NULL_ADDRESS;
 		let mut depth = 0;
 		let key_query = TableKeyQuery::Fetch(None);
-		if let Some(encoded) = Column::get_at_value_index(key_query, HEADER_ADDRESS, values, log)? {
+		if let Some(encoded) = Column::get_value(key_query, HEADER_ADDRESS, values, log)? {
 			let mut buf: ValueTableEntry<Vec<u8>> = ValueTableEntry::new(encoded.1);
 			root = Address::from_u64(buf.read_u64());
 			depth = buf.read_u32();
 		}
-		Ok(BTreeIndex {
+		Ok(BTreeHeader {
 			root,
 			depth,
 		})
@@ -197,7 +197,7 @@ impl BTreeTable {
 	fn get_at_value_index(&self, key: TableKeyQuery, address: Address, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
 		let tables = self.tables.read();
 		let btree = self.locked(&*tables);
-		Column::get_at_value_index(key, address, btree, log)
+		Column::get_value(key, address, btree, log)
 	}
 
 	pub fn flush(&self) -> Result<()> {
@@ -209,22 +209,22 @@ impl BTreeTable {
 	}
 
 	pub fn get(key: &[u8], log: &impl LogQuery, values: TablesRef) -> Result<Option<Vec<u8>>> {
-		let btree_index = Self::btree_index(log, values)?;
-		if btree_index.root == NULL_ADDRESS {
+		let btree_header = Self::btree_header(log, values)?;
+		if btree_header.root == NULL_ADDRESS {
 			return Ok(None);
 		}
 		let record_id = 0; // lifetime of Btree is the query, so no invalidate.
 		// keeping log locked when parsing tree.
-		let mut tree = BTree::new(Some(btree_index.root), btree_index.depth, record_id);
+		let mut tree = BTree::new(Some(btree_header.root), btree_header.depth, record_id);
 		tree.get(key, values, log)
 	}
 
-	fn get_index(at: Address, log: &impl LogQuery, tables: TablesRef) -> Result<Vec<u8>> {
+	fn get_encoded_entry(at: Address, log: &impl LogQuery, tables: TablesRef) -> Result<Vec<u8>> {
 		let key_query = TableKeyQuery::Check(&TableKey::NoHash);
-		if let Some((_tier, value)) = Column::get_at_value_index(key_query, at, tables, log)? {
+		if let Some((_tier, value)) = Column::get_value(key_query, at, tables, log)? {
 			Ok(value)
 		} else {
-			Err(crate::error::Error::Corruption("Missing btree index".to_string()))
+			Err(Error::Corruption(format!("Missing btree entry at {}", at)))
 		}
 	}
 
@@ -260,7 +260,10 @@ impl BTreeTable {
 			LogAction::InsertValue(record) => {
 				tables[record.table.size_tier() as usize].validate_plan(record.index, log)?;
 			},
-			_ => panic!("Unexpected log action"),
+			_ => {
+				log::error!(target: "parity-db", "Unexpected log action");
+				return Err(Error::Corruption("Unexpected log action".to_string()));
+			},
 		}
 		Ok(())
 	}
@@ -286,7 +289,7 @@ impl BTreeTable {
 		btree: &mut BTree,
 		writer: &mut LogWriter,
 		record_id: u64,
-		btree_index: &mut BTreeIndex,
+		btree_header: &mut BTreeHeader,
 		origin: ValueTableOrigin,
 	) -> Result<()> {
 		let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), tables, writer)?;
@@ -294,8 +297,8 @@ impl BTreeTable {
 			btree.root_index = Some(ix);
 		}
 		btree.record_id = record_id;
-		btree_index.root = btree.root_index.unwrap_or(NULL_ADDRESS);
-		btree_index.depth = btree.depth;
+		btree_header.root = btree.root_index.unwrap_or(NULL_ADDRESS);
+		btree_header.depth = btree.depth;
 		Ok(())
 	}
 
@@ -461,20 +464,20 @@ pub mod commit_overlay {
 			let locked = btree.locked(&*locked_tables);
 			let mut tree = BTree::open(locked, writer, record_id)?;
 
-			let mut btree_index = BTreeIndex {
+			let mut btree_header = BTreeHeader {
 				root: tree.root_index.unwrap_or(NULL_ADDRESS),
 				depth: tree.depth,
 			};
-			let old_btree_index = btree_index.clone();
+			let old_btree_header = btree_header.clone();
 
 			self.changes.sort_by_key(|(k, _)| k.clone());
 			tree.write_sorted_changes(&mut self.changes.as_slice(), locked, writer, origin)?;
 			*ops += self.changes.len() as u64;
-			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_index, origin)?;
+			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_header, origin)?;
 
-			if old_btree_index != btree_index {
+			if old_btree_header != btree_header {
 				let mut entry = Entry::empty();
-				entry.write_header(&btree_index);
+				entry.write_header(&btree_header);
 				Column::write_existing_value_plan(
 					&TableKey::NoHash,
 					locked,

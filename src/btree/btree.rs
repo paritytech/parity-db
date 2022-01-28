@@ -187,14 +187,14 @@ impl BTree {
 		log: &impl LogQuery,
 		record_id: u64,
 	) -> Result<Self> {
-		let btree_index = BTreeTable::btree_index(log, values)?;
+		let btree_header = BTreeTable::btree_header(log, values)?;
 
-		let root_index = if btree_index.root == NULL_ADDRESS {
+		let root_index = if btree_header.root == NULL_ADDRESS {
 			None
 		} else {
-			Some(btree_index.root)
+			Some(btree_header.root)
 		};
-		Ok(btree::BTree::new(root_index, btree_index.depth, record_id))
+		Ok(btree::BTree::new(root_index, btree_header.depth, record_id))
 	}
 
 	pub fn iter(&self) -> BTreeIterState {
@@ -285,7 +285,7 @@ impl BTree {
 		let root = BTree::fetch_root(self.root_index.unwrap_or(NULL_ADDRESS), values, log)?;
 		if let Some(address) = root.get(key, values, log)? {
 			let key_query = TableKeyQuery::Fetch(None);
-			let r = Column::get_at_value_index(key_query, address, values, log)?;
+			let r = Column::get_value(key_query, address, values, log)?;
 			Ok(r.map(|r| r.1))
 		} else {
 			Ok(None)
@@ -296,7 +296,7 @@ impl BTree {
 		Ok(if root == NULL_ADDRESS {
 			Node::new()
 		} else {
-			let root = BTreeTable::get_index(root, log, tables)?;
+			let root = BTreeTable::get_encoded_entry(root, log, tables)?;
 			Node::from_encoded(root)
 		})
 	}
