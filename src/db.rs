@@ -1,4 +1,4 @@
-// Copyright 2015-2020 Parity Technologies (UK) Ltd.
+// Copyright 2015-2022 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -18,7 +18,7 @@
 /// `Db` creates shared `DbInner` instance and manages background
 /// worker threads that all use the inner object.
 ///
-/// There are 3 worker threads:
+/// There are 4 worker threads:
 /// log_worker: Processes commit queue and reindexing. For each commit
 /// in the queue, log worker creates a write-ahead record using `Log`.
 /// Additionally, if there are active reindexing, it creates log records
@@ -27,21 +27,22 @@
 /// log files.
 /// commit_worker: Reads flushed log records and applies operations to the
 /// index and value tables.
+/// cleanup_worker: Flush tables by calling `fsync`, and cleanup log.
 /// Each background worker is signalled with a conditional variable once
 /// there is some work to be done.
 
 use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
-use std::convert::TryInto;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque, BTreeMap};
 use parking_lot::{RwLock, Mutex, Condvar};
 use fs2::FileExt;
 use crate::{
-	table::Key,
+	Key,
 	error::{Error, Result},
 	column::{ColId, Column, IterState},
 	log::{Log, LogAction},
 	index::PlanOutcome,
-	options::{Metadata, Options},
+	options::Options,
+	btree::{BTreeIterator, BTreeTable, commit_overlay::{BTreeChangeSet}},
 };
 
 // These are in memory, so we use usize
@@ -54,7 +55,6 @@ const KEEP_LOGS: usize = 16;
 /// Value is just a vector of bytes. Value sizes up to 4Gb are allowed.
 pub type Value = Vec<u8>;
 
-
 // Commit data passed to `commit`
 #[derive(Default)]
 struct Commit {
@@ -65,7 +65,7 @@ struct Commit {
 	// removal (keys)
 	bytes: usize,
 	// Operations.
-	changeset: Vec<(ColId, Key, Option<Value>)>,
+	changeset: CommitChangeSet,
 }
 
 // Pending commits. This may not grow beyond `MAX_COMMIT_QUEUE_BYTES` bytes.
@@ -79,39 +79,17 @@ struct CommitQueue {
 	commits: VecDeque<Commit>,
 }
 
-#[derive(Default)]
-struct IdentityKeyHash(u64);
-type IdentityBuildHasher = std::hash::BuildHasherDefault<IdentityKeyHash>;
-
-impl std::hash::Hasher for IdentityKeyHash {
-	fn write(&mut self, bytes: &[u8]) {
-		self.0 = u64::from_le_bytes((&bytes[0..8]).try_into().unwrap())
-	}
-	fn write_u8(&mut self, _: u8)       { unreachable!() }
-	fn write_u16(&mut self, _: u16)     { unreachable!() }
-	fn write_u32(&mut self, _: u32)     { unreachable!() }
-	fn write_u64(&mut self, _: u64)     { unreachable!() }
-	fn write_usize(&mut self, _: usize) { }
-	fn write_i8(&mut self, _: i8)       { unreachable!() }
-	fn write_i16(&mut self, _: i16)     { unreachable!() }
-	fn write_i32(&mut self, _: i32)     { unreachable!() }
-	fn write_i64(&mut self, _: i64)     { unreachable!() }
-	fn write_isize(&mut self, _: isize) { unreachable!() }
-	fn finish(&self) -> u64 { self.0 }
-}
-
-struct DbInner {
+pub struct DbInner {
 	columns: Vec<Column>,
 	options: Options,
-	metadata: Metadata,
 	shutdown: AtomicBool,
 	log: Log,
 	commit_queue: Mutex<CommitQueue>,
 	commit_queue_full_cv: Condvar,
 	log_worker_wait: WaitCondvar<bool>,
 	commit_worker_wait: Arc<WaitCondvar<bool>>,
-	// Overlay of most recent values int the commit queue. ColumnId -> (Key -> (RecordId, Value)).
-	commit_overlay: RwLock<Vec<HashMap<Key, (u64, Option<Value>), IdentityBuildHasher>>>,
+	// Overlay of most recent values in the commit queue.
+	commit_overlay: RwLock<Vec<CommitOverlay>>,
 	log_queue_wait: WaitCondvar<i64>, // This may underflow occasionally, but is bound for 0 eventually
 	flush_worker_wait: Arc<WaitCondvar<bool>>,
 	cleanup_worker_wait: WaitCondvar<bool>,
@@ -175,16 +153,19 @@ impl DbInner {
 		let log = Log::open(&options)?;
 		let last_enacted = log.replay_record_id().unwrap_or(2) - 1;
 		for c in 0 .. metadata.columns.len() {
-			columns.push(Column::open(c as ColId, &options, &metadata)?);
-			commit_overlay.push(
-				HashMap::with_hasher(std::hash::BuildHasherDefault::<IdentityKeyHash>::default())
-			);
+			let column = Column::open(c as ColId, &options, &metadata)?;
+			commit_overlay.push(CommitOverlay::new());
+			columns.push(column);
 		}
 		log::debug!(target: "parity-db", "Opened db {:?}, metadata={:?}", options, metadata);
+		let mut options = options.clone();
+		if options.salt.is_none() {
+			options.salt = Some(metadata.salt);
+		}
+
 		Ok(DbInner {
 			columns,
 			options: options.clone(),
-			metadata,
 			shutdown: std::sync::atomic::AtomicBool::new(false),
 			log,
 			commit_queue: Mutex::new(Default::default()),
@@ -203,29 +184,65 @@ impl DbInner {
 	}
 
 	fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
-		let key = self.columns[col as usize].hash(key);
-		let overlay = self.commit_overlay.read();
-		// Check commit overlay first
-		if let Some(v) = overlay.get(col as usize).and_then(|o| o.get(&key).map(|(_, v)| v.clone())) {
-			return Ok(v);
+		match &self.columns[col as usize] {
+			Column::Hash(column) => {
+				let key = column.hash(key);
+				let overlay = self.commit_overlay.read();
+				// Check commit overlay first
+				if let Some(v) = overlay.get(col as usize).and_then(|o| o.get(&key)) {
+					return Ok(v);
+				}
+				// Go into tables and log overlay.
+				let log = self.log.overlays();
+				column.get(&key, log)
+			},
+			Column::Tree(column) => {
+				let overlay = self.commit_overlay.read();
+				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
+					return Ok(l.cloned());
+				}
+				// We lock log, if btree structure changed while reading that would be an issue.
+				let log = self.log.overlays().read();
+				column.with_locked(|btree| BTreeTable::get(key, &*log, btree))
+			},
 		}
-		// Go into tables and log overlay.
-		let log = self.log.overlays();
-		self.columns[col as usize].get(&key, log)
 	}
 
 	fn get_size(&self, col: ColId, key: &[u8]) -> Result<Option<u32>> {
-		let key = self.columns[col as usize].hash(key);
-		let overlay = self.commit_overlay.read();
-		// Check commit overlay first
-		if let Some(l) = overlay.get(col as usize).and_then(
-			|o| o.get(&key).map(|(_, v)| v.as_ref().map(|v| v.len() as u32))
-		) {
-			return Ok(l);
+		match &self.columns[col as usize] {
+			Column::Hash(column) => {
+				let key = column.hash(key);
+				let overlay = self.commit_overlay.read();
+				// Check commit overlay first
+				if let Some(l) = overlay.get(col as usize).and_then(|o| o.get_size(&key)) {
+					return Ok(l);
+				}
+				// Go into tables and log overlay.
+				let log = self.log.overlays();
+				column.get_size(&key, log)
+			},
+			Column::Tree(column) => {
+				let overlay = self.commit_overlay.read();
+				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
+					return Ok(l.map(|v| v.len() as u32));
+				}
+				let log = self.log.overlays().read();
+				let l = column.with_locked(|btree| BTreeTable::get(key, &*log, btree))?;
+				Ok(l.map(|v| v.len() as u32))
+			},
 		}
-		// Go into tables and log overlay.
-		let log = self.log.overlays();
-		self.columns[col as usize].get_size(&key, log)
+	}
+
+	pub fn btree_iter(&self, col: ColId) -> Result<BTreeIterator> {
+		match &self.columns[col as usize] {
+			Column::Hash(_column) => {
+				return Err(Error::InvalidConfiguration("Not an indexed column.".to_string()));
+			},
+			Column::Tree(column) => {
+				let log = self.log.overlays();
+				BTreeIterator::new(column, col, log, &self.commit_overlay)
+			},
+		}
 	}
 
 	// Commit simply adds the the data to the queue and to the overlay and
@@ -235,14 +252,23 @@ impl DbInner {
 		I: IntoIterator<Item=(ColId, K, Option<Value>)>,
 		K: AsRef<[u8]>,
 	{
-		let commit: Vec<_> = tx.into_iter().map(
-			|(c, k, v)| (c, self.columns[c as usize].hash(k.as_ref()), v)
-		).collect();
+		let mut commit: CommitChangeSet = Default::default();
+		for (c, k, v) in tx.into_iter() {
+			if self.options.columns[c as usize].btree_index {
+				commit.btree_indexed.entry(c)
+					.or_insert_with(|| BTreeChangeSet::new(c))
+					.push(k.as_ref(), v)
+			} else {
+				commit.indexed.entry(c)
+					.or_insert_with(|| IndexedChangeSet::new(c))
+					.push(k.as_ref(), v, &self.options)
+			}
+		}
 
 		self.commit_raw(commit)
 	}
 
-	fn commit_raw(&self, commit: Vec<(ColId, Key, Option<Value>)>) -> Result<()> {
+	fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
 		{
 			let mut queue = self.commit_queue.lock();
 			if queue.bytes > MAX_COMMIT_QUEUE_BYTES {
@@ -262,13 +288,12 @@ impl DbInner {
 			let record_id = queue.record_id + 1;
 
 			let mut bytes = 0;
-			for (c, k, v) in &commit {
-				bytes += k.len();
-				bytes += v.as_ref().map_or(0, |v|v.len());
-				// Don't add removed ref-counted values to overlay.
-				if !self.metadata.columns[*c as usize].ref_counted || v.is_some() {
-					overlay[*c as usize].insert(*k, (record_id, v.clone()));
-				}
+			for (c, indexed) in &commit.indexed {
+				indexed.copy_to_overlay(&mut overlay[*c as usize], record_id, &mut bytes, &self.options);
+			}
+
+			for (c, iterset) in &commit.btree_indexed {
+				iterset.copy_to_overlay(&mut overlay[*c as usize].btree_indexed, record_id, &mut bytes, &self.options);
 			}
 
 			let commit = Commit {
@@ -323,7 +348,7 @@ impl DbInner {
 			}
 		};
 
-		if let Some(commit) = commit {
+		if let Some(mut commit) = commit {
 			let mut reindex = false;
 			let mut writer = self.log.begin_record();
 			log::debug!(
@@ -334,16 +359,21 @@ impl DbInner {
 				commit.bytes,
 			);
 			let mut ops: u64 = 0;
-			for (c, key, value) in commit.changeset.iter() {
-				match self.columns[*c as usize].write_plan(key, value, &mut writer)? {
-					// Reindex has triggered another reindex.
-					PlanOutcome::NeedReindex => {
-						reindex = true;
-					},
-					_ => {},
-				}
-				ops += 1;
+			for (c, key_values) in commit.changeset.indexed.iter() {
+				key_values.write_plan(&self.columns[*c as usize], &mut writer, &mut ops, &mut reindex)?;
 			}
+
+			for (c, btree) in commit.changeset.btree_indexed.iter_mut() {
+				match &self.columns[*c as usize] {
+					Column::Hash(_column) => {
+						return Err(Error::InvalidConfiguration("Not an indexed column.".to_string()));
+					},
+					Column::Tree(column) => {
+						btree.write_plan(column, &mut writer, &mut ops)?;
+					},
+				}
+			}
+
 			// Collect final changes to value tables
 			for c in self.columns.iter() {
 				c.complete_plan(&mut writer)?;
@@ -362,13 +392,11 @@ impl DbInner {
 			{
 				// Cleanup the commit overlay.
 				let mut overlay = self.commit_overlay.write();
-				for (c, key, _) in commit.changeset.iter() {
-					let overlay = &mut overlay[*c as usize];
-					if let std::collections::hash_map::Entry::Occupied(e) = overlay.entry(*key) {
-						if e.get().0 == commit.id {
-							e.remove_entry();
-						}
-					}
+				for (c, key_values) in commit.changeset.indexed.iter() {
+					key_values.clean_overlay(&mut overlay[*c as usize], commit.id);
+				}
+				for (c, iterset) in commit.changeset.btree_indexed.iter_mut() {
+					iterset.clean_overlay(&mut overlay[*c as usize].btree_indexed, commit.id);
 				}
 			}
 
@@ -401,6 +429,11 @@ impl DbInner {
 		}
 		// Process any pending reindexes
 		for column in self.columns.iter() {
+			let column = if let Column::Hash(c) = column {
+				c
+			} else {
+				continue;
+			};
 			let (drop_index, batch) = column.reindex(&self.log)?;
 			if !batch.is_empty() || drop_index.is_some() {
 				let mut next_reindex = false;
@@ -536,7 +569,6 @@ impl DbInner {
 						LogAction::InsertValue(insertion) => {
 							self.columns[insertion.table.col() as usize]
 								.enact_plan(LogAction::InsertValue(insertion), &mut reader)?;
-
 						},
 						LogAction::DropTable(id) => {
 							log::debug!(
@@ -544,9 +576,14 @@ impl DbInner {
 								"Dropping index {}",
 								id,
 							);
-							self.columns[id.col() as usize].drop_index(id)?;
-							// Check if there's another reindex on the next iteration
-							self.start_reindex(reader.record_id());
+							match &self.columns[id.col() as usize] {
+								Column::Hash(col) => {
+									col.drop_index(id)?;
+									// Check if there's another reindex on the next iteration
+									self.start_reindex(reader.record_id());
+								},
+								Column::Tree(_) => (),
+							}
 						}
 					}
 				}
@@ -710,7 +747,10 @@ impl DbInner {
 	}
 
 	fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
-		self.columns[c as usize].iter_while(&self.log, f)
+		match &self.columns[c as usize] {
+			Column::Hash(column) => column.iter_while(&self.log, f),
+			Column::Tree(_) => unimplemented!(),
+		}
 	}
 }
 
@@ -834,6 +874,10 @@ impl Db {
 		self.inner.get_size(col, key)
 	}
 
+	pub fn iter(&self, col: ColId) -> Result<BTreeIterator> {
+		self.inner.btree_iter(col)
+	}
+
 	pub fn commit<I, K>(&self, tx: I) -> Result<()>
 	where
 		I: IntoIterator<Item=(ColId, K, Option<Value>)>,
@@ -842,7 +886,7 @@ impl Db {
 		self.inner.commit(tx)
 	}
 
-	pub(crate) fn commit_raw(&self, commit: Vec<(ColId, Key, Option<Value>)>) -> Result<()> {
+	pub fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
 		self.inner.commit_raw(commit)
 	}
 
@@ -850,7 +894,7 @@ impl Db {
 		self.inner.columns.len() as u8
 	}
 
-	pub(crate) fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
+	pub fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
 		self.inner.iter_column_while(c, f)
 	}
 
@@ -937,6 +981,140 @@ impl Drop for Db {
 			self.cleanup_thread.take().map(|t| t.join());
 			if let Err(e) = self.inner.kill_logs() {
 				log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
+			}
+		}
+	}
+}
+
+pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<Value>), crate::IdentityBuildHasher>;
+pub type BTreeCommitOverlay = BTreeMap<Vec<u8>, (u64, Option<Value>)>;
+
+pub struct CommitOverlay {
+	indexed: IndexedCommitOverlay,
+	btree_indexed: BTreeCommitOverlay,
+}
+
+impl CommitOverlay {
+	fn new() -> Self {
+		CommitOverlay {
+			indexed: Default::default(),
+			btree_indexed: Default::default(),
+		}
+	}
+
+	#[cfg(test)]
+	fn is_empty(&self) -> bool {
+		self.indexed.is_empty() && self.btree_indexed.is_empty()
+	}
+}
+
+impl CommitOverlay {
+	fn get_ref(&self, key: &[u8]) -> Option<Option<&Value>> {
+		self.indexed.get(key).map(|(_, v)| v.as_ref())
+	}
+
+	fn get(&self, key: &[u8]) -> Option<Option<Value>> {
+		self.get_ref(key).map(|v| v.cloned())
+	}
+
+	fn get_size(&self, key: &[u8]) -> Option<Option<u32>> {
+		self.get_ref(key).map(|res| res.as_ref().map(|b| b.len() as u32))
+	}
+
+	fn btree_get(&self, key: &[u8]) -> Option<Option<&Value>> {
+		self.btree_indexed.get(key).map(|(_, v)| v.as_ref())
+	}
+
+	pub fn btree_next(&self, last_key: &Option<Vec<u8>>, from_seek: bool) -> Option<(Value, Option<Value>)> {
+		if let Some(key) = last_key.as_ref() {
+			let mut iter = self.btree_indexed.range::<Vec<u8>, _>(key..);
+			if let Some((k, (_, v))) = iter.next() {
+				if from_seek || k != key {
+					return Some((k.clone(), v.clone()));
+				}
+			} else {
+				return None;
+			}
+			iter.next().map(|(k, (_, v))| (k.clone(), v.clone()))
+		} else {
+			self.btree_indexed.range::<Vec<u8>, _>(..).next().map(|(k, (_, v))| (k.clone(), v.clone()))
+		}
+	}
+}
+
+#[derive(Default)]
+pub struct CommitChangeSet {
+	pub indexed: HashMap<ColId, IndexedChangeSet>,
+	pub btree_indexed: HashMap<ColId, BTreeChangeSet>,
+}
+
+pub struct IndexedChangeSet {
+	pub col: ColId,
+	pub changes: Vec<(Key, Option<Value>)>,
+}
+
+impl IndexedChangeSet {
+	pub fn new(col: ColId) -> Self {
+		IndexedChangeSet { col, changes: Default::default() }
+	}
+
+	fn push(&mut self, key: &[u8], v: Option<Value>, options: &Options) {
+		let mut k = Key::default();
+		if options.columns[self.col as usize].uniform {
+			k.copy_from_slice(&key[0..32]);
+		} else {
+			let salt = options.salt.as_ref().map(|s| &s[..]).unwrap_or(&[]);
+			k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, salt, &key).as_bytes());
+		}
+		self.changes.push((k, v));
+	}
+
+	fn copy_to_overlay(&self, overlay: &mut CommitOverlay, record_id: u64, bytes: &mut usize, options: &Options) {
+		let ref_counted = options.columns[self.col as usize].ref_counted;
+		for (k, v) in self.changes.iter() {
+			*bytes += k.len();
+			*bytes += v.as_ref().map_or(0, |v|v.len());
+			// Don't add removed ref-counted values to overlay.
+			if !ref_counted || v.is_some() {
+				overlay.indexed.insert(*k, (record_id, v.clone()));
+			}
+		}
+	}
+
+	fn write_plan(
+		&self,
+		column: &Column,
+		writer: &mut crate::log::LogWriter,
+		ops: &mut u64,
+		reindex: &mut bool,
+	) -> Result<()> {
+		let column = match column {
+			Column::Hash(column) => column,
+			Column::Tree(_) => {
+				log::warn!(target: "parity-db", "Skipping unindex commit in indexed column");
+				return Ok(());
+			},
+		};
+		for (key, value) in self.changes.iter() {
+			match column.write_plan(key, value.as_ref().map(|v| v.as_slice()), writer)? {
+				// Reindex has triggered another reindex.
+				PlanOutcome::NeedReindex => {
+					*reindex = true;
+				},
+				_ => {},
+			}
+			*ops += 1;
+		}
+		Ok(())
+	}
+
+	fn clean_overlay(&self, overlay: &mut CommitOverlay, record_id: u64) {
+		use std::collections::hash_map::Entry;
+		for (key, _) in self.changes.iter() {
+			if let Entry::Occupied(e) = overlay.indexed.entry(*key) {
+				if e.get().0 == record_id {
+					e.remove_entry();
+				}
 			}
 		}
 	}
@@ -1042,7 +1220,8 @@ impl EnableCommitPipelineStages {
 	#[cfg(test)]
 	fn check_empty_overlay(&self, db: &Db, col: ColId) -> bool {
 		match self {
-			EnableCommitPipelineStages::LogOverlay => {
+			EnableCommitPipelineStages::DbFile
+			| EnableCommitPipelineStages::LogOverlay => {
 			 if let Some(overlay) = db.inner.commit_overlay.read().get(col as usize) {
 				if !overlay.is_empty() {
 					let mut replayed = 5;
@@ -1051,7 +1230,9 @@ impl EnableCommitPipelineStages {
 							replayed -= 1;
 							// the signal is triggered just before cleaning the overlay, so
 							// we wait a bit.
-							std::thread::sleep(std::time::Duration::from_millis(10));
+							// Warning this is still rather flaky and should be ignored
+							// or removed.
+							std::thread::sleep(std::time::Duration::from_millis(100));
 						} else {
 							return false;
 						}
@@ -1059,11 +1240,6 @@ impl EnableCommitPipelineStages {
 				}
 			 }
 			},
-			EnableCommitPipelineStages::DbFile => {
-				 if let Some(overlay) = db.inner.commit_overlay.read().get(col as usize) {
-					if !overlay.is_empty() { return false; }
-				 }
-			 }
 			_ => (),
 		}
 		true
@@ -1078,6 +1254,7 @@ impl EnableCommitPipelineStages {
 mod tests {
 	use super::{Db, Options, EnableCommitPipelineStages, InternalOptions};
 	use tempfile::tempdir;
+	use std::collections::BTreeMap;
 
 	#[test]
 	fn test_db_open_should_fail() {
@@ -1182,6 +1359,9 @@ mod tests {
 		wait_on.as_ref().map(|w| w.wait_notify());
 		std::mem::drop(db);
 
+		// issue with some file reopening when no delay
+		std::thread::sleep(std::time::Duration::from_millis(100));
+
 		let mut inner_options = InternalOptions::default();
 		inner_options.create = false;
 		inner_options.commit_stages = EnableCommitPipelineStages::CommitOverlay;
@@ -1199,5 +1379,483 @@ mod tests {
 		assert_eq!(db.inner.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
 		assert_eq!(db.inner.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2b".to_vec()));
 		assert_eq!(db.inner.get(col_nb, key3.as_slice()).unwrap(), None);
+	}
+
+	#[test]
+	fn test_indexed_btree_1() {
+		test_indexed_btree_inner(EnableCommitPipelineStages::CommitOverlay, false);
+		test_indexed_btree_inner(EnableCommitPipelineStages::LogOverlay, false);
+		test_indexed_btree_inner(EnableCommitPipelineStages::DbFile, false);
+		test_indexed_btree_inner(EnableCommitPipelineStages::Standard, false);
+		test_indexed_btree_inner(EnableCommitPipelineStages::CommitOverlay, true);
+		test_indexed_btree_inner(EnableCommitPipelineStages::LogOverlay, true);
+		test_indexed_btree_inner(EnableCommitPipelineStages::DbFile, true);
+		test_indexed_btree_inner(EnableCommitPipelineStages::Standard, true);
+	}
+	fn test_indexed_btree_inner(db_test: EnableCommitPipelineStages, long_key: bool) {
+		let tmp = tempdir().unwrap();
+		let col_nb = 0u8;
+		let mut options = Options::with_columns(tmp.path(), 5);
+		options.columns[col_nb as usize].btree_index = true;
+
+		let (key1, key2, key3, key4) = if !long_key {
+			(
+				b"key1".to_vec(),
+				b"key2".to_vec(),
+				b"key3".to_vec(),
+				b"key4".to_vec(),
+			)
+		} else {
+			let key2 = vec![2; 272];
+			let mut key3 = key2.clone();
+			key3[271] = 3;
+			(
+				vec![1; 953],
+				key2,
+				key3,
+				vec![4; 79],
+			)
+		};
+
+		let mut inner_options = InternalOptions::default();
+		inner_options.create = true;
+		inner_options.commit_stages = db_test;
+		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
+		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
+
+		let mut iter = db.iter(col_nb).unwrap();
+		assert_eq!(iter.next().unwrap(), None);
+
+		db.commit(vec![
+			(col_nb, key1.clone(), Some(b"value1".to_vec())),
+		]).unwrap();
+		wait_on.as_ref().map(|w| w.wait_notify());
+
+		assert_eq!(db.get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
+		iter.seek(&[]).unwrap();
+		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.next().unwrap(), None);
+
+		db.commit(vec![
+			(col_nb, key1.clone(), None),
+			(col_nb, key2.clone(), Some(b"value2".to_vec())),
+			(col_nb, key3.clone(), Some(b"value3".to_vec())),
+		]).unwrap();
+		wait_on.as_ref().map(|w| w.wait_notify());
+
+		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
+		assert_eq!(db.get(col_nb, &key2).unwrap(), Some(b"value2".to_vec()));
+		assert_eq!(db.get(col_nb, &key3).unwrap(), Some(b"value3".to_vec()));
+		iter.seek(key2.as_slice()).unwrap();
+		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
+		assert_eq!(iter.next().unwrap(), Some((key3.clone(), b"value3".to_vec())));
+		assert_eq!(iter.next().unwrap(), None);
+
+		db.commit(vec![
+			(col_nb, key2.clone(), Some(b"value2b".to_vec())),
+			(col_nb, key4.clone(), Some(b"value4".to_vec())),
+			(col_nb, key3.clone(), None),
+		]).unwrap();
+		wait_on.as_ref().map(|w| w.wait_notify());
+
+		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
+		assert_eq!(db.get(col_nb, &key3).unwrap(), None);
+		assert_eq!(db.get(col_nb, &key2).unwrap(), Some(b"value2b".to_vec()));
+		assert_eq!(db.get(col_nb, &key4).unwrap(), Some(b"value4".to_vec()));
+		let mut key22 = key2.clone();
+		key22.push(2);
+		iter.seek(key22.as_slice()).unwrap();
+		assert_eq!(iter.next().unwrap(), Some((key4.clone(), b"value4".to_vec())));
+		assert_eq!(iter.next().unwrap(), None);
+	}
+
+	#[test]
+	fn test_indexed_btree_2() {
+		test_indexed_btree_inner_2(EnableCommitPipelineStages::CommitOverlay);
+		test_indexed_btree_inner_2(EnableCommitPipelineStages::LogOverlay);
+	}
+	fn test_indexed_btree_inner_2(db_test: EnableCommitPipelineStages) {
+		let tmp = tempdir().unwrap();
+		let col_nb = 0u8;
+		let mut options = Options::with_columns(tmp.path(), 5);
+		options.columns[col_nb as usize].btree_index = true;
+
+		let key1 = b"key1".to_vec();
+		let key2 = b"key2".to_vec();
+		let key3 = b"key3".to_vec();
+
+		let mut inner_options = InternalOptions::default();
+		inner_options.create = true;
+		inner_options.commit_stages = EnableCommitPipelineStages::DbFile;
+		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
+		let mut iter = db.iter(col_nb).unwrap();
+		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
+		assert_eq!(iter.next().unwrap(), None);
+
+		db.commit(vec![
+			(col_nb, key1.clone(), Some(b"value1".to_vec())),
+		]).unwrap();
+		wait_on.as_ref().map(|w| w.wait_notify());
+		std::mem::drop(db);
+
+		// issue with some file reopening when no delay
+		std::thread::sleep(std::time::Duration::from_millis(100));
+
+		let mut inner_options = InternalOptions::default();
+		inner_options.create = false;
+		inner_options.commit_stages = db_test;
+		inner_options.skip_check_lock = true;
+		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
+
+		let mut iter = db.iter(col_nb).unwrap();
+		assert_eq!(db.get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
+		iter.seek(&[]).unwrap();
+		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.next().unwrap(), None);
+
+		db.commit(vec![
+			(col_nb, key1.clone(), None),
+			(col_nb, key2.clone(), Some(b"value2".to_vec())),
+			(col_nb, key3.clone(), Some(b"value3".to_vec())),
+		]).unwrap();
+		wait_on.as_ref().map(|w| w.wait_notify());
+
+		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
+		assert_eq!(db.get(col_nb, &key2).unwrap(), Some(b"value2".to_vec()));
+		assert_eq!(db.get(col_nb, &key3).unwrap(), Some(b"value3".to_vec()));
+		iter.seek(key2.as_slice()).unwrap();
+		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
+		assert_eq!(iter.next().unwrap(), Some((key3.clone(), b"value3".to_vec())));
+		assert_eq!(iter.next().unwrap(), None);
+	}
+
+	fn test_basic(change_set: &[(Vec<u8>, Option<Vec<u8>>)]) {
+		let tmp = tempdir().unwrap();
+		let col_nb = 0u8;
+		let mut options = Options::with_columns(tmp.path(), 5);
+		options.columns[col_nb as usize].btree_index = true;
+		let mut inner_options = InternalOptions::default();
+		inner_options.create = true;
+		inner_options.commit_stages = EnableCommitPipelineStages::DbFile;
+		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
+
+		let mut iter = db.iter(col_nb).unwrap();
+		assert_eq!(iter.next().unwrap(), None);
+
+		db.commit(change_set.iter().map(|(k, v)| (col_nb, k.clone(), v.clone()))).unwrap();
+		wait_on.as_ref().map(|w| w.wait_notify());
+
+		let state: BTreeMap<Vec<u8>, Option<Vec<u8>>> = change_set.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+		for (key, value) in state.iter() {
+			assert_eq!(&db.get(col_nb, &key).unwrap(), value);
+		}
+	}
+
+	#[test]
+	fn test_random() {
+		for i in 0..100 {
+			test_random_inner(60, 60, i);
+			std::thread::sleep(std::time::Duration::from_millis(30));
+		}
+		for i in 0..50 {
+			test_random_inner(20, 60, i);
+			std::thread::sleep(std::time::Duration::from_millis(30));
+		}
+	}
+	fn test_random_inner(size: usize, key_size: usize, seed: u64) {
+		use rand::{RngCore, SeedableRng};
+		let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
+		let mut data = Vec::<(Vec<u8>, Option<Vec<u8>>)>::new();
+		for i in 0..size {
+			let nb_delete: u32 = rng.next_u32(); // should be out of loop, yet it makes alternance insert/delete in some case.
+			let nb_delete = (nb_delete as usize % size) / 2;
+			let mut key = vec![0u8; key_size];
+			rng.fill_bytes(&mut key[..]);
+			let value = if i > size - nb_delete {
+				let random_key = rng.next_u32();
+				let random_key = (random_key % 4) > 0;
+				if !random_key {
+					key = data[i - size / 2].0.clone();
+				}
+				None
+			} else {
+				Some(key.clone())
+			};
+			let var_keysize = rng.next_u32();
+			let var_keysize = var_keysize as usize % (key_size / 2);
+			key.truncate(key_size - var_keysize);
+			data.push((key, value));
+		}
+		test_basic(&data[..]);
+	}
+
+	#[test]
+	fn test_simple() {
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+		]);
+		test_basic(&[
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key11".to_vec(), Some(b"value31".to_vec())),
+			(b"key12".to_vec(), Some(b"value32".to_vec())),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key51".to_vec(), Some(b"value31".to_vec())),
+			(b"key52".to_vec(), Some(b"value32".to_vec())),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key31".to_vec(), Some(b"value31".to_vec())),
+			(b"key32".to_vec(), Some(b"value32".to_vec())),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value5".to_vec())),
+			(b"key2".to_vec(), Some(b"value3".to_vec())),
+			(b"key3".to_vec(), Some(b"value4".to_vec())),
+			(b"key4".to_vec(), Some(b"value7".to_vec())),
+			(b"key5".to_vec(), Some(b"value2".to_vec())),
+			(b"key6".to_vec(), Some(b"value1".to_vec())),
+			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value5".to_vec())),
+			(b"key2".to_vec(), Some(b"value3".to_vec())),
+			(b"key3".to_vec(), Some(b"value4".to_vec())),
+			(b"key4".to_vec(), Some(b"value7".to_vec())),
+			(b"key5".to_vec(), Some(b"value2".to_vec())),
+			(b"key0".to_vec(), Some(b"value1".to_vec())),
+			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value5".to_vec())),
+			(b"key2".to_vec(), Some(b"value3".to_vec())),
+			(b"key3".to_vec(), Some(b"value4".to_vec())),
+			(b"key4".to_vec(), Some(b"value7".to_vec())),
+			(b"key5".to_vec(), Some(b"value2".to_vec())),
+			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value5".to_vec())),
+			(b"key4".to_vec(), Some(b"value3".to_vec())),
+			(b"key5".to_vec(), Some(b"value4".to_vec())),
+			(b"key6".to_vec(), Some(b"value4".to_vec())),
+			(b"key7".to_vec(), Some(b"value2".to_vec())),
+			(b"key8".to_vec(), Some(b"value1".to_vec())),
+			(b"key5".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value5".to_vec())),
+			(b"key4".to_vec(), Some(b"value3".to_vec())),
+			(b"key5".to_vec(), Some(b"value4".to_vec())),
+			(b"key7".to_vec(), Some(b"value2".to_vec())),
+			(b"key8".to_vec(), Some(b"value1".to_vec())),
+			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key5".to_vec(), None),
+			(b"key3".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key5".to_vec(), None),
+			(b"key3".to_vec(), None),
+			(b"key2".to_vec(), None),
+			(b"key4".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key5".to_vec(), Some(b"value5".to_vec())),
+			(b"key3".to_vec(), Some(b"value3".to_vec())),
+			(b"key4".to_vec(), Some(b"value4".to_vec())),
+			(b"key2".to_vec(), Some(b"value2".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key5".to_vec(), None),
+			(b"key3".to_vec(), None),
+			(b"key2".to_vec(), None),
+			(b"key4".to_vec(), None),
+			(b"key1".to_vec(), None),
+		]);
+		test_basic(&[
+			([5u8; 250].to_vec(), Some(b"value5".to_vec())),
+			([5u8; 200].to_vec(), Some(b"value3".to_vec())),
+			([5u8; 100].to_vec(), Some(b"value4".to_vec())),
+			([5u8; 150].to_vec(), Some(b"value2".to_vec())),
+			([5u8; 101].to_vec(), Some(b"value1".to_vec())),
+			([5u8; 250].to_vec(), None),
+			([5u8; 101].to_vec(), None),
+		]);
+	}
+
+	#[test]
+	fn test_btree_iter() {
+		let col_nb = 0;
+		let mut data_start = Vec::new();
+		for i in 0u8..100 {
+			let mut key = b"key0".to_vec();
+			key[3] = i;
+			let mut value = b"val0".to_vec();
+			value[3] = i;
+			data_start.push((col_nb, key, Some(value)));
+		}
+		let mut data_change = Vec::new();
+		for i in 0u8..100 {
+			let mut key = b"key0".to_vec();
+			if i % 2 == 0 {
+				key[2] = i;
+				let mut value = b"val0".to_vec();
+				value[2] = i;
+				data_change.push((col_nb, key, Some(value)));
+			} else if i % 3 == 0 {
+				key[3] = i;
+				data_change.push((col_nb, key, None));
+			} else {
+				key[3] = i;
+				let mut value = b"val0".to_vec();
+				value[2] = i;
+				data_change.push((col_nb, key, Some(value)));
+			}
+		}
+
+		let start_state: BTreeMap<Vec<u8>, Vec<u8>> = data_start.iter().cloned()
+			.map(|(_c, k, v)| (k, v.unwrap())).collect();
+		let mut end_state: BTreeMap<Vec<u8>, Vec<u8>> = start_state.clone();
+		for (_c, k, v) in data_change.iter() {
+			if let Some(v) = v {
+				end_state.insert(k.clone(), v.clone());
+			} else {
+				end_state.remove(k);
+			}
+		}
+
+		for stage in [
+			EnableCommitPipelineStages::CommitOverlay,
+			EnableCommitPipelineStages::LogOverlay,
+			EnableCommitPipelineStages::DbFile,
+			EnableCommitPipelineStages::Standard,
+		] {
+			for i in 0..10 {
+				test_btree_iter_inner(stage, &data_start, &data_change, &start_state, &end_state, i * 5);
+			}
+			let data_start = vec![
+				(0, b"key1".to_vec(), Some(b"val1".to_vec())),
+				(0, b"key3".to_vec(), Some(b"val3".to_vec())),
+			];
+			let data_change = vec![
+				(0, b"key2".to_vec(), Some(b"val2".to_vec())),
+			];
+			let start_state: BTreeMap<Vec<u8>, Vec<u8>> = data_start.iter().cloned()
+				.map(|(_c, k, v)| (k, v.unwrap())).collect();
+			let mut end_state: BTreeMap<Vec<u8>, Vec<u8>> = start_state.clone();
+			for (_c, k, v) in data_change.iter() {
+				if let Some(v) = v {
+					end_state.insert(k.clone(), v.clone());
+				} else {
+					end_state.remove(k);
+				}
+			}
+			test_btree_iter_inner(stage, &data_start, &data_change, &start_state, &end_state, 1);
+		}
+	}
+	fn test_btree_iter_inner(
+		db_test: EnableCommitPipelineStages,
+		data_start: &Vec<(u8, Vec<u8>, Option<Vec<u8>>)>,
+		data_change: &Vec<(u8, Vec<u8>, Option<Vec<u8>>)>,
+		start_state: &BTreeMap<Vec<u8>, Vec<u8>>,
+		end_state: &BTreeMap<Vec<u8>, Vec<u8>>,
+		commit_at: usize,
+	) {
+		let tmp = tempdir().unwrap();
+		let mut options = Options::with_columns(tmp.path(), 5);
+		let col_nb = 0;
+		options.columns[col_nb as usize].btree_index = true;
+		let mut inner_options = InternalOptions::default();
+		inner_options.create = true;
+		inner_options.commit_stages = db_test;
+		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
+
+		db.commit(data_start.iter().cloned()).unwrap();
+		wait_on.as_ref().map(|w| w.wait_notify());
+
+		let mut iter = db.iter(col_nb).unwrap();
+		let mut iter_state = start_state.iter();
+		let mut last_key = Vec::new();
+		for _ in 0..commit_at {
+			let next = iter.next().unwrap();
+			if let Some((k, _)) = next.as_ref() {
+				last_key = k.clone();
+			}
+			assert_eq!(iter_state.next(), next.as_ref().map(|(k, v)| (k, v)));
+		}
+
+		db.commit(data_change.iter().cloned()).unwrap();
+		wait_on.as_ref().map(|w| w.wait_notify());
+
+		let mut iter_state = end_state.range(last_key.clone()..);
+		for _ in commit_at..100 {
+			let mut state_next = iter_state.next();
+			if let Some((k, _v)) = state_next.as_ref() {
+				if *k == &last_key {
+					state_next = iter_state.next();
+				}
+			}
+			assert_eq!(state_next, iter.next().unwrap().as_ref().map(|(k, v)| (k, v)));
+		}
 	}
 }

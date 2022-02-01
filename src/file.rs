@@ -23,13 +23,13 @@ use crate::table::TableId;
 
 #[cfg(target_os = "linux")]
 fn disable_read_ahead(file: &std::fs::File) -> Result<()> {
-    use std::os::unix::io::AsRawFd;
-    let err = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_RANDOM) };
-    if err != 0 {
-        Err(std::io::Error::from_raw_os_error(err))?
-    } else {
-        Ok(())
-    }
+	use std::os::unix::io::AsRawFd;
+	let err = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_RANDOM) };
+	if err != 0 {
+		Err(std::io::Error::from_raw_os_error(err))?
+	} else {
+		Ok(())
+	}
 }
 
 #[cfg(target_os = "macos")]
@@ -156,7 +156,7 @@ impl TableFile {
 		Ok(())
 	}
 
-	pub(crate) fn flush(&self) -> Result<()> {
+	pub fn flush(&self) -> Result<()> {
 		if let Ok(true) = self.dirty.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed) {
 			if let Some(file) = self.file.read().as_ref() {
 				fsync(&file)?;

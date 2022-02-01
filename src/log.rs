@@ -1,5 +1,4 @@
-// Copyright 2015-2020 Parity Technologies (UK) Ltd.
-// This file is part of Parity.
+// Copyright 2015-2020 Parity Technologies (UK) Ltd. This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -24,9 +23,15 @@ use crate::{
 	table::TableId as ValueTableId,
 	index::{TableId as IndexTableId, Chunk as IndexChunk, ENTRY_BYTES},
 	options::Options,
+	column::ColId,
 };
 
 const MAX_LOG_POOL_SIZE: usize = 16;
+const BEGIN_RECORD: u8 = 1;
+const INSERT_INDEX: u8 = 2;
+const INSERT_VALUE: u8 = 3;
+const END_RECORD: u8 = 4;
+const DROP_TABLE: u8 = 5;
 
 pub struct InsertIndexAction {
 	pub table: IndexTableId,
@@ -55,15 +60,32 @@ pub trait LogQuery {
 pub struct LogOverlays {
 	index: HashMap<IndexTableId, IndexLogOverlay>,
 	value: HashMap<ValueTableId, ValueLogOverlay>,
+	last_record_id: HashMap<ColId, u64>,
+}
+
+impl LogOverlays {
+	pub fn last_record_id(&self, col: ColId) -> u64 {
+		self.last_record_id.get(&col).cloned().unwrap_or(u64::MAX)
+	}
 }
 
 impl LogQuery for RwLock<LogOverlays> {
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R> (&self, table: IndexTableId, index: u64, f: F) -> Option<R> {
-		self.read().index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, _mask, data)| f(data)))
+		self.read().with_index(table, index, f)
 	}
 
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut[u8]) -> bool {
-		let s = self.read();
+		self.read().value(table, index, dest)
+	}
+}
+
+impl LogQuery for LogOverlays {
+	fn with_index<R, F: FnOnce(&IndexChunk) -> R> (&self, table: IndexTableId, index: u64, f: F) -> Option<R> {
+		self.index.get(&table).and_then(|o| o.map.get(&index).map(|(_id, _mask, data)| f(data)))
+	}
+
+	fn value(&self, table: ValueTableId, index: u64, dest: &mut[u8]) -> bool {
+		let s = self;
 		if let Some(d) = s.value.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data)) {
 			let len = dest.len().min(d.len());
 			dest[0..len].copy_from_slice(&d[0..len]);
@@ -71,7 +93,6 @@ impl LogQuery for RwLock<LogOverlays> {
 		} else {
 			false
 		}
-
 	}
 }
 
@@ -131,13 +152,13 @@ impl<'a> LogReader<'a> {
 		let mut buf = [0u8; 8];
 		read_buf(1, &mut buf)?;
 		match buf[0] {
-			1 =>  { // BeginRecord
+			BEGIN_RECORD =>  {
 				read_buf(8, &mut buf)?;
 				let record_id = u64::from_le_bytes(buf);
 				self.record_id = record_id;
 				Ok(LogAction::BeginRecord)
 			},
-			2 => { // InsertIndex
+			INSERT_INDEX => {
 				read_buf(2, &mut buf)?;
 				let table = IndexTableId::from_u16(u16::from_le_bytes(buf[0..2].try_into().unwrap()));
 				read_buf(8, &mut buf)?;
@@ -145,7 +166,7 @@ impl<'a> LogReader<'a> {
 				self.cleared.index.push((table, index));
 				Ok(LogAction::InsertIndex(InsertIndexAction { table, index }))
 			},
-			3 => { // InsertValue
+			INSERT_VALUE => {
 				read_buf(2, &mut buf)?;
 				let table = ValueTableId::from_u16(u16::from_le_bytes(buf[0..2].try_into().unwrap()));
 				read_buf(8, &mut buf)?;
@@ -153,7 +174,7 @@ impl<'a> LogReader<'a> {
 				self.cleared.values.push((table, index));
 				Ok(LogAction::InsertValue(InsertValueAction { table, index }))
 			},
-			4 => {  // EndRecord
+			END_RECORD => {
 				self.file.read_exact(&mut buf[0..4])?;
 				self.read_bytes += 4;
 				if self.validate {
@@ -172,14 +193,14 @@ impl<'a> LogReader<'a> {
 				}
 				Ok(LogAction::EndRecord)
 			},
-			5 => { // DropTable
+			DROP_TABLE => {
 				read_buf(2, &mut buf)?;
 				let table = IndexTableId::from_u16(u16::from_le_bytes(buf[0..2].try_into().unwrap()));
 				Ok(LogAction::DropTable(table))
-			}
+			},
 			_ => {
 				Err(Error::Corruption("Bad log entry type".into()))
-			}
+			},
 		}
 	}
 
@@ -220,6 +241,10 @@ impl LogChange {
 		}
 	}
 
+	pub fn local_values_changes(&self, id: ValueTableId) -> Option<&ValueLogOverlay> {
+		self.local_values.get(&id)
+	}
+
 	pub fn to_file(self, file: &mut std::io::BufWriter<std::fs::File>)
 		-> Result<(HashMap<IndexTableId, IndexLogOverlay>, HashMap<ValueTableId, ValueLogOverlay>, u64)>
 	{
@@ -233,12 +258,12 @@ impl LogChange {
 			Ok(())
 		};
 
-		write(&1u8.to_le_bytes())?; // Begin record
+		write(&BEGIN_RECORD.to_le_bytes())?;
 		write(&self.record_id.to_le_bytes())?;
 
 		for (id, overlay) in self.local_index.iter() {
 			for (index, (_, modified_entries_mask, chunk)) in overlay.map.iter() {
-				write(&2u8.to_le_bytes().as_ref())?;
+				write(&INSERT_INDEX.to_le_bytes().as_ref())?;
 				write(&id.as_u16().to_le_bytes())?;
 				write(&index.to_le_bytes())?;
 				write(&modified_entries_mask.to_le_bytes())?;
@@ -252,7 +277,7 @@ impl LogChange {
 		}
 		for (id, overlay) in self.local_values.iter() {
 			for (index, (_, value)) in overlay.map.iter() {
-				write(&3u8.to_le_bytes().as_ref())?;
+				write(&INSERT_VALUE.to_le_bytes().as_ref())?;
 				write(&id.as_u16().to_le_bytes())?;
 				write(&index.to_le_bytes())?;
 				write(value)?;
@@ -260,11 +285,10 @@ impl LogChange {
 		}
 		for id in self.dropped_tables.iter() {
 			log::debug!(target: "parity-db", "Finalizing drop {}", id);
-			write(&5u8.to_le_bytes().as_ref())?;
+			write(&DROP_TABLE.to_le_bytes().as_ref())?;
 			write(&id.as_u16().to_le_bytes())?;
 		}
-
-		write(&4u8.to_le_bytes())?; // End record
+		write(&END_RECORD.to_le_bytes())?;
 		let checksum: u32 = crc32.finalize();
 		file.write(&checksum.to_le_bytes())?;
 		bytes += 4;
@@ -279,7 +303,7 @@ pub struct LogWriter<'a> {
 }
 
 impl<'a> LogWriter<'a> {
-	fn new(
+	pub fn new(
 		overlays: &'a RwLock<LogOverlays>,
 		record_id: u64,
 	) -> LogWriter<'a> {
@@ -333,7 +357,6 @@ impl<'a> LogQuery for LogWriter<'a> {
 		} else {
 			self.overlays.value(table, index, dest)
 		}
-
 	}
 }
 
@@ -449,7 +472,7 @@ impl Log {
 			dirty: AtomicBool::new(true),
 			sync: options.sync_wal,
 			replay_queue: RwLock::new(logs),
-			cleanup_queue: RwLock::new(VecDeque::new()),
+			cleanup_queue: RwLock::new(Default::default()),
 			log_pool: RwLock::new(Default::default()),
 			path,
 		})
@@ -505,6 +528,7 @@ impl Log {
 		let mut overlays = self.overlays.write();
 		overlays.index.clear();
 		overlays.value.clear();
+		overlays.last_record_id.clear();
 		*self.reading_state.lock() = ReadingState::Idle;
 		self.dirty.store(false, Ordering::Relaxed);
 		Ok(())
@@ -553,8 +577,10 @@ impl Log {
 		let mut total_value = 0;
 		for (id, overlay) in values.into_iter() {
 			total_value += overlay.map.len();
+			overlays.last_record_id.insert(id.col(), record_id);
 			overlays.value.entry(id).or_default().map.extend(overlay.map.into_iter());
 		}
+
 		log::debug!(
 			target: "parity-db",
 			"Finalizing log record {} ({} index, {} value)",

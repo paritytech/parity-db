@@ -64,8 +64,9 @@ pub struct ColumnOptions {
 	pub compression: CompressionType,
 	/// Minimal value size threshold to attempt compressing a value.
 	pub compression_treshold: u32,
+	/// Column is using a btree indexing.
+	pub btree_index: bool,
 }
-
 
 /// Database metadata.
 #[derive(Clone, Debug)]
@@ -80,18 +81,19 @@ pub struct Metadata {
 
 impl ColumnOptions {
 	fn as_string(&self) -> String {
-		format!("preimage: {}, uniform: {}, refc: {}, compression: {}, sizes: [{}]",
+		format!("preimage: {}, uniform: {}, refc: {}, compression: {}, ordered: {}, sizes: [{}]",
 			self.preimage,
 			self.uniform,
 			self.ref_counted,
 			self.compression as u8,
+			self.btree_index,
 			self.sizes.iter().fold(String::new(), |mut r, s| {
 				if !r.is_empty() {
 					r.push_str(", ");
 				}
 				r.push_str(&s.to_string());
 				r
-			})
+			}),
 		)
 	}
 
@@ -103,6 +105,10 @@ impl ColumnOptions {
 			if *size >= crate::table::COMPRESSED_MASK {
 				return false;
 			}
+		}
+		if self.btree_index && self.preimage {
+			log::error!(target: "parity-db", "Using `preimage` option on an indexed column is invalid");
+			return false;
 		}
 		true
 	}
@@ -123,6 +129,7 @@ impl ColumnOptions {
 		let uniform = vals.get("uniform")?.parse().ok()?;
 		let ref_counted = vals.get("refc")?.parse().ok()?;
 		let compression: u8 = vals.get("compression").and_then(|c| c.parse().ok()).unwrap_or(0);
+		let btree_index = vals.get("ordered").and_then(|c| c.parse().ok()).unwrap_or(false);
 
 		Some(ColumnOptions {
 			preimage,
@@ -131,6 +138,7 @@ impl ColumnOptions {
 			compression: compression.into(),
 			sizes,
 			compression_treshold: ColumnOptions::default().compression_treshold,
+			btree_index,
 		})
 	}
 }
@@ -157,6 +165,7 @@ impl Default for ColumnOptions {
 			compression: CompressionType::NoCompression,
 			compression_treshold: 4096,
 			sizes,
+			btree_index: false,
 		}
 	}
 }

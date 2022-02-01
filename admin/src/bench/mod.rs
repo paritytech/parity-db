@@ -105,10 +105,14 @@ pub struct Stress {
 	/// Enable compression.
 	#[structopt(long)]
 	pub compress: bool,
+
+	/// Use btree index.
+	#[structopt(long)]
+	pub ordered: bool,
 }
 
 #[derive(Clone)]
-pub struct Args { // TODO remove (rendundant with Stress)
+pub struct Args {
 	pub readers: usize,
 	pub commits: usize,
 	pub writers: usize,
@@ -117,6 +121,7 @@ pub struct Args { // TODO remove (rendundant with Stress)
 	pub append: bool,
 	pub no_check: bool,
 	pub compress: bool,
+	pub ordered: bool,
 }
 
 impl Stress {
@@ -130,6 +135,7 @@ impl Stress {
 			archive: self.archive,
 			no_check: self.no_check,
 			compress: self.compress,
+			ordered: self.ordered,
 		}
 	}
 }
@@ -189,7 +195,7 @@ fn informant(shutdown: Arc<AtomicBool>, total: usize, start: usize) {
 
 fn writer<D: BenchDb>(db: Arc<D>, args: Arc<Args>, pool: Arc<SizePool>, shutdown: Arc<AtomicBool>, start_commit: usize) {
 	// Note that multiple worker will run on same range concurrently.
-	let mut key = start_commit as u64 * COMMIT_SIZE as u64;
+	let mut key = start_commit as u64 * COMMIT_SIZE as u64 + args.seed.unwrap_or(0);
 	let commit_size = COMMIT_SIZE;
 	let mut commit = Vec::with_capacity(commit_size);
 
@@ -314,7 +320,7 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 		let prune_window: u64 = COMMIT_PRUNE_WINDOW as u64;
 		let start = if commits > prune_window && nc < commits - prune_window {
 			let end = nc * COMMIT_SIZE as u64 + pruned_per_commit;
-			for key in (nc * COMMIT_SIZE as u64) .. end {
+			for key in (nc * COMMIT_SIZE as u64) + args.seed.unwrap_or(0) .. end {
 				let k = pool.key(key);
 				let db_val = db.get(&k);
 				queries += 1;
@@ -322,7 +328,7 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 			}
 			end
 		} else {
-			nc * COMMIT_SIZE as u64
+			nc * COMMIT_SIZE as u64 + args.seed.unwrap_or(0)
 		};
 		for key in start .. (nc + 1) * (COMMIT_SIZE as u64) {
 			let k = pool.key(key);
