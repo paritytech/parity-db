@@ -87,10 +87,13 @@ impl TableFile {
 		let file = if std::fs::metadata(&filepath).is_ok() {
 			let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(filepath.as_path())?;
 			disable_read_ahead(&file)?;
-			if file.metadata()?.len() == 0 {
+			let len = file.metadata()?.len();
+			if len == 0 {
 				// Preallocate.
 				capacity += GROW_SIZE_BYTES / entry_size as u64;
 				file.set_len(capacity * entry_size as u64)?;
+			} else {
+				capacity = len / entry_size as u64;
 			}
 			Some(file)
 		} else {
