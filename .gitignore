@@ -11,6 +11,7 @@ Cargo.lock
 
 .DS_Store
 .cargo/
+.vscode/
 *.log
 test_db/
 test_db_stress/
