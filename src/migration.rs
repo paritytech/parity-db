@@ -24,9 +24,7 @@ const COMMIT_SIZE: usize = 10240;
 const OVERWRITE_TMP_PATH: &str = "to_revert_overwrite";
 
 pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Vec<u8>) -> Result<()> {
-	let mut metadata_path: std::path::PathBuf = from.into();
-	metadata_path.push("metadata");
-	let source_meta = Options::load_metadata(&metadata_path)?
+	let source_meta = Options::load_metadata(from)?
 		.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;
 
 	let mut to_migrate = source_meta.columns_to_migrate();
@@ -120,7 +118,7 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Ve
 			move_column(c, &from, &tmp_dir)?;
 			move_column(c, &to.path, from)?;
 			source_options.columns[c as usize] = to.columns[c as usize].clone();
-			source_options.write_metadata(&metadata_path, &to.salt.expect("Migrate requires salt"))
+			source_options.write_metadata(from, &to.salt.expect("Migrate requires salt"))
 				.map_err(|e| Error::Migration(format!("Error {:?}\nFail updating metadata of column {:?} \
 							in source, please restore manually before restarting.", e, c)))?;
 			remove_tmp_dir()?;

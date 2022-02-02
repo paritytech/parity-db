@@ -174,7 +174,7 @@ impl BTreeTable {
 			id,
 			tables: RwLock::new(values),
 			ref_counted: options.ref_counted,
-			compression: Compress::new(options.compression, options.compression_treshold),
+			compression: Compress::new(options.compression, options.compression_threshold),
 		})
 	}
 

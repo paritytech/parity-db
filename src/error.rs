@@ -30,6 +30,7 @@ pub enum Error {
 	Locked(std::io::Error),
 	Migration(String),
 	Compression,
+	DatabaseNotFound,
 }
 
 impl fmt::Display for Error {
@@ -44,6 +45,7 @@ impl fmt::Display for Error {
 			Error::Locked(e) => write!(f, "Database file is in use. ({})", e),
 			Error::Migration(e) => write!(f, "Migration error: {}", e),
 			Error::Compression => write!(f, "Compression error"),
+			Error::DatabaseNotFound => write!(f, "Database does not exist"),
 		}
     }
 }
