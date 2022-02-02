@@ -17,6 +17,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
+use crate::table::SIZE_TIERS;
 use crate::{
 	Key,
 	table::key::{TableKeyQuery, TableKey},
@@ -37,6 +38,29 @@ const MAX_REBALANCE_BATCH: usize = 8192;
 
 pub type ColId = u8;
 pub type Salt = [u8; 32];
+
+// The size tiers follow log distribution. Generated with the following code:
+//
+//{
+//	let mut r = [0u16; SIZE_TIERS - 1];
+//	let  start = MIN_ENTRY_SIZE as f64;
+//	let  end = MAX_ENTRY_SIZE as f64;
+//	let  n_slices = SIZE_TIERS - 1;
+//	let factor = ((end.ln() - start.ln()) / (n_slices - 1) as f64).exp();
+//
+//	let mut s = start;
+//	let mut i = 0;
+//	while i <  n_slices {
+//		r[i] = s.round() as u16;
+//		s = s * factor;
+//		i += 1;
+//	}
+//	r
+//};
+
+const SIZES: [u16; SIZE_TIERS - 1] = 
+	[32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 50, 51, 52, 54, 55, 57, 58, 60, 62, 63, 65, 67, 69, 71, 73, 75, 77, 79, 81, 83, 85, 88, 90, 93, 95, 98, 101, 103, 106, 109, 112, 115, 119, 122, 125, 129, 132, 136, 140, 144, 148, 152, 156, 160, 165, 169, 174, 179, 183, 189, 194, 199, 205, 210, 216, 222, 228, 235, 241, 248, 255, 262, 269, 276, 284, 292, 300, 308, 317, 325, 334, 344, 353, 363, 373, 383, 394, 405, 416, 428, 439, 452, 464, 477, 490, 504, 518, 532, 547, 562, 577, 593, 610, 627, 644, 662, 680, 699, 718, 738, 758, 779, 801, 823, 846, 869, 893, 918, 943, 969, 996, 1024, 1052, 1081, 1111, 1142, 1174, 1206, 1239, 1274, 1309, 1345, 1382, 1421, 1460, 1500, 1542, 1584, 1628, 1673, 1720, 1767, 1816, 1866, 1918, 1971, 2025, 2082, 2139, 2198, 2259, 2322, 2386, 2452, 2520, 2589, 2661, 2735, 2810, 2888, 2968, 3050, 3134, 3221, 3310, 3402, 3496, 3593, 3692, 3794, 3899, 4007, 4118, 4232, 4349, 4469, 4593, 4720, 4850, 4984, 5122, 5264, 5410, 5559, 5713, 5871, 6034, 6200, 6372, 6548, 6729, 6916, 7107, 7303, 7506, 7713, 7927, 8146, 8371, 8603, 8841, 9085, 9337, 9595, 9860, 10133, 10413, 10702, 10998, 11302, 11614, 11936, 12266, 12605, 12954, 13312, 13681, 14059, 14448, 14848, 15258, 15681, 16114, 16560, 17018, 17489, 17973, 18470, 18981, 19506, 20046, 20600, 21170, 21756, 22358, 22976, 23612, 24265, 24936, 25626, 26335, 27064, 27812, 28582, 29372, 30185, 31020, 31878, 32760]
+;
 
 struct Tables {
 	index: IndexTable,
@@ -162,7 +186,7 @@ impl Column {
 	}
 
 	pub fn compress(compression: &Compress, key: &TableKey, value: &[u8], tables: &Vec<ValueTable>) -> (Option<Vec<u8>>, usize) {
-		let (len, result) = if value.len() > compression.treshold as usize {
+		let (len, result) = if value.len() > compression.threshold as usize {
 			let cvalue = compression.compress(value);
 			if cvalue.len() < value.len() {
 				(cvalue.len(), Some(cvalue))
@@ -189,7 +213,7 @@ impl Column {
 		let arc_path = std::sync::Arc::new(path.clone());
 		let column_options = &metadata.columns[col as usize];
 		let db_version = metadata.version;
-		let value = (0.. column_options.sizes.len() + 1)
+		let value = (0 .. SIZE_TIERS)
 			.map(|i| Self::open_table(arc_path.clone(), col, i as u8, column_options, db_version)).collect::<Result<_>>()?;
 
 		if column_options.btree_index {
@@ -207,7 +231,7 @@ impl Column {
 		db_version: u32,
 	) -> Result<ValueTable> {
 		let id = ValueTableId::new(col, tier);
-		let entry_size = options.sizes.get(tier as usize).cloned();
+		let entry_size = SIZES.get(tier as usize).cloned();
 		ValueTable::open(path, id, entry_size, options, db_version)
 	}
 }
@@ -233,7 +257,7 @@ impl HashColumn {
 			collect_stats,
 			salt: metadata.salt.clone(),
 			stats,
-			compression: Compress::new(options.compression, options.compression_treshold),
+			compression: Compress::new(options.compression, options.compression_threshold),
 			db_version,
 		})
 	}

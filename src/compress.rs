@@ -32,21 +32,21 @@ pub enum CompressionType {
 /// Compression implementation.
 pub struct Compress {
 	inner: Compressor,
-	pub treshold: u32,
+	pub threshold: u32,
 }
 
 impl Compress {
-	pub fn new(kind: CompressionType, treshold: u32) -> Self {
+	pub fn new(kind: CompressionType, threshold: u32) -> Self {
 		Compress {
 			inner: kind.into(),
-			treshold,
+			threshold,
 		}
 	}
 }
 
 pub const NO_COMPRESSION: Compress = Compress {
 	inner: Compressor::NoCompression(NoCompression),
-	treshold: u32::MAX,
+	threshold: u32::MAX,
 };
 
 enum Compressor {
@@ -61,7 +61,7 @@ impl From<u8> for CompressionType {
 			a if a == CompressionType::NoCompression as u8 => CompressionType::NoCompression,
 			a if a == CompressionType::Lz4 as u8 => CompressionType::Lz4,
 			a if a == CompressionType::Snappy as u8 => CompressionType::Snappy,
-			_ => panic!("Unkwown compression."),
+			_ => panic!("Unknown compression."),
 		}
 	}
 }

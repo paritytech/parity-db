@@ -39,9 +39,7 @@ pub fn run() -> Result<(), String> {
 	let db_path = cli.shared().base_path.clone()
 		.unwrap_or_else(|| std::env::current_dir().expect("Cannot resolve current dir"));
 	let nb_column = cli.shared().columns.unwrap_or(1);
-	let mut metadata_path = db_path.clone();
-	metadata_path.push("metadata");
-	let mut options = if let Some(metadata) = parity_db::Options::load_metadata(&metadata_path)
+	let mut options = if let Some(metadata) = parity_db::Options::load_metadata(&db_path)
 		.map_err(|e| format!("Error resolving metas: {:?}", e))? {
 		let mut options = parity_db::Options::with_columns(db_path.as_path(), 0);
 		options.columns = metadata.columns;
@@ -73,7 +71,7 @@ pub fn run() -> Result<(), String> {
 		},
 		SubCommand::Migrate(args) => {
 			use parity_db::Options;
-			let dest_meta = Options::load_metadata(&args.dest_meta)
+			let dest_meta = Options::load_metadata_file(&args.dest_meta)
 				.map_err(|e| format!("Error loading dest metadata: {:?}", e))?
 				.ok_or_else(|| format!("Error opening dest metadata file"))?;
 

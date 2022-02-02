@@ -16,7 +16,7 @@
 
 use std::io::Write;
 use std::collections::HashMap;
-use std::path::{PathBuf, Path};
+use std::path::Path;
 use crate::error::{Error, Result};
 use crate::column::Salt;
 use crate::compress::CompressionType;
@@ -56,14 +56,12 @@ pub struct ColumnOptions {
 	/// the first 32 bytes have uniform distribution.
 	/// Allows for skipping additional key hashing.
 	pub uniform: bool,
-	/// Value size tiers.
-	pub sizes: Vec<u16>,
 	/// Use reference counting for values.
 	pub ref_counted: bool,
 	/// Compression to use for this column.
 	pub compression: CompressionType,
 	/// Minimal value size threshold to attempt compressing a value.
-	pub compression_treshold: u32,
+	pub compression_threshold: u32,
 	/// Column is using a btree indexing.
 	pub btree_index: bool,
 }
@@ -81,33 +79,18 @@ pub struct Metadata {
 
 impl ColumnOptions {
 	fn as_string(&self) -> String {
-		format!("preimage: {}, uniform: {}, refc: {}, compression: {}, ordered: {}, sizes: [{}]",
+		format!("preimage: {}, uniform: {}, refc: {}, compression: {}, ordered: {}",
 			self.preimage,
 			self.uniform,
 			self.ref_counted,
 			self.compression as u8,
 			self.btree_index,
-			self.sizes.iter().fold(String::new(), |mut r, s| {
-				if !r.is_empty() {
-					r.push_str(", ");
-				}
-				r.push_str(&s.to_string());
-				r
-			}),
 		)
 	}
 
 	pub fn is_valid(&self) -> bool {
-		if self.sizes.len() > crate::table::SIZE_TIERS - 1 {
-			return false;
-		}
-		for size in &self.sizes {
-			if *size >= crate::table::COMPRESSED_MASK {
-				return false;
-			}
-		}
 		if self.btree_index && self.preimage {
-			log::error!(target: "parity-db", "Using `preimage` option on an indexed column is invalid");
+			log::error!(target: "parity-db", "Using `preimage` option on an ordered column is not supported");
 			return false;
 		}
 		true
@@ -116,9 +99,6 @@ impl ColumnOptions {
 	fn from_string(s: &str) -> Option<Self> {
 		let mut split = s.split("sizes: ");
 		let vals = split.next()?;
-		let sizes = split.next()?;
-		let sizes = &sizes[1..sizes.len() - 1];
-		let sizes: Vec<u16> = sizes.split(",").filter_map(|v| v.trim().parse().ok()).collect();
 
 		let vals: HashMap<&str, &str> = vals.split(", ").filter_map(|s| {
 			let mut pair = s.split(": ");
@@ -136,8 +116,7 @@ impl ColumnOptions {
 			uniform,
 			ref_counted,
 			compression: compression.into(),
-			sizes,
-			compression_treshold: ColumnOptions::default().compression_treshold,
+			compression_threshold: ColumnOptions::default().compression_threshold,
 			btree_index,
 		})
 	}
@@ -145,26 +124,12 @@ impl ColumnOptions {
 
 impl Default for ColumnOptions {
 	fn default() -> ColumnOptions {
-		let  start = crate::table::MIN_ENTRY_SIZE as f64;
-		let  end = crate::table::MAX_ENTRY_SIZE as f64;
-		let  n_slices = crate::table::SIZE_TIERS - 1;
-
-		let factor = ((end.ln() - start.ln()) / (n_slices - 1) as f64).exp();
-
-		let mut sizes = Vec::with_capacity(n_slices);
-		let mut s = start;
-		for _ in 0 .. n_slices {
-			sizes.push(s.round() as u16);
-			s = s * factor;
-		}
-
 		ColumnOptions {
 			preimage: false,
 			uniform: false,
 			ref_counted: false,
 			compression: CompressionType::NoCompression,
-			compression_treshold: 4096,
-			sizes,
+			compression_threshold: 4096,
 			btree_index: false,
 		}
 	}
@@ -183,6 +148,12 @@ impl Options {
 	}
 
 	pub fn write_metadata(&self, path: &std::path::Path, salt: &Salt) -> Result<()> {
+		let mut path = path.to_path_buf();
+		path.push("metadata");
+		self.write_metadata_file(&path, salt)
+	}
+
+	pub fn write_metadata_file(&self, path: &std::path::Path, salt: &Salt) -> Result<()> {
 		let mut file = std::fs::File::create(path)?;
 		writeln!(file, "version={}", CURRENT_VERSION)?;
 		writeln!(file, "salt={}", hex::encode(salt))?;
@@ -193,9 +164,7 @@ impl Options {
 	}
 
 	pub fn load_and_validate_metadata(&self, create: bool) -> Result<Metadata> {
-		let mut path: PathBuf = self.path.clone();
-		path.push("metadata");
-		let meta = Self::load_metadata(&path)?;
+		let meta = Self::load_metadata(&self.path)?;
 
 		if let Some(meta) = meta {
 			if meta.columns.len() != self.columns.len() {
@@ -212,7 +181,7 @@ impl Options {
 			Ok(meta)
 		} else if create {
 			let s: Salt = self.salt.unwrap_or(rand::thread_rng().gen());
-			self.write_metadata(&path, &s)?;
+			self.write_metadata(&self.path, &s)?;
 			Ok(Metadata {
 				version: CURRENT_VERSION,
 				columns: self.columns.clone(),
@@ -224,6 +193,12 @@ impl Options {
 	}
 
 	pub fn load_metadata(path: &Path) -> Result<Option<Metadata>> {
+		let mut path = path.to_path_buf();
+		path.push("metadata");
+		Self::load_metadata_file(&path)
+	}
+
+	pub fn load_metadata_file(path: &Path) -> Result<Option<Metadata>> {
 		use std::io::BufRead;
 		use std::str::FromStr;
 
