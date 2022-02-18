@@ -1855,7 +1855,8 @@ mod tests {
 					state_next = iter_state.next();
 				}
 			}
-			assert_eq!(state_next, iter.next().unwrap().as_ref().map(|(k, v)| (k, v)));
+			let iter_next = iter.next().unwrap();
+			assert_eq!(state_next, iter_next.as_ref().map(|(k, v)| (k, v)));
 		}
 	}
 }

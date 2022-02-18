@@ -426,13 +426,9 @@ impl Node {
 		Ok(())
 	}
 
-	pub fn need_rebalance(&mut self) -> bool {
-		let mut rebalance = false;
+	fn need_rebalance(&mut self) -> bool {
 		let middle = ORDER / 2;
-		if !self.has_separator(middle - 1) {
-			rebalance = true;
-		}
-		rebalance
+		!self.has_separator(middle - 1)
 	}
 
 	pub fn need_remove_root(

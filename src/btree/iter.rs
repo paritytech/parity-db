@@ -30,7 +30,6 @@ use crate::error::Result;
 use parking_lot::RwLock;
 use crate::btree::BTreeTable;
 
-
 pub struct BTreeIterator<'a> {
 	table: &'a BTreeTable,
 	log: &'a RwLock<crate::log::LogOverlays>,
@@ -244,7 +243,7 @@ impl BTreeIterState {
 
 	pub fn seek(&mut self, key: &[u8], btree: &mut BTree, col: &BTreeTable, log: &impl LogQuery, after: bool) -> Result<()> {
 		self.state.clear();
-		self.record_id = btree.record_id;
+		self.next_separator = false;
 		if col.with_locked(|b| {
 			let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), b, log)?;
 			Node::seek(root, key, b, log, btree.depth, &mut self.state)
