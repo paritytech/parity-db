@@ -194,8 +194,9 @@ fn informant(shutdown: Arc<AtomicBool>, total: usize, start: usize) {
 }
 
 fn writer<D: BenchDb>(db: Arc<D>, args: Arc<Args>, pool: Arc<SizePool>, shutdown: Arc<AtomicBool>, start_commit: usize) {
+	let offset = args.seed.unwrap_or(0);
 	// Note that multiple worker will run on same range concurrently.
-	let mut key = start_commit as u64 * COMMIT_SIZE as u64 + args.seed.unwrap_or(0);
+	let mut key = start_commit as u64 * COMMIT_SIZE as u64 + offset;
 	let commit_size = COMMIT_SIZE;
 	let mut commit = Vec::with_capacity(commit_size);
 
@@ -206,7 +207,7 @@ fn writer<D: BenchDb>(db: Arc<D>, args: Arc<Args>, pool: Arc<SizePool>, shutdown
 			key += 1;
 		}
 		if !args.archive && n >= COMMIT_PRUNE_WINDOW {
-			let prune_start = (n - COMMIT_PRUNE_WINDOW) * COMMIT_SIZE;
+			let prune_start = (n - COMMIT_PRUNE_WINDOW) * COMMIT_SIZE + offset as usize;
 			for p in prune_start .. prune_start + COMMIT_PRUNE_SIZE {
 				commit.push((pool.key(p as u64), None));
 			}
@@ -318,9 +319,10 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 		}
 		let commits  = (start_commit + commits) as u64;
 		let prune_window: u64 = COMMIT_PRUNE_WINDOW as u64;
-		let start = if commits > prune_window && nc < commits - prune_window {
-			let end = nc * COMMIT_SIZE as u64 + pruned_per_commit;
-			for key in (nc * COMMIT_SIZE as u64) + args.seed.unwrap_or(0) .. end {
+		let offset = args.seed.unwrap_or(0);
+		let start = if !args.archive && commits > prune_window && nc < commits - prune_window {
+			let end = nc * COMMIT_SIZE as u64 + pruned_per_commit + offset;
+			for key in (nc * COMMIT_SIZE as u64) + offset .. end {
 				let k = pool.key(key);
 				let db_val = db.get(&k);
 				queries += 1;
@@ -328,9 +330,9 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 			}
 			end
 		} else {
-			nc * COMMIT_SIZE as u64 + args.seed.unwrap_or(0)
+			nc * COMMIT_SIZE as u64 + offset
 		};
-		for key in start .. (nc + 1) * (COMMIT_SIZE as u64) {
+		for key in start .. (nc + 1) * (COMMIT_SIZE as u64) + offset {
 			let k = pool.key(key);
 			let val = pool.value(key, args.compress);
 			let db_val = db.get(&k);
