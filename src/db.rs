@@ -49,7 +49,6 @@ use crate::{
 // full `commit` will block.
 // These are in memory, so we use usize
 const MAX_COMMIT_QUEUE_BYTES: usize = 16 * 1024 * 1024;
-// These are disk-backed, so we use u64
 // Max size of log overlay. If the overlay is full, processing
 // of commit queue is blocked.
 const MAX_LOG_QUEUE_BYTES: i64 = 128 * 1024 * 1024;

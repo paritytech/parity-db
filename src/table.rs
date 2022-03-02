@@ -50,7 +50,6 @@
 // [SIZE: 2][VALUE: SIZE]
 // SIZE: 15-bit size of the remaining payload.
 // The highest bit is reserved to indicate if compression is applied.
-// if value is compressed.
 // VALUE: SIZE payload bytes.
 //
 // Deleted entry
