@@ -651,7 +651,7 @@ impl DbInner {
 		Ok(flush_next)
 	}
 
-	fn cleanup_logs(&self) -> Result<bool> {
+	fn clean_logs(&self) -> Result<bool> {
 		let keep_logs = if self.options.sync_data { 0 } else { KEEP_LOGS };
 		let num_cleanup = self.log.num_dirty_logs();
 		if num_cleanup > keep_logs {
@@ -698,6 +698,14 @@ impl DbInner {
 	}
 
 	fn kill_logs(&self) -> Result<()> {
+		{
+			if let Some(err) = self.bg_err.lock().as_ref() {
+				// On error the log reader may be left in inconsistent state. So it is important
+				// to no attempt any further log enactment.
+				log::debug!(target: "parity-db", "Shutdown with error state {}", err);
+				return Ok(());
+			}
+		}
 		log::debug!(target: "parity-db", "Processing leftover commits");
 		// Finish logged records and proceed to log and enact queued commits.
 		while self.enact_logs(false)? {};
@@ -953,7 +961,7 @@ impl Db {
 			if !more_work {
 				db.cleanup_worker_wait.wait();
 			}
-			more_work = db.cleanup_logs()?;
+			more_work = db.clean_logs()?;
 		}
 		log::debug!(target: "parity-db", "Cleanup worker shutdown");
 		Ok(())
