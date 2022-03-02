@@ -38,18 +38,23 @@ use fs2::FileExt;
 use crate::{
 	Key,
 	error::{Error, Result},
-	column::{ColId, Column, IterState},
+	column::{ColId, Column, IterState, hash_key},
 	log::{Log, LogAction},
 	index::PlanOutcome,
 	options::Options,
 	btree::{BTreeIterator, BTreeTable, commit_overlay::{BTreeChangeSet}},
 };
 
+// Max size of commit queue. (Keys + Values). If the queue is
+// full `commit` will block.
 // These are in memory, so we use usize
 const MAX_COMMIT_QUEUE_BYTES: usize = 16 * 1024 * 1024;
-// These are disk-backed, so we use u64
+// Max size of log overlay. If the overlay is full, processing
+// of commit queue is blocked.
 const MAX_LOG_QUEUE_BYTES: i64 = 128 * 1024 * 1024;
-const MIN_LOG_SIZE: u64 = 64 * 1024 * 1024;
+// Minimum size of log file before it is considered full.
+const MIN_LOG_SIZE_BYTES: u64 = 64 * 1024 * 1024;
+// Number of log files to keep after flush.
 const KEEP_LOGS: usize = 16;
 
 /// Value is just a vector of bytes. Value sizes up to 4Gb are allowed.
@@ -79,7 +84,7 @@ struct CommitQueue {
 	commits: VecDeque<Commit>,
 }
 
-pub struct DbInner {
+struct DbInner {
 	columns: Vec<Column>,
 	options: Options,
 	shutdown: AtomicBool,
@@ -96,10 +101,11 @@ pub struct DbInner {
 	last_enacted: AtomicU64,
 	next_reindex: AtomicU64,
 	bg_err: Mutex<Option<Arc<Error>>>,
+	db_version: u32,
 	_lock_file: std::fs::File,
 }
 
-pub struct WaitCondvar<S> {
+struct WaitCondvar<S> {
 	cv: Condvar,
 	work: Mutex<S>,
 }
@@ -179,6 +185,7 @@ impl DbInner {
 			next_reindex: AtomicU64::new(1),
 			last_enacted: AtomicU64::new(last_enacted),
 			bg_err: Mutex::new(None),
+			db_version: metadata.version,
 			_lock_file: lock_file,
 		})
 	}
@@ -186,7 +193,7 @@ impl DbInner {
 	fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
-				let key = column.hash(key);
+				let key = column.hash_key(key);
 				let overlay = self.commit_overlay.read();
 				// Check commit overlay first
 				if let Some(v) = overlay.get(col as usize).and_then(|o| o.get(&key)) {
@@ -211,7 +218,7 @@ impl DbInner {
 	fn get_size(&self, col: ColId, key: &[u8]) -> Result<Option<u32>> {
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
-				let key = column.hash(key);
+				let key = column.hash_key(key);
 				let overlay = self.commit_overlay.read();
 				// Check commit overlay first
 				if let Some(l) = overlay.get(col as usize).and_then(|o| o.get_size(&key)) {
@@ -245,7 +252,7 @@ impl DbInner {
 		}
 	}
 
-	// Commit simply adds the the data to the queue and to the overlay and
+	// Commit simply adds the data to the queue and to the overlay and
 	// exits as early as possible.
 	fn commit<I, K>(&self, tx: I) -> Result<()>
 	where
@@ -261,7 +268,7 @@ impl DbInner {
 			} else {
 				commit.indexed.entry(c)
 					.or_insert_with(|| IndexedChangeSet::new(c))
-					.push(k.as_ref(), v, &self.options)
+					.push(k.as_ref(), v, &self.options, self.db_version)
 			}
 		}
 
@@ -272,7 +279,7 @@ impl DbInner {
 		{
 			let mut queue = self.commit_queue.lock();
 			if queue.bytes > MAX_COMMIT_QUEUE_BYTES {
-				log::debug!(target: "parity-db", "Waiting, qb={}", queue.bytes);
+				log::debug!(target: "parity-db", "Waiting, queue size={}", queue.bytes);
 				self.commit_queue_full_cv.wait(&mut queue);
 			}
 			{
@@ -317,7 +324,7 @@ impl DbInner {
 
 	fn process_commits(&self) -> Result<bool> {
 		{
-			// Wait if the queue is too big.
+			// Wait if the queue is full.
 			let mut queue = self.log_queue_wait.work.lock();
 			if !self.shutdown.load(Ordering::Relaxed) && *queue > MAX_LOG_QUEUE_BYTES {
 				log::debug!(target: "parity-db", "Waiting, log_bytes={}", queue);
@@ -612,7 +619,7 @@ impl DbInner {
 					if *queue < bytes as i64 {
 						log::warn!(
 							target: "parity-db",
-							"Detected log undeflow record {}, {} bytes, {} queued, reindex = {}",
+							"Detected log underflow record {}, {} bytes, {} queued, reindex = {}",
 							record_id,
 							bytes,
 							*queue,
@@ -643,7 +650,7 @@ impl DbInner {
 		Ok(flush_next)
 	}
 
-	fn cleanup_logs(&self) -> Result<bool> {
+	fn clean_logs(&self) -> Result<bool> {
 		let keep_logs = if self.options.sync_data { 0 } else { KEEP_LOGS };
 		let num_cleanup = self.log.num_dirty_logs();
 		if num_cleanup > keep_logs {
@@ -690,6 +697,14 @@ impl DbInner {
 	}
 
 	fn kill_logs(&self) -> Result<()> {
+		{
+			if let Some(err) = self.bg_err.lock().as_ref() {
+				// On error the log reader may be left in inconsistent state. So it is important
+				// to no attempt any further log enactment.
+				log::debug!(target: "parity-db", "Shutdown with error state {}", err);
+				return Ok(());
+			}
+		}
 		log::debug!(target: "parity-db", "Processing leftover commits");
 		// Finish logged records and proceed to log and enact queued commits.
 		while self.enact_logs(false)? {};
@@ -760,7 +775,7 @@ pub struct Db {
 	flush_thread: Option<std::thread::JoinHandle<()>>,
 	log_thread: Option<std::thread::JoinHandle<()>>,
 	cleanup_thread: Option<std::thread::JoinHandle<()>>,
-	do_drop: bool,
+	join_on_shutdown: bool,
 }
 
 impl Db {
@@ -811,7 +826,7 @@ impl Db {
 				flush_thread: None,
 				log_thread: None,
 				cleanup_thread: None,
-				do_drop: inner_options.commit_stages.do_drop(),
+				join_on_shutdown: inner_options.commit_stages.join_on_shutdown(),
 			}, None))
 		}
 		let run_test_cv = match inner_options.commit_stages {
@@ -832,7 +847,7 @@ impl Db {
 			let min_log_size = if matches!(inner_options.commit_stages, EnableCommitPipelineStages::DbFile) {
 				0
 			} else {
-				MIN_LOG_SIZE
+				MIN_LOG_SIZE_BYTES
 			};
 			Some(std::thread::spawn(move ||
 				flush_worker_db.store_err(Self::flush_worker(flush_worker_db.clone(), min_log_size))
@@ -862,7 +877,7 @@ impl Db {
 			flush_thread: flush_thread,
 			log_thread: log_thread,
 			cleanup_thread: cleanup_thread,
-			do_drop: inner_options.commit_stages.do_drop(),
+			join_on_shutdown: inner_options.commit_stages.join_on_shutdown(),
 		}, run_test_cv))
 	}
 
@@ -945,7 +960,7 @@ impl Db {
 			if !more_work {
 				db.cleanup_worker_wait.wait();
 			}
-			more_work = db.cleanup_logs()?;
+			more_work = db.clean_logs()?;
 		}
 		log::debug!(target: "parity-db", "Cleanup worker shutdown");
 		Ok(())
@@ -959,12 +974,12 @@ impl Db {
 		self.inner.clear_stats(column)
 	}
 
-	pub fn check_from_index(&self, check_param: check::CheckOptions) -> Result<()> {
+	pub fn dump(&self, check_param: check::CheckOptions) -> Result<()> {
 		if let Some(col) = check_param.column.clone() {
-			self.inner.columns[col as usize].check_from_index(&self.inner.log, &check_param, col)?;
+			self.inner.columns[col as usize].dump(&self.inner.log, &check_param, col)?;
 		} else {
 			for (ix, c) in self.inner.columns.iter().enumerate() {
-				c.check_from_index(&self.inner.log, &check_param, ix as ColId)?;
+				c.dump(&self.inner.log, &check_param, ix as ColId)?;
 			}
 		}
 		Ok(())
@@ -973,7 +988,7 @@ impl Db {
 
 impl Drop for Db {
 	fn drop(&mut self) {
-		if self.do_drop {
+		if self.join_on_shutdown {
 			self.inner.shutdown();
 			self.log_thread.take().map(|t| t.join());
 			self.flush_thread.take().map(|t| t.join());
@@ -1058,14 +1073,9 @@ impl IndexedChangeSet {
 		IndexedChangeSet { col, changes: Default::default() }
 	}
 
-	fn push(&mut self, key: &[u8], v: Option<Value>, options: &Options) {
-		let mut k = Key::default();
-		if options.columns[self.col as usize].uniform {
-			k.copy_from_slice(&key[0..32]);
-		} else {
-			let salt = options.salt.as_ref().map(|s| &s[..]).unwrap_or(&[]);
-			k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, salt, &key).as_bytes());
-		}
+	fn push(&mut self, key: &[u8], v: Option<Value>, options: &Options, db_version :u32) {
+		let salt = options.salt.unwrap_or_default();
+		let k = hash_key(key, &salt, options.columns[self.col as usize].uniform, db_version);
 		self.changes.push((k, v));
 	}
 
@@ -1169,6 +1179,7 @@ struct InternalOptions {
 	skip_check_lock: bool,
 }
 
+// This is used in tests to disable certain commit stages.
 #[derive(Debug, Clone, Copy)]
 enum EnableCommitPipelineStages {
 	// No threads started, data stays in commit overlay.
@@ -1245,7 +1256,7 @@ impl EnableCommitPipelineStages {
 		true
 	}
 
-	fn do_drop(&self) -> bool {
+	fn join_on_shutdown(&self) -> bool {
 		matches!(self, EnableCommitPipelineStages::Standard)
 	}
 }

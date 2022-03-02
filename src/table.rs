@@ -15,6 +15,7 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 // On disk data layout for value tables.
+// All numerical values are little endian.
 //
 // Entry 0 (metadata)
 // [LAST_REMOVED: 8][FILLED: 8]
@@ -25,9 +26,9 @@
 // [SIZE: 2][REFS: 4][KEY: 26][VALUE]
 // SIZE: 15-bit value size. Sizes up to 0x7ffc are allowed.
 // This includes size of REFS and KEY.
-// The first bit is reserved to indicate if compression is applied.
+// The highest bit is reserved to indicate if compression is applied.
 // REF: 32-bit reference counter (optional).
-// KEY: lower 26 bytes of the key.
+// KEY: lower 26 bytes of the key (optional for btree nodes).
 // VALUE: payload bytes.
 //
 // Partial entry (first part):
@@ -36,8 +37,7 @@
 // NEXT - 64-bit index of the entry that holds the next part.
 // take all available space in this entry.
 // REF: 32-bit reference counter (optional).
-// KEY: lower 26 bytes of the key. Under different condition
-// can be skipped.
+// KEY: lower 26 bytes of the key (optional for btree nodes).
 // VALUE: The rest of the entry is filled with payload bytes.
 //
 // Partial entry (continuation):
@@ -48,8 +48,8 @@
 //
 // Partial entry (last part):
 // [SIZE: 2][VALUE: SIZE]
-// SIZE: 15-bit size of the remaining payload, also indicate
-// if value is compressed.
+// SIZE: 15-bit size of the remaining payload.
+// The highest bit is reserved to indicate if compression is applied.
 // VALUE: SIZE payload bytes.
 //
 // Deleted entry
@@ -89,7 +89,6 @@ const MULTIPART: &[u8] = &[0xfe, 0xff];
 const MULTIHEAD: &[u8] = &[0xfd, 0xff];
 // When a rc reach locked ref, it is locked in db.
 const LOCKED_REF: u32 = u32::MAX;
-
 
 pub type Value = Vec<u8>;
 
@@ -387,7 +386,7 @@ impl ValueTable {
 		}
 	}
 
-	// Return ref counter, partial key and if it was compressed.
+	// Return ref counter, partial key and if the value is compressed.
 	#[inline(always)]
 	fn for_parts(
 		&self,
