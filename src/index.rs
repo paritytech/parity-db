@@ -486,7 +486,8 @@ impl IndexTable {
 
 	pub fn flush(&self) -> Result<()> {
 		if let Some(map) = &*self.map.read() {
-			map.flush()?;
+			// Flush everything except stats.
+			map.flush_range(META_SIZE, map.len() - META_SIZE)?;
 		}
 		Ok(())
 	}
