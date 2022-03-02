@@ -477,6 +477,18 @@ impl IndexTable {
 		Ok(())
 	}
 
+	pub fn skip_plan(log: &mut LogReader) -> Result<()> {
+		let mut buf = [0u8; 8];
+		log.read(&mut buf)?;
+		let mut mask = u64::from_le_bytes(buf);
+		while mask != 0 {
+			let i = mask.trailing_zeros();
+			mask = mask & !(1 << i);
+			log.read(&mut buf[..])?;
+		}
+		Ok(())
+	}
+
 	pub fn drop_file(self) -> Result<()> {
 		std::mem::drop(self.map);
 		std::fs::remove_file(self.path.as_path())?;

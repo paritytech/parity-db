@@ -499,12 +499,15 @@ impl HashColumn {
 				} else if let Some(table) = reindex.queue.iter().find(|r|r.id == record.table) {
 					table.enact_plan(record.index, log)?;
 				} else {
-					log::warn!(
+					// This may happen when removal is planed for an old index when reindexing.
+					// We can safely skip the removal since the new index does not have the entry
+					// anyway and the old index is already dropped.
+					log::debug!(
 						target: "parity-db",
-						"Missing table {}",
+						"Missing index {}. Skipped",
 						record.table,
 					);
-					return Err(Error::Corruption("Missing table".into()));
+					IndexTable::skip_plan(log)?;
 				}
 			},
 			LogAction::InsertValue(record) => {
