@@ -114,6 +114,25 @@ enum IterStateOrCorrupted {
 	Corrupted(crate::index::Entry, Option<Error>),
 }
 
+#[inline]
+pub fn hash_key(key: &[u8], salt: &Salt, uniform: bool, db_version: u32) -> Key {
+	let mut k = Key::default();
+	if uniform {
+		if db_version <= 5 {
+			k.copy_from_slice(&key[0..32]);
+		} else {
+			// For keys that are hashes already we do a simple XOR with salt.
+			let key = &key[0..32];
+			for i in 0 .. 32 {
+				k[i] = key[i] ^ salt[i];
+			}
+		}
+	} else {
+		k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, salt, &key).as_bytes());
+	}
+	k
+}
+
 impl HashColumn {
 	pub fn get(&self, key: &Key, log: &impl LogQuery) -> Result<Option<Value>> {
 		let tables = self.tables.read();
@@ -264,13 +283,7 @@ impl HashColumn {
 	}
 
 	pub fn hash_key(&self, key: &[u8]) -> Key {
-		let mut k = Key::default();
-		if self.uniform_keys {
-			k.copy_from_slice(&key[0..32]);
-		} else {
-			k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &self.salt, &key).as_bytes());
-		}
-		k
+		hash_key(key, &self.salt, self.uniform_keys, self.db_version)
 	}
 
 	pub fn flush(&self) -> Result<()> {

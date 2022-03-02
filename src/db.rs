@@ -38,7 +38,7 @@ use fs2::FileExt;
 use crate::{
 	Key,
 	error::{Error, Result},
-	column::{ColId, Column, IterState},
+	column::{ColId, Column, IterState, hash_key},
 	log::{Log, LogAction},
 	index::PlanOutcome,
 	options::Options,
@@ -102,6 +102,7 @@ struct DbInner {
 	last_enacted: AtomicU64,
 	next_reindex: AtomicU64,
 	bg_err: Mutex<Option<Arc<Error>>>,
+	db_version: u32,
 	_lock_file: std::fs::File,
 }
 
@@ -185,6 +186,7 @@ impl DbInner {
 			next_reindex: AtomicU64::new(1),
 			last_enacted: AtomicU64::new(last_enacted),
 			bg_err: Mutex::new(None),
+			db_version: metadata.version,
 			_lock_file: lock_file,
 		})
 	}
@@ -267,7 +269,7 @@ impl DbInner {
 			} else {
 				commit.indexed.entry(c)
 					.or_insert_with(|| IndexedChangeSet::new(c))
-					.push(k.as_ref(), v, &self.options)
+					.push(k.as_ref(), v, &self.options, self.db_version)
 			}
 		}
 
@@ -1064,14 +1066,9 @@ impl IndexedChangeSet {
 		IndexedChangeSet { col, changes: Default::default() }
 	}
 
-	fn push(&mut self, key: &[u8], v: Option<Value>, options: &Options) {
-		let mut k = Key::default();
-		if options.columns[self.col as usize].uniform {
-			k.copy_from_slice(&key[0..32]);
-		} else {
-			let salt = options.salt.as_ref().map(|s| &s[..]).unwrap_or(&[]);
-			k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, salt, &key).as_bytes());
-		}
+	fn push(&mut self, key: &[u8], v: Option<Value>, options: &Options, db_version :u32) {
+		let salt = options.salt.unwrap_or_default();
+		let k = hash_key(key, &salt, options.columns[self.col as usize].uniform, db_version);
 		self.changes.push((k, v));
 	}
 
