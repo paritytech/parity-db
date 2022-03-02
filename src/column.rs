@@ -33,8 +33,9 @@ use crate::{
 };
 use crate::compress::Compress;
 
-const START_BITS: u8 = 16;
-const MAX_REBALANCE_BATCH: usize = 8192;
+const MIN_INDEX_BITS: u8 = 16;
+// Measured in index entries
+const MAX_REINDEX_BATCH: usize = 8192;
 
 pub type ColId = u8;
 pub type Salt = [u8; 32];
@@ -116,7 +117,7 @@ enum IterStateOrCorrupted {
 impl HashColumn {
 	pub fn get(&self, key: &Key, log: &impl LogQuery) -> Result<Option<Value>> {
 		let tables = self.tables.read();
-		let values = self.locked(&tables.value);
+		let values = self.as_ref(&tables.value);
 		if let Some((tier, value)) = self.get_in_index(key, &tables.index, values, log)? {
 			if self.collect_stats {
 				self.stats.query_hit(tier);
@@ -160,7 +161,7 @@ impl HashColumn {
 		Ok(None)
 	}
 
-	pub fn locked<'a>(&'a self, tables: &'a Vec<ValueTable>) -> TablesRef<'a> {
+	pub fn as_ref<'a>(&'a self, tables: &'a Vec<ValueTable>) -> TablesRef<'a> {
 		TablesRef {
 			tables,
 			preimage: self.preimage,
@@ -262,7 +263,7 @@ impl HashColumn {
 		})
 	}
 
-	pub fn hash(&self, key: &[u8]) -> Key {
+	pub fn hash_key(&self, key: &[u8]) -> Key {
 		let mut k = Key::default();
 		if self.uniform_keys {
 			k.copy_from_slice(&key[0..32]);
@@ -285,7 +286,7 @@ impl HashColumn {
 		let mut reindexing = VecDeque::new();
 		let mut top = None;
 		let mut stats = ColumnStats::empty();
-		for bits in (START_BITS .. 65).rev() {
+		for bits in (MIN_INDEX_BITS .. 65).rev() {
 			let id = IndexTableId::new(col, bits);
 			if let Some(table) = IndexTable::open_existing(path, id)? {
 				if top.is_none() {
@@ -298,7 +299,7 @@ impl HashColumn {
 		}
 		let table = match top {
 			Some(table) => table,
-			None => IndexTable::create_new(path, IndexTableId::new(col, START_BITS)),
+			None => IndexTable::create_new(path, IndexTableId::new(col, MIN_INDEX_BITS)),
 		};
 		Ok((table, reindexing, stats))
 	}
@@ -397,7 +398,6 @@ impl HashColumn {
 	) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
-		//TODO: return sub-chunk position in index.get
 		let existing = Self::search_all_indexes(key, &*tables, &*reindex, log)?;
 		if let Some((table, sub_index, existing_address)) = existing {
 			self.write_plan_existing(&*tables, key, value, log, table, sub_index, existing_address)
@@ -406,7 +406,7 @@ impl HashColumn {
 				let (r, _, _) = self.write_plan_new(tables, reindex, key, value, log)?;
 				Ok(r)
 			} else {
-				log::trace!(target: "parity-db", "{}: Deletion missed {}", tables.index.id, hex(key));
+				log::trace!(target: "parity-db", "{}: Deleting missing key {}", tables.index.id, hex(key));
 				if self.collect_stats {
 					self.stats.remove_miss();
 				}
@@ -421,7 +421,7 @@ impl HashColumn {
 		key: &Key,
 		value: Option<&[u8]>,
 		log: &mut LogWriter,
-		table: &IndexTable,
+		index: &IndexTable,
 		sub_index: usize,
 		existing_address: Address,
 	) -> Result<PlanOutcome> {
@@ -434,7 +434,7 @@ impl HashColumn {
 		let table_key = TableKey::Partial(*key);
 		match Column::write_existing_value_plan(
 			&table_key,
-			self.locked(&tables.value),
+			self.as_ref(&tables.value),
 			existing_address,
 			value,
 			log,
@@ -443,11 +443,11 @@ impl HashColumn {
 			(Some(outcome), _) => return Ok(outcome),
 			(None, Some(value_address)) => if value.is_some() {
 				// If it was found in an older index we just insert a new entry. Reindex won't overwrite it.
-				let sub_index = if table.id == tables.index.id { Some(sub_index) } else { None };
+				let sub_index = if index.id == tables.index.id { Some(sub_index) } else { None };
 				return tables.index.write_insert_plan(key, value_address, sub_index, log);
 			} else {
-				log::trace!(target: "parity-db", "{}: Replacing in a new table {}", tables.index.id, hex(key));
-				table.write_remove_plan(key, sub_index, log)?;
+				log::trace!(target: "parity-db", "{}: Removing from index {}", tables.index.id, hex(key));
+				index.write_remove_plan(key, sub_index, log)?;
 			},
 			_ => unreachable!(),
 		}
@@ -462,14 +462,9 @@ impl HashColumn {
 		value: &[u8],
 		log: &mut LogWriter,
 	) -> Result<(PlanOutcome, RwLockUpgradableReadGuard<'a, Tables>, RwLockUpgradableReadGuard<'b, Reindex>)> {
-		let stats = if self.collect_stats {
-			Some(&self.stats)
-		} else {
-			None
-		};
-
+		let stats = self.collect_stats.then(|| &self.stats);
 		let table_key = TableKey::Partial(*key);
-		let address = Column::write_new_value_plan(&table_key, self.locked(&tables.value), value, log, stats)?;
+		let address = Column::write_new_value_plan(&table_key, self.as_ref(&tables.value), value, log, stats)?;
 		match tables.index.write_insert_plan(key, address, None, log)? {
 			PlanOutcome::NeedReindex => {
 				log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
@@ -502,7 +497,9 @@ impl HashColumn {
 			LogAction::InsertValue(record) => {
 				tables.value[record.table.size_tier() as usize].enact_plan(record.index, log)?;
 			},
-			_ => panic!("Unexpected log action"),
+			// This should never happen, unless something has modified the log file while the
+			// database is running. Existing logs should be validated with `validate_plan` on startup.
+			_ => return Err(Error::Corruption("Unexpected log action".into())),
 		}
 		Ok(())
 	}
@@ -604,7 +601,7 @@ impl HashColumn {
 						value
 					};
 					let key = blake2_rfc::blake2b::blake2b(32, &[], &value);
-					let key = self.hash(key.as_bytes());
+					let key = self.hash_key(key.as_bytes());
 					let state = IterStateOrCorrupted::Item(IterState { chunk_index: index, key, rc, value });
 					f(state).unwrap_or(false)
 				})?;
@@ -669,7 +666,7 @@ impl HashColumn {
 		Ok(())
 	}
 
-	fn check_from_index(&self, log: &Log, check_param: &crate::CheckOptions, col: ColId) -> Result<()> {
+	fn dump(&self, log: &Log, check_param: &crate::CheckOptions, col: ColId) -> Result<()> {
 		let start_chunk = check_param.from.unwrap_or(0);
 		let end_chunk = check_param.bound;
 
@@ -728,7 +725,7 @@ impl HashColumn {
 					log::debug!(target: "parity-db", "{}: Reindexing at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				}
 				log::debug!(target: "parity-db", "{}: Continue reindex at {}/{}", tables.index.id, source_index, source.id.total_chunks());
-				while source_index < source.id.total_chunks() && plan.len() < MAX_REBALANCE_BATCH {
+				while source_index < source.id.total_chunks() && plan.len() < MAX_REINDEX_BATCH {
 					log::trace!(target: "parity-db", "{}: Reindexing {}", source.id, source_index);
 					let entries = source.entries(source_index, &*log.overlays());
 					for entry in entries.iter() {
@@ -798,7 +795,7 @@ impl Column {
 				let (cur_size, compressed) = tables.tables[tier].size(key, address.offset(), log)?
 					.unwrap_or((0, false));
 				if compressed {
-					// This is very costy.
+					// This is very costly.
 					let compressed = tables.tables[tier].get(key, address.offset(), log)?
 						.expect("Same query as size").0;
 					let uncompressed = tables.compression.decompress(compressed.as_slice())?;
@@ -810,12 +807,10 @@ impl Column {
 			}
 			if tier == target_tier {
 				log::trace!(target: "parity-db", "{}: Replacing {}", tables.col, key);
-
 				tables.tables[target_tier].write_replace_plan(address.offset(), key, &cval, log, compressed)?;
 				return Ok((Some(PlanOutcome::Written), None));
 			} else {
 				log::trace!(target: "parity-db", "{}: Replacing in a new table {}", tables.col, key);
-
 				tables.tables[tier].write_remove_plan(address.offset(), log)?;
 				let new_offset = tables.tables[target_tier].write_insert_plan(key, &cval, log, compressed)?;
 				let new_address = Address::new(new_offset, target_tier as u8);
@@ -932,9 +927,9 @@ impl Column {
 		}
 	}
 
-	pub fn check_from_index(&self, log: &Log, check_param: &crate::CheckOptions, col: ColId) -> Result<()> {
+	pub fn dump(&self, log: &Log, check_param: &crate::CheckOptions, col: ColId) -> Result<()> {
 		match self {
-			Column::Hash(column) => column.check_from_index(log, check_param, col),
+			Column::Hash(column) => column.dump(log, check_param, col),
 			Column::Tree(_column) => Ok(()),
 		}
 	}

@@ -108,7 +108,7 @@ pub fn run() -> Result<(), String> {
 				check.display,
 				check.display_value_max,
 			);
-			db.check_from_index(check_param)
+			db.dump(check_param)
 				.map_err(|e| format!("Check error: {:?}", e))?;
 		},
 		SubCommand::Flush(_flush) => {
