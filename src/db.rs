@@ -123,7 +123,7 @@ impl WaitCondvar<bool> {
 	fn signal(&self) {
 		let mut work = self.work.lock();
 		*work = true;
-		self.cv.notify_all();
+		self.cv.notify_one();
 	}
 
 	pub fn wait(&self) {
@@ -132,12 +132,6 @@ impl WaitCondvar<bool> {
 			self.cv.wait(&mut work)
 		};
 		*work = false;
-	}
-
-	#[cfg(test)]
-	fn wait_notify(&self) {
-		let mut work = self.work.lock();
-		self.cv.wait(&mut work)
 	}
 }
 
@@ -628,7 +622,7 @@ impl DbInner {
 					}
 					*queue -= bytes as i64;
 					if *queue <= MAX_LOG_QUEUE_BYTES && (*queue + bytes as i64) > MAX_LOG_QUEUE_BYTES {
-						self.log_queue_wait.cv.notify_all();
+						self.log_queue_wait.cv.notify_one();
 					}
 					log::debug!(target: "parity-db", "Log queue size: {} bytes", *queue);
 				}
@@ -689,7 +683,7 @@ impl DbInner {
 
 	fn shutdown(&self) {
 		self.shutdown.store(true, Ordering::SeqCst);
-		self.log_queue_wait.cv.notify_all();
+		self.log_queue_wait.cv.notify_one();
 		self.flush_worker_wait.signal();
 		self.log_worker_wait.signal();
 		self.commit_worker_wait.signal();
@@ -784,14 +778,12 @@ impl Db {
 		let mut inner_options = InternalOptions::default();
 		inner_options.create = true;
 		Self::open_inner(&options, &inner_options)
-			.map(|r| r.0)
 	}
 
 	/// Open the database with given options.
 	pub fn open(options: &Options) -> Result<Db> {
 		let inner_options = InternalOptions::default();
 		Self::open_inner(options, &inner_options)
-			.map(|r| r.0)
 	}
 
 	/// Create the database using given options.
@@ -799,20 +791,18 @@ impl Db {
 		let mut inner_options = InternalOptions::default();
 		inner_options.create = true;
 		Self::open_inner(options, &inner_options)
-			.map(|r| r.0)
 	}
 
 	pub fn open_read_only(options: &Options) -> Result<Db> {
 		let mut inner_options = InternalOptions::default();
 		inner_options.read_only = true;
 		Self::open_inner(options, &inner_options)
-			.map(|r| r.0)
 	}
 
 	fn open_inner(
 		options: &Options,
 		inner_options: &InternalOptions,
-	) -> Result<(Db, Option<Arc<WaitCondvar<bool>>>)> {
+	) -> Result<Db> {
 		assert!(options.is_valid());
 		let mut db = DbInner::open(options, &inner_options)?;
 		// This needs to be call before log thread: so first reindexing
@@ -820,21 +810,17 @@ impl Db {
 		db.replay_all_logs()?;
 		let db = Arc::new(db);
 		if inner_options.read_only {
-			return Ok((Db {
+			return Ok(Db {
 				inner: db,
 				commit_thread: None,
 				flush_thread: None,
 				log_thread: None,
 				cleanup_thread: None,
 				join_on_shutdown: inner_options.commit_stages.join_on_shutdown(),
-			}, None))
+			})
 		}
-		let run_test_cv = match inner_options.commit_stages {
-			EnableCommitPipelineStages::LogOverlay => Some(db.flush_worker_wait.clone()),
-			EnableCommitPipelineStages::DbFile => Some(db.commit_worker_wait.clone()),
-			_ => None,
-		};
-		let commit_thread = if inner_options.commit_stages.spawn_commit_thread() {
+		let start_threads = matches!(inner_options.commit_stages, EnableCommitPipelineStages::Standard);
+		let commit_thread = if start_threads {
 			let commit_worker_db = db.clone();
 			Some(std::thread::spawn(move ||
 				commit_worker_db.store_err(Self::commit_worker(commit_worker_db.clone()))
@@ -842,7 +828,7 @@ impl Db {
 		} else {
 			None
 		};
-		let flush_thread = if inner_options.commit_stages.spawn_flush_thread() {
+		let flush_thread = if start_threads {
 			let flush_worker_db = db.clone();
 			let min_log_size = if matches!(inner_options.commit_stages, EnableCommitPipelineStages::DbFile) {
 				0
@@ -855,7 +841,7 @@ impl Db {
 		} else {
 			None
 		};
-		let log_thread = if inner_options.commit_stages.spawn_log_thread() {
+		let log_thread = if start_threads {
 			let log_worker_db = db.clone();
 			Some(std::thread::spawn(move ||
 				log_worker_db.store_err(Self::log_worker(log_worker_db.clone()))
@@ -863,7 +849,7 @@ impl Db {
 		} else {
 			None
 		};
-		let cleanup_thread = if inner_options.commit_stages.spawn_cleanup_thread() {
+		let cleanup_thread = if start_threads {
 			let cleanup_worker_db = db.clone();
 			Some(std::thread::spawn(move ||
 				cleanup_worker_db.store_err(Self::cleanup_worker(cleanup_worker_db.clone()))
@@ -871,14 +857,14 @@ impl Db {
 		} else {
 			None
 		};
-		Ok((Db {
+		Ok(Db {
 			inner: db,
 			commit_thread,
 			flush_thread: flush_thread,
 			log_thread: log_thread,
 			cleanup_thread: cleanup_thread,
 			join_on_shutdown: inner_options.commit_stages.join_on_shutdown(),
-		}, run_test_cv))
+		})
 	}
 
 	pub fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
@@ -1202,38 +1188,35 @@ impl Default for EnableCommitPipelineStages {
 }
 
 impl EnableCommitPipelineStages {
-	fn spawn_commit_thread(&self) -> bool {
-		match self {
-			EnableCommitPipelineStages::CommitOverlay
-			| EnableCommitPipelineStages::LogOverlay => false,
-			EnableCommitPipelineStages::DbFile
-			| EnableCommitPipelineStages::Standard => true,
-		}
-	}
-
-	fn spawn_log_thread(&self) -> bool {
-		match self {
-			EnableCommitPipelineStages::CommitOverlay => false,
-			EnableCommitPipelineStages::LogOverlay
-			| EnableCommitPipelineStages::DbFile
-			| EnableCommitPipelineStages::Standard => true,
-		}
-	}
-
-	fn spawn_flush_thread(&self) -> bool {
-		self.spawn_log_thread()
-	}
-
-	fn spawn_cleanup_thread(&self) -> bool {
-		self.spawn_commit_thread()
-	}
-
 	#[cfg(test)]
-	fn check_empty_overlay(&self, db: &Db, col: ColId) -> bool {
+	fn run_stages(&self, db: &Db) {
+		let db = &db.inner;
 		match self {
 			EnableCommitPipelineStages::DbFile
 			| EnableCommitPipelineStages::LogOverlay => {
-			 if let Some(overlay) = db.inner.commit_overlay.read().get(col as usize) {
+				while db.process_commits().unwrap() { }
+				while db.process_reindex().unwrap() { }
+			},
+			_ => (),
+		}
+		match self {
+			EnableCommitPipelineStages::DbFile => {
+				while db.enact_logs(false).unwrap() { }
+				let (_, _, cleanup_next) = db.log.flush_one(0).unwrap();
+				if cleanup_next {
+					let _ = db.clean_logs().unwrap();
+				}
+			},
+			_ => (),
+		}
+	}
+
+	#[cfg(test)]
+	fn check_empty_overlay(&self, db: &DbInner, col: ColId) -> bool {
+		match self {
+			EnableCommitPipelineStages::DbFile
+			| EnableCommitPipelineStages::LogOverlay => {
+			 if let Some(overlay) = db.commit_overlay.read().get(col as usize) {
 				if !overlay.is_empty() {
 					let mut replayed = 5;
 					while !overlay.is_empty() {
@@ -1311,39 +1294,39 @@ mod tests {
 		let mut inner_options = InternalOptions::default();
 		inner_options.create = true;
 		inner_options.commit_stages = db_test;
-		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
-		assert!(db.inner.get(col_nb, key1.as_slice()).unwrap().is_none());
+		let db = Db::open_inner(&options, &inner_options).unwrap();
+		assert!(db.get(col_nb, key1.as_slice()).unwrap().is_none());
 
 		db.commit(vec![
 			(col_nb, key1.clone(), Some(b"value1".to_vec())),
 		]).unwrap();
-		wait_on.as_ref().map(|w| w.wait_notify());
-		assert!(db_test.check_empty_overlay(&db, col_nb));
+		db_test.run_stages(&db);
+		assert!(db_test.check_empty_overlay(&db.inner, col_nb));
 
-		assert_eq!(db.inner.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
+		assert_eq!(db.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
 
 		db.commit(vec![
 			(col_nb, key1.clone(), None),
 			(col_nb, key2.clone(), Some(b"value2".to_vec())),
 			(col_nb, key3.clone(), Some(b"value3".to_vec())),
 		]).unwrap();
-		wait_on.as_ref().map(|w| w.wait_notify());
-		assert!(db_test.check_empty_overlay(&db, col_nb));
+		db_test.run_stages(&db);
+		assert!(db_test.check_empty_overlay(&db.inner, col_nb));
 
-		assert!(db.inner.get(col_nb, key1.as_slice()).unwrap().is_none());
-		assert_eq!(db.inner.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2".to_vec()));
-		assert_eq!(db.inner.get(col_nb, key3.as_slice()).unwrap(), Some(b"value3".to_vec()));
+		assert!(db.get(col_nb, key1.as_slice()).unwrap().is_none());
+		assert_eq!(db.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2".to_vec()));
+		assert_eq!(db.get(col_nb, key3.as_slice()).unwrap(), Some(b"value3".to_vec()));
 
 		db.commit(vec![
 			(col_nb, key2.clone(), Some(b"value2b".to_vec())),
 			(col_nb, key3.clone(), None),
 		]).unwrap();
-		wait_on.as_ref().map(|w| w.wait_notify());
-		assert!(db_test.check_empty_overlay(&db, col_nb));
+		db_test.run_stages(&db);
+		assert!(db_test.check_empty_overlay(&db.inner, col_nb));
 
-		assert!(db.inner.get(col_nb, key1.as_slice()).unwrap().is_none());
-		assert_eq!(db.inner.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2b".to_vec()));
-		assert_eq!(db.inner.get(col_nb, key3.as_slice()).unwrap(), None);
+		assert!(db.get(col_nb, key1.as_slice()).unwrap().is_none());
+		assert_eq!(db.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2b".to_vec()));
+		assert_eq!(db.get(col_nb, key3.as_slice()).unwrap(), None);
 	}
 
 	#[test]
@@ -1360,36 +1343,37 @@ mod tests {
 		let mut inner_options = InternalOptions::default();
 		inner_options.create = true;
 		inner_options.commit_stages = db_test;
-		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
+		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		db.commit(vec![
 			(col_nb, key1.clone(), Some(b"value1".to_vec())),
 			(col_nb, key2.clone(), Some(b"value2".to_vec())),
 			(col_nb, key3.clone(), Some(b"value3".to_vec())),
 		]).unwrap();
-		wait_on.as_ref().map(|w| w.wait_notify());
+		db_test.run_stages(&db);
 		std::mem::drop(db);
 
 		// issue with some file reopening when no delay
 		std::thread::sleep(std::time::Duration::from_millis(100));
 
+		let db_test = EnableCommitPipelineStages::CommitOverlay;
 		let mut inner_options = InternalOptions::default();
 		inner_options.create = false;
-		inner_options.commit_stages = EnableCommitPipelineStages::CommitOverlay;
+		inner_options.commit_stages = db_test;
 		inner_options.skip_check_lock = true;
-		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
-		assert_eq!(db.inner.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
-		assert_eq!(db.inner.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2".to_vec()));
-		assert_eq!(db.inner.get(col_nb, key3.as_slice()).unwrap(), Some(b"value3".to_vec()));
+		let db = Db::open_inner(&options, &inner_options).unwrap();
+		assert_eq!(db.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
+		assert_eq!(db.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2".to_vec()));
+		assert_eq!(db.get(col_nb, key3.as_slice()).unwrap(), Some(b"value3".to_vec()));
 		db.commit(vec![
 			(col_nb, key2.clone(), Some(b"value2b".to_vec())),
 			(col_nb, key3.clone(), None),
 		]).unwrap();
-		wait_on.as_ref().map(|w| w.wait_notify());
+		db_test.run_stages(&db);
 
-		assert_eq!(db.inner.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
-		assert_eq!(db.inner.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2b".to_vec()));
-		assert_eq!(db.inner.get(col_nb, key3.as_slice()).unwrap(), None);
+		assert_eq!(db.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
+		assert_eq!(db.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2b".to_vec()));
+		assert_eq!(db.get(col_nb, key3.as_slice()).unwrap(), None);
 	}
 
 	#[test]
@@ -1431,7 +1415,7 @@ mod tests {
 		let mut inner_options = InternalOptions::default();
 		inner_options.create = true;
 		inner_options.commit_stages = db_test;
-		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
+		let db = Db::open_inner(&options, &inner_options).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
 
 		let mut iter = db.iter(col_nb).unwrap();
@@ -1440,7 +1424,7 @@ mod tests {
 		db.commit(vec![
 			(col_nb, key1.clone(), Some(b"value1".to_vec())),
 		]).unwrap();
-		wait_on.as_ref().map(|w| w.wait_notify());
+		db_test.run_stages(&db);
 
 		assert_eq!(db.get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
 		iter.seek(&[]).unwrap();
@@ -1452,7 +1436,7 @@ mod tests {
 			(col_nb, key2.clone(), Some(b"value2".to_vec())),
 			(col_nb, key3.clone(), Some(b"value3".to_vec())),
 		]).unwrap();
-		wait_on.as_ref().map(|w| w.wait_notify());
+		db_test.run_stages(&db);
 
 		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
 		assert_eq!(db.get(col_nb, &key2).unwrap(), Some(b"value2".to_vec()));
@@ -1467,7 +1451,7 @@ mod tests {
 			(col_nb, key4.clone(), Some(b"value4".to_vec())),
 			(col_nb, key3.clone(), None),
 		]).unwrap();
-		wait_on.as_ref().map(|w| w.wait_notify());
+		db_test.run_stages(&db);
 
 		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
 		assert_eq!(db.get(col_nb, &key3).unwrap(), None);
@@ -1498,7 +1482,7 @@ mod tests {
 		let mut inner_options = InternalOptions::default();
 		inner_options.create = true;
 		inner_options.commit_stages = EnableCommitPipelineStages::DbFile;
-		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
+		let db = Db::open_inner(&options, &inner_options).unwrap();
 		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
 		assert_eq!(iter.next().unwrap(), None);
@@ -1506,7 +1490,7 @@ mod tests {
 		db.commit(vec![
 			(col_nb, key1.clone(), Some(b"value1".to_vec())),
 		]).unwrap();
-		wait_on.as_ref().map(|w| w.wait_notify());
+		EnableCommitPipelineStages::DbFile.run_stages(&db);
 		std::mem::drop(db);
 
 		// issue with some file reopening when no delay
@@ -1516,7 +1500,7 @@ mod tests {
 		inner_options.create = false;
 		inner_options.commit_stages = db_test;
 		inner_options.skip_check_lock = true;
-		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
+		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
@@ -1529,7 +1513,7 @@ mod tests {
 			(col_nb, key2.clone(), Some(b"value2".to_vec())),
 			(col_nb, key3.clone(), Some(b"value3".to_vec())),
 		]).unwrap();
-		wait_on.as_ref().map(|w| w.wait_notify());
+		db_test.run_stages(&db);
 
 		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
 		assert_eq!(db.get(col_nb, &key2).unwrap(), Some(b"value2".to_vec()));
@@ -1547,14 +1531,15 @@ mod tests {
 		options.columns[col_nb as usize].btree_index = true;
 		let mut inner_options = InternalOptions::default();
 		inner_options.create = true;
-		inner_options.commit_stages = EnableCommitPipelineStages::DbFile;
-		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
+		let db_test = EnableCommitPipelineStages::DbFile;
+		inner_options.commit_stages = db_test;
+		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(iter.next().unwrap(), None);
 
 		db.commit(change_set.iter().map(|(k, v)| (col_nb, k.clone(), v.clone()))).unwrap();
-		wait_on.as_ref().map(|w| w.wait_notify());
+		db_test.run_stages(&db);
 
 		let state: BTreeMap<Vec<u8>, Option<Vec<u8>>> = change_set.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 		for (key, value) in state.iter() {
@@ -1564,6 +1549,7 @@ mod tests {
 
 	#[test]
 	fn test_random() {
+		fdlimit::raise_fd_limit();
 		for i in 0..100 {
 			test_random_inner(60, 60, i);
 			std::thread::sleep(std::time::Duration::from_millis(30));
@@ -1839,10 +1825,10 @@ mod tests {
 		let mut inner_options = InternalOptions::default();
 		inner_options.create = true;
 		inner_options.commit_stages = db_test;
-		let (db, wait_on) = Db::open_inner(&options, &inner_options).unwrap();
+		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		db.commit(data_start.iter().cloned()).unwrap();
-		wait_on.as_ref().map(|w| w.wait_notify());
+		db_test.run_stages(&db);
 
 		let mut iter = db.iter(col_nb).unwrap();
 		let mut iter_state = start_state.iter();
@@ -1856,7 +1842,7 @@ mod tests {
 		}
 
 		db.commit(data_change.iter().cloned()).unwrap();
-		wait_on.as_ref().map(|w| w.wait_notify());
+		db_test.run_stages(&db);
 
 		let mut iter_state = end_state.range(last_key.clone()..);
 		for _ in commit_at..100 {
