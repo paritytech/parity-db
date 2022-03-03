@@ -704,7 +704,6 @@ impl DbInner {
 		while self.enact_logs(false)? {};
 		self.flush_logs(0)?;
 		while self.process_commits()? {};
-		while self.process_reindex()? {};
 		while self.enact_logs(false)? {};
 		self.flush_logs(0)?;
 		while self.enact_logs(false)? {};
