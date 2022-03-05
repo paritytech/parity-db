@@ -11,24 +11,21 @@ env:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v3
     - name: Build
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
-      
+
   fmt:
     runs-on: ubuntu-latest
     steps:
-      # Checks `rustfmt` formatting
       - uses: actions/checkout@v3
       - uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: nightly
           override: true
       - run: rustup component add rustfmt
       - uses: actions-rs/cargo@v1
@@ -36,15 +33,9 @@ jobs:
           command: fmt
           args: --all -- --check
 
-  # TODO: as explained in the official repo (https://github.com/actions-rs/clippy), this action uses unstable GH actions features, but has the huge advantage of not requiring `GITHUB_TOKEN` and working on PRs from forked repositories ; should eventually replace `actions-rs/clippy@master` with a specific version
   clippy:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
-        with:
-            toolchain: stable
-            components: clippy
-      - uses: actions-rs/clippy@master
-        with:
-          args: --all-features --all-targets
+      uses: actions-rs/cargo@v1
+      with:
+        command: clippy
+        args: --all-targets
