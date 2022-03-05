@@ -881,10 +881,10 @@ impl ValueTable {
 				true
 			}) {
 				Ok((rc, compressed)) => {
-                    if rc > 0 && !f(index, rc, result, compressed) {
-    			        break;
-                    }
-    			},
+					if rc > 0 && !f(index, rc, result, compressed) {
+						break;
+					}
+				},
 				Err(crate::error::Error::InvalidValueData) => (), // ignore, can be external index.
 				Err(e) => return Err(e),
 			}

@@ -313,7 +313,7 @@ impl IndexTable {
 	fn transmute_chunk(chunk: [u8; CHUNK_LEN]) -> [Entry; CHUNK_ENTRIES] {
 		let mut result: [Entry; CHUNK_ENTRIES] = unsafe { std::mem::transmute(chunk) };
 		if !cfg!(target_endian = "little") {
-			for item in result.iter_mut().take(CHUNK_ENTRIES) {
+			for item in result.iter_mut() {
 				*item = Entry::from_u64(u64::from_le(item.0));
 			}
 		}

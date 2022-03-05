@@ -446,8 +446,8 @@ impl DbInner {
 				);
 				for (key, address) in batch.into_iter() {
 					if let PlanOutcome::NeedReindex = column.write_reindex_plan(&key, address, &mut writer)? {
-     					next_reindex = true
-     				}
+						next_reindex = true
+					}
 				}
 				if let Some(table) = drop_index {
 					writer.drop_table(table);
@@ -1087,8 +1087,9 @@ impl IndexedChangeSet {
 		};
 		for (key, value) in self.changes.iter() {
 			if let PlanOutcome::NeedReindex = column.write_plan(key, value.as_ref().map(|v| v.as_slice()), writer)? {
-   					*reindex = true;
-   				}
+					// Reindex has triggered another reindex.
+					*reindex = true;
+				}
 			*ops += 1;
 		}
 		Ok(())

@@ -88,11 +88,11 @@ impl ColumnStats {
 	pub fn from_slice(data: &[u8]) -> ColumnStats {
 		let mut cursor = Cursor::new(data);
 		let mut value_histogram: [AtomicU32; HISTOGRAM_BUCKETS] = unsafe { MaybeUninit::uninit().assume_init() };
-		for item in value_histogram.iter_mut().take(HISTOGRAM_BUCKETS) {
+		for item in value_histogram.iter_mut() {
 			*item = read_u32(&mut cursor);
 		}
 		let mut query_histogram: [AtomicU64; SIZE_TIERS] = unsafe { MaybeUninit::uninit().assume_init() };
-		for item in query_histogram.iter_mut().take(SIZE_TIERS) {
+		for item in query_histogram.iter_mut() {
 			*item = read_u64(&mut cursor);
 		}
 		let mut stats = ColumnStats {
@@ -111,8 +111,8 @@ impl ColumnStats {
 			uncompressed_bytes: read_u64(&mut cursor),
 			compression_delta: unsafe { MaybeUninit::uninit().assume_init() },
 		};
-		for n in 0 .. HISTOGRAM_BUCKETS {
-			stats.compression_delta[n] = read_i64(&mut cursor);
+		for item in stats.compression_delta.iter_mut() {
+			*item = read_i64(&mut cursor);
 		}
 		stats
 	}
@@ -140,11 +140,11 @@ impl ColumnStats {
 
 	pub fn to_slice(&self, data: &mut [u8]) {
 		let mut cursor = Cursor::new(data);
-		for n in 0 .. HISTOGRAM_BUCKETS {
-			write_u32(&mut cursor, &self.value_histogram[n]);
+		for item in &self.value_histogram {
+			write_u32(&mut cursor, item);
 		}
-		for n in 0 .. SIZE_TIERS {
-			write_u64(&mut cursor, &self.query_histogram[n]);
+		for item in &self.query_histogram {
+			write_u64(&mut cursor, item);
 		}
 		write_u64(&mut cursor, &self.oversized);
 		write_u64(&mut cursor, &self.oversized_bytes);
@@ -157,8 +157,8 @@ impl ColumnStats {
 		write_u64(&mut cursor, &self.removed_miss);
 		write_u64(&mut cursor, &self.queries_miss);
 		write_u64(&mut cursor, &self.uncompressed_bytes);
-		for n in 0 .. HISTOGRAM_BUCKETS {
-			write_i64(&mut cursor, &self.compression_delta[n]);
+		for item in &self.compression_delta {
+			write_i64(&mut cursor, item);
 		}
 	}
 
