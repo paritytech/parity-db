@@ -34,7 +34,7 @@ fn disable_read_ahead(file: &std::fs::File) -> Result<()> {
 fn disable_read_ahead(file: &std::fs::File) -> Result<()> {
 	use std::os::unix::io::AsRawFd;
 	if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_RDAHEAD, 0) } != 0 {
-		Err(std::io::Error::last_os_error())?
+		Err(std::io::Error::last_os_error().into())
 	} else {
 		Ok(())
 	}
@@ -56,7 +56,7 @@ fn disable_read_ahead(_file: &std::fs::File) -> Result<()> {
 fn fsync(file: &std::fs::File) -> Result<()> {
 	use std::os::unix::io::AsRawFd;
 	if unsafe { libc::fsync(file.as_raw_fd()) } != 0 {
-		Err(std::io::Error::last_os_error())?
+		Err(std::io::Error::last_os_error().into())
 	} else {
 		Ok(())
 	}

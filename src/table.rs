@@ -171,6 +171,7 @@ type PartialKeyEntry = Entry<[u8; 40]>; // 2 + 4 + 26 + 8
 
 impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	#[inline(always)]
+	#[allow(clippy::uninit_assumed_init)]
 	pub fn new_uninit() -> Self {
 		Entry(0, unsafe { MaybeUninit::uninit().assume_init() })
 	}
@@ -505,6 +506,7 @@ impl ValueTable {
 		Ok(None)
 	}
 
+	#[allow(clippy::type_complexity)]
 	pub fn get_with_meta(
 		&self,
 		index: u64,
@@ -1387,7 +1389,7 @@ mod test {
 			table.write_insert_plan(key, &val, writer, compressed).unwrap();
 			table.write_inc_ref(1, writer).unwrap();
 		});
-		assert_eq!(table.get(key, 1, log.overlays()).unwrap(), Some((val.clone(), compressed)));
+		assert_eq!(table.get(key, 1, log.overlays()).unwrap(), Some((val, compressed)));
 		write_ops(&table, &log, |writer| {
 			table.write_dec_ref(1, writer).unwrap();
 			table.write_dec_ref(1, writer).unwrap();
@@ -1410,7 +1412,7 @@ mod test {
 		write_ops(&table, &log, |writer| {
 			table.write_insert_plan(key, &val, writer, compressed).unwrap();
 		});
-		assert_eq!(table.get(key, 1, log.overlays()).unwrap(), Some((val.clone(), compressed)));
+		assert_eq!(table.get(key, 1, log.overlays()).unwrap(), Some((val, compressed)));
 		write_ops(&table, &log, |writer| {
 			table.write_dec_ref(1, writer).unwrap();
 		});
@@ -1423,6 +1425,6 @@ mod test {
 		write_ops(&table, &log, |writer| {
 			table.write_insert_plan(key, &val, writer, compressed).unwrap();
 		});
-		assert_eq!(table.get(key, 1, log.overlays()).unwrap(), Some((val.clone(), compressed)));
+		assert_eq!(table.get(key, 1, log.overlays()).unwrap(), Some((val, compressed)));
 	}
 }
