@@ -18,7 +18,9 @@
 pub struct HexDisplay<'a>(&'a [u8]);
 
 impl<'a> HexDisplay<'a> {
-	pub fn from<R: std::convert::AsRef<[u8]> + ?Sized>(d: &'a R) -> Self { HexDisplay(d.as_ref()) }
+	pub fn from<R: std::convert::AsRef<[u8]> + ?Sized>(d: &'a R) -> Self {
+		HexDisplay(d.as_ref())
+	}
 }
 
 impl<'a> std::fmt::Display for HexDisplay<'a> {
@@ -39,6 +41,6 @@ impl<'a> std::fmt::Debug for HexDisplay<'a> {
 	}
 }
 
-pub fn hex<'a, R: std::convert::AsRef<[u8]> + ?Sized>(r: &'a R) -> HexDisplay<'a> {
+pub fn hex<R: std::convert::AsRef<[u8]> + ?Sized>(r: &R) -> HexDisplay<'_> {
 	HexDisplay::from(r)
 }

@@ -14,7 +14,6 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-
 //! Compression utility and types.
 
 use crate::error::Result;
@@ -37,17 +36,12 @@ pub struct Compress {
 
 impl Compress {
 	pub fn new(kind: CompressionType, threshold: u32) -> Self {
-		Compress {
-			inner: kind.into(),
-			threshold,
-		}
+		Compress { inner: kind.into(), threshold }
 	}
 }
 
-pub const NO_COMPRESSION: Compress = Compress {
-	inner: Compressor::NoCompression(NoCompression),
-	threshold: u32::MAX,
-};
+pub const NO_COMPRESSION: Compress =
+	Compress { inner: Compressor::NoCompression(NoCompression), threshold: u32::MAX };
 
 enum Compressor {
 	NoCompression(NoCompression),
@@ -135,8 +129,7 @@ mod lz4 {
 		}
 
 		pub(super) fn compress(&self, buf: &[u8]) -> Vec<u8> {
-			lz4::block::compress(buf, Some(lz4::block::CompressionMode::DEFAULT), true)
-				.unwrap()
+			lz4::block::compress(buf, Some(lz4::block::CompressionMode::DEFAULT), true).unwrap()
 		}
 
 		pub(super) fn decompress(&self, buf: &[u8]) -> Result<Vec<u8>> {
@@ -160,7 +153,7 @@ mod snappy {
 			let mut buf = Vec::with_capacity(value.len() << 3);
 			{
 				let mut encoder = snap::write::FrameEncoder::new(&mut buf);
-				encoder.write(value).expect("Expect in memory write to succeed.");
+				encoder.write_all(value).expect("Expect in memory write to succeed.");
 			}
 			buf
 		}
@@ -180,18 +173,15 @@ mod tests {
 
 	#[test]
 	fn test_compression_interfaces() {
-		let original = vec![42;100];
-		let types = vec![
-			CompressionType::NoCompression,
-			CompressionType::Snappy,
-			CompressionType::Lz4
-		];
+		let original = vec![42; 100];
+		let types =
+			vec![CompressionType::NoCompression, CompressionType::Snappy, CompressionType::Lz4];
 
 		for compression_type in types {
 			let compress = Compress::new(compression_type, 0);
 			let v = compress.compress(&original[..]);
 			assert!(v.len() <= 100);
-			let round_tripped = compress.decompress( &v[..]).unwrap();
+			let round_tripped = compress.decompress(&v[..]).unwrap();
 			assert_eq!(original, round_tripped);
 		}
 	}

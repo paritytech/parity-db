@@ -33,23 +33,26 @@
 //
 // This sequence is repeated ORDER times, followed by an additional CHILD index.
 
-use node::SeparatorInner;
-use crate::table::{Entry as ValueTableEntry, ValueTable, Value};
-use crate::table::key::{TableKey, TableKeyQuery};
-use crate::options::Options;
-use crate::index::Address;
-use crate::error::{Error, Result};
-use crate::column::{ColId, Column, TablesRef};
-use crate::log::{LogQuery, LogWriter, LogAction, LogReader};
-use crate::compress::Compress;
-use crate::btree::node::Node;
-use crate::btree::btree::BTree;
-use parking_lot::RwLock;
+use crate::{
+	btree::{btree::BTree, node::Node},
+	column::{ColId, Column, TablesRef},
+	compress::Compress,
+	error::{Error, Result},
+	index::Address,
+	log::{LogAction, LogQuery, LogReader, LogWriter},
+	options::Options,
+	table::{
+		key::{TableKey, TableKeyQuery},
+		Entry as ValueTableEntry, Value, ValueTable,
+	},
+};
 pub use iter::BTreeIterator;
+use node::SeparatorInner;
+use parking_lot::RwLock;
 
 mod btree;
-mod node;
 mod iter;
+mod node;
 
 const ORDER: usize = 8;
 const ORDER_CHILD: usize = ORDER + 1;
@@ -77,41 +80,32 @@ impl Entry {
 	}
 
 	fn from_encoded(enc: Vec<u8>) -> Self {
-		Entry {
-			encoded: ValueTableEntry::new(enc),
-		}
+		Entry { encoded: ValueTableEntry::new(enc) }
 	}
 
 	fn read_separator(&mut self) -> Option<SeparatorInner> {
 		if self.encoded.offset() == self.encoded.inner_mut().len() {
-			return None;
+			return None
 		}
 		let value = self.encoded.read_u64();
 		let head = self.encoded.read_slice(1);
 		let head = head[0];
-		let size = if head == u8::MAX {
-			self.encoded.read_u32() as usize
-		} else {
-			head as usize
-		};
+		let size = if head == u8::MAX { self.encoded.read_u32() as usize } else { head as usize };
 		let key = self.encoded.read_slice(size).to_vec();
 		if value == 0 {
-			return None;
+			return None
 		}
 		let value = Address::from_u64(value);
-		Some(SeparatorInner {
-			key,
-			value,
-		})
+		Some(SeparatorInner { key, value })
 	}
 
 	fn write_separator(&mut self, key: &Vec<u8>, value: Address) {
 		let size = key.len();
 		let inner_size = self.encoded.inner_mut().len();
 		if size >= u8::MAX as usize {
-			self.encoded.inner_mut().resize(inner_size + 8 + 1 + 4 + size, 0); 
+			self.encoded.inner_mut().resize(inner_size + 8 + 1 + 4 + size, 0);
 		} else {
-			self.encoded.inner_mut().resize(inner_size + 8 + 1 + size, 0); 
+			self.encoded.inner_mut().resize(inner_size + 8 + 1 + size, 0);
 		};
 		self.encoded.write_u64(value.as_u64());
 		if size >= u8::MAX as usize {
@@ -161,10 +155,7 @@ impl BTreeTable {
 	) -> Result<Self> {
 		let size_tier = HEADER_ADDRESS.size_tier() as usize;
 		if !values[size_tier].is_init() {
-			let btree_header = BTreeHeader {
-				root: NULL_ADDRESS,
-				depth: 0,
-			};
+			let btree_header = BTreeHeader { root: NULL_ADDRESS, depth: 0 };
 			let mut entry = Entry::empty();
 			entry.write_header(&btree_header);
 			values[size_tier].init_with_entry(&*entry.encoded.inner_mut())?;
@@ -187,13 +178,15 @@ impl BTreeTable {
 			root = Address::from_u64(buf.read_u64());
 			depth = buf.read_u32();
 		}
-		Ok(BTreeHeader {
-			root,
-			depth,
-		})
+		Ok(BTreeHeader { root, depth })
 	}
 
-	fn get_at_value_index(&self, key: TableKeyQuery, address: Address, log: &impl LogQuery) -> Result<Option<(u8, Value)>> {
+	fn get_at_value_index(
+		&self,
+		key: TableKeyQuery,
+		address: Address,
+		log: &impl LogQuery,
+	) -> Result<Option<(u8, Value)>> {
 		let tables = self.tables.read();
 		let btree = self.locked(&*tables);
 		Column::get_value(key, address, btree, log)
@@ -210,10 +203,10 @@ impl BTreeTable {
 	pub fn get(key: &[u8], log: &impl LogQuery, values: TablesRef) -> Result<Option<Vec<u8>>> {
 		let btree_header = Self::btree_header(log, values)?;
 		if btree_header.root == NULL_ADDRESS {
-			return Ok(None);
+			return Ok(None)
 		}
 		let record_id = 0; // lifetime of Btree is the query, so no invalidate.
-		// keeping log locked when parsing tree.
+				   // keeping log locked when parsing tree.
 		let tree = BTree::new(Some(btree_header.root), btree_header.depth, record_id);
 		tree.get(key, values, log)
 	}
@@ -262,7 +255,7 @@ impl BTreeTable {
 			},
 			_ => {
 				log::error!(target: "parity-db", "Unexpected log action");
-				return Err(Error::Corruption("Unexpected log action".to_string()));
+				return Err(Error::Corruption("Unexpected log action".to_string()))
 			},
 		}
 		Ok(())
@@ -336,7 +329,7 @@ impl BTreeTable {
 		}
 
 		if !node.changed {
-			return Ok(None);
+			return Ok(None)
 		}
 
 		let mut entry = Entry::empty();
@@ -350,13 +343,13 @@ impl BTreeTable {
 			}
 			i_children += 1;
 			if i_children == ORDER_CHILD {
-				break;
+				break
 			}
 			if let Some(sep) = &node.separators.as_mut()[i_separator].separator {
 				entry.write_separator(&sep.key, sep.value);
 				i_separator += 1
 			} else {
-				break;
+				break
 			}
 		}
 
@@ -397,9 +390,11 @@ impl BTreeTable {
 
 pub mod commit_overlay {
 	use super::*;
-	use crate::db::BTreeCommitOverlay;
-	use crate::column::{Column, ColId};
-	use crate::error::Result;
+	use crate::{
+		column::{ColId, Column},
+		db::BTreeCommitOverlay,
+		error::Result,
+	};
 
 	pub struct BTreeChangeSet {
 		pub col: ColId,
@@ -416,7 +411,13 @@ pub mod commit_overlay {
 			self.changes.push((k.to_vec(), v));
 		}
 
-		pub fn copy_to_overlay(&self, overlay: &mut BTreeCommitOverlay, record_id: u64, bytes: &mut usize, options: &Options) {
+		pub fn copy_to_overlay(
+			&self,
+			overlay: &mut BTreeCommitOverlay,
+			record_id: u64,
+			bytes: &mut usize,
+			options: &Options,
+		) {
 			let ref_counted = options.columns[self.col as usize].ref_counted;
 			for commit in self.changes.iter() {
 				match commit {
@@ -461,14 +462,12 @@ pub mod commit_overlay {
 			let locked = btree.locked(&*locked_tables);
 			let mut tree = BTree::open(locked, writer, record_id)?;
 
-			let mut btree_header = BTreeHeader {
-				root: tree.root_index.unwrap_or(NULL_ADDRESS),
-				depth: tree.depth,
-			};
+			let mut btree_header =
+				BTreeHeader { root: tree.root_index.unwrap_or(NULL_ADDRESS), depth: tree.depth };
 			let old_btree_header = btree_header.clone();
 
 			self.changes.sort_by_key(|(k, _)| k.clone());
-			tree.write_sorted_changes(&mut self.changes.as_slice(), locked, writer)?;
+			tree.write_sorted_changes(self.changes.as_slice(), locked, writer)?;
 			*ops += self.changes.len() as u64;
 			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_header)?;
 

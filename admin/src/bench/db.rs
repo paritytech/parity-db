@@ -22,5 +22,5 @@ pub trait Db: Send + Sync + 'static {
 	fn open(path: &std::path::Path) -> Self;
 	fn with_options(options: &Self::Options) -> Self;
 	fn get(&self, key: &Key) -> Option<Value>;
-	fn commit<I: IntoIterator<Item=(Key, Option<Value>)>>(&self, tx: I);
+	fn commit<I: IntoIterator<Item = (Key, Option<Value>)>>(&self, tx: I);
 }

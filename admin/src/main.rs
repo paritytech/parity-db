@@ -18,7 +18,7 @@
 //! Experimental, some functionality may not
 //! guarantee db durability.
 
-#[cfg_attr(any(target_os = "linux", target_os = "macos"),  global_allocator)]
+#[cfg_attr(any(target_os = "linux", target_os = "macos"), global_allocator)]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
