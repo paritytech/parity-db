@@ -14,8 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::fmt;
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -34,7 +33,7 @@ pub enum Error {
 }
 
 impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Error::Io(e) => write!(f, "IO Error: {}", e),
 			Error::Corruption(e) => write!(f, "Corruption: {}", e),
@@ -47,7 +46,7 @@ impl fmt::Display for Error {
 			Error::Compression => write!(f, "Compression error"),
 			Error::DatabaseNotFound => write!(f, "Database does not exist"),
 		}
-    }
+	}
 }
 
 impl From<std::io::Error> for Error {

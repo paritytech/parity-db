@@ -14,13 +14,13 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::io::Write;
-use std::collections::HashMap;
-use std::path::Path;
-use crate::error::{Error, Result};
-use crate::column::Salt;
-use crate::compress::CompressionType;
+use crate::{
+	column::Salt,
+	compress::CompressionType,
+	error::{Error, Result},
+};
 use rand::Rng;
+use std::{collections::HashMap, io::Write, path::Path};
 
 pub const CURRENT_VERSION: u32 = 6;
 // TODO on last supported 5, remove MULTIHEAD_V4 and MULTIPART_V4
@@ -79,19 +79,16 @@ pub struct Metadata {
 
 impl ColumnOptions {
 	fn as_string(&self) -> String {
-		format!("preimage: {}, uniform: {}, refc: {}, compression: {}, ordered: {}",
-			self.preimage,
-			self.uniform,
-			self.ref_counted,
-			self.compression as u8,
-			self.btree_index,
+		format!(
+			"preimage: {}, uniform: {}, refc: {}, compression: {}, ordered: {}",
+			self.preimage, self.uniform, self.ref_counted, self.compression as u8, self.btree_index,
 		)
 	}
 
 	pub fn is_valid(&self) -> bool {
 		if self.btree_index && self.preimage {
 			log::error!(target: "parity-db", "Using `preimage` option on an ordered column is not supported");
-			return false;
+			return false
 		}
 		true
 	}
@@ -100,10 +97,13 @@ impl ColumnOptions {
 		let mut split = s.split("sizes: ");
 		let vals = split.next()?;
 
-		let vals: HashMap<&str, &str> = vals.split(", ").filter_map(|s| {
-			let mut pair = s.split(": ");
-			Some((pair.next()?, pair.next()?))
-		}).collect();
+		let vals: HashMap<&str, &str> = vals
+			.split(", ")
+			.filter_map(|s| {
+				let mut pair = s.split(": ");
+				Some((pair.next()?, pair.next()?))
+			})
+			.collect();
 
 		let preimage = vals.get("preimage")?.parse().ok()?;
 		let uniform = vals.get("uniform")?.parse().ok()?;
@@ -168,27 +168,28 @@ impl Options {
 
 		if let Some(meta) = meta {
 			if meta.columns.len() != self.columns.len() {
-				return Err(Error::InvalidConfiguration("Column config mismatch".into()));
+				return Err(Error::InvalidConfiguration("Column config mismatch".into()))
 			}
 
 			for c in 0..meta.columns.len() {
 				if meta.columns[c] != self.columns[c] {
 					return Err(Error::InvalidConfiguration(format!(
-								"Column config mismatch for column {}. Expected \"{}\", got \"{}\"",
-								c, self.columns[c].as_string(), meta.columns[c].as_string())));
+						"Column config mismatch for column {}. Expected \"{}\", got \"{}\"",
+						c,
+						self.columns[c].as_string(),
+						meta.columns[c].as_string()
+					)))
 				}
 			}
 			Ok(meta)
 		} else if create {
-			let s: Salt = self.salt.unwrap_or_else(||rand::thread_rng().gen());
+			let s: Salt = self.salt.unwrap_or_else(|| rand::thread_rng().gen());
 			self.write_metadata(&self.path, &s)?;
-			Ok(Metadata {
-				version: CURRENT_VERSION,
-				columns: self.columns.clone(),
-				salt: s,
-			})
+			Ok(Metadata { version: CURRENT_VERSION, columns: self.columns.clone(), salt: s })
 		} else {
-			Err(Error::InvalidConfiguration("Database does not exist. To create a new one, use open_or_create".into()))
+			Err(Error::InvalidConfiguration(
+				"Database does not exist. To create a new one, use open_or_create".into(),
+			))
 		}
 	}
 
@@ -199,8 +200,7 @@ impl Options {
 	}
 
 	pub fn load_metadata_file(path: &Path) -> Result<Option<Metadata>> {
-		use std::io::BufRead;
-		use std::str::FromStr;
+		use std::{io::BufRead, str::FromStr};
 
 		if !path.exists() {
 			return Ok(None)
@@ -212,36 +212,37 @@ impl Options {
 		for l in file.lines() {
 			let l = l?;
 			let mut vals = l.split('=');
-			let k = vals.next().ok_or_else(||Error::Corruption("Bad metadata".into()))?;
-			let v = vals.next().ok_or_else(||Error::Corruption("Bad metadata".into()))?;
+			let k = vals.next().ok_or_else(|| Error::Corruption("Bad metadata".into()))?;
+			let v = vals.next().ok_or_else(|| Error::Corruption("Bad metadata".into()))?;
 			if k == "version" {
-				version = u32::from_str(v).map_err(|_| Error::Corruption("Bad version string".into()))?;
+				version =
+					u32::from_str(v).map_err(|_| Error::Corruption("Bad version string".into()))?;
 			} else if k == "salt" {
-					let salt_slice = hex::decode(v).map_err(|_| Error::Corruption("Bad salt string".into()))?;
-					let mut s = Salt::default();
-					s.copy_from_slice(&salt_slice);
-					salt = Some(s);
+				let salt_slice =
+					hex::decode(v).map_err(|_| Error::Corruption("Bad salt string".into()))?;
+				let mut s = Salt::default();
+				s.copy_from_slice(&salt_slice);
+				salt = Some(s);
 			} else if k.starts_with("col") {
-				let col = ColumnOptions::from_string(v).ok_or_else(|| Error::Corruption("Bad column metadata".into()))?;
+				let col = ColumnOptions::from_string(v)
+					.ok_or_else(|| Error::Corruption("Bad column metadata".into()))?;
 				columns.push(col);
 			}
 		}
-		if version < LAST_SUPPORTED_VERSION  {
+		if version < LAST_SUPPORTED_VERSION {
 			return Err(Error::InvalidConfiguration(format!(
-						"Unsupported database version {}. Expected {}", version, CURRENT_VERSION)));
+				"Unsupported database version {}. Expected {}",
+				version, CURRENT_VERSION
+			)))
 		}
 		let salt = salt.ok_or_else(|| Error::InvalidConfiguration("Missing salt value".into()))?;
-		Ok(Some(Metadata {
-			version,
-			columns,
-			salt,
-		}))
+		Ok(Some(Metadata { version, columns, salt }))
 	}
 
 	pub fn is_valid(&self) -> bool {
 		for option in self.columns.iter() {
 			if !option.is_valid() {
-				return false;
+				return false
 			}
 		}
 		true

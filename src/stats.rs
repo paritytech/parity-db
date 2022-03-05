@@ -14,19 +14,21 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
+use crate::{column::ColId, error::Result, table::SIZE_TIERS};
 /// Database statistics.
-
-use std::sync::atomic::{AtomicU64, AtomicU32, AtomicI64, Ordering};
-use std::mem::MaybeUninit;
-use std::io::{Read, Write, Cursor};
-use crate::{error::Result, column::ColId, table::SIZE_TIERS};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::{
+	io::{Cursor, Read, Write},
+	mem::MaybeUninit,
+};
 
 // store up to value of size HISTOGRAM_BUCKETS * 2 ^ HISTOGRAM_BUCKET_BITS,
 // that is 32ko
 const HISTOGRAM_BUCKETS: usize = 1024;
 const HISTOGRAM_BUCKET_BITS: u8 = 5;
 
-pub const TOTAL_SIZE: usize = 4 * HISTOGRAM_BUCKETS + 8 * HISTOGRAM_BUCKETS + 8 * SIZE_TIERS + 8 * 11;
+pub const TOTAL_SIZE: usize =
+	4 * HISTOGRAM_BUCKETS + 8 * HISTOGRAM_BUCKETS + 8 * SIZE_TIERS + 8 * 11;
 
 pub struct ColumnStats {
 	value_histogram: [AtomicU32; HISTOGRAM_BUCKETS],
@@ -64,15 +66,21 @@ fn read_i64(cursor: &mut Cursor<&[u8]>) -> AtomicI64 {
 }
 
 fn write_u32(cursor: &mut Cursor<&mut [u8]>, val: &AtomicU32) {
-	cursor.write_all(&val.load(Ordering::Relaxed).to_le_bytes()).expect("Incorrent stats buffer");
+	cursor
+		.write_all(&val.load(Ordering::Relaxed).to_le_bytes())
+		.expect("Incorrent stats buffer");
 }
 
 fn write_u64(cursor: &mut Cursor<&mut [u8]>, val: &AtomicU64) {
-	cursor.write_all(&val.load(Ordering::Relaxed).to_le_bytes()).expect("Incorrent stats buffer");
+	cursor
+		.write_all(&val.load(Ordering::Relaxed).to_le_bytes())
+		.expect("Incorrent stats buffer");
 }
 
 fn write_i64(cursor: &mut Cursor<&mut [u8]>, val: &AtomicI64) {
-	cursor.write_all(&val.load(Ordering::Relaxed).to_le_bytes()).expect("Incorrent stats buffer");
+	cursor
+		.write_all(&val.load(Ordering::Relaxed).to_le_bytes())
+		.expect("Incorrent stats buffer");
 }
 
 fn value_histogram_index(size: u32) -> Option<usize> {
@@ -87,11 +95,13 @@ fn value_histogram_index(size: u32) -> Option<usize> {
 impl ColumnStats {
 	pub fn from_slice(data: &[u8]) -> ColumnStats {
 		let mut cursor = Cursor::new(data);
-		let mut value_histogram: [AtomicU32; HISTOGRAM_BUCKETS] = unsafe { MaybeUninit::uninit().assume_init() };
+		let mut value_histogram: [AtomicU32; HISTOGRAM_BUCKETS] =
+			unsafe { MaybeUninit::uninit().assume_init() };
 		for item in value_histogram.iter_mut() {
 			*item = read_u32(&mut cursor);
 		}
-		let mut query_histogram: [AtomicU64; SIZE_TIERS] = unsafe { MaybeUninit::uninit().assume_init() };
+		let mut query_histogram: [AtomicU64; SIZE_TIERS] =
+			unsafe { MaybeUninit::uninit().assume_init() };
 		for item in query_histogram.iter_mut() {
 			*item = read_u64(&mut cursor);
 		}
@@ -118,8 +128,10 @@ impl ColumnStats {
 	}
 
 	pub fn empty() -> ColumnStats {
-		let value_histogram: [AtomicU32; HISTOGRAM_BUCKETS] = unsafe { std::mem::transmute([0u32; HISTOGRAM_BUCKETS]) };
-		let query_histogram: [AtomicU64; SIZE_TIERS] = unsafe { std::mem::transmute([0u64; SIZE_TIERS]) };
+		let value_histogram: [AtomicU32; HISTOGRAM_BUCKETS] =
+			unsafe { std::mem::transmute([0u32; HISTOGRAM_BUCKETS]) };
+		let query_histogram: [AtomicU64; SIZE_TIERS] =
+			unsafe { std::mem::transmute([0u64; SIZE_TIERS]) };
 		ColumnStats {
 			value_histogram,
 			query_histogram,
@@ -167,19 +179,32 @@ impl ColumnStats {
 		writeln!(writer, "Total values: {}", self.total_values.load(Ordering::Relaxed))?;
 		writeln!(writer, "Total bytes: {}", self.total_bytes.load(Ordering::Relaxed))?;
 		writeln!(writer, "Total oversized values: {}", self.oversized.load(Ordering::Relaxed))?;
-		writeln!(writer, "Total oversized bytes: {}", self.oversized_bytes.load(Ordering::Relaxed))?;
+		writeln!(
+			writer,
+			"Total oversized bytes: {}",
+			self.oversized_bytes.load(Ordering::Relaxed)
+		)?;
 		writeln!(writer, "Total commits: {}", self.commits.load(Ordering::Relaxed))?;
 		writeln!(writer, "New value insertions: {}", self.inserted_new.load(Ordering::Relaxed))?;
-		writeln!(writer, "Existing value insertions: {}", self.inserted_overwrite.load(Ordering::Relaxed))?;
+		writeln!(
+			writer,
+			"Existing value insertions: {}",
+			self.inserted_overwrite.load(Ordering::Relaxed)
+		)?;
 		writeln!(writer, "Removals: {}", self.removed_hit.load(Ordering::Relaxed))?;
 		writeln!(writer, "Missed removals: {}", self.removed_miss.load(Ordering::Relaxed))?;
-		writeln!(writer, "Uncompressed bytes: {}", self.uncompressed_bytes.load(Ordering::Relaxed))?;
+		writeln!(
+			writer,
+			"Uncompressed bytes: {}",
+			self.uncompressed_bytes.load(Ordering::Relaxed)
+		)?;
 		writeln!(writer, "Compression deltas:")?;
-		for i in 0 .. HISTOGRAM_BUCKETS {
+		for i in 0..HISTOGRAM_BUCKETS {
 			let count = self.value_histogram[i].load(Ordering::Relaxed);
 			let delta = self.compression_delta[i].load(Ordering::Relaxed);
 			if count != 0 && delta != 0 {
-				writeln!(writer,
+				writeln!(
+					writer,
 					"    {}-{}: {}",
 					i << HISTOGRAM_BUCKET_BITS,
 					(((i + 1) << HISTOGRAM_BUCKET_BITS) - 1),
@@ -188,7 +213,7 @@ impl ColumnStats {
 			}
 		}
 		write!(writer, "Queries per size tier: [")?;
-		for i in 0 .. SIZE_TIERS {
+		for i in 0..SIZE_TIERS {
 			if i == SIZE_TIERS - 1 {
 				writeln!(writer, "{}]", self.query_histogram[i].load(Ordering::Relaxed))?;
 			} else {
@@ -197,10 +222,11 @@ impl ColumnStats {
 		}
 		writeln!(writer, "Missed queries: {}", self.queries_miss.load(Ordering::Relaxed))?;
 		writeln!(writer, "Value histogram:")?;
-		for i in 0 .. HISTOGRAM_BUCKETS {
+		for i in 0..HISTOGRAM_BUCKETS {
 			let count = self.value_histogram[i].load(Ordering::Relaxed);
 			if count != 0 {
-				writeln!(writer,
+				writeln!(
+					writer,
 					"    {}-{}: {}",
 					i << HISTOGRAM_BUCKET_BITS,
 					(((i + 1) << HISTOGRAM_BUCKET_BITS) - 1),
@@ -227,7 +253,8 @@ impl ColumnStats {
 	pub fn insert(&self, size: u32, compressed: u32) {
 		if let Some(index) = value_histogram_index(size) {
 			self.value_histogram[index].fetch_add(1, Ordering::Relaxed);
-			self.compression_delta[index].fetch_add(size as i64 - compressed as i64, Ordering::Relaxed);
+			self.compression_delta[index]
+				.fetch_add(size as i64 - compressed as i64, Ordering::Relaxed);
 		} else {
 			self.oversized.fetch_add(1, Ordering::Relaxed);
 			self.oversized_bytes.fetch_add(compressed as u64, Ordering::Relaxed);
@@ -240,7 +267,8 @@ impl ColumnStats {
 	pub fn remove(&self, size: u32, compressed: u32) {
 		if let Some(index) = value_histogram_index(size) {
 			self.value_histogram[index].fetch_sub(1, Ordering::Relaxed);
-			self.compression_delta[index].fetch_sub(size as i64 - compressed as i64, Ordering::Relaxed);
+			self.compression_delta[index]
+				.fetch_sub(size as i64 - compressed as i64, Ordering::Relaxed);
 		} else {
 			self.oversized.fetch_sub(1, Ordering::Relaxed);
 			self.oversized_bytes.fetch_sub(compressed as u64, Ordering::Relaxed);

@@ -14,12 +14,10 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
+use crate::{error::Result, table::TableId};
+use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 /// Utilites for db file.
-
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use parking_lot::{RwLockUpgradableReadGuard, RwLock};
-use crate::error::Result;
-use crate::table::TableId;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[cfg(target_os = "linux")]
 fn disable_read_ahead(file: &std::fs::File) -> Result<()> {
@@ -70,7 +68,6 @@ fn fsync(file: &std::fs::File) -> Result<()> {
 	Ok(())
 }
 
-
 const GROW_SIZE_BYTES: u64 = 256 * 1024;
 
 pub struct TableFile {
@@ -85,7 +82,11 @@ impl TableFile {
 	pub fn open(filepath: std::path::PathBuf, entry_size: u16, id: TableId) -> Result<Self> {
 		let mut capacity = 0u64;
 		let file = if std::fs::metadata(&filepath).is_ok() {
-			let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(filepath.as_path())?;
+			let file = std::fs::OpenOptions::new()
+				.create(true)
+				.read(true)
+				.write(true)
+				.open(filepath.as_path())?;
 			disable_read_ahead(&file)?;
 			let len = file.metadata()?.len();
 			if len == 0 {
@@ -110,7 +111,11 @@ impl TableFile {
 
 	fn create_file(&self) -> Result<std::fs::File> {
 		log::debug!(target: "parity-db", "Created value table {}", self.id);
-		let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(self.path.as_path())?;
+		let file = std::fs::OpenOptions::new()
+			.create(true)
+			.read(true)
+			.write(true)
+			.open(self.path.as_path())?;
 		disable_read_ahead(&file)?;
 		Ok(file)
 	}
@@ -160,7 +165,9 @@ impl TableFile {
 	}
 
 	pub fn flush(&self) -> Result<()> {
-		if let Ok(true) = self.dirty.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed) {
+		if let Ok(true) =
+			self.dirty.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+		{
 			if let Some(file) = self.file.read().as_ref() {
 				fsync(file)?;
 			}

@@ -24,7 +24,6 @@ mod bench;
 /// Command line admin client entry point.
 /// Uses default column definition.
 pub fn run() -> Result<(), String> {
-
 	let cli = Cli::from_args();
 	use env_logger::Builder;
 
@@ -36,11 +35,15 @@ pub fn run() -> Result<(), String> {
 	builder.parse_filters(logs.as_slice().join(",").as_str());
 	builder.init();
 
-	let db_path = cli.shared().base_path.clone()
+	let db_path = cli
+		.shared()
+		.base_path
+		.clone()
 		.unwrap_or_else(|| std::env::current_dir().expect("Cannot resolve current dir"));
 	let nb_column = cli.shared().columns.unwrap_or(1);
 	let mut options = if let Some(metadata) = parity_db::Options::load_metadata(&db_path)
-		.map_err(|e| format!("Error resolving metas: {:?}", e))? {
+		.map_err(|e| format!("Error resolving metas: {:?}", e))?
+	{
 		let mut options = parity_db::Options::with_columns(db_path.as_path(), 0);
 		options.columns = metadata.columns;
 		options.salt = Some(metadata.salt);
@@ -78,9 +81,11 @@ pub fn run() -> Result<(), String> {
 			let dest_columns = dest_meta.columns;
 
 			if args.clear_dest && std::fs::metadata(&args.dest_path).is_ok() {
-				std::fs::remove_dir_all(&args.dest_path).map_err(|e| format!("Error removing dest dir: {:?}", e))?;
+				std::fs::remove_dir_all(&args.dest_path)
+					.map_err(|e| format!("Error removing dest dir: {:?}", e))?;
 			}
-			std::fs::create_dir_all(&args.dest_path).map_err(|e| format!("Error creating dest dir: {:?}", e))?;
+			std::fs::create_dir_all(&args.dest_path)
+				.map_err(|e| format!("Error creating dest dir: {:?}", e))?;
 
 			let mut dest_options = Options::with_columns(&args.dest_path, dest_columns.len() as u8);
 			dest_options.columns = dest_columns;
@@ -91,7 +96,8 @@ pub fn run() -> Result<(), String> {
 				.map_err(|e| format!("Migration error: {:?}", e))?;
 
 			if args.overwrite && std::fs::metadata(&args.dest_path).is_ok() {
-				std::fs::remove_dir_all(&args.dest_path).map_err(|e| format!("Error removing dest dir: {:?}", e))?;
+				std::fs::remove_dir_all(&args.dest_path)
+					.map_err(|e| format!("Error removing dest dir: {:?}", e))?;
 			}
 		},
 		SubCommand::Check(check) => {
@@ -99,7 +105,7 @@ pub fn run() -> Result<(), String> {
 				.map_err(|e| format!("Invalid db: {:?}", e))?;
 			if !check.index_value {
 				// Note that we should use enum parameter instead.
-				return Err("Requires one of the following check flag: --index-value".to_string());
+				return Err("Requires one of the following check flag: --index-value".to_string())
 			}
 			let check_param = parity_db::CheckOptions::new(
 				check.column,
@@ -108,15 +114,12 @@ pub fn run() -> Result<(), String> {
 				check.display,
 				check.display_value_max,
 			);
-			db.dump(check_param)
-				.map_err(|e| format!("Check error: {:?}", e))?;
+			db.dump(check_param).map_err(|e| format!("Check error: {:?}", e))?;
 		},
 		SubCommand::Flush(_flush) => {
-			let _db = parity_db::Db::open(&options)
-				.map_err(|e| format!("Invalid db: {:?}", e))?;
+			let _db = parity_db::Db::open(&options).map_err(|e| format!("Invalid db: {:?}", e))?;
 		},
 		SubCommand::Stress(bench) => {
-
 			let args = bench.get_args();
 			// avoid deleting folders by mistake.
 			options.path.push("test_db_stress");
@@ -165,7 +168,6 @@ pub struct Shared {
 /// Admin cli command for parity-db.
 #[derive(Debug, StructOpt)]
 pub struct Cli {
-
 	/// Subcommands.
 	#[structopt(subcommand)]
 	pub subcommand: SubCommand,
@@ -175,9 +177,7 @@ pub struct Cli {
 	/// The node will be started with the authority role and actively
 	/// participate in any consensus task that it can (e.g. depending on
 	/// availability of local keys).
-	#[structopt(
-		long = "validator"
-	)]
+	#[structopt(long = "validator")]
 	pub validator: bool,
 }
 
@@ -208,21 +208,11 @@ impl SubCommand {
 impl Cli {
 	fn shared(&self) -> &Shared {
 		match &self.subcommand {
-			SubCommand::Stats(stats) => {
-				&stats.shared
-			},
-			SubCommand::Migrate(stats) => {
-				&stats.shared
-			},
-			SubCommand::Flush(flush) => {
-				&flush.shared
-			},
-			SubCommand::Check(check) => {
-				&check.shared
-			},
-			SubCommand::Stress(bench) => {
-				&bench.shared
-			},
+			SubCommand::Stats(stats) => &stats.shared,
+			SubCommand::Migrate(stats) => &stats.shared,
+			SubCommand::Flush(flush) => &flush.shared,
+			SubCommand::Check(check) => &check.shared,
+			SubCommand::Stress(bench) => &bench.shared,
 		}
 	}
 }

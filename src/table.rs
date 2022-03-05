@@ -57,19 +57,22 @@
 // TOMBSTONE - Deleted entry marker. 0xffff
 // NEXT - 64-bit index of the next deleted entry.
 
-
-use std::convert::TryInto;
-use std::mem::MaybeUninit;
-use std::io::Read;
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use std::sync::Arc;
 use crate::{
-	table::key::{TableKey, TableKeyQuery, PARTIAL_SIZE},
-	error::Result,
 	column::ColId,
-	log::{LogQuery, LogReader, LogWriter},
 	display::hex,
+	error::Result,
+	log::{LogQuery, LogReader, LogWriter},
 	options::ColumnOptions as Options,
+	table::key::{TableKey, TableKeyQuery, PARTIAL_SIZE},
+};
+use std::{
+	convert::TryInto,
+	io::Read,
+	mem::MaybeUninit,
+	sync::{
+		atomic::{AtomicBool, AtomicU64, Ordering},
+		Arc,
+	},
 };
 
 pub const SIZE_TIERS: usize = 1usize << SIZE_TIERS_BITS;
@@ -230,7 +233,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	}
 
 	fn is_multi(&self, db_version: u32) -> bool {
-		self.is_multipart() || self.is_multihead() ||
+		self.is_multipart() ||
+			self.is_multihead() ||
 			(db_version <= 4 && (self.is_multipart_v4() || self.is_multihead_v4()))
 	}
 
@@ -417,7 +421,7 @@ impl ValueTable {
 			buf.set_offset(0);
 
 			if buf.is_tombstone() {
-				return Ok((0, false));
+				return Ok((0, false))
 			}
 
 			let (entry_end, next) = if self.multipart && buf.is_multi(self.db_version) {
@@ -451,17 +455,17 @@ impl ValueTable {
 								to_fetch,
 								self.entry_size,
 							);
-							return Ok((0, false));
+							return Ok((0, false))
 						}
 					},
 				}
 			}
 			if !f(buf.remaining_to(entry_end)) {
-				break;
+				break
 			};
 
 			if next == 0 {
-				break;
+				break
 			}
 			part += 1;
 			index = next;
@@ -469,42 +473,66 @@ impl ValueTable {
 		Ok((rc, compressed))
 	}
 
-	pub fn get(&self, key: &TableKey, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool)>> {
-		if let Some((value, compressed, _)) = self.query(&mut TableKeyQuery::Check(key), index, log)? {
+	pub fn get(
+		&self,
+		key: &TableKey,
+		index: u64,
+		log: &impl LogQuery,
+	) -> Result<Option<(Value, bool)>> {
+		if let Some((value, compressed, _)) =
+			self.query(&mut TableKeyQuery::Check(key), index, log)?
+		{
 			Ok(Some((value, compressed)))
 		} else {
 			Ok(None)
 		}
 	}
 
-	pub fn query(&self, key: &mut TableKeyQuery, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool, u32)>> {
+	pub fn query(
+		&self,
+		key: &mut TableKeyQuery,
+		index: u64,
+		log: &impl LogQuery,
+	) -> Result<Option<(Value, bool, u32)>> {
 		let mut result = Vec::new();
 		let (rc, compressed) = self.for_parts(key, index, log, |buf| {
 			result.extend_from_slice(buf);
 			true
 		})?;
 		if rc > 0 {
-			return Ok(Some((result, compressed, rc)));
+			return Ok(Some((result, compressed, rc)))
 		}
 		Ok(None)
 	}
 
-	pub fn get_with_meta(&self, index: u64, log: &impl LogQuery) -> Result<Option<(Value, u32, [u8; PARTIAL_SIZE], bool)>> {
+	pub fn get_with_meta(
+		&self,
+		index: u64,
+		log: &impl LogQuery,
+	) -> Result<Option<(Value, u32, [u8; PARTIAL_SIZE], bool)>> {
 		let mut query_key = Default::default();
-		if let Some((value, compressed, rc)) = self.query(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index, log)? {
-			return Ok(Some((value, rc, query_key, compressed)));
+		if let Some((value, compressed, rc)) =
+			self.query(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index, log)?
+		{
+			return Ok(Some((value, rc, query_key, compressed)))
 		}
 		Ok(None)
 	}
 
-	pub fn size(&self, key: &TableKey, index: u64, log: &impl LogQuery) -> Result<Option<(u32, bool)>> {
+	pub fn size(
+		&self,
+		key: &TableKey,
+		index: u64,
+		log: &impl LogQuery,
+	) -> Result<Option<(u32, bool)>> {
 		let mut result = 0;
-		let (rc, compressed) = self.for_parts(&mut TableKeyQuery::Check(key), index, log, |buf| {
-			result += buf.len() as u32;
-			true
-		})?;
+		let (rc, compressed) =
+			self.for_parts(&mut TableKeyQuery::Check(key), index, log, |buf| {
+				result += buf.len() as u32;
+				true
+			})?;
 		if rc > 0 {
-			return Ok(Some((result, compressed)));
+			return Ok(Some((result, compressed)))
 		}
 		Ok(None)
 	}
@@ -519,14 +547,17 @@ impl ValueTable {
 		}
 	}
 
-	pub fn partial_key_at(&self, index: u64, log: &impl LogQuery) -> Result<Option<[u8; PARTIAL_SIZE]>> {
+	pub fn partial_key_at(
+		&self,
+		index: u64,
+		log: &impl LogQuery,
+	) -> Result<Option<[u8; PARTIAL_SIZE]>> {
 		let mut query_key = Default::default();
-		let (rc, _compressed) = self.for_parts(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index, log, |_buf| false)?;
-		Ok(if rc == 0 {
-			None
-		} else {
-			Some(query_key)
-		})
+		let (rc, _compressed) =
+			self.for_parts(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index, log, |_buf| {
+				false
+			})?;
+		Ok(if rc == 0 { None } else { Some(query_key) })
 	}
 
 	pub fn is_tombstone(&self, index: u64, log: &impl LogQuery) -> Result<bool> {
@@ -557,7 +588,7 @@ impl ValueTable {
 		if self.multipart && buf.is_multi(self.db_version) {
 			buf.skip_size();
 			let next = buf.read_next();
-			return Ok(Some(next));
+			return Ok(Some(next))
 		}
 		Ok(None)
 	}
@@ -589,14 +620,21 @@ impl ValueTable {
 		Ok(index)
 	}
 
-	fn overwrite_chain(&self, key: &TableKey, value: &[u8], log: &mut LogWriter, at: Option<u64>, compressed: bool) -> Result<u64> {
+	fn overwrite_chain(
+		&self,
+		key: &TableKey,
+		value: &[u8],
+		log: &mut LogWriter,
+		at: Option<u64>,
+		compressed: bool,
+	) -> Result<u64> {
 		let mut remainder = value.len() + self.ref_size() + key.encoded_size();
 		let mut offset = 0;
 		let mut start = 0;
 		assert!(self.multipart || value.len() <= self.value_size(key).unwrap() as usize);
 		let (mut index, mut follow) = match at {
 			Some(index) => (index, true),
-			None => (self.next_free(log)?, false)
+			None => (self.next_free(log)?, false),
 		};
 		loop {
 			let mut next_index = 0;
@@ -605,10 +643,10 @@ impl ValueTable {
 				match self.read_next_part(index, log)? {
 					Some(next) => {
 						next_index = next;
-					}
+					},
 					None => {
 						follow = false;
-					}
+					},
 				}
 			}
 			log::trace!(
@@ -657,7 +695,7 @@ impl ValueTable {
 					// End of new entry. Clear the remaining tail and exit
 					self.clear_chain(index, log)?;
 				}
-				break;
+				break
 			}
 		}
 
@@ -670,11 +708,11 @@ impl ValueTable {
 				Some(next) => {
 					self.clear_slot(index, log)?;
 					index = next;
-				}
+				},
 				None => {
 					self.clear_slot(index, log)?;
-					return Ok(());
-				}
+					return Ok(())
+				},
 			}
 		}
 	}
@@ -698,11 +736,24 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn write_insert_plan(&self, key: &TableKey, value: &[u8], log: &mut LogWriter, compressed: bool) -> Result<u64> {
+	pub fn write_insert_plan(
+		&self,
+		key: &TableKey,
+		value: &[u8],
+		log: &mut LogWriter,
+		compressed: bool,
+	) -> Result<u64> {
 		self.overwrite_chain(key, value, log, None, compressed)
 	}
 
-	pub fn write_replace_plan(&self, index: u64, key: &TableKey, value: &[u8], log: &mut LogWriter, compressed: bool) -> Result<()> {
+	pub fn write_replace_plan(
+		&self,
+		index: u64,
+		key: &TableKey,
+		value: &[u8],
+		log: &mut LogWriter,
+		compressed: bool,
+	) -> Result<()> {
 		self.overwrite_chain(key, value, log, Some(index), compressed)?;
 		Ok(())
 	}
@@ -723,7 +774,7 @@ impl ValueTable {
 
 	pub fn write_dec_ref(&self, index: u64, log: &mut LogWriter) -> Result<bool> {
 		if self.change_ref(index, -1, log)? {
-			return Ok(true);
+			return Ok(true)
 		}
 		self.write_remove_plan(index, log)?;
 		Ok(false)
@@ -734,12 +785,13 @@ impl ValueTable {
 		let buf = if log.value(self.id, index, buf.as_mut()) {
 			&mut buf
 		} else {
-			self.file.read_at(&mut buf[0..self.entry_size as usize], index * self.entry_size as u64)?;
+			self.file
+				.read_at(&mut buf[0..self.entry_size as usize], index * self.entry_size as u64)?;
 			&mut buf
 		};
 
 		if buf.is_tombstone() {
-			return Ok(false);
+			return Ok(false)
 		}
 
 		let size = if self.multipart && buf.is_multi(self.db_version) {
@@ -760,11 +812,11 @@ impl ValueTable {
 				counter += delta as u32;
 			}
 		} else if counter != LOCKED_REF {
-            counter = counter.saturating_sub(-delta as u32);
-            if counter == 0 {
-                return Ok(false);
-            }
-        }
+			counter = counter.saturating_sub(-delta as u32);
+			if counter == 0 {
+				return Ok(false)
+			}
+		}
 
 		buf.set_offset(rc_offset);
 		buf.write_rc(counter);
@@ -781,24 +833,26 @@ impl ValueTable {
 			let mut header = Header::default();
 			log.read(&mut header.0)?;
 			self.file.write_at(&header.0, 0)?;
-			return Ok(());
+			return Ok(())
 		}
 
 		let mut buf = FullEntry::new_uninit();
 		log.read(&mut buf[0..SIZE_SIZE])?;
 		if buf.is_tombstone() {
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
-			self.file.write_at(&buf[0..SIZE_SIZE + INDEX_SIZE], index * (self.entry_size as u64))?;
+			self.file
+				.write_at(&buf[0..SIZE_SIZE + INDEX_SIZE], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted tombstone in slot {}", self.id, index);
 		} else if self.multipart && buf.is_multi(self.db_version) {
-				let entry_size = self.entry_size as usize;
-				log.read(&mut buf[SIZE_SIZE..entry_size])?;
-				self.file.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
-				log::trace!(target: "parity-db", "{}: Enacted multipart in slot {}", self.id, index);
+			let entry_size = self.entry_size as usize;
+			log.read(&mut buf[SIZE_SIZE..entry_size])?;
+			self.file.write_at(&buf[0..entry_size], index * (entry_size as u64))?;
+			log::trace!(target: "parity-db", "{}: Enacted multipart in slot {}", self.id, index);
 		} else {
 			let (len, _compressed) = buf.read_size();
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + len as usize])?;
-			self.file.write_at(&buf[0..(SIZE_SIZE + len as usize)], index * (self.entry_size as u64))?;
+			self.file
+				.write_at(&buf[0..(SIZE_SIZE + len as usize)], index * (self.entry_size as u64))?;
 			log::trace!(target: "parity-db", "{}: Enacted {}: {}, {} bytes", self.id, index, hex(&buf.1[6..32]), len);
 		}
 		Ok(())
@@ -809,7 +863,7 @@ impl ValueTable {
 			let mut header = Header::default();
 			log.read(&mut header.0)?;
 			// TODO: sanity check last_removed and filled
-			return Ok(());
+			return Ok(())
 		}
 		let mut buf = FullEntry::new_uninit();
 		log.read(&mut buf[0..SIZE_SIZE])?;
@@ -831,7 +885,7 @@ impl ValueTable {
 
 	pub fn refresh_metadata(&self) -> Result<()> {
 		if self.file.file.read().is_none() {
-			return Ok(());
+			return Ok(())
 		}
 		let mut header = Header::default();
 		self.file.read_at(&mut header.0, 0)?;
@@ -846,7 +900,10 @@ impl ValueTable {
 	}
 
 	pub fn complete_plan(&self, log: &mut LogWriter) -> Result<()> {
-		if let Ok(true) = self.dirty_header.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed) {
+		if let Ok(true) =
+			self.dirty_header
+				.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+		{
 			// last_removed or filled pointers were modified. Add them to the log
 			let mut buf = Header::default();
 			let last_removed = self.last_removed.load(Ordering::Relaxed);
@@ -870,21 +927,29 @@ impl ValueTable {
 		}
 	}
 
-	pub fn iter_while(&self, log: &impl LogQuery, mut f: impl FnMut (u64, u32, Vec<u8>, bool) -> bool) -> Result<()> {
+	pub fn iter_while(
+		&self,
+		log: &impl LogQuery,
+		mut f: impl FnMut(u64, u32, Vec<u8>, bool) -> bool,
+	) -> Result<()> {
 		let filled = self.filled.load(Ordering::Relaxed);
-		for index in 1 .. filled {
+		for index in 1..filled {
 			let mut result = Vec::new();
 			// expect only indexed key.
 			let mut _fetch_key = Default::default();
-			match self.for_parts(&mut TableKeyQuery::Fetch(Some(&mut _fetch_key)), index, log, |buf| {
-				result.extend_from_slice(buf);
-				true
-			}) {
-				Ok((rc, compressed)) => {
-					if rc > 0 && !f(index, rc, result, compressed) {
-						break;
-					}
+			match self.for_parts(
+				&mut TableKeyQuery::Fetch(Some(&mut _fetch_key)),
+				index,
+				log,
+				|buf| {
+					result.extend_from_slice(buf);
+					true
 				},
+			) {
+				Ok((rc, compressed)) =>
+					if rc > 0 && !f(index, rc, result, compressed) {
+						break
+					},
 				Err(crate::error::Error::InvalidValueData) => (), // ignore, can be external index.
 				Err(e) => return Err(e),
 			}
@@ -915,7 +980,7 @@ impl ValueTable {
 
 pub mod key {
 	use super::FullEntry;
-	use crate::{Result, Key};
+	use crate::{Key, Result};
 
 	pub const PARTIAL_SIZE: usize = 26;
 
@@ -942,26 +1007,20 @@ pub mod key {
 
 		pub fn index(&self) -> Option<u64> {
 			match self {
-				TableKey::Partial(k) => {
-					Some(Self::index_from_partial(k))
-				},
-				TableKey::NoHash => {
-					None
-				},
+				TableKey::Partial(k) => Some(Self::index_from_partial(k)),
+				TableKey::NoHash => None,
 			}
 		}
 
 		pub fn compare(&self, fetch: &Option<[u8; PARTIAL_SIZE]>) -> bool {
 			match (self, fetch) {
-				(TableKey::Partial(k), Some(fetch)) => {
-					partial_key(k) == fetch
-				},
+				(TableKey::Partial(k), Some(fetch)) => partial_key(k) == fetch,
 				(TableKey::NoHash, _) => true,
 				_ => false,
 			}
 		}
 
-		pub fn fetch_partial(buf: &mut super::FullEntry)-> Result<[u8; PARTIAL_SIZE]> {
+		pub fn fetch_partial(buf: &mut super::FullEntry) -> Result<[u8; PARTIAL_SIZE]> {
 			let mut result = [0u8; PARTIAL_SIZE];
 			if buf.1.len() >= PARTIAL_SIZE {
 				let pks = buf.read_partial();
@@ -971,7 +1030,7 @@ pub mod key {
 			Err(crate::error::Error::InvalidValueData)
 		}
 
-		pub fn fetch(&self, buf: &mut super::FullEntry)-> Result<Option<[u8; PARTIAL_SIZE]>> {
+		pub fn fetch(&self, buf: &mut super::FullEntry) -> Result<Option<[u8; PARTIAL_SIZE]>> {
 			match self {
 				TableKey::Partial(_k) => Ok(Some(Self::fetch_partial(buf)?)),
 				TableKey::NoHash => Ok(None),
@@ -1006,10 +1065,13 @@ pub mod key {
 #[cfg(test)]
 mod test {
 	const ENTRY_SIZE: u16 = 64;
-	use crate::Key;
-	use crate::table::key::TableKey;
-	use super::{ValueTable, TableId, Value};
-	use crate::{log::{Log, LogWriter, LogAction}, options::{Options, ColumnOptions, CURRENT_VERSION}};
+	use super::{TableId, Value, ValueTable};
+	use crate::{
+		log::{Log, LogAction, LogWriter},
+		options::{ColumnOptions, Options, CURRENT_VERSION},
+		table::key::TableKey,
+		Key,
+	};
 
 	struct TempDir(std::sync::Arc<std::path::PathBuf>);
 
@@ -1059,15 +1121,15 @@ mod test {
 		let mut reader = log.read_next(false).unwrap().unwrap();
 		loop {
 			match reader.next().unwrap() {
-				LogAction::BeginRecord
-					| LogAction::InsertIndex { .. }
-					| LogAction::DropTable { .. } => {
+				LogAction::BeginRecord |
+				LogAction::InsertIndex { .. } |
+				LogAction::DropTable { .. } => {
 					panic!("Unexpected log entry");
 				},
 				LogAction::EndRecord => {
 					let bytes_read = reader.read_bytes();
 					assert_eq!(bytes_written, bytes_read);
-					break;
+					break
 				},
 				LogAction::InsertValue(insertion) => {
 					table.enact_plan(insertion.index, &mut reader).unwrap();
