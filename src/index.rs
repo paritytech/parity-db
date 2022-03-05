@@ -256,8 +256,8 @@ impl IndexTable {
 		// Restore first 54 bits of the key.
 		let partial_key = entry.partial_key(self.id.index_bits());
 		let k = 64 - Entry::address_bits(self.id.index_bits());
-		let index_key =
-			(chunk << (64 - self.id.index_bits())) | (partial_key << (64 - k - self.id.index_bits()));
+		let index_key = (chunk << (64 - self.id.index_bits())) |
+			(partial_key << (64 - k - self.id.index_bits()));
 		let mut key = Key::default();
 		key[0..8].copy_from_slice(&index_key.to_be_bytes());
 		key

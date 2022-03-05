@@ -264,11 +264,7 @@ impl LogChange {
 		self.local_values.get(&id)
 	}
 
-	fn flush_to_file(
-		self,
-		file: &mut std::io::BufWriter<std::fs::File>,
-	) -> Result<FlushedLog>
-	{
+	fn flush_to_file(self, file: &mut std::io::BufWriter<std::fs::File>) -> Result<FlushedLog> {
 		let mut crc32 = crc32fast::Hasher::new();
 		let mut bytes: u64 = 0;
 
@@ -314,11 +310,7 @@ impl LogChange {
 		file.write_all(&checksum.to_le_bytes())?;
 		bytes += 4;
 		file.flush()?;
-		Ok(FlushedLog {
-			index: self.local_index,
-			values: self.local_values,
-			bytes,
-		})
+		Ok(FlushedLog { index: self.local_index, values: self.local_values, bytes })
 	}
 }
 

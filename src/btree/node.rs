@@ -180,7 +180,7 @@ impl Node {
 						let sep = self.remove_separator(middle);
 						let right = Self::write_split_child(right_ix, right, btree, log)?;
 						return Ok((Some((sep, right)), false))
-					}
+					},
 				}
 			}
 
@@ -237,7 +237,7 @@ impl Node {
 					let sep = self.remove_separator(middle);
 					let right = Self::write_split_child(right_ix, right, btree, log)?;
 					Ok(Some((sep, right)))
-				}
+				},
 			}
 		} else {
 			self.shift_from(at, has_child, false);
