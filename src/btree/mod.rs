@@ -468,7 +468,7 @@ pub mod commit_overlay {
 			let old_btree_header = btree_header.clone();
 
 			self.changes.sort_by_key(|(k, _)| k.clone());
-			tree.write_sorted_changes(&mut self.changes.as_slice(), locked, writer)?;
+			tree.write_sorted_changes(self.changes.as_slice(), locked, writer)?;
 			*ops += self.changes.len() as u64;
 			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_header)?;
 

@@ -64,15 +64,15 @@ fn read_i64(cursor: &mut Cursor<&[u8]>) -> AtomicI64 {
 }
 
 fn write_u32(cursor: &mut Cursor<&mut [u8]>, val: &AtomicU32) {
-	cursor.write(&val.load(Ordering::Relaxed).to_le_bytes()).expect("Incorrent stats buffer");
+	cursor.write_all(&val.load(Ordering::Relaxed).to_le_bytes()).expect("Incorrent stats buffer");
 }
 
 fn write_u64(cursor: &mut Cursor<&mut [u8]>, val: &AtomicU64) {
-	cursor.write(&val.load(Ordering::Relaxed).to_le_bytes()).expect("Incorrent stats buffer");
+	cursor.write_all(&val.load(Ordering::Relaxed).to_le_bytes()).expect("Incorrent stats buffer");
 }
 
 fn write_i64(cursor: &mut Cursor<&mut [u8]>, val: &AtomicI64) {
-	cursor.write(&val.load(Ordering::Relaxed).to_le_bytes()).expect("Incorrent stats buffer");
+	cursor.write_all(&val.load(Ordering::Relaxed).to_le_bytes()).expect("Incorrent stats buffer");
 }
 
 fn value_histogram_index(size: u32) -> Option<usize> {
@@ -88,12 +88,12 @@ impl ColumnStats {
 	pub fn from_slice(data: &[u8]) -> ColumnStats {
 		let mut cursor = Cursor::new(data);
 		let mut value_histogram: [AtomicU32; HISTOGRAM_BUCKETS] = unsafe { MaybeUninit::uninit().assume_init() };
-		for n in 0 .. HISTOGRAM_BUCKETS {
-			value_histogram[n] = read_u32(&mut cursor);
+		for item in value_histogram.iter_mut().take(HISTOGRAM_BUCKETS) {
+			*item = read_u32(&mut cursor);
 		}
 		let mut query_histogram: [AtomicU64; SIZE_TIERS] = unsafe { MaybeUninit::uninit().assume_init() };
-		for n in 0 .. SIZE_TIERS {
-			query_histogram[n] = read_u64(&mut cursor);
+		for item in query_histogram.iter_mut().take(SIZE_TIERS) {
+			*item = read_u64(&mut cursor);
 		}
 		let mut stats = ColumnStats {
 			value_histogram,
@@ -190,7 +190,7 @@ impl ColumnStats {
 		write!(writer, "Queries per size tier: [")?;
 		for i in 0 .. SIZE_TIERS {
 			if i == SIZE_TIERS - 1 {
-				write!(writer, "{}]\n", self.query_histogram[i].load(Ordering::Relaxed))?;
+				writeln!(writer, "{}]", self.query_histogram[i].load(Ordering::Relaxed))?;
 			} else {
 				write!(writer, "{}, ", self.query_histogram[i].load(Ordering::Relaxed))?;
 			}
@@ -208,7 +208,7 @@ impl ColumnStats {
 				)?;
 			}
 		}
-		writeln!(writer, "")?;
+		writeln!(writer)?;
 		Ok(())
 	}
 

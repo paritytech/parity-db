@@ -39,6 +39,6 @@ impl<'a> std::fmt::Debug for HexDisplay<'a> {
 	}
 }
 
-pub fn hex<'a, R: std::convert::AsRef<[u8]> + ?Sized>(r: &'a R) -> HexDisplay<'a> {
+pub fn hex<R: std::convert::AsRef<[u8]> + ?Sized>(r: &R) -> HexDisplay<'_> {
 	HexDisplay::from(r)
 }

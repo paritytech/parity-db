@@ -144,16 +144,16 @@ impl DbInner {
 		lock_path.push("lock");
 		let lock_file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(lock_path.as_path())?;
 		if !inner_options.skip_check_lock {
-			lock_file.try_lock_exclusive().map_err(|e| Error::Locked(e))?;
+			lock_file.try_lock_exclusive().map_err(Error::Locked)?;
 		}
 
 		let metadata = options.load_and_validate_metadata(inner_options.create)?;
 		let mut columns = Vec::with_capacity(metadata.columns.len());
 		let mut commit_overlay = Vec::with_capacity(metadata.columns.len());
-		let log = Log::open(&options)?;
+		let log = Log::open(options)?;
 		let last_enacted = log.replay_record_id().unwrap_or(2) - 1;
 		for c in 0 .. metadata.columns.len() {
-			let column = Column::open(c as ColId, &options, &metadata)?;
+			let column = Column::open(c as ColId, options, &metadata)?;
 			commit_overlay.push(CommitOverlay::new());
 			columns.push(column);
 		}
@@ -165,7 +165,7 @@ impl DbInner {
 
 		Ok(DbInner {
 			columns,
-			options: options.clone(),
+			options,
 			shutdown: std::sync::atomic::AtomicBool::new(false),
 			log,
 			commit_queue: Mutex::new(Default::default()),
@@ -237,7 +237,7 @@ impl DbInner {
 	pub fn btree_iter(&self, col: ColId) -> Result<BTreeIterator> {
 		match &self.columns[col as usize] {
 			Column::Hash(_column) => {
-				return Err(Error::InvalidConfiguration("Not an indexed column.".to_string()));
+				Err(Error::InvalidConfiguration("Not an indexed column.".to_string()))
 			},
 			Column::Tree(column) => {
 				let log = self.log.overlays();
@@ -445,12 +445,9 @@ impl DbInner {
 					writer.record_id(),
 				);
 				for (key, address) in batch.into_iter() {
-					match column.write_reindex_plan(&key, address, &mut writer)? {
-						PlanOutcome::NeedReindex => {
-							next_reindex = true
-						},
-						_ => {},
-					}
+					if let PlanOutcome::NeedReindex = column.write_reindex_plan(&key, address, &mut writer)? {
+     					next_reindex = true
+     				}
 				}
 				if let Some(table) = drop_index {
 					writer.drop_table(table);
@@ -775,8 +772,7 @@ pub struct Db {
 impl Db {
 	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Result<Db> {
 		let options = Options::with_columns(path, num_columns);
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = true;
+		let inner_options = InternalOptions { create: true,  ..Default::default() };
 		Self::open_inner(&options, &inner_options)
 	}
 
@@ -788,14 +784,12 @@ impl Db {
 
 	/// Create the database using given options.
 	pub fn open_or_create(options: &Options) -> Result<Db> {
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = true;
+		let inner_options = InternalOptions { create: true, ..Default::default() };
 		Self::open_inner(options, &inner_options)
 	}
 
 	pub fn open_read_only(options: &Options) -> Result<Db> {
-		let mut inner_options = InternalOptions::default();
-		inner_options.read_only = true;
+		let inner_options = InternalOptions { read_only: true, ..Default::default() };
 		Self::open_inner(options, &inner_options)
 	}
 
@@ -804,7 +798,7 @@ impl Db {
 		inner_options: &InternalOptions,
 	) -> Result<Db> {
 		assert!(options.is_valid());
-		let mut db = DbInner::open(options, &inner_options)?;
+		let mut db = DbInner::open(options, inner_options)?;
 		// This needs to be call before log thread: so first reindexing
 		// will run in correct state.
 		db.replay_all_logs()?;
@@ -860,9 +854,9 @@ impl Db {
 		Ok(Db {
 			inner: db,
 			commit_thread,
-			flush_thread: flush_thread,
-			log_thread: log_thread,
-			cleanup_thread: cleanup_thread,
+			flush_thread,
+			log_thread,
+			cleanup_thread,
 			join_on_shutdown: inner_options.commit_stages.join_on_shutdown(),
 		})
 	}
@@ -961,7 +955,7 @@ impl Db {
 	}
 
 	pub fn dump(&self, check_param: check::CheckOptions) -> Result<()> {
-		if let Some(col) = check_param.column.clone() {
+		if let Some(col) = check_param.column {
 			self.inner.columns[col as usize].dump(&self.inner.log, &check_param, col)?;
 		} else {
 			for (ix, c) in self.inner.columns.iter().enumerate() {
@@ -1092,13 +1086,9 @@ impl IndexedChangeSet {
 			},
 		};
 		for (key, value) in self.changes.iter() {
-			match column.write_plan(key, value.as_ref().map(|v| v.as_slice()), writer)? {
-				// Reindex has triggered another reindex.
-				PlanOutcome::NeedReindex => {
-					*reindex = true;
-				},
-				_ => {},
-			}
+			if let PlanOutcome::NeedReindex = column.write_plan(key, value.as_ref().map(|v| v.as_slice()), writer)? {
+   					*reindex = true;
+   				}
 			*ops += 1;
 		}
 		Ok(())

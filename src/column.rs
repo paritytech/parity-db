@@ -128,7 +128,7 @@ pub fn hash_key(key: &[u8], salt: &Salt, uniform: bool, db_version: u32) -> Key 
 			}
 		}
 	} else {
-		k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, salt, &key).as_bytes());
+		k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, salt, key).as_bytes());
 	}
 	k
 }
@@ -144,7 +144,7 @@ impl HashColumn {
 			return Ok(Some(value));
 		}
 		for r in &self.reindex.read().queue {
-			if let Some((tier, value)) = self.get_in_index(key, &r, values, log)? {
+			if let Some((tier, value)) = self.get_in_index(key, r, values, log)? {
 				if self.collect_stats {
 					self.stats.query_hit(tier);
 				}
@@ -205,7 +205,7 @@ impl Column {
 		Ok(None)
 	}
 
-	pub fn compress(compression: &Compress, key: &TableKey, value: &[u8], tables: &Vec<ValueTable>) -> (Option<Vec<u8>>, usize) {
+	pub fn compress(compression: &Compress, key: &TableKey, value: &[u8], tables: &[ValueTable]) -> (Option<Vec<u8>>, usize) {
 		let (len, result) = if value.len() > compression.threshold as usize {
 			let cvalue = compression.compress(value);
 			if cvalue.len() < value.len() {
@@ -275,7 +275,7 @@ impl HashColumn {
 			uniform_keys: options.uniform,
 			ref_counted: options.ref_counted,
 			collect_stats,
-			salt: metadata.salt.clone(),
+			salt: metadata.salt,
 			stats,
 			compression: Compress::new(options.compression, options.compression_threshold),
 			db_version,
@@ -352,12 +352,12 @@ impl HashColumn {
 		match tables.index.write_insert_plan(key, address, None, log)? {
 			PlanOutcome::NeedReindex => {
 				log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
-				let _ = Self::trigger_reindex(tables, reindex, self.path.as_path());
+				let _lock = Self::trigger_reindex(tables, reindex, self.path.as_path());
 				self.write_reindex_plan(key, address, log)?;
-				return Ok(PlanOutcome::NeedReindex);
+				Ok(PlanOutcome::NeedReindex)
 			}
 			_ => {
-				return Ok(PlanOutcome::Written);
+				Ok(PlanOutcome::Written)
 			}
 		}
 	}
@@ -374,7 +374,7 @@ impl HashColumn {
 			let existing_tier = existing_address.size_tier();
 			let table_key = TableKey::Partial(*key);
 			if tables.value[existing_tier as usize].has_key_at(existing_address.offset(), &table_key, log)? {
-				return Ok(Some((&index, sub_index, existing_address)));
+				return Ok(Some((index, sub_index, existing_address)));
 			}
 
 			let (next_entry, next_index) = index.get(key, sub_index + 1, log);
@@ -414,18 +414,16 @@ impl HashColumn {
 		let existing = Self::search_all_indexes(key, &*tables, &*reindex, log)?;
 		if let Some((table, sub_index, existing_address)) = existing {
 			self.write_plan_existing(&*tables, key, value, log, table, sub_index, existing_address)
-		} else {
-			if let Some(value) = value {
-				let (r, _, _) = self.write_plan_new(tables, reindex, key, value, log)?;
-				Ok(r)
-			} else {
-				log::trace!(target: "parity-db", "{}: Deleting missing key {}", tables.index.id, hex(key));
-				if self.collect_stats {
-					self.stats.remove_miss();
-				}
-				Ok(PlanOutcome::Skipped)
-			}
-		}
+		} else if let Some(value) = value {
+            let (r, _, _) = self.write_plan_new(tables, reindex, key, value, log)?;
+            Ok(r)
+        } else {
+            log::trace!(target: "parity-db", "{}: Deleting missing key {}", tables.index.id, hex(key));
+            if self.collect_stats {
+                self.stats.remove_miss();
+            }
+            Ok(PlanOutcome::Skipped)
+        }
 	}
 
 	fn write_plan_existing(
@@ -537,7 +535,7 @@ impl HashColumn {
 						"Missing table {}, starting reindex",
 						record.table,
 					);
-					let _ = Self::trigger_reindex(tables, reindex, self.path.as_path());
+					let _lock = Self::trigger_reindex(tables, reindex, self.path.as_path());
 					return self.validate_plan(LogAction::InsertIndex(record), log);
 				}
 			},
@@ -802,7 +800,7 @@ impl Column {
 				return Ok((Some(PlanOutcome::Skipped), None));
 			}
 
-			let (cval, target_tier) = Column::compress(tables.compression, key, &val, tables.tables);
+			let (cval, target_tier) = Column::compress(tables.compression, key, val, tables.tables);
 			let (cval, compressed) = cval.as_ref()
 				.map(|cval| (cval.as_slice(), true))
 				.unwrap_or((val, false));
@@ -823,14 +821,14 @@ impl Column {
 			}
 			if tier == target_tier {
 				log::trace!(target: "parity-db", "{}: Replacing {}", tables.col, key);
-				tables.tables[target_tier].write_replace_plan(address.offset(), key, &cval, log, compressed)?;
-				return Ok((Some(PlanOutcome::Written), None));
+				tables.tables[target_tier].write_replace_plan(address.offset(), key, cval, log, compressed)?;
+				Ok((Some(PlanOutcome::Written), None))
 			} else {
 				log::trace!(target: "parity-db", "{}: Replacing in a new table {}", tables.col, key);
 				tables.tables[tier].write_remove_plan(address.offset(), log)?;
-				let new_offset = tables.tables[target_tier].write_insert_plan(key, &cval, log, compressed)?;
+				let new_offset = tables.tables[target_tier].write_insert_plan(key, cval, log, compressed)?;
 				let new_address = Address::new(new_offset, target_tier as u8);
-				return Ok((None, Some(new_address)));
+				Ok((None, Some(new_address)))
 			}
 		} else {
 			// Deletion
@@ -865,9 +863,9 @@ impl Column {
 						stats.remove_val(uncompressed_size, compressed_size);
 					}
 				}
-				return Ok((None, Some(address)));
+				Ok((None, Some(address)))
 			} else {
-				return Ok((Some(PlanOutcome::Written), None));
+				Ok((Some(PlanOutcome::Written), None))
 			}
 		}
 	}
@@ -879,13 +877,13 @@ impl Column {
 		log: &mut LogWriter,
 		stats: Option<&ColumnStats>,
 	) -> Result<Address> {
-		let (cval, target_tier) = Column::compress(tables.compression, key, &val, tables.tables);
+		let (cval, target_tier) = Column::compress(tables.compression, key, val, tables.tables);
 		let (cval, compressed) = cval.as_ref()
 			.map(|cval| (cval.as_slice(), true))
 			.unwrap_or((val, false));
 
 		log::trace!(target: "parity-db", "{}: Inserting new {}, size = {}", tables.col, key, cval.len());
-		let offset = tables.tables[target_tier].write_insert_plan(key, &cval, log, compressed)?;
+		let offset = tables.tables[target_tier].write_insert_plan(key, cval, log, compressed)?;
 		let address = Address::new(offset, target_tier as u8);
 
 		if let Some(stats) = stats {

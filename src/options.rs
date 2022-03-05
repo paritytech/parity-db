@@ -180,7 +180,7 @@ impl Options {
 			}
 			Ok(meta)
 		} else if create {
-			let s: Salt = self.salt.unwrap_or(rand::thread_rng().gen());
+			let s: Salt = self.salt.unwrap_or_else(||rand::thread_rng().gen());
 			self.write_metadata(&self.path, &s)?;
 			Ok(Metadata {
 				version: CURRENT_VERSION,
@@ -211,9 +211,9 @@ impl Options {
 		let mut version = 0;
 		for l in file.lines() {
 			let l = l?;
-			let mut vals = l.split("=");
-			let k = vals.next().ok_or(Error::Corruption("Bad metadata".into()))?;
-			let v = vals.next().ok_or(Error::Corruption("Bad metadata".into()))?;
+			let mut vals = l.split('=');
+			let k = vals.next().ok_or_else(||Error::Corruption("Bad metadata".into()))?;
+			let v = vals.next().ok_or_else(||Error::Corruption("Bad metadata".into()))?;
 			if k == "version" {
 				version = u32::from_str(v).map_err(|_| Error::Corruption("Bad version string".into()))?;
 			} else if k == "salt" {

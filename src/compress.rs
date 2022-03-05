@@ -160,7 +160,7 @@ mod snappy {
 			let mut buf = Vec::with_capacity(value.len() << 3);
 			{
 				let mut encoder = snap::write::FrameEncoder::new(&mut buf);
-				encoder.write(value).expect("Expect in memory write to succeed.");
+				encoder.write_all(value).expect("Expect in memory write to succeed.");
 			}
 			buf
 		}

@@ -214,7 +214,7 @@ impl Node {
 				let (mut right, right_ix) = self.split(middle, true, None, None, has_child);
 				right.set_child(0, child);
 				let right = Self::write_split_child(right_ix, right, btree, log)?;
-				return Ok(Some((separator, right)));
+				Ok(Some((separator, right)))
 			} else if insert < middle {
 				let (right, right_ix) = self.split(middle, false, None, None, has_child);
 				let sep = self.remove_separator(middle - 1);
@@ -222,12 +222,12 @@ impl Node {
 				self.set_separator(insert, separator);
 				self.set_child(insert + 1, child);
 				let right = Self::write_split_child(right_ix, right, btree, log)?;
-				return Ok(Some((sep, right)));
+				Ok(Some((sep, right)))
 			} else {
 				let (right, right_ix) = self.split(middle + 1, false, Some((insert, separator)), Some((insert, child)), has_child);
 				let sep = self.remove_separator(middle);
 				let right = Self::write_split_child(right_ix, right, btree, log)?;
-				return Ok(Some((sep, right)));
+				Ok(Some((sep, right)))
 			}
 		} else {
 			self.shift_from(at, has_child, false);
@@ -436,14 +436,12 @@ impl Node {
 		values: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<Option<(Option<Address>, Node)>> {
-		if self.number_separator() == 0 {
-			if self.fetch_child(0, values, log)?.is_some() {
-				if let Some(node) = self.fetch_child(0, values, log)? {
-					let child = self.remove_child(0);
-					return Ok(Some((child.entry_index, node)))
-				}
-			}
-		}
+		if self.number_separator() == 0 && self.fetch_child(0, values, log)?.is_some() {
+            if let Some(node) = self.fetch_child(0, values, log)? {
+                let child = self.remove_child(0);
+                return Ok(Some((child.entry_index, node)))
+            }
+        }
 		Ok(None)
 	}
 
@@ -463,20 +461,18 @@ impl Node {
 			let result = self.remove_separator(i);
 
 			Ok((self.need_rebalance(), Some(result)))
-		} else {
-			if let Some(mut child) = self.fetch_child(i + 1, values, log)? {
-				let result = child.remove_last(depth - 1, values, log)?;
-				self.write_child(i + 1, child, values, log)?;
-				if result.0 {
-					self.rebalance(depth, i + 1, values, log)?;
-					Ok((self.need_rebalance(), result.1))
-				} else {
-					Ok(result)
-				}
-			} else {
-				Ok((false, None))
-			}
-		}
+		} else if let Some(mut child) = self.fetch_child(i + 1, values, log)? {
+            let result = child.remove_last(depth - 1, values, log)?;
+            self.write_child(i + 1, child, values, log)?;
+            if result.0 {
+                self.rebalance(depth, i + 1, values, log)?;
+                Ok((self.need_rebalance(), result.1))
+            } else {
+                Ok(result)
+            }
+        } else {
+            Ok((false, None))
+  			}
 	}
 
 	pub fn get(&self, key: &[u8], values: TablesRef, log: &impl LogQuery) -> Result<Option<Address>> {
@@ -542,19 +538,20 @@ pub struct Node {
 	pub(super) changed: bool,
 }
 
-#[derive(Clone)]
+impl Default for Node {
+	fn default() -> Self {
+		Node {
+			separators: Default::default(),
+			children: Default::default(),
+			changed: true,
+		}
+	}
+}
+
+#[derive(Clone, Default)]
 pub struct Separator {
 	pub(super) modified: bool,
 	pub(super) separator: Option<SeparatorInner>,
-}
-
-impl Default for Separator {
-	fn default() -> Self {
-		Separator {
-			modified: false,
-			separator: None,
-		}
-	}
 }
 
 #[derive(Clone)]
@@ -563,27 +560,13 @@ pub struct SeparatorInner {
 	pub value: Address,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Child {
 	pub(super) moved: bool,
 	pub(super) entry_index: Option<Address>,
 }
 
-impl Default for Child {
-	fn default() -> Self {
-		Child { moved: false, entry_index: None }
-	}
-}
-
 impl Node {
-	pub fn new() -> Self {
-		Node {
-			separators: Default::default(),
-			children: Default::default(),
-			changed: true,
-		}
-	}
-
 	pub fn clear(&mut self) {
 		self.separators = Default::default();
 		self.children = Default::default();
@@ -711,7 +694,7 @@ impl Node {
 		mut insert_right_child: Option<(usize, Child)>,
 		has_child: bool,
 	) -> (Self, Option<Address>) {
-		let (right_ix, mut right) = (None, Self::new());
+		let (right_ix, mut right) = (None, Self::default());
 		let mut offset = 0;
 		let right_start = at;
 		for i in right_start .. ORDER {

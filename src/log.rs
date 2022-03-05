@@ -252,7 +252,7 @@ impl LogChange {
 		let mut bytes: u64 = 0;
 
 		let mut write = |buf: &[u8]| -> Result<()> {
-			file.write(buf)?;
+			file.write_all(buf)?;
 			crc32.update(buf);
 			bytes += buf.len() as u64;
 			Ok(())
@@ -263,21 +263,21 @@ impl LogChange {
 
 		for (id, overlay) in self.local_index.iter() {
 			for (index, (_, modified_entries_mask, chunk)) in overlay.map.iter() {
-				write(&INSERT_INDEX.to_le_bytes().as_ref())?;
+				write(INSERT_INDEX.to_le_bytes().as_ref())?;
 				write(&id.as_u16().to_le_bytes())?;
 				write(&index.to_le_bytes())?;
 				write(&modified_entries_mask.to_le_bytes())?;
 				let mut mask = *modified_entries_mask;
 				while mask != 0 {
 					let i = mask.trailing_zeros();
-					mask = mask & !(1 << i);
+					mask &= !(1 << i);
 					write(&chunk[i as usize *ENTRY_BYTES .. (i as usize + 1)*ENTRY_BYTES])?;
 				}
 			}
 		}
 		for (id, overlay) in self.local_values.iter() {
 			for (index, (_, value)) in overlay.map.iter() {
-				write(&INSERT_VALUE.to_le_bytes().as_ref())?;
+				write(INSERT_VALUE.to_le_bytes().as_ref())?;
 				write(&id.as_u16().to_le_bytes())?;
 				write(&index.to_le_bytes())?;
 				write(value)?;
@@ -285,12 +285,12 @@ impl LogChange {
 		}
 		for id in self.dropped_tables.iter() {
 			log::debug!(target: "parity-db", "Finalizing drop {}", id);
-			write(&DROP_TABLE.to_le_bytes().as_ref())?;
+			write(DROP_TABLE.to_le_bytes().as_ref())?;
 			write(&id.as_u16().to_le_bytes())?;
 		}
 		write(&END_RECORD.to_le_bytes())?;
 		let checksum: u32 = crc32.finalize();
-		file.write(&checksum.to_le_bytes())?;
+		file.write_all(&checksum.to_le_bytes())?;
 		bytes += 4;
 		file.flush()?;
 		Ok((self.local_index, self.local_values, bytes))
@@ -320,16 +320,16 @@ impl<'a> LogWriter<'a> {
 	pub fn insert_index(&mut self, table: IndexTableId, index: u64, sub: u8, data: &IndexChunk) {
 		match self.log.local_index.entry(table).or_default().map.entry(index) {
 			std::collections::hash_map::Entry::Occupied(mut entry) => {
-				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), data.clone());
+				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), *data);
 			}
 			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert((self.log.record_id, 1 << sub, data.clone()));
+				entry.insert((self.log.record_id, 1 << sub, *data));
 			}
 		}
 	}
 
 	pub fn insert_value(&mut self, table: ValueTableId, index: u64, data: Vec<u8>) {
-		self.log.local_values.entry(table).or_default().map.insert(index, (self.log.record_id, data.clone()));
+		self.log.local_values.entry(table).or_default().map.insert(index, (self.log.record_id, data));
 	}
 
 	pub fn drop_table(&mut self, id: IndexTableId) {
@@ -534,13 +534,9 @@ impl Log {
 		Ok(())
 	}
 
-	pub fn begin_record<'a>(&'a self) -> LogWriter<'a> {
+	pub fn begin_record(&self) -> LogWriter<'_> {
 		let id = self.next_record_id.fetch_add(1, Ordering::Relaxed);
-		let writer = LogWriter::new(
-			&self.overlays,
-			id
-		);
-		writer
+		LogWriter::new( &self.overlays, id)
 	}
 
 	pub fn end_record(&self, log: LogChange) -> Result<u64> {
@@ -600,25 +596,19 @@ impl Log {
 		let mut overlays = self.overlays.write();
 		for (table, index) in cleared.index.into_iter() {
 			if let Some(ref mut overlay) = overlays.index.get_mut(&table) {
-				match overlay.map.entry(index) {
-					std::collections::hash_map::Entry::Occupied(e) => {
-						if e.get().0 == record_id {
-							e.remove_entry();
-						}
-					}
-					_ => {},
-				}
+				if let std::collections::hash_map::Entry::Occupied(e) = overlay.map.entry(index) {
+                    if e.get().0 == record_id {
+                        e.remove_entry();
+                    }
+    			}
 			}
 		}
 		for (table, index) in cleared.values.into_iter() {
 			if let Some(ref mut overlay) = overlays.value.get_mut(&table) {
-				match overlay.map.entry(index) {
-					std::collections::hash_map::Entry::Occupied(e) => {
-						if e.get().0 == record_id {
-							e.remove_entry();
-						}
-					}
-					_ => {},
+				if let std::collections::hash_map::Entry::Occupied(e) = overlay.map.entry(index) {
+                    if e.get().0 == record_id {
+                        e.remove_entry();
+                    }
 				}
 			}
 		}
@@ -738,7 +728,7 @@ impl Log {
 		self.cleanup_queue.read().len()
 	}
 
-	pub fn read_next<'a>(&'a self, validate: bool) -> Result<Option<LogReader<'a>>> {
+	pub fn read_next(&self, validate: bool) -> Result<Option<LogReader<'_>>> {
 		let mut reading_state = self.reading_state.lock();
 		if *reading_state != ReadingState::Reading {
 			log::trace!(target: "parity-db", "No logs to enact");
@@ -754,17 +744,17 @@ impl Log {
 		let mut reader = LogReader::new(reading, validate);
 		match reader.next() {
 			Ok(LogAction::BeginRecord) => {
-				return Ok(Some(reader));
+				Ok(Some(reader))
 			}
-			Ok(_) => return Err(Error::Corruption("Bad log record structure".into())),
+			Ok(_) => Err(Error::Corruption("Bad log record structure".into())),
 			Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
 				*reading_state = ReadingState::Idle;
 				self.done_reading_cv.notify_one();
 				log::debug!(target: "parity-db", "Read: End of log");
-				return Ok(None);
+				Ok(None)
 			}
-			Err(e) => return Err(e),
-		};
+			Err(e) => Err(e),
+		}
 	}
 
 	pub fn overlays(&self) -> &RwLock<LogOverlays> {

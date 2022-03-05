@@ -104,29 +104,29 @@ impl<'a> BTreeIterator<'a> {
 							self.last_key = Some(commit_key.clone());
 							self.from_seek = false;
 							self.pending_next_backend = Some(Some((backend_key, backend_value)));
-							return Ok(Some((commit_key, value)));
+							Ok(Some((commit_key, value)))
 						} else {
 							self.last_key = Some(commit_key);
 							self.from_seek = false;
 							self.pending_next_backend = Some(Some((backend_key, backend_value)));
 							std::mem::drop(log);
-							return self.next();
+							self.next()
 						}
 					},
 					std::cmp::Ordering::Greater => {
 						self.last_key = Some(backend_key.clone());
-						return Ok(Some((backend_key, backend_value)));
+						Ok(Some((backend_key, backend_value)))
 					},
 					std::cmp::Ordering::Equal => {
 						if let Some(value) = commit_value {
 							self.last_key = Some(commit_key);
 							self.from_seek = false;
-							return Ok(Some((backend_key, value)));
+							Ok(Some((backend_key, value)))
 						} else {
 							self.last_key = Some(commit_key);
 							self.from_seek = false;
 							std::mem::drop(log);
-							return self.next();
+							self.next()
 						}
 					},
 				}
@@ -136,22 +136,22 @@ impl<'a> BTreeIterator<'a> {
 					self.last_key = Some(commit_key.clone());
 					self.from_seek = false;
 					self.pending_next_backend = Some(None);
-					return Ok(Some((commit_key, value)));
+					Ok(Some((commit_key, value)))
 				} else {
 					self.last_key = Some(commit_key);
 					self.from_seek = false;
 					self.pending_next_backend = Some(None);
 					std::mem::drop(log);
-					return self.next();
+					self.next()
 				}
 			},
 			(None, Some((backend_key, backend_value))) => {
 				self.last_key = Some(backend_key.clone());
-				return Ok(Some((backend_key, backend_value)));
+				Ok(Some((backend_key, backend_value)))
 			},
 			(None, None) => {
 				self.pending_next_backend = Some(None);
-				return Ok(None);
+				Ok(None)
 			},
 		}
 	}

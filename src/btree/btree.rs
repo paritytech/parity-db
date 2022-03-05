@@ -62,12 +62,12 @@ impl BTree {
 		let mut root = BTree::fetch_root(self.root_index.unwrap_or(NULL_ADDRESS), btree, log)?;
 		let changes = &mut changes;
 
-		while changes.len() > 0 {
+		while !changes.is_empty() {
 			match root.change(None, self.depth, changes, btree, log)? {
 				(Some((sep, right)), _) => {
 					// add one level
 					self.depth += 1;
-					let left = std::mem::replace(&mut root, Node::new());
+					let left = std::mem::take(&mut root);
 					let left_index = self.root_index.take();
 					let new_index = BTreeTable::write_node_plan(
 						btree,
@@ -137,7 +137,7 @@ impl BTree {
 
 	pub fn fetch_root(root: Address, tables: TablesRef, log: &impl LogQuery) -> Result<Node> {
 		Ok(if root == NULL_ADDRESS {
-			Node::new()
+			Node::default()
 		} else {
 			let root = BTreeTable::get_encoded_entry(root, log, tables)?;
 			Node::from_encoded(root)

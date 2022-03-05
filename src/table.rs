@@ -202,7 +202,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	}
 
 	fn write_tombstone(&mut self) {
-		self.write_slice(&TOMBSTONE);
+		self.write_slice(TOMBSTONE);
 	}
 
 	fn is_multipart(&self) -> bool {
@@ -214,7 +214,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	}
 
 	fn write_multipart(&mut self) {
-		self.write_slice(&MULTIPART);
+		self.write_slice(MULTIPART);
 	}
 
 	fn is_multihead(&self) -> bool {
@@ -226,7 +226,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	}
 
 	fn write_multihead(&mut self) {
-		self.write_slice(&MULTIHEAD);
+		self.write_slice(MULTIHEAD);
 	}
 
 	fn is_multi(&self, db_version: u32) -> bool {
@@ -380,7 +380,7 @@ impl ValueTable {
 		let base = self.entry_size - SIZE_SIZE as u16 - self.ref_size() as u16;
 		let k_encoded = key.encoded_size() as u16;
 		if base < k_encoded {
-			return None;
+			None
 		} else {
 			Some(base - k_encoded)
 		}
@@ -546,8 +546,7 @@ impl ValueTable {
 			self.file.read_at(buf.as_mut(), index * self.entry_size as u64)?;
 		}
 		buf.skip_size();
-		let next = buf.read_next();
-		return Ok(next);
+		Ok(buf.read_next())
 	}
 
 	pub fn read_next_part(&self, index: u64, log: &LogWriter) -> Result<Option<u64>> {
@@ -560,7 +559,7 @@ impl ValueTable {
 			let next = buf.read_next();
 			return Ok(Some(next));
 		}
-		return Ok(None);
+		Ok(None)
 	}
 
 	pub fn next_free(&self, log: &mut LogWriter) -> Result<u64> {
@@ -758,22 +757,20 @@ impl ValueTable {
 			if counter >= LOCKED_REF - delta as u32 {
 				counter = LOCKED_REF
 			} else {
-				counter = counter + delta as u32;
+				counter += delta as u32;
 			}
-		} else {
-			if counter != LOCKED_REF {
-				counter = counter.saturating_sub(-delta as u32);
-				if counter == 0 {
-					return Ok(false);
-				}
-			}
-		}
+		} else if counter != LOCKED_REF {
+            counter = counter.saturating_sub(-delta as u32);
+            if counter == 0 {
+                return Ok(false);
+            }
+        }
 
 		buf.set_offset(rc_offset);
 		buf.write_rc(counter);
 		// TODO: optimize actual buf size
 		log.insert_value(self.id, index, buf[0..size].to_vec());
-		return Ok(true);
+		Ok(true)
 	}
 
 	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
@@ -883,11 +880,11 @@ impl ValueTable {
 				result.extend_from_slice(buf);
 				true
 			}) {
-				Ok((rc, compressed)) => if rc > 0 {
-					if !f(index, rc, result, compressed) {
-						break;
-					}
-				}
+				Ok((rc, compressed)) => {
+                    if rc > 0 && !f(index, rc, result, compressed) {
+    			        break;
+                    }
+    			},
 				Err(crate::error::Error::InvalidValueData) => (), // ignore, can be external index.
 				Err(e) => return Err(e),
 			}
@@ -968,7 +965,7 @@ pub mod key {
 			let mut result = [0u8; PARTIAL_SIZE];
 			if buf.1.len() >= PARTIAL_SIZE {
 				let pks = buf.read_partial();
-				result.copy_from_slice(&pks);
+				result.copy_from_slice(pks);
 				return Ok(result)
 			}
 			Err(crate::error::Error::InvalidValueData)

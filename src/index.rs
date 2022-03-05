@@ -228,6 +228,7 @@ impl IndexTable {
 	}
 
 	pub fn load_stats(&self) -> ColumnStats {
+        // NOTE: this const assertion will be optimized out by the compiler
 		debug_assert!(META_SIZE >= HEADER_SIZE + stats::TOTAL_SIZE);
 		if let Some(map) = &*self.map.read() {
 			ColumnStats::from_slice(&map[HEADER_SIZE .. HEADER_SIZE + stats::TOTAL_SIZE])
@@ -237,10 +238,11 @@ impl IndexTable {
 	}
 
 	pub fn write_stats(&self, stats: &ColumnStats) {
+        // NOTE: this const assertion will be optimized out by the compiler
 		debug_assert!(META_SIZE >= HEADER_SIZE + stats::TOTAL_SIZE);
 		if let Some(map) = &mut *self.map.write() {
-			let mut slice = &mut map[HEADER_SIZE .. HEADER_SIZE + stats::TOTAL_SIZE];
-			stats.to_slice(&mut slice);
+			let slice = &mut map[HEADER_SIZE .. HEADER_SIZE + stats::TOTAL_SIZE];
+			stats.to_slice(slice);
 		}
 	}
 
@@ -252,12 +254,12 @@ impl IndexTable {
 	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
 		let partial_key = Entry::extract_key(key_prefix, self.id.index_bits());
 		for i in sub_index .. CHUNK_ENTRIES {
-			let entry = Self::read_entry(&chunk, i);
+			let entry = Self::read_entry(chunk, i);
 			if !entry.is_empty() && entry.partial_key(self.id.index_bits()) == partial_key {
 				return (entry, i);
 			}
 		}
-		return (Entry::empty(), 0)
+		(Entry::empty(), 0)
 	}
 
 	// Only returns 54 bits of the actual key.
@@ -290,7 +292,7 @@ impl IndexTable {
 			return self.find_entry(key, sub_index, chunk);
 
 		}
-		return (Entry::empty(), 0)
+		(Entry::empty(), 0)
 	}
 
 	pub fn entries(&self, chunk_index: u64, log: &impl LogQuery) -> [Entry; CHUNK_ENTRIES] {
@@ -304,15 +306,15 @@ impl IndexTable {
 			chunk.copy_from_slice(source);
 			return Self::transmute_chunk(chunk);
 		}
-		return Self::transmute_chunk(EMPTY_CHUNK);
+		Self::transmute_chunk(EMPTY_CHUNK)
 	}
 
 	#[inline(always)]
 	fn transmute_chunk(chunk: [u8; CHUNK_LEN]) -> [Entry; CHUNK_ENTRIES] {
 		let mut result: [Entry; CHUNK_ENTRIES] = unsafe { std::mem::transmute(chunk) };
 		if !cfg!(target_endian = "little") {
-			for i in 0 .. CHUNK_ENTRIES {
-				result[i] = Entry::from_u64(u64::from_le(result[i].0));
+			for item in result.iter_mut().take(CHUNK_ENTRIES) {
+				*item = Entry::from_u64(u64::from_le(item.0));
 			}
 		}
 		result
@@ -369,7 +371,7 @@ impl IndexTable {
 			}
 		}
 		log::trace!(target: "parity-db", "{}: Full at {}", self.id, chunk_index);
-		return Ok(PlanOutcome::NeedReindex);
+		Ok(PlanOutcome::NeedReindex)
 	}
 
 	pub fn write_insert_plan(&self, key: &Key, address: Address, sub_index: Option<usize>, log: &mut LogWriter) -> Result<PlanOutcome> {
@@ -377,7 +379,7 @@ impl IndexTable {
 		let key_prefix = TableKey::index_from_partial(key);
 		let chunk_index = self.chunk_index(key_prefix);
 
-		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| chunk.clone()) {
+		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| *chunk) {
 			return self.plan_insert_chunk(key_prefix, address, &chunk, sub_index, log)
 		}
 
@@ -414,7 +416,7 @@ impl IndexTable {
 
 		let chunk_index = self.chunk_index(key_prefix);
 
-		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| chunk.clone()) {
+		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| *chunk) {
 			return self.plan_remove_chunk(key_prefix, &chunk, sub_index, log);
 		}
 
@@ -446,7 +448,7 @@ impl IndexTable {
 		// through the overlay in other threads.
 		let ptr: *mut u8 = map.as_ptr() as *mut u8;
 		let chunk: &mut[u8] = unsafe {
-			let ptr = ptr.offset(offset as isize);
+			let ptr = ptr.add(offset);
 			std::slice::from_raw_parts_mut(ptr, CHUNK_LEN)
 		};
 		let mut mask_buf = [0u8; 8];
@@ -454,7 +456,7 @@ impl IndexTable {
 		let mut mask = u64::from_le_bytes(mask_buf);
 		while mask != 0 {
 			let i = mask.trailing_zeros();
-			mask = mask & !(1 << i);
+			mask &= !(1 << i);
 			log.read(&mut chunk[i as usize *ENTRY_BYTES .. (i as usize + 1)*ENTRY_BYTES])?;
 		}
 		log::trace!(target: "parity-db", "{}: Enacted chunk {}", self.id, index);
@@ -470,7 +472,7 @@ impl IndexTable {
 		let mut mask = u64::from_le_bytes(buf);
 		while mask != 0 {
 			let i = mask.trailing_zeros();
-			mask = mask & !(1 << i);
+			mask &= !(1 << i);
 			log.read(&mut buf[..])?;
 		}
 		log::trace!(target: "parity-db", "{}: Validated chunk {}", self.id, index);
@@ -483,7 +485,7 @@ impl IndexTable {
 		let mut mask = u64::from_le_bytes(buf);
 		while mask != 0 {
 			let i = mask.trailing_zeros();
-			mask = mask & !(1 << i);
+			mask &= !(1 << i);
 			log.read(&mut buf[..])?;
 		}
 		Ok(())

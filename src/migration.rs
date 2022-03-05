@@ -23,7 +23,7 @@ use crate::db::{CommitChangeSet, IndexedChangeSet};
 const COMMIT_SIZE: usize = 10240;
 const OVERWRITE_TMP_PATH: &str = "to_revert_overwrite";
 
-pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Vec<u8>) -> Result<()> {
+pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u8]) -> Result<()> {
 	let source_meta = Options::load_metadata(from)?
 		.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;
 
@@ -115,7 +115,7 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &Ve
 			std::fs::create_dir_all(&tmp_dir)
 				.map_err(|e| Error::Migration(format!("Error creating overwrite tmp dir: {:?}", e)))?;
 
-			move_column(c, &from, &tmp_dir)?;
+			move_column(c, from, &tmp_dir)?;
 			move_column(c, &to.path, from)?;
 			source_options.columns[c as usize] = to.columns[c as usize].clone();
 			source_options.write_metadata(from, &to.salt.expect("Migrate requires salt"))
