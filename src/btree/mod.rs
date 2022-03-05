@@ -50,6 +50,7 @@ pub use iter::BTreeIterator;
 use node::SeparatorInner;
 use parking_lot::RwLock;
 
+#[allow(clippy::module_inception)]
 mod btree;
 mod iter;
 mod node;
@@ -99,7 +100,7 @@ impl Entry {
 		Some(SeparatorInner { key, value })
 	}
 
-	fn write_separator(&mut self, key: &Vec<u8>, value: Address) {
+	fn write_separator(&mut self, key: &[u8], value: Address) {
 		let size = key.len();
 		let inner_size = self.encoded.inner_mut().len();
 		if size >= u8::MAX as usize {
@@ -114,7 +115,7 @@ impl Entry {
 		} else {
 			self.encoded.write_slice(&[size as u8]);
 		}
-		self.encoded.write_slice(key.as_slice());
+		self.encoded.write_slice(key);
 	}
 
 	fn read_child_index(&mut self) -> Option<Address> {
@@ -220,7 +221,7 @@ impl BTreeTable {
 		}
 	}
 
-	fn locked<'a>(&'a self, tables: &'a Vec<ValueTable>) -> TablesRef<'a> {
+	fn locked<'a>(&'a self, tables: &'a [ValueTable]) -> TablesRef<'a> {
 		TablesRef {
 			tables,
 			ref_counted: self.ref_counted,

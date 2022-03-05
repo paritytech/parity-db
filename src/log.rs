@@ -264,10 +264,10 @@ impl LogChange {
 		self.local_values.get(&id)
 	}
 
-	pub fn to_file(
+	fn flush_to_file(
 		self,
 		file: &mut std::io::BufWriter<std::fs::File>,
-	) -> Result<(HashMap<IndexTableId, IndexLogOverlay>, HashMap<ValueTableId, ValueLogOverlay>, u64)>
+	) -> Result<FlushedLog>
 	{
 		let mut crc32 = crc32fast::Hasher::new();
 		let mut bytes: u64 = 0;
@@ -314,8 +314,18 @@ impl LogChange {
 		file.write_all(&checksum.to_le_bytes())?;
 		bytes += 4;
 		file.flush()?;
-		Ok((self.local_index, self.local_values, bytes))
+		Ok(FlushedLog {
+			index: self.local_index,
+			values: self.local_values,
+			bytes,
+		})
 	}
+}
+
+struct FlushedLog {
+	index: HashMap<IndexTableId, IndexLogOverlay>,
+	values: HashMap<ValueTableId, ValueLogOverlay>,
+	bytes: u64,
 }
 
 pub struct LogWriter<'a> {
@@ -619,7 +629,7 @@ impl Log {
 			*appending = Some(Appending { size: 0, file: std::io::BufWriter::new(file), id });
 		}
 		let appending = appending.as_mut().unwrap();
-		let (index, values, bytes) = log.to_file(&mut appending.file)?;
+		let FlushedLog { index, values, bytes } = log.flush_to_file(&mut appending.file)?;
 		let mut overlays = self.overlays.write();
 		let mut total_index = 0;
 		for (id, overlay) in index.into_iter() {

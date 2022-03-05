@@ -16,7 +16,7 @@
 
 use crate::{
 	btree::{commit_overlay::BTreeChangeSet, BTreeIterator, BTreeTable},
-	column::{hash_key, ColId, Column, IterState},
+	column::{hash_key, ColId, Column, IterState, ReindexBatch},
 	error::{Error, Result},
 	index::PlanOutcome,
 	log::{Log, LogAction},
@@ -453,7 +453,7 @@ impl DbInner {
 		// Process any pending reindexes
 		for column in self.columns.iter() {
 			let column = if let Column::Hash(c) = column { c } else { continue };
-			let (drop_index, batch) = column.reindex(&self.log)?;
+			let ReindexBatch { drop_index, batch } = column.reindex(&self.log)?;
 			if !batch.is_empty() || drop_index.is_some() {
 				let mut next_reindex = false;
 				let mut writer = self.log.begin_record();
@@ -1460,7 +1460,7 @@ mod tests {
 		let mut key22 = key2.clone();
 		key22.push(2);
 		iter.seek(key22.as_slice()).unwrap();
-		assert_eq!(iter.next().unwrap(), Some((key4.clone(), b"value4".to_vec())));
+		assert_eq!(iter.next().unwrap(), Some((key4, b"value4".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
 	}
 
@@ -1519,7 +1519,7 @@ mod tests {
 		assert_eq!(db.get(col_nb, &key3).unwrap(), Some(b"value3".to_vec()));
 		iter.seek(key2.as_slice()).unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
-		assert_eq!(iter.next().unwrap(), Some((key3.clone(), b"value3".to_vec())));
+		assert_eq!(iter.next().unwrap(), Some((key3, b"value3".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
 	}
 
@@ -1544,7 +1544,7 @@ mod tests {
 		let state: BTreeMap<Vec<u8>, Option<Vec<u8>>> =
 			change_set.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 		for (key, value) in state.iter() {
-			assert_eq!(&db.get(col_nb, &key).unwrap(), value);
+			assert_eq!(&db.get(col_nb, key).unwrap(), value);
 		}
 	}
 

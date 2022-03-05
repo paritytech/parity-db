@@ -155,28 +155,32 @@ impl Node {
 				let insert = i;
 				let insert_separator = Self::create_separator(key, value, btree, log, None)?;
 
-				if insert == middle {
-					let (right, right_ix) = self.split(middle, true, None, None, has_child);
-					let right = Self::write_split_child(right_ix, right, btree, log)?;
-					return Ok((Some((insert_separator, right)), false))
-				} else if insert < middle {
-					let (right, right_ix) = self.split(middle, false, None, None, has_child);
-					let sep = self.remove_separator(middle - 1);
-					self.shift_from(insert, has_child, false);
-					self.set_separator(insert, insert_separator);
-					let right = Self::write_split_child(right_ix, right, btree, log)?;
-					return Ok((Some((sep, right)), false))
-				} else {
-					let (right, right_ix) = self.split(
-						middle + 1,
-						false,
-						Some((insert, insert_separator)),
-						None,
-						has_child,
-					);
-					let sep = self.remove_separator(middle);
-					let right = Self::write_split_child(right_ix, right, btree, log)?;
-					return Ok((Some((sep, right)), false))
+				match insert.cmp(&middle) {
+					std::cmp::Ordering::Equal => {
+						let (right, right_ix) = self.split(middle, true, None, None, has_child);
+						let right = Self::write_split_child(right_ix, right, btree, log)?;
+						return Ok((Some((insert_separator, right)), false))
+					},
+					std::cmp::Ordering::Less => {
+						let (right, right_ix) = self.split(middle, false, None, None, has_child);
+						let sep = self.remove_separator(middle - 1);
+						self.shift_from(insert, has_child, false);
+						self.set_separator(insert, insert_separator);
+						let right = Self::write_split_child(right_ix, right, btree, log)?;
+						return Ok((Some((sep, right)), false))
+					},
+					std::cmp::Ordering::Greater => {
+						let (right, right_ix) = self.split(
+							middle + 1,
+							false,
+							Some((insert, insert_separator)),
+							None,
+							has_child,
+						);
+						let sep = self.remove_separator(middle);
+						let right = Self::write_split_child(right_ix, right, btree, log)?;
+						return Ok((Some((sep, right)), false))
+					}
 				}
 			}
 
@@ -205,30 +209,35 @@ impl Node {
 			// full
 			let middle = ORDER / 2;
 			let insert = at;
-			if insert == middle {
-				let (mut right, right_ix) = self.split(middle, true, None, None, has_child);
-				right.set_child(0, child);
-				let right = Self::write_split_child(right_ix, right, btree, log)?;
-				Ok(Some((separator, right)))
-			} else if insert < middle {
-				let (right, right_ix) = self.split(middle, false, None, None, has_child);
-				let sep = self.remove_separator(middle - 1);
-				self.shift_from(insert, has_child, false);
-				self.set_separator(insert, separator);
-				self.set_child(insert + 1, child);
-				let right = Self::write_split_child(right_ix, right, btree, log)?;
-				Ok(Some((sep, right)))
-			} else {
-				let (right, right_ix) = self.split(
-					middle + 1,
-					false,
-					Some((insert, separator)),
-					Some((insert, child)),
-					has_child,
-				);
-				let sep = self.remove_separator(middle);
-				let right = Self::write_split_child(right_ix, right, btree, log)?;
-				Ok(Some((sep, right)))
+
+			match insert.cmp(&middle) {
+				std::cmp::Ordering::Equal => {
+					let (mut right, right_ix) = self.split(middle, true, None, None, has_child);
+					right.set_child(0, child);
+					let right = Self::write_split_child(right_ix, right, btree, log)?;
+					Ok(Some((separator, right)))
+				},
+				std::cmp::Ordering::Less => {
+					let (right, right_ix) = self.split(middle, false, None, None, has_child);
+					let sep = self.remove_separator(middle - 1);
+					self.shift_from(insert, has_child, false);
+					self.set_separator(insert, separator);
+					self.set_child(insert + 1, child);
+					let right = Self::write_split_child(right_ix, right, btree, log)?;
+					Ok(Some((sep, right)))
+				},
+				std::cmp::Ordering::Greater => {
+					let (right, right_ix) = self.split(
+						middle + 1,
+						false,
+						Some((insert, separator)),
+						Some((insert, child)),
+						has_child,
+					);
+					let sep = self.remove_separator(middle);
+					let right = Self::write_split_child(right_ix, right, btree, log)?;
+					Ok(Some((sep, right)))
+				}
 			}
 		} else {
 			self.shift_from(at, has_child, false);

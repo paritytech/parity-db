@@ -30,6 +30,7 @@ const HISTOGRAM_BUCKET_BITS: u8 = 5;
 pub const TOTAL_SIZE: usize =
 	4 * HISTOGRAM_BUCKETS + 8 * HISTOGRAM_BUCKETS + 8 * SIZE_TIERS + 8 * 11;
 
+// TODO: get rid of the struct and use index meta directly.
 pub struct ColumnStats {
 	value_histogram: [AtomicU32; HISTOGRAM_BUCKETS],
 	query_histogram: [AtomicU64; SIZE_TIERS], // Per size tier
@@ -68,19 +69,19 @@ fn read_i64(cursor: &mut Cursor<&[u8]>) -> AtomicI64 {
 fn write_u32(cursor: &mut Cursor<&mut [u8]>, val: &AtomicU32) {
 	cursor
 		.write_all(&val.load(Ordering::Relaxed).to_le_bytes())
-		.expect("Incorrent stats buffer");
+		.expect("Incorrect stats buffer");
 }
 
 fn write_u64(cursor: &mut Cursor<&mut [u8]>, val: &AtomicU64) {
 	cursor
 		.write_all(&val.load(Ordering::Relaxed).to_le_bytes())
-		.expect("Incorrent stats buffer");
+		.expect("Incorrect stats buffer");
 }
 
 fn write_i64(cursor: &mut Cursor<&mut [u8]>, val: &AtomicI64) {
 	cursor
 		.write_all(&val.load(Ordering::Relaxed).to_le_bytes())
-		.expect("Incorrent stats buffer");
+		.expect("Incorrect stats buffer");
 }
 
 fn value_histogram_index(size: u32) -> Option<usize> {
@@ -93,6 +94,7 @@ fn value_histogram_index(size: u32) -> Option<usize> {
 }
 
 impl ColumnStats {
+	#[allow(clippy::uninit_assumed_init)]
 	pub fn from_slice(data: &[u8]) -> ColumnStats {
 		let mut cursor = Cursor::new(data);
 		let mut value_histogram: [AtomicU32; HISTOGRAM_BUCKETS] =

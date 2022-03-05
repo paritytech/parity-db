@@ -72,6 +72,7 @@ impl<'a> BTreeIterator<'a> {
 		self.seek_backend(key, record_id, self.table, &*log, after)
 	}
 
+	#[allow(clippy::should_implement_trait)]
 	pub fn next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 		let col = self.col;
 
@@ -250,10 +251,11 @@ impl BTreeIterState {
 	) -> Result<()> {
 		self.state.clear();
 		self.next_separator = false;
-		if col.with_locked(|b| {
+		let found = col.with_locked(|b| {
 			let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), b, log)?;
 			Node::seek(root, key, b, log, btree.depth, &mut self.state)
-		})? {
+		})?;
+		if found {
 			// on value
 			if after {
 				if let Some((ix, _node)) = self.state.last_mut() {

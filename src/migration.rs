@@ -224,7 +224,7 @@ mod test {
 
 		let dest_opts = Options::with_columns(&dest_dir, 1);
 
-		migrate(&source_dir, dest_opts, false, &vec![0]).unwrap();
+		migrate(&source_dir, dest_opts, false, &[0]).unwrap();
 		let dest = Db::with_columns(&dest_dir, 1).unwrap();
 		assert_eq!(dest.get(0, b"1").unwrap(), Some("value".as_bytes().to_vec()));
 	}

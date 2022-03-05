@@ -39,6 +39,9 @@ const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
 
 pub type Chunk = [u8; CHUNK_LEN];
 
+// TODO: compile time assert
+// (META_SIZE >= HEADER_SIZE + stats::TOTAL_SIZE);
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct Entry(u64);
 
@@ -218,8 +221,6 @@ impl IndexTable {
 	}
 
 	pub fn load_stats(&self) -> ColumnStats {
-		// NOTE: this const assertion will be optimized out by the compiler
-		debug_assert!(META_SIZE >= HEADER_SIZE + stats::TOTAL_SIZE);
 		if let Some(map) = &*self.map.read() {
 			ColumnStats::from_slice(&map[HEADER_SIZE..HEADER_SIZE + stats::TOTAL_SIZE])
 		} else {
@@ -228,8 +229,6 @@ impl IndexTable {
 	}
 
 	pub fn write_stats(&self, stats: &ColumnStats) {
-		// NOTE: this const assertion will be optimized out by the compiler
-		debug_assert!(META_SIZE >= HEADER_SIZE + stats::TOTAL_SIZE);
 		if let Some(map) = &mut *self.map.write() {
 			let slice = &mut map[HEADER_SIZE..HEADER_SIZE + stats::TOTAL_SIZE];
 			stats.to_slice(slice);
@@ -258,7 +257,7 @@ impl IndexTable {
 		let partial_key = entry.partial_key(self.id.index_bits());
 		let k = 64 - Entry::address_bits(self.id.index_bits());
 		let index_key =
-			(chunk << 64 - self.id.index_bits()) | (partial_key << (64 - k - self.id.index_bits()));
+			(chunk << (64 - self.id.index_bits())) | (partial_key << (64 - k - self.id.index_bits()));
 		let mut key = Key::default();
 		key[0..8].copy_from_slice(&index_key.to_be_bytes());
 		key

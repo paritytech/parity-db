@@ -90,6 +90,7 @@ struct Reindex {
 	progress: AtomicU64,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum Column {
 	Hash(HashColumn),
 	Tree(BTreeTable),
@@ -112,7 +113,7 @@ pub struct HashColumn {
 
 #[derive(Clone, Copy)]
 pub struct TablesRef<'a> {
-	pub tables: &'a Vec<ValueTable>,
+	pub tables: &'a [ValueTable],
 	pub compression: &'a Compress,
 	pub col: ColId,
 	pub preimage: bool,
@@ -148,6 +149,11 @@ pub fn hash_key(key: &[u8], salt: &Salt, uniform: bool, db_version: u32) -> Key 
 		k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, salt, key).as_bytes());
 	}
 	k
+}
+
+pub struct ReindexBatch {
+	pub drop_index: Option<IndexTableId>,
+	pub batch: Vec<(Key, Address)>,
 }
 
 impl HashColumn {
@@ -206,7 +212,7 @@ impl HashColumn {
 		Ok(None)
 	}
 
-	pub fn as_ref<'a>(&'a self, tables: &'a Vec<ValueTable>) -> TablesRef<'a> {
+	pub fn as_ref<'a>(&'a self, tables: &'a [ValueTable]) -> TablesRef<'a> {
 		TablesRef {
 			tables,
 			preimage: self.preimage,
@@ -473,6 +479,7 @@ impl HashColumn {
 		}
 	}
 
+	#[allow(clippy::too_many_arguments)]
 	fn write_plan_existing(
 		&self,
 		tables: &Tables,
@@ -797,8 +804,7 @@ impl HashColumn {
 		Ok(())
 	}
 
-	pub fn reindex(&self, log: &Log) -> Result<(Option<IndexTableId>, Vec<(Key, Address)>)> {
-		// TODO: handle overlay
+	pub fn reindex(&self, log: &Log) -> Result<ReindexBatch> {
 		let tables = self.tables.read();
 		let reindex = self.reindex.read();
 		let mut plan = Vec::new();
@@ -832,7 +838,7 @@ impl HashColumn {
 				}
 			}
 		}
-		Ok((drop_index, plan))
+		Ok(ReindexBatch { drop_index, batch: plan })
 	}
 
 	pub fn drop_index(&self, id: IndexTableId) -> Result<()> {
