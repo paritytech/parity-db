@@ -387,11 +387,10 @@ impl DbInner {
 
 			for (c, btree) in commit.changeset.btree_indexed.iter_mut() {
 				match &self.columns[*c as usize] {
-					Column::Hash(_column) => {
+					Column::Hash(_column) =>
 						return Err(Error::InvalidConfiguration(
 							"Not an indexed column.".to_string(),
-						))
-					},
+						)),
 					Column::Tree(column) => {
 						btree.write_plan(column, &mut writer, &mut ops)?;
 					},
@@ -453,11 +452,7 @@ impl DbInner {
 		}
 		// Process any pending reindexes
 		for column in self.columns.iter() {
-			let column = if let Column::Hash(c) = column {
-				c
-			} else {
-				continue
-			};
+			let column = if let Column::Hash(c) = column { c } else { continue };
 			let (drop_index, batch) = column.reindex(&self.log)?;
 			if !batch.is_empty() || drop_index.is_some() {
 				let mut next_reindex = false;
@@ -547,9 +542,7 @@ impl DbInner {
 								self.log.clear_replay_logs()?;
 								return Ok(false)
 							},
-							LogAction::EndRecord => {
-								break
-							},
+							LogAction::EndRecord => break,
 							LogAction::InsertIndex(insertion) => {
 								let col = insertion.table.col() as usize;
 								if let Err(e) = self.columns[col]
@@ -572,9 +565,7 @@ impl DbInner {
 									return Ok(false)
 								}
 							},
-							LogAction::DropTable(_) => {
-								continue
-							},
+							LogAction::DropTable(_) => continue,
 						}
 					}
 					reader.reset()?;
@@ -582,12 +573,9 @@ impl DbInner {
 				}
 				loop {
 					match reader.next()? {
-						LogAction::BeginRecord => {
-							return Err(Error::Corruption("Bad log record".into()))
-						},
-						LogAction::EndRecord => {
-							break
-						},
+						LogAction::BeginRecord =>
+							return Err(Error::Corruption("Bad log record".into())),
+						LogAction::EndRecord => break,
 						LogAction::InsertIndex(insertion) => {
 							self.columns[insertion.table.col() as usize]
 								.enact_plan(LogAction::InsertIndex(insertion), &mut reader)?;

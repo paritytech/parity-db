@@ -195,9 +195,7 @@ impl HashColumn {
 				log,
 			)?;
 			match value {
-				Some(result) => {
-					return Ok(Some(result))
-				},
+				Some(result) => return Ok(Some(result)),
 				None => {
 					let (next_entry, next_index) = index.get(key, sub_index + 1, log);
 					entry = next_entry;

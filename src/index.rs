@@ -200,9 +200,7 @@ impl IndexTable {
 		path.push(id.file_name());
 
 		let file = match std::fs::OpenOptions::new().read(true).write(true).open(path.as_path()) {
-			Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-				return Ok(None)
-			},
+			Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
 			Err(e) => return Err(e.into()),
 			Ok(file) => file,
 		};

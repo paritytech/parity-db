@@ -793,12 +793,8 @@ impl Node {
 		while let Some(separator) = self.separators[i].separator.as_ref() {
 			match key[..].cmp(&separator.key[..]) {
 				Ordering::Greater => (),
-				Ordering::Less => {
-					return Ok((false, i))
-				},
-				Ordering::Equal => {
-					return Ok((true, i))
-				},
+				Ordering::Less => return Ok((false, i)),
+				Ordering::Equal => return Ok((true, i)),
 			}
 			i += 1;
 			if i == ORDER {
