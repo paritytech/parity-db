@@ -78,3 +78,16 @@ impl std::hash::Hasher for IdentityKeyHash {
 
 pub const KEY_SIZE: usize = 32;
 pub type Key = [u8; KEY_SIZE];
+
+#[macro_export]
+macro_rules! const_assert {
+	(let $e:expr; ) => (
+		const _: [(); { const ASSERT: bool = $e; ASSERT} as usize -1] = [];
+	);
+	(let $e:expr; $e1:expr $(, $ee:expr)*) => (
+		const_assert!(let ($e) && ($e1); $($ee),*);
+	);
+	($e:expr $(, $ee:expr)*) => (
+		const_assert!(let true && ($e); $($ee),*);
+	);
+}

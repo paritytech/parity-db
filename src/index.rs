@@ -16,6 +16,7 @@
 
 use crate::{
 	column::ColId,
+	const_assert,
 	display::hex,
 	error::{Error, Result},
 	log::{LogQuery, LogReader, LogWriter},
@@ -39,8 +40,7 @@ const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
 
 pub type Chunk = [u8; CHUNK_LEN];
 
-// TODO: compile time assert
-// (META_SIZE >= HEADER_SIZE + stats::TOTAL_SIZE);
+const_assert!(META_SIZE >= HEADER_SIZE + stats::TOTAL_SIZE);
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct Entry(u64);
