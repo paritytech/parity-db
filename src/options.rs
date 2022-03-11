@@ -22,7 +22,7 @@ use crate::{
 use rand::Rng;
 use std::{collections::HashMap, io::Write, path::Path};
 
-pub const CURRENT_VERSION: u32 = 6;
+pub const CURRENT_VERSION: u32 = 7;
 // TODO on last supported 5, remove MULTIHEAD_V4 and MULTIPART_V4
 const LAST_SUPPORTED_VERSION: u32 = 4;
 
