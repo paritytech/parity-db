@@ -1215,11 +1215,11 @@ impl EnableCommitPipelineStages {
 		}
 		match self {
 			EnableCommitPipelineStages::DbFile => {
+				let _ = db.log.flush_one(0).unwrap();
+				let _ = db.log.flush_one(0).unwrap();
 				while db.enact_logs(false).unwrap() {}
-				let (_, _, cleanup_next) = db.log.flush_one(0).unwrap();
-				if cleanup_next {
-					let _ = db.clean_logs().unwrap();
-				}
+				let _ = db.log.flush_one(0).unwrap();
+				let _ = db.clean_logs().unwrap();
 			},
 			_ => (),
 		}
