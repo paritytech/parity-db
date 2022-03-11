@@ -1418,8 +1418,18 @@ mod test {
 
 	#[test]
 	fn multipart_collision() {
+		use super::MAX_ENTRY_SIZE;
+		let mut entry = super::Entry::new(super::MULTIPART.to_vec());
+		let size = entry.read_size().0 as usize;
+		assert!(size > MAX_ENTRY_SIZE);
+		let mut entry = super::Entry::new(super::MULTIHEAD.to_vec());
+		let size = entry.read_size().0 as usize;
+		assert!(size > MAX_ENTRY_SIZE);
+		let mut entry = super::Entry::new(super::MULTIHEAD_COMPRESSED.to_vec());
+		let size = entry.read_size().0 as usize;
+		assert!(size > MAX_ENTRY_SIZE);
 		let dir = TempDir::new("multipart_collision");
-		let table = dir.table(Some(super::MAX_ENTRY_SIZE as u16), &rc_options());
+		let table = dir.table(Some(MAX_ENTRY_SIZE as u16), &rc_options());
 		let log = dir.log();
 
 		let key = key(1);
