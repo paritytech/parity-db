@@ -90,6 +90,7 @@ const MULTIPART_V4: &[u8] = &[0xff, 0xfe];
 const MULTIHEAD_V4: &[u8] = &[0xff, 0xfd];
 const MULTIPART: &[u8] = &[0xfe, 0xff];
 const MULTIHEAD: &[u8] = &[0xfd, 0xff];
+const MULTIHEAD_COMPRESSED: &[u8] = &[0xfd, 0x7f];
 // When a rc reach locked ref, it is locked in db.
 const LOCKED_REF: u32 = u32::MAX;
 
@@ -221,8 +222,12 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 		self.write_slice(MULTIPART);
 	}
 
+	fn is_multihead_compressed(&self) -> bool {
+		&self.1.as_ref()[0..SIZE_SIZE] == MULTIHEAD_COMPRESSED
+	}
+
 	fn is_multihead(&self) -> bool {
-		&self.1.as_ref()[0..SIZE_SIZE] == MULTIHEAD
+		self.is_multihead_compressed() || &self.1.as_ref()[0..SIZE_SIZE] == MULTIHEAD
 	}
 
 	fn is_multihead_v4(&self) -> bool {
@@ -231,6 +236,10 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 
 	fn write_multihead(&mut self) {
 		self.write_slice(MULTIHEAD);
+	}
+
+	fn write_multihead_compressed(&mut self) {
+		self.write_slice(MULTIHEAD_COMPRESSED);
 	}
 
 	fn is_multi(&self, db_version: u32) -> bool {
@@ -426,12 +435,17 @@ impl ValueTable {
 			}
 
 			let (entry_end, next) = if self.multipart && buf.is_multi(self.db_version) {
+				if part == 0 && self.db_version > 6 && buf.is_multihead_compressed() {
+					compressed = true;
+				}
 				buf.skip_size();
 				let next = buf.read_next();
 				(entry_size, next)
 			} else {
 				let (size, read_compressed) = buf.read_size();
-				compressed = read_compressed;
+				if part == 0 || self.db_version <= 6 {
+					compressed = read_compressed;
+				}
 				(buf.offset() + size as usize, 0)
 			};
 
@@ -665,7 +679,11 @@ impl ValueTable {
 					next_index = self.next_free(log)?
 				}
 				if start == 0 {
-					buf.write_multihead();
+					if compressed {
+						buf.write_multihead_compressed();
+					} else {
+						buf.write_multihead();
+					}
 				} else {
 					buf.write_multipart();
 				}
@@ -1400,8 +1418,18 @@ mod test {
 
 	#[test]
 	fn multipart_collision() {
+		use super::MAX_ENTRY_SIZE;
+		let mut entry = super::Entry::new(super::MULTIPART.to_vec());
+		let size = entry.read_size().0 as usize;
+		assert!(size > MAX_ENTRY_SIZE);
+		let mut entry = super::Entry::new(super::MULTIHEAD.to_vec());
+		let size = entry.read_size().0 as usize;
+		assert!(size > MAX_ENTRY_SIZE);
+		let mut entry = super::Entry::new(super::MULTIHEAD_COMPRESSED.to_vec());
+		let size = entry.read_size().0 as usize;
+		assert!(size > MAX_ENTRY_SIZE);
 		let dir = TempDir::new("multipart_collision");
-		let table = dir.table(Some(super::MAX_ENTRY_SIZE as u16), &rc_options());
+		let table = dir.table(Some(MAX_ENTRY_SIZE as u16), &rc_options());
 		let log = dir.log();
 
 		let key = key(1);
