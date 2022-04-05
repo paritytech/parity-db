@@ -1267,12 +1267,7 @@ mod tests {
 	fn test_db_open_should_fail() {
 		let tmp = tempdir().unwrap();
 		let options = Options::with_columns(tmp.path(), 5);
-		assert!(Db::open(&options).is_err(), "Database does not exist, so it should fail to open");
-		assert!(Db::open(&options)
-			.map(|_| ())
-			.unwrap_err()
-			.to_string()
-			.contains("use open_or_create"));
+		assert!(matches!(Db::open(&options), Err(crate::Error::DatabaseNotFound)));
 	}
 
 	#[test]
