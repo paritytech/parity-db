@@ -216,9 +216,7 @@ impl Options {
 			self.write_metadata(&self.path, &s)?;
 			Ok(Metadata { version: CURRENT_VERSION, columns: self.columns.clone(), salt: s })
 		} else {
-			Err(Error::InvalidConfiguration(
-				"Database does not exist. To create a new one, use open_or_create".into(),
-			))
+			Err(Error::DatabaseNotFound)
 		}
 	}
 
