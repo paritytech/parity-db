@@ -138,8 +138,11 @@ impl WaitCondvar<bool> {
 impl DbInner {
 	fn open(options: &Options, inner_options: &InternalOptions) -> Result<DbInner> {
 		if inner_options.create {
-			std::fs::create_dir_all(&options.path)?
-		};
+			std::fs::create_dir_all(&options.path)?;
+		} else if !options.path.is_dir() {
+			return Err(Error::DatabaseNotFound)
+		}
+
 		let mut lock_path: std::path::PathBuf = options.path.clone();
 		lock_path.push("lock");
 		let lock_file = std::fs::OpenOptions::new()
@@ -1268,6 +1271,46 @@ mod tests {
 		let tmp = tempdir().unwrap();
 		let options = Options::with_columns(tmp.path(), 5);
 		assert!(matches!(Db::open(&options), Err(crate::Error::DatabaseNotFound)));
+	}
+
+	#[test]
+	fn test_db_open_fail_then_recursively_create() {
+		let tmp = tempdir().unwrap();
+		let (db_path_first, db_path_last) = {
+			let mut db_path_first = tmp.path().to_owned();
+			db_path_first.push("nope");
+
+			let mut db_path_last = db_path_first.to_owned();
+
+			for p in ["does", "not", "yet", "exist"] {
+				db_path_last.push(p);
+			}
+
+			(db_path_first, db_path_last)
+		};
+
+		assert!(
+			!db_path_first.exists(),
+			"That directory should not have existed at this point (dir: {:?})",
+			db_path_first
+		);
+
+		let options = Options::with_columns(&db_path_last, 5);
+		assert!(matches!(Db::open(&options), Err(crate::Error::DatabaseNotFound)));
+
+		assert!(!db_path_first.exists(), "That directory should remain non-existent. Did the `open(create: false)` nonetheless create a directory? (dir: {:?})", db_path_first);
+		assert!(Db::open_or_create(&options).is_ok(), "New database should be created");
+
+		assert!(
+			db_path_first.is_dir(),
+			"A directory should have been been created (dir: {:?})",
+			db_path_first
+		);
+		assert!(
+			db_path_last.is_dir(),
+			"A directory should have been been created (dir: {:?})",
+			db_path_last
+		);
 	}
 
 	#[test]
