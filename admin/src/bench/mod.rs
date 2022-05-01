@@ -34,7 +34,8 @@ use std::{
 };
 
 static COMMITS: AtomicUsize = AtomicUsize::new(0);
-//static QUERIES: AtomicUsize = AtomicUsize::new(0);
+static QUERIES_HIT: AtomicUsize = AtomicUsize::new(0);
+static QUERIES_MISS: AtomicUsize = AtomicUsize::new(0);
 
 const COMMIT_SIZE: usize = 100;
 
@@ -79,7 +80,7 @@ pub struct Stress {
 	#[structopt(flatten)]
 	pub shared: Shared,
 
-	/// Number of reading threads [default: 4].
+	/// Number of reading threads [default: 0].
 	#[structopt(long)]
 	pub readers: Option<usize>,
 
@@ -132,7 +133,7 @@ pub struct Args {
 impl Stress {
 	pub(super) fn get_args(&self) -> Args {
 		Args {
-			readers: self.readers.unwrap_or(4),
+			readers: self.readers.unwrap_or(0),
 			writers: self.writers.unwrap_or(1),
 			commits: self.commits.unwrap_or(100_000),
 			seed: self.seed.clone(),
@@ -210,14 +211,13 @@ fn writer<D: BenchDb>(
 ) {
 	let offset = args.seed.unwrap_or(0);
 	// Note that multiple worker will run on same range concurrently.
-	let mut key = start_commit as u64 * COMMIT_SIZE as u64 + offset;
 	let commit_size = COMMIT_SIZE;
 	let mut commit = Vec::with_capacity(commit_size);
 
-	for n in start_commit..start_commit + args.commits {
-		if shutdown.load(Ordering::Relaxed) {
-			break
-		}
+
+	loop {
+		let n = COMMITS.fetch_add(1, Ordering::SeqCst);
+		let mut key = n as u64 * COMMIT_SIZE as u64 + offset;
 		for _ in 0..commit_size {
 			commit.push((pool.key(key), Some(pool.value(key, args.compress))));
 			key += 1;
@@ -231,16 +231,38 @@ fn writer<D: BenchDb>(
 		commit.push((KEY_RESTART, Some((n as u64).to_be_bytes().to_vec())));
 
 		db.commit(commit.drain(..));
-		COMMITS.fetch_add(1, Ordering::Release);
 		commit.clear();
+
+		if n >= start_commit + args.commits || shutdown.load(Ordering::Relaxed) {
+			break;
+		}
 	}
-	commit.clear();
 }
 
-fn reader<D: BenchDb>(_db: Arc<D>, shutdown: Arc<AtomicBool>) {
-	// Query a random  key
+fn reader<D: BenchDb>(
+	db: Arc<D>,
+	pool: Arc<SizePool>,
+	seed: u64,
+	index: u64,
+	shutdown: Arc<AtomicBool>)
+{
+	// Query random keys while writing
+	let mut rng = rand::rngs::SmallRng::seed_from_u64(seed + index);
 	while !shutdown.load(Ordering::Relaxed) {
-		thread::sleep(std::time::Duration::from_millis(500));
+		let commits = COMMITS.load(Ordering::Relaxed) as u64;
+		if commits == 0 {
+			continue
+		}
+		let num_keys = commits * COMMIT_SIZE as u64;
+		let key = pool.key(rng.next_u64() % num_keys + seed);
+		match db.get(&key) {
+			Some(_) => {
+				QUERIES_HIT.fetch_add(1, Ordering::SeqCst);
+			},
+			None => {
+				QUERIES_MISS.fetch_add(1, Ordering::SeqCst);
+			}
+		}
 	}
 }
 
@@ -273,11 +295,13 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 	for i in 0..args.readers {
 		let db = db.clone();
 		let shutdown = shutdown.clone();
+		let offset = args.seed.unwrap_or(0);
+		let pool = pool.clone();
 
 		threads.push(
 			thread::Builder::new()
 				.name(format!("reader {}", i))
-				.spawn(move || reader(db, shutdown))
+				.spawn(move || reader(db, pool, offset, i as u64, shutdown))
 				.unwrap(),
 		);
 	}
@@ -309,11 +333,17 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 	let commits = commits - start_commit;
 	let elapsed = start.elapsed().as_secs_f64();
 
+	let hits = QUERIES_HIT.load(Ordering::SeqCst);
+	let misses = QUERIES_MISS.load(Ordering::SeqCst);
+
 	println!(
-		"Completed {} commits in {} seconds. {} cps",
+		"Completed {} commits in {} seconds. {} cps. {} hits, {} mises, {} qps",
 		commits,
 		elapsed,
-		commits as f64 / elapsed
+		commits as f64 / elapsed,
+		hits,
+		misses,
+		(hits + misses) as f64 / elapsed,
 	);
 
 	if args.no_check {
@@ -326,8 +356,8 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 	let mut queries = 0;
 	for nc in start_commit as u64..(start_commit + commits) as u64 {
 		let counter = nc - start_commit as u64;
-		if counter % 1000 == 0 {
-			println!("Query {}/{}", counter, commits,);
+		if counter % 10000 == 0 {
+			println!("Query {}/{}", counter, commits);
 		}
 		let commits = (start_commit + commits) as u64;
 		let prune_window: u64 = COMMIT_PRUNE_WINDOW as u64;
