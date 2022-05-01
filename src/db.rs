@@ -360,7 +360,7 @@ impl DbInner {
 						target: "parity-db",
 						"Waking up commit queue worker",
 					);
-					self.commit_queue_full_cv.notify_one();
+					self.commit_queue_full_cv.notify_all();
 				}
 				Some(commit)
 			} else {
@@ -769,7 +769,7 @@ impl DbInner {
 				*err = Some(Arc::new(e));
 				self.shutdown();
 			}
-			self.commit_queue_full_cv.notify_one();
+			self.commit_queue_full_cv.notify_all();
 		}
 	}
 
