@@ -214,7 +214,6 @@ fn writer<D: BenchDb>(
 	let commit_size = COMMIT_SIZE;
 	let mut commit = Vec::with_capacity(commit_size);
 
-
 	loop {
 		let n = COMMITS.fetch_add(1, Ordering::SeqCst);
 		let mut key = n as u64 * COMMIT_SIZE as u64 + offset;
@@ -234,7 +233,7 @@ fn writer<D: BenchDb>(
 		commit.clear();
 
 		if n >= start_commit + args.commits || shutdown.load(Ordering::Relaxed) {
-			break;
+			break
 		}
 	}
 }
@@ -244,8 +243,8 @@ fn reader<D: BenchDb>(
 	pool: Arc<SizePool>,
 	seed: u64,
 	index: u64,
-	shutdown: Arc<AtomicBool>)
-{
+	shutdown: Arc<AtomicBool>,
+) {
 	// Query random keys while writing
 	let mut rng = rand::rngs::SmallRng::seed_from_u64(seed + index);
 	while !shutdown.load(Ordering::Relaxed) {
@@ -261,7 +260,7 @@ fn reader<D: BenchDb>(
 			},
 			None => {
 				QUERIES_MISS.fetch_add(1, Ordering::SeqCst);
-			}
+			},
 		}
 	}
 }
