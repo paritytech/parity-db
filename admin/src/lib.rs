@@ -60,7 +60,7 @@ pub fn run() -> Result<(), String> {
 	options.sync_wal = !cli.shared().no_sync;
 	options.sync_data = !cli.shared().no_sync;
 	options.stats = cli.shared().with_stats;
-	println!("Options {:?}, {:?}", cli, options);
+	log::debug!("Options: {:?}, {:?}", cli, options);
 	match cli.subcommand {
 		SubCommand::Stats(stat) => {
 			let db = parity_db::Db::open_read_only(&options)
