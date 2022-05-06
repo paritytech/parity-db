@@ -215,13 +215,7 @@ fn writer(
 	}
 }
 
-fn reader(
-	db: Arc<Db>,
-	pool: Arc<SizePool>,
-	seed: u64,
-	index: u64,
-	shutdown: Arc<AtomicBool>,
-) {
+fn reader(db: Arc<Db>, pool: Arc<SizePool>, seed: u64, index: u64, shutdown: Arc<AtomicBool>) {
 	// Query random keys while writing
 	let mut rng = rand::rngs::SmallRng::seed_from_u64(seed + index);
 	while !shutdown.load(Ordering::Relaxed) {
@@ -242,15 +236,12 @@ fn reader(
 	}
 }
 
-fn iter(
-	db: Arc<Db>,
-	shutdown: Arc<AtomicBool>,
-) {
+fn iter(db: Arc<Db>, shutdown: Arc<AtomicBool>) {
 	loop {
 		let mut iter = db.iter(0).unwrap();
 		while let Some(_) = iter.next().unwrap() {
 			if shutdown.load(Ordering::Relaxed) {
-				return;
+				return
 			}
 		}
 		ITERATIONS.fetch_add(1, Ordering::SeqCst);
