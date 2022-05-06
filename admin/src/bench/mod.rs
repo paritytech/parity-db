@@ -32,6 +32,7 @@ use std::{
 };
 
 static COMMITS: AtomicUsize = AtomicUsize::new(0);
+static NEXT_COMMIT: AtomicUsize = AtomicUsize::new(0);
 static QUERIES_HIT: AtomicUsize = AtomicUsize::new(0);
 static QUERIES_MISS: AtomicUsize = AtomicUsize::new(0);
 static ITERATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -192,7 +193,11 @@ fn writer(
 	let mut commit = Vec::with_capacity(commit_size);
 
 	loop {
-		let n = COMMITS.fetch_add(1, Ordering::SeqCst);
+		let n = NEXT_COMMIT.fetch_add(1, Ordering::SeqCst);
+		if n >= start_commit + args.commits || shutdown.load(Ordering::Relaxed) {
+			break
+		}
+
 		let mut key = n as u64 * COMMIT_SIZE as u64 + offset;
 		for _ in 0..commit_size {
 			commit.push((pool.key(key), Some(pool.value(key, args.compress))));
@@ -207,11 +212,8 @@ fn writer(
 		commit.push((KEY_RESTART, Some((n as u64).to_be_bytes().to_vec())));
 
 		db.commit(commit.drain(..).map(|(k, v)| (0, k, v))).unwrap();
+		COMMITS.fetch_add(1, Ordering::Relaxed);
 		commit.clear();
-
-		if n >= start_commit + args.commits || shutdown.load(Ordering::Relaxed) {
-			break
-		}
 	}
 }
 
@@ -266,6 +268,7 @@ pub fn run_internal(args: Args, db: Db) {
 	};
 
 	COMMITS.store(start_commit as usize, Ordering::SeqCst);
+	NEXT_COMMIT.store(start_commit as usize, Ordering::SeqCst);
 
 	{
 		let commits = args.commits;

@@ -97,8 +97,8 @@ struct DbInner {
 	commit_worker_wait: Arc<WaitCondvar<bool>>,
 	// Overlay of most recent values in the commit queue.
 	commit_overlay: RwLock<Vec<CommitOverlay>>,
-	log_queue_wait: WaitCondvar<i64>, /* This may underflow occasionally, but is bound for 0
-	                                   * eventually */
+	// This may underflow occasionally, but is bound for 0 eventually.
+	log_queue_wait: WaitCondvar<i64>,
 	flush_worker_wait: Arc<WaitCondvar<bool>>,
 	cleanup_worker_wait: WaitCondvar<bool>,
 	last_enacted: AtomicU64,
