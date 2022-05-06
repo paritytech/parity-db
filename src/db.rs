@@ -281,53 +281,53 @@ impl DbInner {
 	}
 
 	fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
-			let mut queue = self.commit_queue.lock();
-			if queue.bytes > MAX_COMMIT_QUEUE_BYTES {
-				log::debug!(target: "parity-db", "Waiting, queue size={}", queue.bytes);
-				self.commit_queue_full_cv.wait(&mut queue);
+		let mut queue = self.commit_queue.lock();
+		if queue.bytes > MAX_COMMIT_QUEUE_BYTES {
+			log::debug!(target: "parity-db", "Waiting, queue size={}", queue.bytes);
+			self.commit_queue_full_cv.wait(&mut queue);
+		}
+		{
+			let bg_err = self.bg_err.lock();
+			if let Some(err) = &*bg_err {
+				return Err(Error::Background(err.clone()))
 			}
-			{
-				let bg_err = self.bg_err.lock();
-				if let Some(err) = &*bg_err {
-					return Err(Error::Background(err.clone()))
-				}
-			}
+		}
 
-			let mut overlay = self.commit_overlay.write();
+		let mut overlay = self.commit_overlay.write();
 
-			queue.record_id += 1;
-			let record_id = queue.record_id + 1;
+		queue.record_id += 1;
+		let record_id = queue.record_id + 1;
 
-			let mut bytes = 0;
-			for (c, indexed) in &commit.indexed {
-				indexed.copy_to_overlay(
-					&mut overlay[*c as usize],
-					record_id,
-					&mut bytes,
-					&self.options,
-				);
-			}
-
-			for (c, iterset) in &commit.btree_indexed {
-				iterset.copy_to_overlay(
-					&mut overlay[*c as usize].btree_indexed,
-					record_id,
-					&mut bytes,
-					&self.options,
-				);
-			}
-
-			let commit = Commit { id: record_id, changeset: commit, bytes };
-
-			log::debug!(
-				target: "parity-db",
-				"Queued commit {}, {} bytes",
-				commit.id,
-				bytes,
+		let mut bytes = 0;
+		for (c, indexed) in &commit.indexed {
+			indexed.copy_to_overlay(
+				&mut overlay[*c as usize],
+				record_id,
+				&mut bytes,
+				&self.options,
 			);
-			queue.commits.push_back(commit);
-			queue.bytes += bytes;
-			self.log_worker_wait.signal();
+		}
+
+		for (c, iterset) in &commit.btree_indexed {
+			iterset.copy_to_overlay(
+				&mut overlay[*c as usize].btree_indexed,
+				record_id,
+				&mut bytes,
+				&self.options,
+			);
+		}
+
+		let commit = Commit { id: record_id, changeset: commit, bytes };
+
+		log::debug!(
+			target: "parity-db",
+			"Queued commit {}, {} bytes",
+			commit.id,
+			bytes,
+		);
+		queue.commits.push_back(commit);
+		queue.bytes += bytes;
+		self.log_worker_wait.signal();
 		Ok(())
 	}
 
