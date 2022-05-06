@@ -241,7 +241,7 @@ impl DbInner {
 		}
 	}
 
-	pub fn btree_iter(&self, col: ColId) -> Result<BTreeIterator> {
+	fn btree_iter(&self, col: ColId) -> Result<BTreeIterator> {
 		match &self.columns[col as usize] {
 			Column::Hash(_column) =>
 				Err(Error::InvalidConfiguration("Not an indexed column.".to_string())),
