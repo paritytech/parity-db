@@ -281,7 +281,6 @@ impl DbInner {
 	}
 
 	fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
-		{
 			let mut queue = self.commit_queue.lock();
 			if queue.bytes > MAX_COMMIT_QUEUE_BYTES {
 				log::debug!(target: "parity-db", "Waiting, queue size={}", queue.bytes);
@@ -329,7 +328,6 @@ impl DbInner {
 			queue.commits.push_back(commit);
 			queue.bytes += bytes;
 			self.log_worker_wait.signal();
-		}
 		Ok(())
 	}
 
