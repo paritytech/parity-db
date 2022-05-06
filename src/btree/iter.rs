@@ -77,12 +77,12 @@ impl<'a> BTreeIterator<'a> {
 		let col = self.col;
 
 		// Lock log over function call (no btree struct change).
-		let log = self.log.read();
-		let record_id = log.last_record_id(self.col);
 		let commit_overlay = self.commit_overlay.read();
 		let next_commit_overlay = commit_overlay
 			.get(col as usize)
 			.and_then(|o| o.btree_next(&self.last_key, self.from_seek));
+		let log = self.log.read();
+		let record_id = log.last_record_id(self.col);
 		// No consistency over iteration, allows dropping lock to overlay.
 		std::mem::drop(commit_overlay);
 		if record_id != self.iter.1.record_id {
