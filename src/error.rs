@@ -61,3 +61,14 @@ impl From<std::io::ErrorKind> for Error {
 		e.into()
 	}
 }
+
+impl std::error::Error for Error {
+	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+		match self {
+			Error::Io(e) => Some(e),
+			Error::Background(e) => e.source(),
+			Error::Locked(e) => Some(e),
+			_ => None,
+		}
+	}
+}
