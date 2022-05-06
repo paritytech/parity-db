@@ -18,10 +18,8 @@ use super::*;
 /// Stress subcommand.
 use structopt::StructOpt;
 
-mod db;
 mod sizes;
 
-pub use db::Db as BenchDb;
 pub use parity_db::{CompressionType, Db, Key, Value};
 
 use rand::{RngCore, SeedableRng};
@@ -36,6 +34,7 @@ use std::{
 static COMMITS: AtomicUsize = AtomicUsize::new(0);
 static QUERIES_HIT: AtomicUsize = AtomicUsize::new(0);
 static QUERIES_MISS: AtomicUsize = AtomicUsize::new(0);
+static ITERATIONS: AtomicUsize = AtomicUsize::new(0);
 
 const COMMIT_SIZE: usize = 100;
 
@@ -46,34 +45,6 @@ const KEY_RESTART: Key = [1u8; 32];
 const COMMIT_PRUNE_SIZE: usize = 90;
 const COMMIT_PRUNE_WINDOW: usize = 2000;
 
-pub(super) struct BenchAdapter(parity_db::Db);
-
-impl BenchDb for BenchAdapter {
-	type Options = (parity_db::Options, Args);
-
-	fn open(path: &std::path::Path) -> Self {
-		BenchAdapter(Db::with_columns(path, 1).unwrap())
-	}
-
-	fn with_options(options: &Self::Options) -> Self {
-		let mut db_options = options.0.clone();
-		if options.1.compress {
-			for mut c in &mut db_options.columns {
-				c.compression = CompressionType::Lz4;
-			}
-		}
-		BenchAdapter(Db::open_or_create(&db_options).unwrap())
-	}
-
-	fn get(&self, key: &Key) -> Option<Value> {
-		self.0.get(0, key).unwrap()
-	}
-
-	fn commit<I: IntoIterator<Item = (Key, Option<Value>)>>(&self, tx: I) {
-		self.0.commit(tx.into_iter().map(|(k, v)| (0, k, v))).unwrap()
-	}
-}
-
 /// Stress tests (warning erase db first).
 #[derive(Debug, StructOpt)]
 pub struct Stress {
@@ -83,6 +54,10 @@ pub struct Stress {
 	/// Number of reading threads [default: 0].
 	#[structopt(long)]
 	pub readers: Option<usize>,
+
+	/// Number of iterating threads [default: 0].
+	#[structopt(long)]
+	pub iter: Option<usize>,
 
 	/// Number of writing threads [default: 1].
 	#[structopt(long)]
@@ -120,6 +95,7 @@ pub struct Stress {
 #[derive(Clone)]
 pub struct Args {
 	pub readers: usize,
+	pub iter: usize,
 	pub commits: usize,
 	pub writers: usize,
 	pub seed: Option<u64>,
@@ -134,6 +110,7 @@ impl Stress {
 	pub(super) fn get_args(&self) -> Args {
 		Args {
 			readers: self.readers.unwrap_or(0),
+			iter: self.iter.unwrap_or(0),
 			writers: self.writers.unwrap_or(1),
 			commits: self.commits.unwrap_or(100_000),
 			seed: self.seed.clone(),
@@ -202,8 +179,8 @@ fn informant(shutdown: Arc<AtomicBool>, total: usize, start: usize) {
 	}
 }
 
-fn writer<D: BenchDb>(
-	db: Arc<D>,
+fn writer(
+	db: Arc<Db>,
 	args: Arc<Args>,
 	pool: Arc<SizePool>,
 	shutdown: Arc<AtomicBool>,
@@ -229,7 +206,7 @@ fn writer<D: BenchDb>(
 		}
 		commit.push((KEY_RESTART, Some((n as u64).to_be_bytes().to_vec())));
 
-		db.commit(commit.drain(..));
+		db.commit(commit.drain(..).map(|(k, v)| (0, k, v))).unwrap();
 		commit.clear();
 
 		if n >= start_commit + args.commits || shutdown.load(Ordering::Relaxed) {
@@ -238,8 +215,8 @@ fn writer<D: BenchDb>(
 	}
 }
 
-fn reader<D: BenchDb>(
-	db: Arc<D>,
+fn reader(
+	db: Arc<Db>,
 	pool: Arc<SizePool>,
 	seed: u64,
 	index: u64,
@@ -254,7 +231,7 @@ fn reader<D: BenchDb>(
 		}
 		let num_keys = commits * COMMIT_SIZE as u64;
 		let key = pool.key(rng.next_u64() % num_keys + seed);
-		match db.get(&key) {
+		match db.get(0, &key).unwrap() {
 			Some(_) => {
 				QUERIES_HIT.fetch_add(1, Ordering::SeqCst);
 			},
@@ -265,16 +242,31 @@ fn reader<D: BenchDb>(
 	}
 }
 
-pub fn run_internal<D: BenchDb>(args: Args, db: D) {
+fn iter(
+	db: Arc<Db>,
+	shutdown: Arc<AtomicBool>,
+) {
+	loop {
+		let mut iter = db.iter(0).unwrap();
+		while let Some(_) = iter.next().unwrap() {
+			if shutdown.load(Ordering::Relaxed) {
+				return;
+			}
+		}
+		ITERATIONS.fetch_add(1, Ordering::SeqCst);
+	}
+}
+
+pub fn run_internal(args: Args, db: Db) {
 	let args = Arc::new(args);
 	let shutdown = Arc::new(AtomicBool::new(false));
 	let pool = Arc::new(SizePool::from_histogram(&sizes::KUSAMA_STATE_DISTRIBUTION));
-	let db = Arc::new(db) as Arc<D>;
+	let db = Arc::new(db);
 	let start = std::time::Instant::now();
 
 	let mut threads = Vec::new();
 
-	let start_commit = if let Some(start) = db.get(&KEY_RESTART) {
+	let start_commit = if let Some(start) = db.get(0, &KEY_RESTART).unwrap() {
 		let mut buf = [0u8; 8];
 		buf.copy_from_slice(&start[0..8]);
 		u64::from_be_bytes(buf) as usize + 1
@@ -301,6 +293,18 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 			thread::Builder::new()
 				.name(format!("reader {}", i))
 				.spawn(move || reader(db, pool, offset, i as u64, shutdown))
+				.unwrap(),
+		);
+	}
+
+	for i in 0..args.iter {
+		let db = db.clone();
+		let shutdown = shutdown.clone();
+
+		threads.push(
+			thread::Builder::new()
+				.name(format!("iter {}", i))
+				.spawn(move || iter(db, shutdown))
 				.unwrap(),
 		);
 	}
@@ -334,14 +338,16 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 
 	let hits = QUERIES_HIT.load(Ordering::SeqCst);
 	let misses = QUERIES_MISS.load(Ordering::SeqCst);
+	let iterations = ITERATIONS.load(Ordering::SeqCst);
 
 	println!(
-		"Completed {} commits in {} seconds. {} cps. {} hits, {} mises, {} qps",
+		"Completed {} commits in {} seconds. {} cps. {} hits, {} mises, {}, iterations, {} qps",
 		commits,
 		elapsed,
 		commits as f64 / elapsed,
 		hits,
 		misses,
+		iterations,
 		(hits + misses) as f64 / elapsed,
 	);
 
@@ -365,7 +371,7 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 			let end = nc * COMMIT_SIZE as u64 + pruned_per_commit + offset;
 			for key in (nc * COMMIT_SIZE as u64) + offset..end {
 				let k = pool.key(key);
-				let db_val = db.get(&k);
+				let db_val = db.get(0, &k).unwrap();
 				queries += 1;
 				assert_eq!(None, db_val);
 			}
@@ -376,7 +382,7 @@ pub fn run_internal<D: BenchDb>(args: Args, db: D) {
 		for key in start..(nc + 1) * (COMMIT_SIZE as u64) + offset {
 			let k = pool.key(key);
 			let val = pool.value(key, args.compress);
-			let db_val = db.get(&k);
+			let db_val = db.get(0, &k).unwrap();
 			queries += 1;
 			assert_eq!(Some(val), db_val);
 		}

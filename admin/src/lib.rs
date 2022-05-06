@@ -128,9 +128,13 @@ pub fn run() -> Result<(), String> {
 					.map_err(|e| format!("Error clearing stress db: {:?}", e))?;
 			}
 
-			use crate::bench::BenchDb;
-			let db = bench::BenchAdapter::with_options(&(options, args.clone()));
-
+			let mut db_options = options.clone();
+			if args.compress {
+				for mut c in &mut db_options.columns {
+					c.compression = parity_db::CompressionType::Lz4;
+				}
+			}
+			let db = parity_db::Db::open_or_create(&db_options).unwrap();
 			crate::bench::run_internal(args, db);
 		},
 	}
