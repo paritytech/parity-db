@@ -332,7 +332,7 @@ pub fn run_internal(args: Args, db: Db) {
 	let iterations = ITERATIONS.load(Ordering::SeqCst);
 
 	println!(
-		"Completed {} commits in {} seconds. {} cps. {} hits, {} mises, {}, iterations, {} qps",
+		"Completed {} commits in {} seconds. {} cps. {} hits, {} misses, {} iterations, {} qps",
 		commits,
 		elapsed,
 		commits as f64 / elapsed,
