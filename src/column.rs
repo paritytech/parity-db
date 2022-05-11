@@ -397,14 +397,25 @@ impl HashColumn {
 	) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
+		self.write_reindex_plan_locked(tables, reindex, key, address, log)
+	}
+
+	fn write_reindex_plan_locked<'a, 'b>(
+		&self,
+		tables: RwLockUpgradableReadGuard<'a, Tables>,
+		reindex: RwLockUpgradableReadGuard<'b, Reindex>,
+		key: &Key,
+		address: Address,
+		log: &mut LogWriter,
+	) -> Result<PlanOutcome> {
 		if Self::search_index(key, &tables.index, &*tables, log)?.is_some() {
 			return Ok(PlanOutcome::Skipped)
 		}
 		match tables.index.write_insert_plan(key, address, None, log)? {
 			PlanOutcome::NeedReindex => {
-				log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
-				let _lock = Self::trigger_reindex(tables, reindex, self.path.as_path());
-				self.write_reindex_plan(key, address, log)?;
+				log::debug!(target: "parity-db", "{}: Index chunk full {} when reindexing", tables.index.id, hex(key));
+				let (tables, reindex) = Self::trigger_reindex(tables, reindex, self.path.as_path());
+				self.write_reindex_plan_locked(tables, reindex, key, address, log)?;
 				Ok(PlanOutcome::NeedReindex)
 			},
 			_ => Ok(PlanOutcome::Written),
