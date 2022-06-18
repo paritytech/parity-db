@@ -1040,22 +1040,21 @@ impl CommitOverlay {
 		last_key: &Option<Vec<u8>>,
 		from_seek: bool,
 	) -> Option<(Value, Option<Value>)> {
-		if let Some(key) = last_key.as_ref() {
-			let mut iter = self.btree_indexed.range::<Vec<u8>, _>(key..);
-			if let Some((k, (_, v))) = iter.next() {
-				if from_seek || k != key {
-					return Some((k.clone(), v.clone()))
-				}
-			} else {
-				return None
-			}
-			iter.next().map(|(k, (_, v))| (k.clone(), v.clone()))
+		let key = if let Some(key) = last_key.as_ref() {
+			key
 		} else {
-			self.btree_indexed
-				.range::<Vec<u8>, _>(..)
-				.next()
-				.map(|(k, (_, v))| (k.clone(), v.clone()))
+			return self.btree_indexed.iter().next().map(|(k, (_, v))| (k.clone(), v.clone()))
+		};
+
+		let mut iter = self.btree_indexed.range::<Vec<u8>, _>(key..);
+
+		let (k, v) = if let Some((k, (_, v))) = iter.next() { (k, v) } else { return None };
+
+		if from_seek || k != key {
+			return Some((k.clone(), v.clone()))
 		}
+
+		iter.next().map(|(k, (_, v))| (k.clone(), v.clone()))
 	}
 }
 

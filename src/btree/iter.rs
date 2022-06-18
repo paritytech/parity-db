@@ -96,49 +96,49 @@ impl<'a> BTreeIterator<'a> {
 
 		match (next_commit_overlay, next_backend) {
 			(Some((commit_key, commit_value)), Some((backend_key, backend_value))) =>
-				match commit_key.cmp(&backend_key) {
-					std::cmp::Ordering::Less =>
-						if let Some(value) = commit_value {
-							self.last_key = Some(commit_key.clone());
-							self.from_seek = false;
-							self.pending_next_backend = Some(Some((backend_key, backend_value)));
-							Ok(Some((commit_key, value)))
-						} else {
-							self.last_key = Some(commit_key);
-							self.from_seek = false;
-							self.pending_next_backend = Some(Some((backend_key, backend_value)));
-							std::mem::drop(log);
-							self.next()
-						},
-					std::cmp::Ordering::Greater => {
+				match (commit_key.cmp(&backend_key), commit_value) {
+					(std::cmp::Ordering::Less, Some(value)) => {
+						self.last_key = Some(commit_key.clone());
+						self.from_seek = false;
+						self.pending_next_backend = Some(Some((backend_key, backend_value)));
+						Ok(Some((commit_key, value)))
+					},
+					(std::cmp::Ordering::Less, None) => {
+						self.last_key = Some(commit_key);
+						self.from_seek = false;
+						self.pending_next_backend = Some(Some((backend_key, backend_value)));
+						std::mem::drop(log);
+						self.next()
+					},
+					(std::cmp::Ordering::Greater, _) => {
 						self.last_key = Some(backend_key.clone());
 						Ok(Some((backend_key, backend_value)))
 					},
-					std::cmp::Ordering::Equal =>
-						if let Some(value) = commit_value {
-							self.last_key = Some(commit_key);
-							self.from_seek = false;
-							Ok(Some((backend_key, value)))
-						} else {
-							self.last_key = Some(commit_key);
-							self.from_seek = false;
-							std::mem::drop(log);
-							self.next()
-						},
+					(std::cmp::Ordering::Equal, Some(value)) => {
+						self.last_key = Some(commit_key);
+						self.from_seek = false;
+						Ok(Some((backend_key, value)))
+					},
+					(std::cmp::Ordering::Equal, None) => {
+						self.last_key = Some(commit_key);
+						self.from_seek = false;
+						std::mem::drop(log);
+						self.next()
+					},
 				},
-			(Some((commit_key, commit_value)), None) =>
-				if let Some(value) = commit_value {
-					self.last_key = Some(commit_key.clone());
-					self.from_seek = false;
-					self.pending_next_backend = Some(None);
-					Ok(Some((commit_key, value)))
-				} else {
-					self.last_key = Some(commit_key);
-					self.from_seek = false;
-					self.pending_next_backend = Some(None);
-					std::mem::drop(log);
-					self.next()
-				},
+			(Some((commit_key, Some(commit_value))), None) => {
+				self.last_key = Some(commit_key.clone());
+				self.from_seek = false;
+				self.pending_next_backend = Some(None);
+				Ok(Some((commit_key, commit_value)))
+			},
+			(Some((commit_key, None)), None) => {
+				self.last_key = Some(commit_key);
+				self.from_seek = false;
+				self.pending_next_backend = Some(None);
+				std::mem::drop(log);
+				self.next()
+			},
 			(None, Some((backend_key, backend_value))) => {
 				self.last_key = Some(backend_key.clone());
 				Ok(Some((backend_key, backend_value)))
@@ -155,7 +155,7 @@ impl<'a> BTreeIterator<'a> {
 		record_id: u64,
 		col: &BTreeTable,
 		log: &impl LogQuery,
-	) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+	) -> Result<Option<(Vec<u8>, Value)>> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
 		if record_id != tree.record_id {
 			let new_tree = col.with_locked(|btree| BTree::open(btree, log, record_id))?;
@@ -202,7 +202,7 @@ impl BTreeIterState {
 		btree: &mut BTree,
 		col: &BTreeTable,
 		log: &impl LogQuery,
-	) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+	) -> Result<Option<(Vec<u8>, Value)>> {
 		if self.next_separator && self.state.is_empty() {
 			return Ok(None)
 		}
@@ -237,7 +237,6 @@ impl BTreeIterState {
 			}
 		}
 		self.state.pop();
-		self.next_separator = true;
 		self.next(btree, col, log)
 	}
 
@@ -250,24 +249,20 @@ impl BTreeIterState {
 		after: bool,
 	) -> Result<()> {
 		self.state.clear();
-		self.next_separator = false;
 		let found = col.with_locked(|b| {
 			let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), b, log)?;
 			Node::seek(root, key, b, log, btree.depth, &mut self.state)
 		})?;
-		if found {
-			// on value
-			if after {
-				if let Some((ix, _node)) = self.state.last_mut() {
-					*ix += 1;
-				}
-				self.next_separator = false;
-			} else {
-				self.next_separator = true;
+
+		self.next_separator = true;
+		// on value
+		if found && after {
+			if let Some((ix, _node)) = self.state.last_mut() {
+				*ix += 1;
 			}
-		} else {
-			self.next_separator = true;
+			self.next_separator = false;
 		}
+
 		Ok(())
 	}
 }
