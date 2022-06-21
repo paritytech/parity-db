@@ -322,7 +322,7 @@ impl BTreeTable {
 				node.changed = true;
 			} else {
 				if child.entry_index.is_none() {
-					break;
+					break
 				}
 			}
 		}
@@ -332,7 +332,7 @@ impl BTreeTable {
 				node.changed = true;
 			} else {
 				if separator.separator.is_none() {
-					break;
+					break
 				}
 			}
 		}
