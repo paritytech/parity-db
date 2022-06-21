@@ -426,7 +426,6 @@ impl Node {
 			BTreeTable::write_plan_remove_node(values, log, index)?;
 		}
 		self.write_child(at, left, values, log)?;
-		self.write_child(at_right, right, values, log)?;
 		let has_child = true; // rebalance on parent.
 		self.remove_from(at, has_child, false);
 		Ok(())
