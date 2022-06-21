@@ -1174,16 +1174,13 @@ mod test {
 
 	fn value(size: usize) -> Value {
 		use rand::RngCore;
-		let mut result = Vec::with_capacity(size);
-		result.resize(size, 0);
+		let mut result = vec![0; size];
 		rand::thread_rng().fill_bytes(&mut result);
 		result
 	}
 
 	fn rc_options() -> ColumnOptions {
-		let mut result = ColumnOptions::default();
-		result.ref_counted = true;
-		result
+		ColumnOptions { ref_counted: true, ..Default::default() }
 	}
 
 	#[test]

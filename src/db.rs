@@ -1214,15 +1214,12 @@ impl EnableCommitPipelineStages {
 			},
 			_ => (),
 		}
-		match self {
-			EnableCommitPipelineStages::DbFile => {
-				let _ = db.log.flush_one(0).unwrap();
-				let _ = db.log.flush_one(0).unwrap();
-				while db.enact_logs(false).unwrap() {}
-				let _ = db.log.flush_one(0).unwrap();
-				let _ = db.clean_logs().unwrap();
-			},
-			_ => (),
+		if let EnableCommitPipelineStages::DbFile = self {
+			let _ = db.log.flush_one(0).unwrap();
+			let _ = db.log.flush_one(0).unwrap();
+			while db.enact_logs(false).unwrap() {}
+			let _ = db.log.flush_one(0).unwrap();
+			let _ = db.clean_logs().unwrap();
 		}
 	}
 
@@ -1260,6 +1257,8 @@ impl EnableCommitPipelineStages {
 
 #[cfg(test)]
 mod tests {
+	use crate::Value;
+
 	use super::{Db, EnableCommitPipelineStages, InternalOptions, Options};
 	use std::collections::BTreeMap;
 	use tempfile::tempdir;
@@ -1335,9 +1334,8 @@ mod tests {
 		let key2 = b"key2".to_vec();
 		let key3 = b"key3".to_vec();
 
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = true;
-		inner_options.commit_stages = db_test;
+		let inner_options =
+			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 		assert!(db.get(col_nb, key1.as_slice()).unwrap().is_none());
 
@@ -1384,9 +1382,8 @@ mod tests {
 		let key3 = b"key3".to_vec();
 
 		let db_test = EnableCommitPipelineStages::DbFile;
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = true;
-		inner_options.commit_stages = db_test;
+		let inner_options =
+			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		db.commit(vec![
@@ -1402,10 +1399,12 @@ mod tests {
 		std::thread::sleep(std::time::Duration::from_millis(100));
 
 		let db_test = EnableCommitPipelineStages::CommitOverlay;
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = false;
-		inner_options.commit_stages = db_test;
-		inner_options.skip_check_lock = true;
+		let inner_options = InternalOptions {
+			create: false,
+			commit_stages: db_test,
+			skip_check_lock: true,
+			..Default::default()
+		};
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 		assert_eq!(db.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
 		assert_eq!(db.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2".to_vec()));
@@ -1448,9 +1447,8 @@ mod tests {
 			(vec![1; 953], key2, key3, vec![4; 79])
 		};
 
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = true;
-		inner_options.commit_stages = db_test;
+		let inner_options =
+			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
 
@@ -1515,9 +1513,8 @@ mod tests {
 		let key2 = b"key2".to_vec();
 		let key3 = b"key3".to_vec();
 
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = true;
-		inner_options.commit_stages = EnableCommitPipelineStages::DbFile;
+		let inner_options =
+			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
@@ -1530,10 +1527,12 @@ mod tests {
 		// issue with some file reopening when no delay
 		std::thread::sleep(std::time::Duration::from_millis(100));
 
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = false;
-		inner_options.commit_stages = db_test;
-		inner_options.skip_check_lock = true;
+		let inner_options = InternalOptions {
+			create: false,
+			commit_stages: db_test,
+			skip_check_lock: true,
+			..Default::default()
+		};
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		let mut iter = db.iter(col_nb).unwrap();
@@ -1564,10 +1563,9 @@ mod tests {
 		let col_nb = 0u8;
 		let mut options = Options::with_columns(tmp.path(), 5);
 		options.columns[col_nb as usize].btree_index = true;
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = true;
 		let db_test = EnableCommitPipelineStages::DbFile;
-		inner_options.commit_stages = db_test;
+		let inner_options =
+			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		let mut iter = db.iter(col_nb).unwrap();
@@ -1854,8 +1852,8 @@ mod tests {
 	}
 	fn test_btree_iter_inner(
 		db_test: EnableCommitPipelineStages,
-		data_start: &Vec<(u8, Vec<u8>, Option<Vec<u8>>)>,
-		data_change: &Vec<(u8, Vec<u8>, Option<Vec<u8>>)>,
+		data_start: &[(u8, Vec<u8>, Option<Value>)],
+		data_change: &[(u8, Vec<u8>, Option<Value>)],
 		start_state: &BTreeMap<Vec<u8>, Vec<u8>>,
 		end_state: &BTreeMap<Vec<u8>, Vec<u8>>,
 		commit_at: usize,
@@ -1864,9 +1862,8 @@ mod tests {
 		let mut options = Options::with_columns(tmp.path(), 5);
 		let col_nb = 0;
 		options.columns[col_nb as usize].btree_index = true;
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = true;
-		inner_options.commit_stages = db_test;
+		let inner_options =
+			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		db.commit(data_start.iter().cloned()).unwrap();

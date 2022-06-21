@@ -114,7 +114,7 @@ impl Stress {
 			iter: self.iter.unwrap_or(0),
 			writers: self.writers.unwrap_or(1),
 			commits: self.commits.unwrap_or(100_000),
-			seed: self.seed.clone(),
+			seed: self.seed,
 			append: self.append,
 			archive: self.archive,
 			no_check: self.no_check,
@@ -241,7 +241,7 @@ fn reader(db: Arc<Db>, pool: Arc<SizePool>, seed: u64, index: u64, shutdown: Arc
 fn iter(db: Arc<Db>, shutdown: Arc<AtomicBool>) {
 	loop {
 		let mut iter = db.iter(0).unwrap();
-		while let Some(_) = iter.next().unwrap() {
+		while iter.next().unwrap().is_some() {
 			if shutdown.load(Ordering::Relaxed) {
 				return
 			}
@@ -253,7 +253,7 @@ fn iter(db: Arc<Db>, shutdown: Arc<AtomicBool>) {
 pub fn run_internal(args: Args, db: Db) {
 	let args = Arc::new(args);
 	let shutdown = Arc::new(AtomicBool::new(false));
-	let pool = Arc::new(SizePool::from_histogram(&sizes::KUSAMA_STATE_DISTRIBUTION));
+	let pool = Arc::new(SizePool::from_histogram(sizes::KUSAMA_STATE_DISTRIBUTION));
 	let db = Arc::new(db);
 	let start = std::time::Instant::now();
 

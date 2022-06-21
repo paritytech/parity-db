@@ -542,7 +542,7 @@ mod test {
 	fn test_entries() {
 		let mut chunk = IndexTable::transmute_chunk(EMPTY_CHUNK);
 		let mut chunk2 = EMPTY_CHUNK;
-		for i in 0..CHUNK_ENTRIES {
+		for (i, chunk) in chunk.iter_mut().enumerate().take(CHUNK_ENTRIES) {
 			use std::{
 				collections::hash_map::DefaultHasher,
 				hash::{Hash, Hasher},
@@ -552,7 +552,7 @@ mod test {
 			let hash = hasher.finish();
 			let entry = Entry::from_u64(hash as u64);
 			IndexTable::write_entry(&entry, i, &mut chunk2);
-			chunk[i] = entry;
+			*chunk = entry;
 		}
 
 		assert!(IndexTable::transmute_chunk(chunk2) == chunk);
