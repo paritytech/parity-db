@@ -320,12 +320,20 @@ impl BTreeTable {
 		for child in node.children.as_mut().iter_mut() {
 			if child.moved {
 				node.changed = true;
+			} else {
+				if child.entry_index.is_none() {
+					break
+				}
 			}
 		}
 
 		for separator in node.separators.as_mut().iter_mut() {
 			if separator.modified {
 				node.changed = true;
+			} else {
+				if separator.separator.is_none() {
+					break
+				}
 			}
 		}
 
