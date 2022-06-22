@@ -1068,7 +1068,7 @@ impl CommitOverlay {
 			return self.btree_indexed.iter().rev().next().map(|(k, (_, v))| (k.clone(), v.clone()))
 		};
 
-		let mut iter = self.btree_indexed.range::<Vec<u8>, _>(..key).rev();
+		let mut iter = self.btree_indexed.range::<Vec<u8>, _>(..=key).rev();
 
 		let (k, v) = if let Some((k, (_, v))) = iter.next() { (k, v) } else { return None };
 

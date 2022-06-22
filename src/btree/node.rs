@@ -513,10 +513,13 @@ impl Node {
 			return Ok(true)
 		}
 
-		// If we search from end we point to child which is greater than searched value
-		let i = if from_end { i + 1 } else { i };
-
 		if depth != 0 {
+			if from_end {
+				if let Some(child) = from.fetch_child(i + 1, values, log)? {
+					stack.push((i + 1, from));
+					return Self::seek(child, key, values, log, depth - 1, stack, from_end)
+				}
+			}
 			if let Some(child) = from.fetch_child(i, values, log)? {
 				stack.push((i, from));
 				return Self::seek(child, key, values, log, depth - 1, stack, from_end)
