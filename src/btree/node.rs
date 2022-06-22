@@ -505,21 +505,25 @@ impl Node {
 		log: &impl LogQuery,
 		depth: u32,
 		stack: &mut Vec<(usize, Self)>,
+		from_end: bool,
 	) -> Result<bool> {
 		let (at, i) = from.position(key)?;
 		if at {
 			stack.push((i, from));
-			Ok(true)
-		} else {
-			if depth != 0 {
-				if let Some(child) = from.fetch_child(i, values, log)? {
-					stack.push((i, from));
-					return Self::seek(child, key, values, log, depth - 1, stack)
-				}
-			}
-			stack.push((i, from));
-			Ok(false)
+			return Ok(true)
 		}
+
+		// If we search from end we point to child which is greater than searched value
+		let i = if from_end { i + 1 } else { i };
+
+		if depth != 0 {
+			if let Some(child) = from.fetch_child(i, values, log)? {
+				stack.push((i, from));
+				return Self::seek(child, key, values, log, depth - 1, stack, from_end)
+			}
+		}
+		stack.push((i, from));
+		Ok(false)
 	}
 
 	#[cfg(test)]

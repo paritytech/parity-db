@@ -251,7 +251,7 @@ impl BTreeIterState {
 		self.state.clear();
 		let found = col.with_locked(|b| {
 			let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), b, log)?;
-			Node::seek(root, key, b, log, btree.depth, &mut self.state)
+			Node::seek(root, key, b, log, btree.depth, &mut self.state, false)
 		})?;
 
 		self.next_separator = true;
