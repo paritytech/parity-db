@@ -26,6 +26,19 @@ use crate::{
 };
 use parking_lot::RwLock;
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum IterDirection {
+	Backward,
+	Forward,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+pub enum SeekTo {
+	Before,
+	At,
+	After,
+}
+
 pub struct BTreeIterator<'a> {
 	table: &'a BTreeTable,
 	log: &'a RwLock<crate::log::LogOverlays>,
@@ -62,14 +75,13 @@ impl<'a> BTreeIterator<'a> {
 	}
 
 	pub fn seek(&mut self, key: &[u8]) -> Result<()> {
-		let after = false;
 		// seek require log do not change
 		let log = self.log.read();
 		let record_id = log.last_record_id(self.col);
-		self.from_seek = !after;
+		self.from_seek = true;
 		self.last_key = Some(key.to_vec());
 		self.pending_next_backend = None;
-		self.seek_backend(key, record_id, self.table, &*log, after)
+		self.seek_backend(key, record_id, self.table, &*log, SeekTo::At)
 	}
 
 	#[allow(clippy::should_implement_trait)]
@@ -161,7 +173,7 @@ impl<'a> BTreeIterator<'a> {
 			let new_tree = col.with_locked(|btree| BTree::open(btree, log, record_id))?;
 			*tree = new_tree;
 			if let Some(last_key) = self.last_key.as_ref() {
-				iter.seek(last_key.as_slice(), tree, col, log, true)?;
+				iter.seek(last_key.as_slice(), tree, col, log, SeekTo::After)?;
 			}
 			iter.record_id = record_id;
 		}
@@ -174,7 +186,7 @@ impl<'a> BTreeIterator<'a> {
 		record_id: u64,
 		col: &BTreeTable,
 		log: &impl LogQuery,
-		after: bool,
+		seek_to: SeekTo,
 	) -> Result<()> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
 		if record_id != tree.record_id {
@@ -182,7 +194,7 @@ impl<'a> BTreeIterator<'a> {
 			*tree = new_tree;
 			iter.record_id = record_id;
 		}
-		iter.seek(key, tree, col, log, after)
+		iter.seek(key, tree, col, log, seek_to)
 	}
 }
 
@@ -246,21 +258,32 @@ impl BTreeIterState {
 		btree: &mut BTree,
 		col: &BTreeTable,
 		log: &impl LogQuery,
-		after: bool,
+		seek_to: SeekTo,
 	) -> Result<()> {
 		self.state.clear();
 		let found = col.with_locked(|b| {
 			let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), b, log)?;
-			Node::seek(root, key, b, log, btree.depth, &mut self.state, false)
+			Node::seek(root, key, b, log, btree.depth, &mut self.state, seek_to == SeekTo::Before)
 		})?;
 
 		self.next_separator = true;
-		// on value
-		if found && after {
-			if let Some((ix, _node)) = self.state.last_mut() {
-				*ix += 1;
-			}
-			self.next_separator = false;
+
+		match (found, seek_to) {
+			(false, _) | (true, SeekTo::At) => (),
+			(true, SeekTo::After) => {
+				if let Some((ix, _node)) = self.state.last_mut() {
+					*ix += 1;
+				}
+				self.next_separator = false;
+			},
+			(true, SeekTo::Before) => match self.state.last_mut() {
+				Some((0, _node)) => {
+					self.state.pop();
+					self.next_separator = true;
+				},
+				Some((ix, _node)) => *ix -= 1,
+				None => (),
+			},
 		}
 
 		Ok(())
