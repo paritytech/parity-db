@@ -560,7 +560,7 @@ impl Node {
 /// Nodes with data loaded in memory.
 /// Nodes get only serialized when flushed in the global overlay
 /// (there we need one entry per record id).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Node {
 	pub(super) separators: [node::Separator; ORDER],
 	pub(super) children: [node::Child; ORDER_CHILD],
@@ -573,19 +573,19 @@ impl Default for Node {
 	}
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct Separator {
 	pub(super) modified: bool,
 	pub(super) separator: Option<SeparatorInner>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SeparatorInner {
 	pub key: Vec<u8>,
 	pub value: Address,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct Child {
 	pub(super) moved: bool,
 	pub(super) entry_index: Option<Address>,

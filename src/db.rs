@@ -1475,6 +1475,7 @@ mod tests {
 
 		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(iter.next().unwrap(), None);
+		assert_eq!(iter.prev().unwrap(), None);
 
 		db.commit(vec![(col_nb, key1.clone(), Some(b"value1".to_vec()))]).unwrap();
 		db_test.run_stages(&db);
@@ -1483,6 +1484,15 @@ mod tests {
 		iter.seek(&[]).unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
+
+		iter.seek(&[]).unwrap();
+		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.prev().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.prev().unwrap(), None);
+
+		iter.seek(&[0xff]).unwrap();
+		assert_eq!(iter.prev().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.prev().unwrap(), None);
 
 		db.commit(vec![
 			(col_nb, key1.clone(), None),
@@ -1495,10 +1505,16 @@ mod tests {
 		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
 		assert_eq!(db.get(col_nb, &key2).unwrap(), Some(b"value2".to_vec()));
 		assert_eq!(db.get(col_nb, &key3).unwrap(), Some(b"value3".to_vec()));
+
 		iter.seek(key2.as_slice()).unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
 		assert_eq!(iter.next().unwrap(), Some((key3.clone(), b"value3".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
+
+		iter.seek(key3.as_slice()).unwrap();
+		assert_eq!(iter.prev().unwrap(), Some((key3.clone(), b"value3".to_vec())));
+		assert_eq!(iter.prev().unwrap(), Some((key2.clone(), b"value2".to_vec())));
+		assert_eq!(iter.prev().unwrap(), None);
 
 		db.commit(vec![
 			(col_nb, key2.clone(), Some(b"value2b".to_vec())),

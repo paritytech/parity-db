@@ -95,7 +95,7 @@ impl Entry {
 	}
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
 pub struct Address(u64);
 
 impl Address {
