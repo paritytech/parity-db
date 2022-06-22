@@ -48,6 +48,7 @@ pub struct BTreeIterator<'a> {
 	pending_next_backend: Option<Option<(Vec<u8>, Vec<u8>)>>,
 	last_key: Option<Vec<u8>>,
 	from_seek: bool,
+	direction: IterDirection,
 }
 
 pub struct BtreeIterBackend(BTree, BTreeIterState);
@@ -68,6 +69,7 @@ impl<'a> BTreeIterator<'a> {
 			col,
 			pending_next_backend: None,
 			last_key: None,
+			direction: IterDirection::Forward,
 			from_seek: false,
 			log,
 			commit_overlay,
@@ -90,9 +92,12 @@ impl<'a> BTreeIterator<'a> {
 
 		// Lock log over function call (no btree struct change).
 		let commit_overlay = self.commit_overlay.read();
-		let next_commit_overlay = commit_overlay
-			.get(col as usize)
-			.and_then(|o| o.btree_next(&self.last_key, self.from_seek));
+		let next_commit_overlay = commit_overlay.get(col as usize).and_then(|o| {
+			o.btree_next(
+				&self.last_key,
+				self.from_seek || self.direction == IterDirection::Backward,
+			)
+		});
 		let log = self.log.read();
 		let record_id = log.last_record_id(self.col);
 		// No consistency over iteration, allows dropping lock to overlay.
@@ -100,11 +105,12 @@ impl<'a> BTreeIterator<'a> {
 		if record_id != self.iter.1.record_id {
 			self.pending_next_backend = None;
 		}
-		let next_backend = if let Some(n) = self.pending_next_backend.take() {
-			n
-		} else {
-			self.next_backend(record_id, self.table, &*log)?
-		};
+		let next_backend =
+			if self.pending_next_backend.is_some() && self.direction == IterDirection::Forward {
+				self.pending_next_backend.take().expect("Checked above")
+			} else {
+				self.next_backend(record_id, self.table, &*log)?
+			};
 
 		match (next_commit_overlay, next_backend) {
 			(Some((commit_key, commit_value)), Some((backend_key, backend_value))) =>
@@ -162,6 +168,84 @@ impl<'a> BTreeIterator<'a> {
 		}
 	}
 
+	pub fn prev(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+		let col = self.col;
+
+		// Lock log over function call (no btree struct change).
+		let commit_overlay = self.commit_overlay.read();
+		let next_commit_overlay = commit_overlay.get(col as usize).and_then(|o| {
+			o.btree_prev(&self.last_key, self.from_seek || self.direction == IterDirection::Forward)
+		});
+		let log = self.log.read();
+		let record_id = log.last_record_id(self.col);
+		// No consistency over iteration, allows dropping lock to overlay.
+		std::mem::drop(commit_overlay);
+		if record_id != self.iter.1.record_id {
+			self.pending_next_backend = None;
+		}
+		let next_backend =
+			if self.pending_next_backend.is_some() && self.direction == IterDirection::Backward {
+				self.pending_next_backend.take().expect("Checked above")
+			} else {
+				self.prev_backend(record_id, self.table, &*log)?
+			};
+
+		match (next_commit_overlay, next_backend) {
+			(Some((commit_key, commit_value)), Some((backend_key, backend_value))) =>
+				match (commit_key.cmp(&backend_key), commit_value) {
+					(std::cmp::Ordering::Greater, Some(value)) => {
+						self.last_key = Some(commit_key.clone());
+						self.from_seek = false;
+						self.pending_next_backend = Some(Some((backend_key, backend_value)));
+						Ok(Some((commit_key, value)))
+					},
+					(std::cmp::Ordering::Greater, None) => {
+						self.last_key = Some(commit_key);
+						self.from_seek = false;
+						self.pending_next_backend = Some(Some((backend_key, backend_value)));
+						std::mem::drop(log);
+						self.prev()
+					},
+					(std::cmp::Ordering::Less, _) => {
+						self.last_key = Some(backend_key.clone());
+						Ok(Some((backend_key, backend_value)))
+					},
+					(std::cmp::Ordering::Equal, Some(value)) => {
+						self.last_key = Some(commit_key);
+						self.from_seek = false;
+						Ok(Some((backend_key, value)))
+					},
+					(std::cmp::Ordering::Equal, None) => {
+						self.last_key = Some(commit_key);
+						self.from_seek = false;
+						std::mem::drop(log);
+						self.prev()
+					},
+				},
+			(Some((commit_key, Some(commit_value))), None) => {
+				self.last_key = Some(commit_key.clone());
+				self.from_seek = false;
+				self.pending_next_backend = Some(None);
+				Ok(Some((commit_key, commit_value)))
+			},
+			(Some((commit_key, None)), None) => {
+				self.last_key = Some(commit_key);
+				self.from_seek = false;
+				self.pending_next_backend = Some(None);
+				std::mem::drop(log);
+				self.prev()
+			},
+			(None, Some((backend_key, backend_value))) => {
+				self.last_key = Some(backend_key.clone());
+				Ok(Some((backend_key, backend_value)))
+			},
+			(None, None) => {
+				self.pending_next_backend = Some(None);
+				Ok(None)
+			},
+		}
+	}
+
 	pub fn next_backend(
 		&mut self,
 		record_id: u64,
@@ -169,16 +253,40 @@ impl<'a> BTreeIterator<'a> {
 		log: &impl LogQuery,
 	) -> Result<Option<(Vec<u8>, Value)>> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
-		if record_id != tree.record_id {
+		if record_id != tree.record_id || self.direction != IterDirection::Forward {
+			self.direction = IterDirection::Forward;
 			let new_tree = col.with_locked(|btree| BTree::open(btree, log, record_id))?;
 			*tree = new_tree;
 			if let Some(last_key) = self.last_key.as_ref() {
-				iter.seek(last_key.as_slice(), tree, col, log, SeekTo::After)?;
+				let seek_to = if self.from_seek { SeekTo::At } else { SeekTo::After };
+				iter.seek(last_key.as_slice(), tree, col, log, seek_to)?;
 			}
 			iter.record_id = record_id;
 		}
 
-		iter.next(tree, col, log, self.last_key.as_ref(), IterDirection::Forward)
+		iter.next(tree, col, log, self.last_key.as_ref(), self.direction)
+	}
+
+	pub fn prev_backend(
+		&mut self,
+		record_id: u64,
+		col: &BTreeTable,
+		log: &impl LogQuery,
+	) -> Result<Option<(Vec<u8>, Value)>> {
+		let BtreeIterBackend(tree, iter) = &mut self.iter;
+		if record_id != tree.record_id || self.direction != IterDirection::Backward {
+			self.direction = IterDirection::Backward;
+			let new_tree = col.with_locked(|btree| BTree::open(btree, log, record_id))?;
+			*tree = new_tree;
+			if let Some(last_key) = self.last_key.as_ref() {
+				let seek_to = if self.from_seek { SeekTo::At } else { SeekTo::Before };
+				iter.seek(last_key.as_slice(), tree, col, log, seek_to)?;
+				self.from_seek = false;
+			}
+			iter.record_id = record_id;
+		}
+
+		iter.prev(tree, col, log, self.last_key.as_ref(), self.direction)
 	}
 
 	pub fn seek_backend(
