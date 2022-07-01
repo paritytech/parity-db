@@ -34,7 +34,6 @@ pub enum IterDirection {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum SeekTo {
-	Before,
 	At,
 	After,
 }
@@ -83,7 +82,7 @@ impl<'a> BTreeIterator<'a> {
 		self.from_seek = true;
 		self.last_key = Some(key.to_vec());
 		self.pending_next_backend = None;
-		self.seek_backend(key, record_id, self.table, &*log, SeekTo::At)
+		self.seek_backend(key, record_id, self.table, &*log, SeekTo::At, self.direction)
 	}
 
 	#[allow(clippy::should_implement_trait)]
@@ -259,12 +258,12 @@ impl<'a> BTreeIterator<'a> {
 			*tree = new_tree;
 			if let Some(last_key) = self.last_key.as_ref() {
 				let seek_to = if self.from_seek { SeekTo::At } else { SeekTo::After };
-				iter.seek(last_key.as_slice(), tree, col, log, seek_to)?;
+				iter.seek(last_key.as_slice(), tree, col, log, seek_to, IterDirection::Forward)?;
 			}
 			iter.record_id = record_id;
 		}
 
-		iter.next(tree, col, log, self.last_key.as_ref(), self.direction)
+		iter.next(tree, col, log)
 	}
 
 	pub fn prev_backend(
@@ -279,14 +278,14 @@ impl<'a> BTreeIterator<'a> {
 			let new_tree = col.with_locked(|btree| BTree::open(btree, log, record_id))?;
 			*tree = new_tree;
 			if let Some(last_key) = self.last_key.as_ref() {
-				let seek_to = if self.from_seek { SeekTo::At } else { SeekTo::Before };
-				iter.seek(last_key.as_slice(), tree, col, log, seek_to)?;
+				let seek_to = if self.from_seek { SeekTo::At } else { SeekTo::After };
+				iter.seek(last_key.as_slice(), tree, col, log, seek_to, IterDirection::Backward)?;
 				self.from_seek = false;
 			}
 			iter.record_id = record_id;
 		}
 
-		iter.prev(tree, col, log, self.last_key.as_ref(), self.direction)
+		iter.prev(tree, col, log)
 	}
 
 	pub fn seek_backend(
@@ -296,6 +295,7 @@ impl<'a> BTreeIterator<'a> {
 		col: &BTreeTable,
 		log: &impl LogQuery,
 		seek_to: SeekTo,
+		direction: IterDirection,
 	) -> Result<()> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
 		if record_id != tree.record_id {
@@ -303,7 +303,7 @@ impl<'a> BTreeIterator<'a> {
 			*tree = new_tree;
 			iter.record_id = record_id;
 		}
-		iter.seek(key, tree, col, log, seek_to)
+		iter.seek(key, tree, col, log, seek_to, direction)
 	}
 }
 
@@ -323,17 +323,7 @@ impl BTreeIterState {
 		btree: &mut BTree,
 		col: &BTreeTable,
 		log: &impl LogQuery,
-		last_key: Option<impl AsRef<[u8]>>,
-		last_direction: IterDirection,
 	) -> Result<Option<(Vec<u8>, Value)>> {
-		if last_direction == IterDirection::Backward {
-			if let Some(last_key) = last_key {
-				self.seek(last_key.as_ref(), btree, col, log, SeekTo::After)?;
-			} else {
-				*self = Self::new(self.record_id);
-			}
-		}
-
 		if self.next_separator && self.state.is_empty() {
 			return Ok(None)
 		}
@@ -367,8 +357,9 @@ impl BTreeIterState {
 				}
 			}
 		}
+		self.next_separator = true;
 		self.state.pop();
-		self.next(btree, col, log, None::<&[u8]>, IterDirection::Forward)
+		self.next(btree, col, log)
 	}
 
 	pub fn prev(
@@ -376,17 +367,7 @@ impl BTreeIterState {
 		btree: &mut BTree,
 		col: &BTreeTable,
 		log: &impl LogQuery,
-		last_key: Option<impl AsRef<[u8]>>,
-		last_direction: IterDirection,
 	) -> Result<Option<(Vec<u8>, Value)>> {
-		if last_direction == IterDirection::Forward {
-			if let Some(last_key) = last_key {
-				self.seek(last_key.as_ref(), btree, col, log, SeekTo::Before)?;
-			} else {
-				*self = Self::new(self.record_id);
-			}
-		}
-
 		if self.next_separator && self.state.is_empty() {
 			return Ok(None)
 		}
@@ -431,7 +412,7 @@ impl BTreeIterState {
 
 		self.next_separator = true;
 		self.state.pop();
-		self.prev(btree, col, log, None::<&[u8]>, IterDirection::Backward)
+		self.prev(btree, col, log)
 	}
 
 	pub fn seek(
@@ -441,21 +422,23 @@ impl BTreeIterState {
 		col: &BTreeTable,
 		log: &impl LogQuery,
 		seek_to: SeekTo,
+		direction: IterDirection,
 	) -> Result<()> {
 		self.state.clear();
 		self.next_separator = false;
 		let found = col.with_locked(|b| {
 			let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), b, log)?;
-			Node::seek(root, key, b, log, btree.depth, &mut self.state, seek_to == SeekTo::Before)
+			let from_end = direction == IterDirection::Backward;
+			Node::seek(root, key, b, log, btree.depth, &mut self.state, from_end)
 		})?;
 
-		match (found, seek_to) {
-			(false, _) | (true, SeekTo::At) => self.next_separator = true,
-			(true, SeekTo::After) =>
+		match (found, seek_to, direction) {
+			(false, _, _) | (true, SeekTo::At, _) => self.next_separator = true,
+			(true, SeekTo::After, IterDirection::Forward) =>
 				if let Some((ix, _node)) = self.state.last_mut() {
 					*ix += 1;
 				},
-			(true, SeekTo::Before) => match self.state.last_mut() {
+			(true, SeekTo::After, IterDirection::Backward) => match self.state.last_mut() {
 				Some((0, _node)) => drop(self.state.pop()),
 				Some((ix, _node)) => *ix -= 1,
 				None => (),
