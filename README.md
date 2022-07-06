@@ -11,7 +11,7 @@ ParityDb is an embedded persistent key-value store optimized for blockchain appl
 The database is a universal key-value storage that supports transactions. The API allows the data to be partitioned into columns. It is recommended that each column contains entries corresponding to a single data type. E.g. state trie node, block headers, blockchain transactions, etc. Two types of column indexes are supported: Hash and Btree.
 
 ### Transactions
-Database supports multiple concurrent readers. All writes are serialized. Writes are perform in batches, also known as transactions. Transaction are applied atomically. Either all of the transaction data is written, or none. Queries can't retrieve partially committed data.
+Database supports multiple concurrent readers. All writes are serialized. Writes are performed in batches, also known as transactions. Transactions are applied atomically. Either all of the transaction data is written, or none. Queries can't retrieve partially committed data.
 
 ### No cache
 Database does implement any custom data caching. Instead it relies on OS page cache. Performance of a large database therefore depends on how much system memory is available to be used in OS page cache.
@@ -28,17 +28,16 @@ Each column stores data in a set of 256 value tables, with 255 tables containing
 Metadata file contains database definition. This includes a set of columns with configuration specified for each column.
 
 ### Hash index
-Hash index is an is mmap-backed dynamically sized probing hash table. For each key the index computes a uniformly distributed 256-bit hash 'k'. For index of size `n` first `n` bit of `k` map to the 512 byte index page. Each page is an unordered list of 64 8-byte entries. Each 8-byte entry contains value address and some additional bits of `k`. Empty entry is denoted with a zero value. Empty database starts with `n` = 16.
-Value address includes a 8-bit value table index and an index of an entry in that table.
+Hash index is an is mmap-backed dynamically sized probing hash table. For each key the index computes a uniformly distributed 256-bit hash 'k'. For index of size `n`, the first `n` bits of `k` map to the 512 byte index page. Each page is an unordered list of 64 8-byte entries. Each 8-byte entry contains a value address and some additional bits of `k`. An empty entry is denoted with a zero value. An empty database starts with `n` = 16. A value address includes a 8-bit value table index and an index of an entry in that table.
 The first 16 kbytes of each index file is used to store statistics for the column.
 
 ### Value tables
-Value table is linear array of fixed-size entries that can grow as necessary. Each entry may contain one of the following:
+Value table is a linear array of fixed-size entries that can grow as necessary. Each entry may contain one of the following:
   * Filled entry that contains 240 bits of `k`, 15 bit data value size, compression flag, optional reference counter, and the actual value.
   * Tombstone entry. This contains an index of the previous tombstone, forming a linked list of empty entries.
-  * Multipart entry. This is much like Filled, additionally holding an address of the next entry that holds continuation of the data.
+  * Multipart entry. This is much like Filled, additionally holding an address of the next entry that holds the continuation of the data.
 
-## Hash index operations.
+## Hash index operations
 
 ### Hash index lookup
 Compute `k`, find index page using first `n` bits. Search for a matching entry that has matching key bits. Use the address in the entry to query the partial `k` and value from a value table. Confirm that `k` matches expected value.
