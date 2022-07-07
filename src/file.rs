@@ -137,17 +137,14 @@ impl TableFile {
 	#[cfg(windows)]
 	pub fn read_at(&self, mut buf: &mut [u8], mut offset: u64) -> Result<()> {
 		use crate::error::Error;
-		use std::io;
-		use std::os::windows::fs::FileExt;
+		use std::{io, os::windows::fs::FileExt};
 
 		let file = self.file.read();
 		let file = file.as_ref().unwrap();
 
 		while !buf.is_empty() {
 			match file.seek_read(buf, offset) {
-				Ok(0) => {
-					break;
-				},
+				Ok(0) => break,
 				Ok(n) => {
 					buf = &mut buf[n..];
 					offset += n as u64;
@@ -155,9 +152,7 @@ impl TableFile {
 				Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
 					// Try again
 				},
-				Err(e) => {
-					return Err(Error::Io(e));
-				},
+				Err(e) => return Err(Error::Io(e)),
 			}
 		}
 
@@ -174,8 +169,7 @@ impl TableFile {
 	#[cfg(windows)]
 	pub fn write_at(&self, mut buf: &[u8], mut offset: u64) -> Result<()> {
 		use crate::error::Error;
-		use std::io;
-		use std::os::windows::fs::FileExt;
+		use std::{io, os::windows::fs::FileExt};
 
 		self.dirty.store(true, Ordering::Relaxed);
 		let file = self.file.read();
@@ -183,12 +177,11 @@ impl TableFile {
 
 		while !buf.is_empty() {
 			match file.seek_write(buf, offset) {
-				Ok(0) => {
+				Ok(0) =>
 					return Err(Error::Io(io::Error::new(
 						io::ErrorKind::WriteZero,
 						"failed to write whole buffer",
-					)));
-				},
+					))),
 				Ok(n) => {
 					buf = &buf[n..];
 					offset += n as u64;
@@ -196,9 +189,7 @@ impl TableFile {
 				Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
 					// Try again
 				},
-				Err(e) => {
-					return Err(Error::Io(e));
-				},
+				Err(e) => return Err(Error::Io(e)),
 			}
 		}
 

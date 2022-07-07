@@ -513,7 +513,7 @@ impl HashColumn {
 			stats,
 		)? {
 			(Some(outcome), _) => return Ok(outcome),
-			(None, Some(value_address)) =>
+			(None, Some(value_address)) => {
 				if value.is_some() {
 					// If it was found in an older index we just insert a new entry. Reindex won't
 					// overwrite it.
@@ -523,7 +523,8 @@ impl HashColumn {
 				} else {
 					log::trace!(target: "parity-db", "{}: Removing from index {}", tables.index.id, hex(key));
 					index.write_remove_plan(key, sub_index, log)?;
-				},
+				}
+			},
 			_ => unreachable!(),
 		}
 		Ok(PlanOutcome::Skipped)
