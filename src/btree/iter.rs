@@ -91,12 +91,10 @@ impl<'a> BTreeIterator<'a> {
 
 		// Lock log over function call (no btree struct change).
 		let commit_overlay = self.commit_overlay.read();
-		let next_commit_overlay = commit_overlay.get(col as usize).and_then(|o| {
-			o.btree_next(
-				&self.last_key,
-				self.from_seek || self.direction == IterDirection::Backward,
-			)
-		});
+		self.from_seek |= self.direction == IterDirection::Backward;
+		let next_commit_overlay = commit_overlay
+			.get(col as usize)
+			.and_then(|o| o.btree_next(&self.last_key, self.from_seek));
 		let log = self.log.read();
 		let record_id = log.last_record_id(self.col);
 		// No consistency over iteration, allows dropping lock to overlay.
@@ -172,9 +170,10 @@ impl<'a> BTreeIterator<'a> {
 
 		// Lock log over function call (no btree struct change).
 		let commit_overlay = self.commit_overlay.read();
-		let next_commit_overlay = commit_overlay.get(col as usize).and_then(|o| {
-			o.btree_prev(&self.last_key, self.from_seek || self.direction == IterDirection::Forward)
-		});
+		self.from_seek |= self.direction == IterDirection::Forward;
+		let next_commit_overlay = commit_overlay
+			.get(col as usize)
+			.and_then(|o| o.btree_prev(&self.last_key, self.from_seek));
 		let log = self.log.read();
 		let record_id = log.last_record_id(self.col);
 		// No consistency over iteration, allows dropping lock to overlay.
@@ -257,6 +256,7 @@ impl<'a> BTreeIterator<'a> {
 			let new_tree = col.with_locked(|btree| BTree::open(btree, log, record_id))?;
 			*tree = new_tree;
 			if let Some(last_key) = self.last_key.as_ref() {
+				self.pending_next_backend = None;
 				let seek_to = if self.from_seek { SeekTo::At } else { SeekTo::After };
 				iter.seek(last_key.as_slice(), tree, col, log, seek_to, IterDirection::Forward)?;
 			}
@@ -278,9 +278,9 @@ impl<'a> BTreeIterator<'a> {
 			let new_tree = col.with_locked(|btree| BTree::open(btree, log, record_id))?;
 			*tree = new_tree;
 			if let Some(last_key) = self.last_key.as_ref() {
+				self.pending_next_backend = None;
 				let seek_to = if self.from_seek { SeekTo::At } else { SeekTo::After };
 				iter.seek(last_key.as_slice(), tree, col, log, seek_to, IterDirection::Backward)?;
-				self.from_seek = false;
 			}
 			iter.record_id = record_id;
 		}
@@ -307,15 +307,22 @@ impl<'a> BTreeIterator<'a> {
 	}
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum NodeType {
+	Child,
+	Separator,
+}
+
+#[derive(Debug)]
 pub struct BTreeIterState {
-	state: Vec<(usize, Node)>,
-	next_separator: bool,
+	state: Vec<(usize, NodeType, Node)>,
+	fetch_root: bool,
 	pub record_id: u64,
 }
 
 impl BTreeIterState {
 	pub fn new(record_id: u64) -> BTreeIterState {
-		BTreeIterState { next_separator: false, state: vec![], record_id }
+		BTreeIterState { state: vec![], fetch_root: true, record_id }
 	}
 
 	pub fn next(
@@ -324,40 +331,38 @@ impl BTreeIterState {
 		col: &BTreeTable,
 		log: &impl LogQuery,
 	) -> Result<Option<(Vec<u8>, Value)>> {
-		if self.next_separator && self.state.is_empty() {
+		if !self.fetch_root && self.state.is_empty() {
 			return Ok(None)
 		}
-		if !self.next_separator {
-			if self.state.is_empty() {
-				let root = col.with_locked(|tables| {
-					BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), tables, log)
-				})?;
-				self.state.push((0, root));
-			}
-			while let Some((ix, node)) = self.state.last_mut() {
-				if let Some(child) = col.with_locked(|btree| node.fetch_child(*ix, btree, log))? {
-					self.state.push((0, child));
-				} else {
-					break
-				}
-			}
-			self.next_separator = true;
+
+		if self.fetch_root {
+			let root = col.with_locked(|tables| {
+				BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), tables, log)
+			})?;
+			self.state.push((0, NodeType::Child, root));
+			self.fetch_root = false;
 		}
 
-		if let Some((ix, node)) = self.state.last_mut() {
-			if *ix < ORDER {
-				if let Some(address) = node.separator_address(*ix) {
-					let key = node.separator_key(*ix).unwrap();
-					*ix += 1;
-					self.next_separator = false;
-
-					let key_query = TableKeyQuery::Fetch(None);
-					let r = col.get_at_value_index(key_query, address, log)?;
-					return Ok(r.map(|r| (key, r.1)))
-				}
+		while let Some((ix, ty @ NodeType::Child, node)) = self.state.last_mut() {
+			*ty = NodeType::Separator;
+			if let Some(child) = col.with_locked(|btree| node.fetch_child(*ix, btree, log))? {
+				self.state.push((0, NodeType::Child, child));
 			}
 		}
-		self.next_separator = true;
+
+		let (ix, ty, node) = self.state.last_mut().expect("We always have at least one entry");
+		if *ix < ORDER {
+			if let Some(address) = node.separator_address(*ix) {
+				let key = node.separator_key(*ix).unwrap();
+				*ix += 1;
+				*ty = NodeType::Child;
+
+				let key_query = TableKeyQuery::Fetch(None);
+				let r = col.get_at_value_index(key_query, address, log)?;
+				return Ok(r.map(|r| (key, r.1)))
+			}
+		}
+
 		self.state.pop();
 		self.next(btree, col, log)
 	}
@@ -368,50 +373,42 @@ impl BTreeIterState {
 		col: &BTreeTable,
 		log: &impl LogQuery,
 	) -> Result<Option<(Vec<u8>, Value)>> {
-		if self.next_separator && self.state.is_empty() {
+		if self.state.is_empty() {
 			return Ok(None)
 		}
-		if !self.next_separator {
-			if self.state.is_empty() {
-				let root = col.with_locked(|tables| {
-					BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), tables, log)
-				})?;
-				self.state.push((ORDER - 1, root));
-			}
-			while let Some((ix, node)) = self.state.last_mut() {
-				if let Some(child) = col.with_locked(|btree| node.fetch_child(*ix, btree, log))? {
-					self.state.push((ORDER - 1, child));
-				} else {
-					break
-				}
-			}
-			self.next_separator = true;
-		}
-
-		if let Some((ix, node)) = self.state.last_mut() {
-			while node.separator_address(*ix).is_none() && *ix > 0 {
-				*ix -= 1;
-			}
-
-			if let Some(address) = node.separator_address(*ix) {
-				let key = node.separator_key(*ix).unwrap();
-				self.next_separator = false;
-
-				if *ix == 0 {
-					self.next_separator = true;
-					self.state.pop();
-				} else {
-					*ix -= 1;
-				}
-
-				let key_query = TableKeyQuery::Fetch(None);
-				let r = col.get_at_value_index(key_query, address, log)?;
-				return Ok(r.map(|r| (key, r.1)))
+		while let Some((ix, ty @ NodeType::Child, node)) = self.state.last_mut() {
+			*ty = NodeType::Separator;
+			match col.with_locked(|btree| node.fetch_child(*ix, btree, log))? {
+				Some(child) => {
+					let last_separator = child.last_separator_index().unwrap_or_default();
+					let last_child = child.last_child_index().unwrap_or_default();
+					if *ix > 0 {
+						*ix -= 1;
+					} else {
+						self.state.pop();
+					}
+					self.state.push(if last_child > last_separator {
+						(last_child, NodeType::Child, child)
+					} else {
+						(last_separator, NodeType::Separator, child)
+					});
+				},
+				None if *ix > 0 => *ix -= 1,
+				None => drop(self.state.pop()),
 			}
 		}
 
-		self.next_separator = true;
-		self.state.pop();
+		let (ix, ty, node) =
+			if let Some(entry) = self.state.last_mut() { entry } else { return Ok(None) };
+		*ty = NodeType::Child;
+		if let Some(address) = node.separator_address(*ix) {
+			let key = node.separator_key(*ix).unwrap();
+
+			let key_query = TableKeyQuery::Fetch(None);
+			let r = col.get_at_value_index(key_query, address, log)?;
+			return Ok(r.map(|r| (key, r.1)))
+		}
+
 		self.prev(btree, col, log)
 	}
 
@@ -425,26 +422,15 @@ impl BTreeIterState {
 		direction: IterDirection,
 	) -> Result<()> {
 		self.state.clear();
-		self.next_separator = false;
-		let found = col.with_locked(|b| {
+		self.fetch_root = false;
+		col.with_locked(|b| {
 			let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), b, log)?;
-			let from_end = direction == IterDirection::Backward;
-			Node::seek(root, key, b, log, btree.depth, &mut self.state, from_end)
-		})?;
-
-		match (found, seek_to, direction) {
-			(false, _, _) | (true, SeekTo::At, _) => self.next_separator = true,
-			(true, SeekTo::After, IterDirection::Forward) =>
-				if let Some((ix, _node)) = self.state.last_mut() {
-					*ix += 1;
-				},
-			(true, SeekTo::After, IterDirection::Backward) => match self.state.last_mut() {
-				Some((0, _node)) => drop(self.state.pop()),
-				Some((ix, _node)) => *ix -= 1,
-				None => (),
-			},
-		}
-
-		Ok(())
+			match direction {
+				IterDirection::Forward =>
+					Node::seek(root, key, b, log, btree.depth, &mut self.state, seek_to),
+				IterDirection::Backward =>
+					Node::seek_prev(root, key, b, log, btree.depth, &mut self.state, seek_to),
+			}
+		})
 	}
 }

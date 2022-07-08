@@ -16,7 +16,10 @@
 
 //! BTree node struct and methods.
 
-use super::*;
+use super::{
+	iter::{NodeType, SeekTo},
+	*,
+};
 use crate::{
 	column::Column,
 	error::Result,
@@ -27,13 +30,12 @@ use crate::{
 use std::cmp::Ordering;
 
 impl Node {
-	fn last_separator_index(&self) -> Option<usize> {
-		let i = self.number_separator();
-		if i == 0 {
-			None
-		} else {
-			Some(i - 1)
-		}
+	pub(crate) fn last_child_index(&self) -> Option<usize> {
+		self.children.iter().rposition(|child| child.entry_index.is_some())
+	}
+
+	pub(crate) fn last_separator_index(&self) -> Option<usize> {
+		self.separators.iter().rposition(|separator| separator.separator.is_some())
 	}
 
 	pub fn write_child(
@@ -504,29 +506,59 @@ impl Node {
 		values: TablesRef,
 		log: &impl LogQuery,
 		depth: u32,
-		stack: &mut Vec<(usize, Self)>,
-		from_end: bool,
-	) -> Result<bool> {
+		stack: &mut Vec<(usize, NodeType, Self)>,
+		seek_to: SeekTo,
+	) -> Result<()> {
 		let (at, i) = from.position(key)?;
 		if at {
-			stack.push((i, from));
-			return Ok(true)
+			stack.push(match seek_to {
+				SeekTo::At => (i, NodeType::Separator, from),
+				SeekTo::After => (i + 1, NodeType::Child, from),
+			});
+			return Ok(())
 		}
 
 		if depth != 0 {
-			if from_end {
-				if let Some(child) = from.fetch_child(i + 1, values, log)? {
-					stack.push((i + 1, from));
-					return Self::seek(child, key, values, log, depth - 1, stack, from_end)
-				}
-			}
 			if let Some(child) = from.fetch_child(i, values, log)? {
-				stack.push((i, from));
-				return Self::seek(child, key, values, log, depth - 1, stack, from_end)
+				stack.push((i, NodeType::Separator, from));
+				return Self::seek(child, key, values, log, depth - 1, stack, seek_to)
 			}
 		}
-		stack.push((i, from));
-		Ok(false)
+		stack.push((i, NodeType::Separator, from));
+		Ok(())
+	}
+
+	pub fn seek_prev(
+		from: Self,
+		key: &[u8],
+		values: TablesRef,
+		log: &impl LogQuery,
+		depth: u32,
+		stack: &mut Vec<(usize, NodeType, Self)>,
+		seek_to: SeekTo,
+	) -> Result<()> {
+		let (at, i) = from.position_rev(key)?;
+		if at {
+			stack.push(match seek_to {
+				SeekTo::At => (i, NodeType::Separator, from),
+				SeekTo::After => (i, NodeType::Child, from),
+			});
+
+			return Ok(())
+		}
+
+		if depth != 0 {
+			if let Some(child) = from.fetch_child(i, values, log)? {
+				if i > 0 {
+					stack.push((i - 1, NodeType::Separator, from));
+				}
+				return Self::seek_prev(child, key, values, log, depth - 1, stack, seek_to)
+			}
+		}
+		if i > 0 {
+			stack.push((i - 1, NodeType::Separator, from));
+		}
+		Ok(())
 	}
 
 	#[cfg(test)]
@@ -815,6 +847,29 @@ impl Node {
 			if i == ORDER {
 				break
 			}
+		}
+		Ok((false, i))
+	}
+
+	// Return true if match and matched position.
+	// Return index of first element less than key otherwhise.
+	fn position_rev(&self, key: &[u8]) -> Result<(bool, usize)> {
+		let mut i = match self.last_separator_index() {
+			Some(i) => i,
+			None => return Ok((false, 0)),
+		};
+
+		loop {
+			let separator = self.separators[i].separator.as_ref().expect("Checked before");
+			match key[..].cmp(&separator.key[..]) {
+				Ordering::Less => (),
+				Ordering::Greater => return Ok((false, i + 1)),
+				Ordering::Equal => return Ok((true, i)),
+			}
+			if i == 0 {
+				break
+			}
+			i -= 1;
 		}
 		Ok((false, i))
 	}
