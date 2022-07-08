@@ -1281,6 +1281,7 @@ mod tests {
 	use crate::Value;
 
 	use super::{Db, EnableCommitPipelineStages, InternalOptions, Options};
+	use rand::Rng;
 	use std::collections::BTreeMap;
 	use tempfile::tempdir;
 
@@ -1593,6 +1594,73 @@ mod tests {
 		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
 		assert_eq!(iter.next().unwrap(), Some((key3, b"value3".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
+	}
+
+	#[test]
+	fn test_indexed_btree_3() {
+		test_indexed_btree_inner_3(EnableCommitPipelineStages::CommitOverlay);
+		test_indexed_btree_inner_3(EnableCommitPipelineStages::LogOverlay);
+		test_indexed_btree_inner_3(EnableCommitPipelineStages::DbFile);
+		test_indexed_btree_inner_3(EnableCommitPipelineStages::Standard);
+	}
+
+	fn test_indexed_btree_inner_3(db_test: EnableCommitPipelineStages) {
+		use std::collections::BTreeSet;
+
+		let tmp = tempdir().unwrap();
+		let col_nb = 0u8;
+		let mut options = Options::with_columns(tmp.path(), 5);
+		options.columns[col_nb as usize].btree_index = true;
+
+		let inner_options =
+			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
+		let db = Db::open_inner(&options, &inner_options).unwrap();
+
+		db.commit(
+			(0u64..1024)
+				.map(|i| (0, i.to_be_bytes().to_vec(), Some(i.to_be_bytes().to_vec())))
+				.chain((0u64..1024).step_by(2).map(|i| (0, i.to_be_bytes().to_vec(), None))),
+		)
+		.unwrap();
+		let expected = (0u64..1024).filter(|i| i % 2 == 1).collect::<BTreeSet<_>>();
+		let mut iter = db.iter(0).unwrap();
+
+		for _ in 0..100 {
+			let at = rand::thread_rng().gen_range(0u64..=1024);
+			iter.seek(&at.to_be_bytes()).unwrap();
+
+			let at = if rand::random() {
+				let take = rand::thread_rng().gen_range(1..100);
+				let got = std::iter::from_fn(|| iter.next().unwrap())
+					.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
+					.take(take)
+					.collect::<Vec<_>>();
+				let expected = expected.range(at..).take(take).copied().collect::<Vec<_>>();
+				assert_eq!(got, expected);
+				expected.last().copied().unwrap_or(at)
+			} else {
+				at
+			};
+
+			let at = {
+				let take = rand::thread_rng().gen_range(1..100);
+				let got = std::iter::from_fn(|| iter.prev().unwrap())
+					.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
+					.take(take)
+					.collect::<Vec<_>>();
+				let expected = expected.range(..=at).rev().take(take).copied().collect::<Vec<_>>();
+				assert_eq!(got, expected);
+				expected.last().copied().unwrap_or(at)
+			};
+
+			let take = rand::thread_rng().gen_range(1..100);
+			let got = std::iter::from_fn(|| iter.next().unwrap())
+				.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
+				.take(take)
+				.collect::<Vec<_>>();
+			let expected = expected.range(at..).take(take).copied().collect::<Vec<_>>();
+			assert_eq!(got, expected);
+		}
 	}
 
 	fn test_basic(change_set: &[(Vec<u8>, Option<Vec<u8>>)]) {
