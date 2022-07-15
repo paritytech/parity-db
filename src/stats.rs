@@ -93,40 +93,56 @@ fn value_histogram_index(size: u32) -> Option<usize> {
 	}
 }
 
+#[inline(always)]
+fn read_array<T, const N: usize, F>(cursor: &mut Cursor<&[u8]>, reader: F) -> [T; N]
+where
+	F: Fn(&mut Cursor<&[u8]>) -> T,
+{
+	// SAFETY:
+	// https://doc.rust-lang.org/std/mem/union.MaybeUninit.html#initializing-an-array-element-by-element
+	let mut data: [MaybeUninit<T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
+	for item in &mut data[..] {
+		item.write(reader(cursor));
+	}
+	data.map(|x| unsafe { x.assume_init() })
+}
+
 impl ColumnStats {
-	#[allow(clippy::uninit_assumed_init)]
 	pub fn from_slice(data: &[u8]) -> ColumnStats {
 		let mut cursor = Cursor::new(data);
-		let mut value_histogram: [AtomicU32; HISTOGRAM_BUCKETS] =
-			unsafe { MaybeUninit::uninit().assume_init() };
-		for item in value_histogram.iter_mut() {
-			*item = read_u32(&mut cursor);
-		}
-		let mut query_histogram: [AtomicU64; SIZE_TIERS] =
-			unsafe { MaybeUninit::uninit().assume_init() };
-		for item in query_histogram.iter_mut() {
-			*item = read_u64(&mut cursor);
-		}
-		let mut stats = ColumnStats {
+		let cursor = &mut cursor;
+
+		let value_histogram = read_array(cursor, read_u32);
+		let query_histogram = read_array(cursor, read_u64);
+		let oversized = read_u64(cursor);
+		let oversized_bytes = read_u64(cursor);
+		let total_values = read_u64(cursor);
+		let total_bytes = read_u64(cursor);
+		let commits = read_u64(cursor);
+		let inserted_new = read_u64(cursor);
+		let inserted_overwrite = read_u64(cursor);
+		let removed_hit = read_u64(cursor);
+		let removed_miss = read_u64(cursor);
+		let queries_miss = read_u64(cursor);
+		let uncompressed_bytes = read_u64(cursor);
+		let compression_delta = read_array(cursor, read_i64);
+
+		ColumnStats {
 			value_histogram,
 			query_histogram,
-			oversized: read_u64(&mut cursor),
-			oversized_bytes: read_u64(&mut cursor),
-			total_values: read_u64(&mut cursor),
-			total_bytes: read_u64(&mut cursor),
-			commits: read_u64(&mut cursor),
-			inserted_new: read_u64(&mut cursor),
-			inserted_overwrite: read_u64(&mut cursor),
-			removed_hit: read_u64(&mut cursor),
-			removed_miss: read_u64(&mut cursor),
-			queries_miss: read_u64(&mut cursor),
-			uncompressed_bytes: read_u64(&mut cursor),
-			compression_delta: unsafe { MaybeUninit::uninit().assume_init() },
-		};
-		for item in stats.compression_delta.iter_mut() {
-			*item = read_i64(&mut cursor);
+			oversized,
+			oversized_bytes,
+			total_values,
+			total_bytes,
+			commits,
+			inserted_new,
+			inserted_overwrite,
+			removed_hit,
+			removed_miss,
+			queries_miss,
+			uncompressed_bytes,
+			compression_delta,
 		}
-		stats
 	}
 
 	pub fn empty() -> ColumnStats {
