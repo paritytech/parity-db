@@ -34,9 +34,7 @@ const OVERWRITE_TMP_PATH: &str = "to_revert_overwrite";
 /// `force_migrate` Force column re-population even if its setting did not change.
 ///
 /// Note that migration between hash to btree columns is not possible.
-///
-pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u8]) ->
-Result<()> {
+pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u8]) -> Result<()> {
 	let source_meta = Options::load_metadata(from)?
 		.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;
 
@@ -156,7 +154,6 @@ Result<()> {
 	Ok(())
 }
 
-
 /// Clear specified column. All data is removed and stats are reset.
 /// Database must be closed before calling this.
 pub fn clear_column(path: &Path, column: ColId) -> Result<()> {
@@ -169,7 +166,7 @@ pub fn clear_column(path: &Path, column: ColId) -> Result<()> {
 
 	// It is not specified how read_dir behaves when deleting and iterating in the same loop
 	// We collect a list of paths to be deleted first.
-	let mut to_delete = Vec::new(); 
+	let mut to_delete = Vec::new();
 	for entry in std::fs::read_dir(path)? {
 		let entry = entry?;
 		if let Some(file) = entry.path().file_name().and_then(|f| f.to_str()) {
@@ -282,7 +279,8 @@ mod test {
 				(0, b"0".to_vec(), Some(b"value0".to_vec())),
 				(1, b"1".to_vec(), Some(b"value1".to_vec())),
 				(2, b"2".to_vec(), Some(b"value2".to_vec())),
-			]).unwrap();
+			])
+			.unwrap();
 		}
 		{
 			let db = Db::with_columns(&source_dir, 3).unwrap();
