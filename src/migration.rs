@@ -157,12 +157,17 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 /// Clear specified column. All data is removed and stats are reset.
 /// Database must be closed before calling this.
 pub fn clear_column(path: &Path, column: ColId) -> Result<()> {
-	let source_meta = Options::load_metadata(path)?
+	let meta = Options::load_metadata(path)?
 		.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;
 
-	if (column as usize) >= source_meta.columns.len() {
+	if (column as usize) >= meta.columns.len() {
 		return Err(Error::Migration("Invalid column index".into()))
 	}
+
+	// Validate the database by opening. This also makes sure all the logs are enacted,
+	// so that after deleting a column there are no leftover commits that may write to it.
+	let _db = Db::with_columns(path, meta.columns.len() as u8)?;
+	std::mem::drop(_db);
 
 	// It is not specified how read_dir behaves when deleting and iterating in the same loop
 	// We collect a list of paths to be deleted first.
@@ -263,7 +268,6 @@ mod test {
 		}
 
 		let dest_opts = Options::with_columns(&dest_dir, 1);
-
 		migration::migrate(&source_dir, dest_opts, false, &[0]).unwrap();
 		let dest = Db::with_columns(&dest_dir, 1).unwrap();
 		assert_eq!(dest.get(0, b"1").unwrap(), Some("value".as_bytes().to_vec()));
@@ -281,10 +285,6 @@ mod test {
 				(2, b"2".to_vec(), Some(b"value2".to_vec())),
 			])
 			.unwrap();
-		}
-		{
-			let db = Db::with_columns(&source_dir, 3).unwrap();
-			assert_eq!(db.get(1, b"1").unwrap(), Some("value1".as_bytes().to_vec()));
 		}
 		migration::clear_column(&source_dir, 1).unwrap();
 		let db = Db::with_columns(&source_dir, 3).unwrap();
