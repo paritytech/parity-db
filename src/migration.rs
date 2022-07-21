@@ -69,6 +69,13 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 			to_migrate.insert(c);
 		}
 	}
+
+	for c in to_migrate.iter() {
+		if source_options.columns[*c as usize].btree_index || to.columns[*c as usize].btree_index {
+			unimplemented!("Migrate only implemented for hash indexed column to hash indexed column");
+		}
+	}
+
 	for c in 0..source_options.columns.len() as ColId {
 		if !to_migrate.contains(&c) {
 			if !overwrite {
