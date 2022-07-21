@@ -907,7 +907,7 @@ impl Db {
 		self.inner.columns.len() as u8
 	}
 
-	pub fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
+	pub(crate) fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
 		self.inner.iter_column_while(c, f)
 	}
 
