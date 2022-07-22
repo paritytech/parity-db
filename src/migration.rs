@@ -72,9 +72,9 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 
 	for c in to_migrate.iter() {
 		if source_options.columns[*c as usize].btree_index || to.columns[*c as usize].btree_index {
-			unimplemented!(
-				"Migrate only implemented for hash indexed column to hash indexed column"
-			);
+			return Err(Error::Migration(
+				"Migrate only implemented for hash indexed column to hash indexed column".into(),
+			))
 		}
 	}
 
