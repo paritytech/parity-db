@@ -15,7 +15,7 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-	column::Salt,
+	column::{ColId, Salt},
 	compress::CompressionType,
 	error::{Error, Result},
 };
@@ -202,12 +202,14 @@ impl Options {
 
 			for c in 0..meta.columns.len() {
 				if meta.columns[c] != self.columns[c] {
-					return Err(Error::InvalidConfiguration(format!(
-						"Column config mismatch for column {}. Expected \"{}\", got \"{}\"",
-						c,
-						self.columns[c].as_string(),
-						meta.columns[c].as_string()
-					)))
+					return Err(Error::IncompatibleColumnConfig {
+						id: c as ColId,
+						reason: format!(
+							"Column config mismatch. Expected \"{}\", got \"{}\"",
+							self.columns[c].as_string(),
+							meta.columns[c].as_string(),
+						),
+					})
 				}
 			}
 			Ok(meta)

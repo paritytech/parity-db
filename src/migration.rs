@@ -21,11 +21,19 @@ use crate::{
 	Error, Result,
 };
 /// Database migration.
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const COMMIT_SIZE: usize = 10240;
 const OVERWRITE_TMP_PATH: &str = "to_revert_overwrite";
 
+/// Attempt to migrate a database to a new configuration with different column settings.
+/// `from` Source database path
+/// `to` New database configuration.
+/// `overwrite` Ignore path set in `to` and attempt to overwrite data in place. This may be faster
+/// but if migration fails data may be lost
+/// `force_migrate` Force column re-population even if its setting did not change.
+///
+/// Note that migration between hash to btree columns is not possible.
 pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u8]) -> Result<()> {
 	let source_meta = Options::load_metadata(from)?
 		.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;
@@ -61,6 +69,15 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 			to_migrate.insert(c);
 		}
 	}
+
+	for c in to_migrate.iter() {
+		if source_options.columns[*c as usize].btree_index || to.columns[*c as usize].btree_index {
+			unimplemented!(
+				"Migrate only implemented for hash indexed column to hash indexed column"
+			);
+		}
+	}
+
 	for c in 0..source_options.columns.len() as ColId {
 		if !to_migrate.contains(&c) {
 			if !overwrite {
@@ -146,6 +163,43 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 	Ok(())
 }
 
+/// Clear specified column. All data is removed and stats are reset.
+/// Database must be closed before calling this.
+pub fn clear_column(path: &Path, column: ColId) -> Result<()> {
+	let meta = Options::load_metadata(path)?
+		.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;
+
+	if (column as usize) >= meta.columns.len() {
+		return Err(Error::Migration("Invalid column index".into()))
+	}
+
+	// Validate the database by opening. This also makes sure all the logs are enacted,
+	// so that after deleting a column there are no leftover commits that may write to it.
+	let _db = Db::with_columns(path, meta.columns.len() as u8)?;
+	std::mem::drop(_db);
+
+	// It is not specified how read_dir behaves when deleting and iterating in the same loop
+	// We collect a list of paths to be deleted first.
+	let mut to_delete = Vec::new();
+	for entry in std::fs::read_dir(path)? {
+		let entry = entry?;
+		if let Some(file) = entry.path().file_name().and_then(|f| f.to_str()) {
+			if crate::index::TableId::is_file_name(column, file) ||
+				crate::table::TableId::is_file_name(column, file)
+			{
+				to_delete.push(PathBuf::from(file));
+			}
+		}
+	}
+
+	for file in to_delete {
+		let mut path = path.to_path_buf();
+		path.push(file);
+		std::fs::remove_file(path)?;
+	}
+	Ok(())
+}
+
 fn move_column(c: ColId, from: &Path, to: &Path) -> Result<()> {
 	deplace_column(c, from, to, false)
 }
@@ -178,7 +232,7 @@ fn deplace_column(c: ColId, from: &Path, to: &Path, copy: bool) -> Result<()> {
 
 #[cfg(test)]
 mod test {
-	use crate::{migration::migrate, Db, Options};
+	use crate::{migration, Db, Options};
 
 	struct TempDir(std::path::PathBuf);
 
@@ -223,9 +277,28 @@ mod test {
 		}
 
 		let dest_opts = Options::with_columns(&dest_dir, 1);
-
-		migrate(&source_dir, dest_opts, false, &[0]).unwrap();
+		migration::migrate(&source_dir, dest_opts, false, &[0]).unwrap();
 		let dest = Db::with_columns(&dest_dir, 1).unwrap();
 		assert_eq!(dest.get(0, b"1").unwrap(), Some("value".as_bytes().to_vec()));
+	}
+
+	#[test]
+	fn clear_column() {
+		let dir = TempDir::new("clear_column");
+		let source_dir = dir.path("db");
+		{
+			let db = Db::with_columns(&source_dir, 3).unwrap();
+			db.commit(vec![
+				(0, b"0".to_vec(), Some(b"value0".to_vec())),
+				(1, b"1".to_vec(), Some(b"value1".to_vec())),
+				(2, b"2".to_vec(), Some(b"value2".to_vec())),
+			])
+			.unwrap();
+		}
+		migration::clear_column(&source_dir, 1).unwrap();
+		let db = Db::with_columns(&source_dir, 3).unwrap();
+		assert_eq!(db.get(0, b"0").unwrap(), Some("value0".as_bytes().to_vec()));
+		assert_eq!(db.get(1, b"1").unwrap(), None);
+		assert_eq!(db.get(2, b"2").unwrap(), Some("value2".as_bytes().to_vec()));
 	}
 }

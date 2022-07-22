@@ -32,7 +32,7 @@ pub use btree::BTreeIterator;
 pub use compress::CompressionType;
 pub use db::{check::CheckOptions, Db, Value};
 pub use error::{Error, Result};
-pub use migration::migrate;
+pub use migration::{clear_column, migrate};
 pub use options::{ColumnOptions, Options};
 
 #[derive(Default)]

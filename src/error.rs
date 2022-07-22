@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
+use crate::column::ColId;
 use std::{fmt, sync::Arc};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -23,6 +24,7 @@ pub enum Error {
 	Io(std::io::Error),
 	Corruption(String),
 	InvalidConfiguration(String),
+	IncompatibleColumnConfig { id: ColId, reason: String },
 	InvalidInput(String),
 	InvalidValueData,
 	Background(Arc<Error>),
@@ -38,6 +40,8 @@ impl fmt::Display for Error {
 			Error::Io(e) => write!(f, "IO Error: {}", e),
 			Error::Corruption(e) => write!(f, "Corruption: {}", e),
 			Error::InvalidConfiguration(e) => write!(f, "Invalid configuration: {}", e),
+			Error::IncompatibleColumnConfig { id, reason } =>
+				write!(f, "Invalid column {} configuration : {}", id, reason),
 			Error::InvalidInput(e) => write!(f, "Invalid input: {}", e),
 			Error::InvalidValueData => write!(f, "Invalid data in value table"),
 			Error::Background(e) => write!(f, "Background worker error: {}", e),

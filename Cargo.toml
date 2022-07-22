@@ -1,6 +1,6 @@
 [package]
 name = "parity-db"
-version = "0.3.14"
+version = "0.3.15"
 authors = ["Parity Technologies <admin@parity.io>"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
