@@ -537,7 +537,24 @@ impl Node {
 		stack: &mut Vec<(usize, NodeType, Self)>,
 		seek_to: SeekTo,
 	) -> Result<()> {
-		let (at, i) = from.position_rev(key)?;
+		// Try to find the separator with provided `key`. If we fail then `i` will be equal to
+		// index of the first element less than key
+		let (at, i) = match from.last_separator_index() {
+			Some(mut i) => loop {
+				let separator = from.separators[i].separator.as_ref().expect("Checked before");
+				match key[..].cmp(&separator.key[..]) {
+					Ordering::Less => (),
+					Ordering::Greater => break (false, i + 1),
+					Ordering::Equal => break (true, i),
+				}
+				if i == 0 {
+					break (false, 0)
+				}
+				i -= 1;
+			},
+			None => (false, 0),
+		};
+
 		if at {
 			stack.push(match seek_to {
 				SeekTo::At => (i, NodeType::Separator, from),
@@ -873,29 +890,6 @@ impl Node {
 			if i == ORDER {
 				break
 			}
-		}
-		Ok((false, i))
-	}
-
-	// Return true if match and matched position.
-	// Return index of first element less than key otherwhise.
-	fn position_rev(&self, key: &[u8]) -> Result<(bool, usize)> {
-		let mut i = match self.last_separator_index() {
-			Some(i) => i,
-			None => return Ok((false, 0)),
-		};
-
-		loop {
-			let separator = self.separators[i].separator.as_ref().expect("Checked before");
-			match key[..].cmp(&separator.key[..]) {
-				Ordering::Less => (),
-				Ordering::Greater => return Ok((false, i + 1)),
-				Ordering::Equal => return Ok((true, i)),
-			}
-			if i == 0 {
-				break
-			}
-			i -= 1;
 		}
 		Ok((false, i))
 	}
