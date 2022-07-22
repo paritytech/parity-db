@@ -1482,11 +1482,11 @@ mod tests {
 		db_test.run_stages(&db);
 
 		assert_eq!(db.get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
-		iter.seek(&[]).unwrap();
+		iter.seek_to_first().unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
 
-		iter.seek(&[]).unwrap();
+		iter.seek_to_first().unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.prev().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.prev().unwrap(), None);
@@ -1575,7 +1575,7 @@ mod tests {
 
 		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
-		iter.seek(&[]).unwrap();
+		iter.seek_to_first().unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
 
@@ -1592,8 +1592,13 @@ mod tests {
 		assert_eq!(db.get(col_nb, &key3).unwrap(), Some(b"value3".to_vec()));
 		iter.seek(key2.as_slice()).unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
-		assert_eq!(iter.next().unwrap(), Some((key3, b"value3".to_vec())));
+		assert_eq!(iter.next().unwrap(), Some((key3.clone(), b"value3".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
+
+		iter.seek_to_last().unwrap();
+		assert_eq!(iter.prev().unwrap(), Some((key3, b"value3".to_vec())));
+		assert_eq!(iter.prev().unwrap(), Some((key2.clone(), b"value2".to_vec())));
+		assert_eq!(iter.prev().unwrap(), None);
 	}
 
 	#[test]
@@ -1661,6 +1666,15 @@ mod tests {
 			let expected = expected.range(at..).take(take).copied().collect::<Vec<_>>();
 			assert_eq!(got, expected);
 		}
+
+		let take = rand::thread_rng().gen_range(20..100);
+		iter.seek_to_last().unwrap();
+		let got = std::iter::from_fn(|| iter.prev().unwrap())
+			.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
+			.take(take)
+			.collect::<Vec<_>>();
+		let expected = expected.iter().rev().take(take).copied().collect::<Vec<_>>();
+		assert_eq!(got, expected);
 	}
 
 	fn test_basic(change_set: &[(Vec<u8>, Option<Vec<u8>>)]) {

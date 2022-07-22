@@ -85,6 +85,21 @@ impl<'a> BTreeIterator<'a> {
 		self.seek_backend(key, record_id, self.table, &*log, SeekTo::At, self.direction)
 	}
 
+	pub fn seek_to_first(&mut self) -> Result<()> {
+		self.direction = IterDirection::Forward;
+		self.seek(&[])
+	}
+
+	pub fn seek_to_last(&mut self) -> Result<()> {
+		let log = self.log.read();
+		let record_id = log.last_record_id(self.col);
+		self.from_seek = true;
+		self.last_key = None;
+		self.pending_next_backend = None;
+		self.direction = IterDirection::Backward;
+		self.seek_backend_to_last(record_id, self.table, &*log)
+	}
+
 	#[allow(clippy::should_implement_trait)]
 	pub fn next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 		let col = self.col;
@@ -305,6 +320,21 @@ impl<'a> BTreeIterator<'a> {
 		}
 		iter.seek(key, tree, col, log, seek_to, direction)
 	}
+
+	pub fn seek_backend_to_last(
+		&mut self,
+		record_id: u64,
+		col: &BTreeTable,
+		log: &impl LogQuery,
+	) -> Result<()> {
+		let BtreeIterBackend(tree, iter) = &mut self.iter;
+		if record_id != tree.record_id {
+			let new_tree = col.with_locked(|btree| BTree::open(btree, log, record_id))?;
+			*tree = new_tree;
+			iter.record_id = record_id;
+		}
+		iter.seek_to_last(tree, col, log)
+	}
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -431,6 +461,20 @@ impl BTreeIterState {
 				IterDirection::Backward =>
 					Node::seek_prev(root, key, b, log, btree.depth, &mut self.state, seek_to),
 			}
+		})
+	}
+
+	pub fn seek_to_last(
+		&mut self,
+		btree: &mut BTree,
+		col: &BTreeTable,
+		log: &impl LogQuery,
+	) -> Result<()> {
+		self.state.clear();
+		self.fetch_root = false;
+		col.with_locked(|b| {
+			let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), b, log)?;
+			Node::seek_to_last(root, b, log, btree.depth, &mut self.state)
 		})
 	}
 }
