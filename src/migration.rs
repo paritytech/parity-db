@@ -175,7 +175,10 @@ pub fn clear_column(path: &Path, column: ColId) -> Result<()> {
 
 	// Validate the database by opening. This also makes sure all the logs are enacted,
 	// so that after deleting a column there are no leftover commits that may write to it.
-	let _db = Db::with_columns(path, meta.columns.len() as u8)?;
+	let mut options = Options::with_columns(path, meta.columns.len() as u8);
+	options.columns = meta.columns;
+	options.salt = Some(meta.salt);
+	let _db = Db::open(&options)?;
 	std::mem::drop(_db);
 
 	// It is not specified how read_dir behaves when deleting and iterating in the same loop
@@ -286,8 +289,12 @@ mod test {
 	fn clear_column() {
 		let dir = TempDir::new("clear_column");
 		let source_dir = dir.path("db");
+		let mut options = Options::with_columns(&source_dir, 3);
+		options.columns = vec![Default::default(); 3];
+		options.columns[1].btree_index = true;
 		{
-			let db = Db::with_columns(&source_dir, 3).unwrap();
+			let db = Db::open_or_create(&options).unwrap();
+
 			db.commit(vec![
 				(0, b"0".to_vec(), Some(b"value0".to_vec())),
 				(1, b"1".to_vec(), Some(b"value1".to_vec())),
@@ -295,8 +302,9 @@ mod test {
 			])
 			.unwrap();
 		}
+
 		migration::clear_column(&source_dir, 1).unwrap();
-		let db = Db::with_columns(&source_dir, 3).unwrap();
+		let db = Db::open(&options).unwrap();
 		assert_eq!(db.get(0, b"0").unwrap(), Some("value0".as_bytes().to_vec()));
 		assert_eq!(db.get(1, b"1").unwrap(), None);
 		assert_eq!(db.get(2, b"2").unwrap(), Some("value2".as_bytes().to_vec()));
