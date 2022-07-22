@@ -250,6 +250,7 @@ impl<'a> BTreeIterator<'a> {
 			},
 			(None, Some((backend_key, backend_value))) => {
 				self.last_key = Some(backend_key.clone());
+				self.from_seek = false;
 				Ok(Some((backend_key, backend_value)))
 			},
 			(None, None) => {
@@ -403,9 +404,15 @@ impl BTreeIterState {
 		col: &BTreeTable,
 		log: &impl LogQuery,
 	) -> Result<Option<(Vec<u8>, Value)>> {
-		if self.state.is_empty() {
+		if !self.fetch_root && self.state.is_empty() {
 			return Ok(None)
 		}
+
+		if self.fetch_root {
+			self.seek_to_last(btree, col, log)?;
+			self.fetch_root = false;
+		}
+
 		while let Some((ix, ty @ NodeType::Child, node)) = self.state.last_mut() {
 			*ty = NodeType::Separator;
 			match col.with_locked(|btree| node.fetch_child(*ix, btree, log))? {

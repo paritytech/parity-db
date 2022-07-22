@@ -2016,7 +2016,6 @@ mod tests {
 
 		let mut iter_state_rev = end_state.iter().rev();
 		let mut iter = db.iter(col_nb).unwrap();
-		iter.seek(&[0xff; 4]).unwrap();
 		for _ in 0..100 {
 			let next = iter.prev().unwrap();
 			assert_eq!(iter_state_rev.next(), next.as_ref().map(|(k, v)| (k, v)));
