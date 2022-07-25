@@ -578,14 +578,10 @@ impl Node {
 		Ok(())
 	}
 
-	pub fn seek_to_last(
-		from: Self,
-		_values: TablesRef,
-		_log: &impl LogQuery,
-		_depth: u32,
-		stack: &mut Vec<(usize, NodeType, Self)>,
-	) -> Result<()> {
-		if let Some(i) = from.last_child_index().or_else(|| from.last_separator_index()) {
+	pub fn seek_to_last(from: Self, stack: &mut Vec<(usize, NodeType, Self)>) -> Result<()> {
+		if let Some(i) = from.last_child_index() {
+			stack.push((i, NodeType::Child, from))
+		} else if let Some(i) = from.last_separator_index() {
 			stack.push((i, NodeType::Separator, from))
 		}
 		Ok(())

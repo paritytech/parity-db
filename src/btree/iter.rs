@@ -408,7 +408,6 @@ impl BTreeIterState {
 			return Ok(None)
 		}
 
-		dbg!(&self.state);
 		while let Some((ix, ty @ NodeType::Child, node)) = self.state.last_mut() {
 			*ty = NodeType::Separator;
 			match col.with_locked(|btree| node.fetch_child(*ix, btree, log))? {
@@ -477,7 +476,7 @@ impl BTreeIterState {
 		self.fetch_root = false;
 		col.with_locked(|b| {
 			let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), b, log)?;
-			Node::seek_to_last(root, b, log, btree.depth, &mut self.state)
+			Node::seek_to_last(root, &mut self.state)
 		})
 	}
 }
