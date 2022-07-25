@@ -17,14 +17,13 @@
 //! Experimental admin functionality for parity-db.
 
 use std::path::PathBuf;
-use structopt::StructOpt;
 
 mod bench;
 
 /// Command line admin client entry point.
 /// Uses default column definition.
 pub fn run() -> Result<(), String> {
-	let cli = Cli::from_args();
+	let cli: Cli = clap::Parser::parse();
 	use env_logger::Builder;
 
 	let mut builder = Builder::from_default_env();
@@ -142,38 +141,38 @@ pub fn run() -> Result<(), String> {
 }
 
 /// Admin cli command for parity-db.
-#[derive(Debug, StructOpt)]
+#[derive(Debug, clap::Parser)]
 pub struct Shared {
 	/// Specify db base path.
-	#[structopt(long, short = "d", value_name = "PATH", parse(from_os_str))]
+	#[clap(long, short = 'd', value_name = "PATH", parse(from_os_str))]
 	pub base_path: Option<PathBuf>,
 
 	/// Do not sync file on each flush.
-	#[structopt(long)]
+	#[clap(long)]
 	pub no_sync: bool,
 
 	/// Register stat from those admin operations.
-	#[structopt(long)]
+	#[clap(long)]
 	pub with_stats: bool,
 
 	/// Indicate the number of column, when using
 	/// a new or temporary db, defaults to one.
-	#[structopt(long)]
+	#[clap(long)]
 	pub columns: Option<u8>,
 
 	/// Sets a custom logging filter. Syntax is <target>=<level>, e.g. -lsync=debug.
 	///
 	/// Log levels (least to most verbose) are error, warn, info, debug, and trace.
 	/// By default, all targets log `info`. The global log level can be set with -l<level>.
-	#[structopt(short = "l", long, value_name = "LOG_PATTERN")]
+	#[clap(short = 'l', long, value_name = "LOG_PATTERN")]
 	pub log: Vec<String>,
 }
 
 /// Admin cli command for parity-db.
-#[derive(Debug, StructOpt)]
+#[derive(Debug, clap::Parser)]
 pub struct Cli {
 	/// Subcommands.
-	#[structopt(subcommand)]
+	#[clap(subcommand)]
 	pub subcommand: SubCommand,
 
 	/// Enable validator mode.
@@ -181,11 +180,11 @@ pub struct Cli {
 	/// The node will be started with the authority role and actively
 	/// participate in any consensus task that it can (e.g. depending on
 	/// availability of local keys).
-	#[structopt(long = "validator")]
+	#[clap(long)]
 	pub validator: bool,
 }
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, clap::Subcommand)]
 pub enum SubCommand {
 	/// Show stats.
 	Stats(Stats),
@@ -222,86 +221,86 @@ impl Cli {
 }
 
 /// Show stats for columns.
-#[derive(Debug, StructOpt)]
+#[derive(Debug, clap::Parser)]
 pub struct Stats {
-	#[structopt(flatten)]
+	#[clap(flatten)]
 	pub shared: Shared,
 
 	/// Only show stat for the given column.
-	#[structopt(long)]
+	#[clap(long)]
 	pub column: Option<u8>,
 
 	/// Clear current stats.
-	#[structopt(long)]
+	#[clap(long)]
 	pub clear: bool,
 }
 
 /// Migrate db (update version or change column options).
-#[derive(Debug, StructOpt)]
+#[derive(Debug, clap::Parser)]
 pub struct Migrate {
-	#[structopt(flatten)]
+	#[clap(flatten)]
 	pub shared: Shared,
 
 	/// Force migration of given columns, even if
 	/// column option are unchanged (eg to repack table).
-	#[structopt(long)]
+	#[clap(long)]
 	pub force_columns: Vec<u8>,
 
 	/// Overwrite source after each
 	/// column processing.
-	#[structopt(long)]
+	#[clap(long)]
 	pub overwrite: bool,
 
 	/// Clear destination folder before migration.
-	#[structopt(long)]
+	#[clap(long)]
 	pub clear_dest: bool,
 
 	/// Destination or temporary folder for migration.
-	#[structopt(long)]
+	#[clap(long)]
 	pub dest_path: PathBuf,
 
 	/// Meta to migrate to.
-	#[structopt(long)]
+	#[clap(long)]
 	pub dest_meta: PathBuf,
 }
 
 /// Run db until all logs are flushed.
-#[derive(Debug, StructOpt)]
+#[derive(Debug, clap::Parser)]
 pub struct Flush {
-	#[structopt(flatten)]
+	#[clap(flatten)]
 	pub shared: Shared,
 }
 
 /// Check db.
-#[derive(Debug, StructOpt)]
+#[derive(Debug, clap::Parser)]
 pub struct Check {
-	#[structopt(flatten)]
+	#[clap(flatten)]
 	pub shared: Shared,
 
 	/// Only process a given column.
-	#[structopt(long)]
+	#[clap(long)]
 	pub column: Option<u8>,
 
 	/// Parse indexes and
 	/// lookup values.
-	#[structopt(long)]
+	#[clap(long)]
 	pub index_value: bool,
 
 	/// Start range for operation.
 	/// Index start chunk in db.
-	#[structopt(long)]
+	#[clap(long)]
 	pub range_start: Option<u64>,
 
 	/// End range for operation.
 	/// Index end chunk in db.
-	#[structopt(long)]
+	#[clap(long)]
 	pub range_end: Option<u64>,
 
 	/// When active, display parsed index and value content.
-	#[structopt(long)]
+	#[clap(long)]
 	pub display: bool,
 
 	/// Max length for value to display (when using --display).
-	#[structopt(long)]
+	#[clap(long)]
 	pub display_value_max: Option<u64>,
 }

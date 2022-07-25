@@ -15,8 +15,6 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::*;
-/// Stress subcommand.
-use structopt::StructOpt;
 
 mod sizes;
 
@@ -47,49 +45,49 @@ const COMMIT_PRUNE_SIZE: usize = 90;
 const COMMIT_PRUNE_WINDOW: usize = 2000;
 
 /// Stress tests (warning erase db first).
-#[derive(Debug, StructOpt)]
+#[derive(Debug, clap::Parser)]
 pub struct Stress {
-	#[structopt(flatten)]
+	#[clap(flatten)]
 	pub shared: Shared,
 
 	/// Number of reading threads [default: 0].
-	#[structopt(long)]
+	#[clap(long)]
 	pub readers: Option<usize>,
 
 	/// Number of iterating threads [default: 0].
-	#[structopt(long)]
+	#[clap(long)]
 	pub iter: Option<usize>,
 
 	/// Number of writing threads [default: 1].
-	#[structopt(long)]
+	#[clap(long)]
 	pub writers: Option<usize>,
 
 	/// Total number of inserted commits.
-	#[structopt(long)]
+	#[clap(long)]
 	pub commits: Option<usize>,
 
 	/// Random seed used for key generation.
-	#[structopt(long)]
+	#[clap(long)]
 	pub seed: Option<u64>,
 
 	/// Open an existing database.
-	#[structopt(long)]
+	#[clap(long)]
 	pub append: bool,
 
 	/// Do not apply pruning.
-	#[structopt(long)]
+	#[clap(long)]
 	pub archive: bool,
 
 	/// Do not check after writing.
-	#[structopt(long)]
+	#[clap(long)]
 	pub no_check: bool,
 
 	/// Enable compression.
-	#[structopt(long)]
+	#[clap(long)]
 	pub compress: bool,
 
 	/// Use btree index.
-	#[structopt(long)]
+	#[clap(long)]
 	pub ordered: bool,
 }
 
