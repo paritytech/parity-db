@@ -1610,7 +1610,11 @@ mod tests {
 	}
 
 	fn test_indexed_btree_inner_3(db_test: EnableCommitPipelineStages) {
+		use rand::SeedableRng;
+
 		use std::collections::BTreeSet;
+
+		let mut rng = rand::rngs::SmallRng::from_rng(rand::thread_rng()).unwrap();
 
 		let tmp = tempdir().unwrap();
 		let col_nb = 0u8;
@@ -1631,11 +1635,11 @@ mod tests {
 		let mut iter = db.iter(0).unwrap();
 
 		for _ in 0..100 {
-			let at = rand::thread_rng().gen_range(0u64..=1024);
+			let at = rng.gen_range(0u64..=1024);
 			iter.seek(&at.to_be_bytes()).unwrap();
 
-			let at = if rand::random() {
-				let take = rand::thread_rng().gen_range(1..100);
+			let at = if rng.gen() {
+				let take = rng.gen_range(1..100);
 				let got = std::iter::from_fn(|| iter.next().unwrap())
 					.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
 					.take(take)
@@ -1648,7 +1652,7 @@ mod tests {
 			};
 
 			let at = {
-				let take = rand::thread_rng().gen_range(1..100);
+				let take = rng.gen_range(1..100);
 				let got = std::iter::from_fn(|| iter.prev().unwrap())
 					.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
 					.take(take)
@@ -1658,7 +1662,7 @@ mod tests {
 				expected.last().copied().unwrap_or(at)
 			};
 
-			let take = rand::thread_rng().gen_range(1..100);
+			let take = rng.gen_range(1..100);
 			let got = std::iter::from_fn(|| iter.next().unwrap())
 				.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
 				.take(take)
@@ -1667,7 +1671,7 @@ mod tests {
 			assert_eq!(got, expected);
 		}
 
-		let take = rand::thread_rng().gen_range(20..100);
+		let take = rng.gen_range(20..100);
 		iter.seek_to_last().unwrap();
 		let got = std::iter::from_fn(|| iter.prev().unwrap())
 			.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
@@ -2016,6 +2020,7 @@ mod tests {
 
 		let mut iter_state_rev = end_state.iter().rev();
 		let mut iter = db.iter(col_nb).unwrap();
+		iter.seek_to_last().unwrap();
 		for _ in 0..100 {
 			let next = iter.prev().unwrap();
 			assert_eq!(iter_state_rev.next(), next.as_ref().map(|(k, v)| (k, v)));

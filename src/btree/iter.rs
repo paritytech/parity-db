@@ -404,15 +404,11 @@ impl BTreeIterState {
 		col: &BTreeTable,
 		log: &impl LogQuery,
 	) -> Result<Option<(Vec<u8>, Value)>> {
-		if !self.fetch_root && self.state.is_empty() {
+		if self.state.is_empty() {
 			return Ok(None)
 		}
 
-		if self.fetch_root {
-			self.seek_to_last(btree, col, log)?;
-			self.fetch_root = false;
-		}
-
+		dbg!(&self.state);
 		while let Some((ix, ty @ NodeType::Child, node)) = self.state.last_mut() {
 			*ty = NodeType::Separator;
 			match col.with_locked(|btree| node.fetch_child(*ix, btree, log))? {

@@ -580,27 +580,14 @@ impl Node {
 
 	pub fn seek_to_last(
 		from: Self,
-		values: TablesRef,
-		log: &impl LogQuery,
-		depth: u32,
+		_values: TablesRef,
+		_log: &impl LogQuery,
+		_depth: u32,
 		stack: &mut Vec<(usize, NodeType, Self)>,
 	) -> Result<()> {
-		let i = if let Some(i) = from.last_child_index().or_else(|| from.last_separator_index()) {
-			i
-		} else {
-			return Ok(())
-		};
-
-		if depth != 0 {
-			if let Some(child) = from.fetch_child(i, values, log)? {
-				if i > 0 {
-					stack.push((i - 1, NodeType::Separator, from));
-				}
-				return Self::seek_to_last(child, values, log, depth - 1, stack)
-			}
+		if let Some(i) = from.last_child_index().or_else(|| from.last_separator_index()) {
+			stack.push((i, NodeType::Separator, from))
 		}
-
-		stack.push((i, NodeType::Separator, from));
 		Ok(())
 	}
 
