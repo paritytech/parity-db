@@ -16,7 +16,10 @@
 
 //! BTree node struct and methods.
 
-use super::*;
+use super::{
+	iter::{NodeType, SeekTo},
+	*,
+};
 use crate::{
 	column::Column,
 	error::Result,
@@ -27,13 +30,12 @@ use crate::{
 use std::cmp::Ordering;
 
 impl Node {
-	fn last_separator_index(&self) -> Option<usize> {
-		let i = self.number_separator();
-		if i == 0 {
-			None
-		} else {
-			Some(i - 1)
-		}
+	pub(crate) fn last_child_index(&self) -> Option<usize> {
+		self.children.iter().rposition(|child| child.entry_index.is_some())
+	}
+
+	pub(crate) fn last_separator_index(&self) -> Option<usize> {
+		self.separators.iter().rposition(|separator| separator.separator.is_some())
 	}
 
 	pub fn write_child(
@@ -504,22 +506,85 @@ impl Node {
 		values: TablesRef,
 		log: &impl LogQuery,
 		depth: u32,
-		stack: &mut Vec<(usize, Self)>,
-	) -> Result<bool> {
+		stack: &mut Vec<(usize, NodeType, Self)>,
+		seek_to: SeekTo,
+	) -> Result<()> {
 		let (at, i) = from.position(key)?;
 		if at {
-			stack.push((i, from));
-			Ok(true)
-		} else {
-			if depth != 0 {
-				if let Some(child) = from.fetch_child(i, values, log)? {
-					stack.push((i, from));
-					return Self::seek(child, key, values, log, depth - 1, stack)
-				}
-			}
-			stack.push((i, from));
-			Ok(false)
+			stack.push(match seek_to {
+				SeekTo::At => (i, NodeType::Separator, from),
+				SeekTo::After => (i + 1, NodeType::Child, from),
+			});
+			return Ok(())
 		}
+
+		if depth != 0 {
+			if let Some(child) = from.fetch_child(i, values, log)? {
+				stack.push((i, NodeType::Separator, from));
+				return Self::seek(child, key, values, log, depth - 1, stack, seek_to)
+			}
+		}
+		stack.push((i, NodeType::Separator, from));
+		Ok(())
+	}
+
+	pub fn seek_prev(
+		from: Self,
+		key: &[u8],
+		values: TablesRef,
+		log: &impl LogQuery,
+		depth: u32,
+		stack: &mut Vec<(usize, NodeType, Self)>,
+		seek_to: SeekTo,
+	) -> Result<()> {
+		// Try to find the separator with provided `key`. If we fail then `i` will be equal to
+		// index of the first element less than key
+		let (at, i) = match from.last_separator_index() {
+			Some(mut i) => loop {
+				let separator = from.separators[i].separator.as_ref().expect("Checked before");
+				match key[..].cmp(&separator.key[..]) {
+					Ordering::Less => (),
+					Ordering::Greater => break (false, i + 1),
+					Ordering::Equal => break (true, i),
+				}
+				if i == 0 {
+					break (false, 0)
+				}
+				i -= 1;
+			},
+			None => (false, 0),
+		};
+
+		if at {
+			stack.push(match seek_to {
+				SeekTo::At => (i, NodeType::Separator, from),
+				SeekTo::After => (i, NodeType::Child, from),
+			});
+
+			return Ok(())
+		}
+
+		if depth != 0 {
+			if let Some(child) = from.fetch_child(i, values, log)? {
+				if i > 0 {
+					stack.push((i - 1, NodeType::Separator, from));
+				}
+				return Self::seek_prev(child, key, values, log, depth - 1, stack, seek_to)
+			}
+		}
+		if i > 0 {
+			stack.push((i - 1, NodeType::Separator, from));
+		}
+		Ok(())
+	}
+
+	pub fn seek_to_last(from: Self, stack: &mut Vec<(usize, NodeType, Self)>) -> Result<()> {
+		if let Some(i) = from.last_child_index() {
+			stack.push((i, NodeType::Child, from))
+		} else if let Some(i) = from.last_separator_index() {
+			stack.push((i, NodeType::Separator, from))
+		}
+		Ok(())
 	}
 
 	#[cfg(test)]
@@ -553,7 +618,7 @@ impl Node {
 /// Nodes with data loaded in memory.
 /// Nodes get only serialized when flushed in the global overlay
 /// (there we need one entry per record id).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Node {
 	pub(super) separators: [node::Separator; ORDER],
 	pub(super) children: [node::Child; ORDER_CHILD],
@@ -566,19 +631,19 @@ impl Default for Node {
 	}
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct Separator {
 	pub(super) modified: bool,
 	pub(super) separator: Option<SeparatorInner>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SeparatorInner {
 	pub key: Vec<u8>,
 	pub value: Address,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct Child {
 	pub(super) moved: bool,
 	pub(super) entry_index: Option<Address>,

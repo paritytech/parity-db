@@ -65,7 +65,7 @@ const HEADER_ADDRESS: Address = {
 };
 const ENTRY_CAPACITY: usize = ORDER * 33 + ORDER * 8 + ORDER_CHILD * 8;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct BTreeHeader {
 	pub root: Address,
 	pub depth: u32,
@@ -320,20 +320,16 @@ impl BTreeTable {
 		for child in node.children.as_mut().iter_mut() {
 			if child.moved {
 				node.changed = true;
-			} else {
-				if child.entry_index.is_none() {
-					break
-				}
+			} else if child.entry_index.is_none() {
+				break
 			}
 		}
 
 		for separator in node.separators.as_mut().iter_mut() {
 			if separator.modified {
 				node.changed = true;
-			} else {
-				if separator.separator.is_none() {
-					break
-				}
+			} else if separator.separator.is_none() {
+				break
 			}
 		}
 

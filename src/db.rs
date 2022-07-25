@@ -1044,22 +1044,43 @@ impl CommitOverlay {
 		last_key: &Option<Vec<u8>>,
 		from_seek: bool,
 	) -> Option<(Value, Option<Value>)> {
-		if let Some(key) = last_key.as_ref() {
-			let mut iter = self.btree_indexed.range::<Vec<u8>, _>(key..);
-			if let Some((k, (_, v))) = iter.next() {
-				if from_seek || k != key {
-					return Some((k.clone(), v.clone()))
-				}
-			} else {
-				return None
-			}
-			iter.next().map(|(k, (_, v))| (k.clone(), v.clone()))
+		let key = if let Some(key) = last_key.as_ref() {
+			key
 		} else {
-			self.btree_indexed
-				.range::<Vec<u8>, _>(..)
-				.next()
-				.map(|(k, (_, v))| (k.clone(), v.clone()))
+			return self.btree_indexed.iter().next().map(|(k, (_, v))| (k.clone(), v.clone()))
+		};
+
+		let mut iter = self.btree_indexed.range::<Vec<u8>, _>(key..);
+
+		let (k, v) = if let Some((k, (_, v))) = iter.next() { (k, v) } else { return None };
+
+		if from_seek || k != key {
+			return Some((k.clone(), v.clone()))
 		}
+
+		iter.next().map(|(k, (_, v))| (k.clone(), v.clone()))
+	}
+
+	pub fn btree_prev(
+		&self,
+		last_key: &Option<Vec<u8>>,
+		from_seek: bool,
+	) -> Option<(Value, Option<Value>)> {
+		let key = if let Some(key) = last_key.as_ref() {
+			key
+		} else {
+			return self.btree_indexed.iter().rev().next().map(|(k, (_, v))| (k.clone(), v.clone()))
+		};
+
+		let mut iter = self.btree_indexed.range::<Vec<u8>, _>(..=key).rev();
+
+		let (k, v) = if let Some((k, (_, v))) = iter.next() { (k, v) } else { return None };
+
+		if from_seek || k != key {
+			return Some((k.clone(), v.clone()))
+		}
+
+		iter.next().map(|(k, (_, v))| (k.clone(), v.clone()))
 	}
 }
 
@@ -1218,15 +1239,12 @@ impl EnableCommitPipelineStages {
 			},
 			_ => (),
 		}
-		match self {
-			EnableCommitPipelineStages::DbFile => {
-				let _ = db.log.flush_one(0).unwrap();
-				let _ = db.log.flush_one(0).unwrap();
-				while db.enact_logs(false).unwrap() {}
-				let _ = db.log.flush_one(0).unwrap();
-				let _ = db.clean_logs().unwrap();
-			},
-			_ => (),
+		if let EnableCommitPipelineStages::DbFile = self {
+			let _ = db.log.flush_one(0).unwrap();
+			let _ = db.log.flush_one(0).unwrap();
+			while db.enact_logs(false).unwrap() {}
+			let _ = db.log.flush_one(0).unwrap();
+			let _ = db.clean_logs().unwrap();
 		}
 	}
 
@@ -1264,7 +1282,10 @@ impl EnableCommitPipelineStages {
 
 #[cfg(test)]
 mod tests {
+	use crate::Value;
+
 	use super::{Db, EnableCommitPipelineStages, InternalOptions, Options};
+	use rand::Rng;
 	use std::collections::BTreeMap;
 	use tempfile::tempdir;
 
@@ -1339,9 +1360,8 @@ mod tests {
 		let key2 = b"key2".to_vec();
 		let key3 = b"key3".to_vec();
 
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = true;
-		inner_options.commit_stages = db_test;
+		let inner_options =
+			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 		assert!(db.get(col_nb, key1.as_slice()).unwrap().is_none());
 
@@ -1388,9 +1408,8 @@ mod tests {
 		let key3 = b"key3".to_vec();
 
 		let db_test = EnableCommitPipelineStages::DbFile;
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = true;
-		inner_options.commit_stages = db_test;
+		let inner_options =
+			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		db.commit(vec![
@@ -1406,10 +1425,12 @@ mod tests {
 		std::thread::sleep(std::time::Duration::from_millis(100));
 
 		let db_test = EnableCommitPipelineStages::CommitOverlay;
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = false;
-		inner_options.commit_stages = db_test;
-		inner_options.skip_check_lock = true;
+		let inner_options = InternalOptions {
+			create: false,
+			commit_stages: db_test,
+			skip_check_lock: true,
+			..Default::default()
+		};
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 		assert_eq!(db.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
 		assert_eq!(db.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2".to_vec()));
@@ -1452,22 +1473,31 @@ mod tests {
 			(vec![1; 953], key2, key3, vec![4; 79])
 		};
 
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = true;
-		inner_options.commit_stages = db_test;
+		let inner_options =
+			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
 
 		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(iter.next().unwrap(), None);
+		assert_eq!(iter.prev().unwrap(), None);
 
 		db.commit(vec![(col_nb, key1.clone(), Some(b"value1".to_vec()))]).unwrap();
 		db_test.run_stages(&db);
 
 		assert_eq!(db.get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
-		iter.seek(&[]).unwrap();
+		iter.seek_to_first().unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
+
+		iter.seek_to_first().unwrap();
+		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.prev().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.prev().unwrap(), None);
+
+		iter.seek(&[0xff]).unwrap();
+		assert_eq!(iter.prev().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.prev().unwrap(), None);
 
 		db.commit(vec![
 			(col_nb, key1.clone(), None),
@@ -1480,10 +1510,16 @@ mod tests {
 		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
 		assert_eq!(db.get(col_nb, &key2).unwrap(), Some(b"value2".to_vec()));
 		assert_eq!(db.get(col_nb, &key3).unwrap(), Some(b"value3".to_vec()));
+
 		iter.seek(key2.as_slice()).unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
 		assert_eq!(iter.next().unwrap(), Some((key3.clone(), b"value3".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
+
+		iter.seek(key3.as_slice()).unwrap();
+		assert_eq!(iter.prev().unwrap(), Some((key3.clone(), b"value3".to_vec())));
+		assert_eq!(iter.prev().unwrap(), Some((key2.clone(), b"value2".to_vec())));
+		assert_eq!(iter.prev().unwrap(), None);
 
 		db.commit(vec![
 			(col_nb, key2.clone(), Some(b"value2b".to_vec())),
@@ -1519,9 +1555,8 @@ mod tests {
 		let key2 = b"key2".to_vec();
 		let key3 = b"key3".to_vec();
 
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = true;
-		inner_options.commit_stages = EnableCommitPipelineStages::DbFile;
+		let inner_options =
+			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
@@ -1534,15 +1569,17 @@ mod tests {
 		// issue with some file reopening when no delay
 		std::thread::sleep(std::time::Duration::from_millis(100));
 
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = false;
-		inner_options.commit_stages = db_test;
-		inner_options.skip_check_lock = true;
+		let inner_options = InternalOptions {
+			create: false,
+			commit_stages: db_test,
+			skip_check_lock: true,
+			..Default::default()
+		};
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
-		iter.seek(&[]).unwrap();
+		iter.seek_to_first().unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
 
@@ -1559,8 +1596,93 @@ mod tests {
 		assert_eq!(db.get(col_nb, &key3).unwrap(), Some(b"value3".to_vec()));
 		iter.seek(key2.as_slice()).unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
-		assert_eq!(iter.next().unwrap(), Some((key3, b"value3".to_vec())));
+		assert_eq!(iter.next().unwrap(), Some((key3.clone(), b"value3".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
+
+		iter.seek_to_last().unwrap();
+		assert_eq!(iter.prev().unwrap(), Some((key3, b"value3".to_vec())));
+		assert_eq!(iter.prev().unwrap(), Some((key2.clone(), b"value2".to_vec())));
+		assert_eq!(iter.prev().unwrap(), None);
+	}
+
+	#[test]
+	fn test_indexed_btree_3() {
+		test_indexed_btree_inner_3(EnableCommitPipelineStages::CommitOverlay);
+		test_indexed_btree_inner_3(EnableCommitPipelineStages::LogOverlay);
+		test_indexed_btree_inner_3(EnableCommitPipelineStages::DbFile);
+		test_indexed_btree_inner_3(EnableCommitPipelineStages::Standard);
+	}
+
+	fn test_indexed_btree_inner_3(db_test: EnableCommitPipelineStages) {
+		use rand::SeedableRng;
+
+		use std::collections::BTreeSet;
+
+		let mut rng = rand::rngs::SmallRng::from_rng(rand::thread_rng()).unwrap();
+
+		let tmp = tempdir().unwrap();
+		let col_nb = 0u8;
+		let mut options = Options::with_columns(tmp.path(), 5);
+		options.columns[col_nb as usize].btree_index = true;
+
+		let inner_options =
+			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
+		let db = Db::open_inner(&options, &inner_options).unwrap();
+
+		db.commit(
+			(0u64..1024)
+				.map(|i| (0, i.to_be_bytes().to_vec(), Some(i.to_be_bytes().to_vec())))
+				.chain((0u64..1024).step_by(2).map(|i| (0, i.to_be_bytes().to_vec(), None))),
+		)
+		.unwrap();
+		let expected = (0u64..1024).filter(|i| i % 2 == 1).collect::<BTreeSet<_>>();
+		let mut iter = db.iter(0).unwrap();
+
+		for _ in 0..100 {
+			let at = rng.gen_range(0u64..=1024);
+			iter.seek(&at.to_be_bytes()).unwrap();
+
+			let at = if rng.gen() {
+				let take = rng.gen_range(1..100);
+				let got = std::iter::from_fn(|| iter.next().unwrap())
+					.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
+					.take(take)
+					.collect::<Vec<_>>();
+				let expected = expected.range(at..).take(take).copied().collect::<Vec<_>>();
+				assert_eq!(got, expected);
+				expected.last().copied().unwrap_or(at)
+			} else {
+				at
+			};
+
+			let at = {
+				let take = rng.gen_range(1..100);
+				let got = std::iter::from_fn(|| iter.prev().unwrap())
+					.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
+					.take(take)
+					.collect::<Vec<_>>();
+				let expected = expected.range(..=at).rev().take(take).copied().collect::<Vec<_>>();
+				assert_eq!(got, expected);
+				expected.last().copied().unwrap_or(at)
+			};
+
+			let take = rng.gen_range(1..100);
+			let got = std::iter::from_fn(|| iter.next().unwrap())
+				.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
+				.take(take)
+				.collect::<Vec<_>>();
+			let expected = expected.range(at..).take(take).copied().collect::<Vec<_>>();
+			assert_eq!(got, expected);
+		}
+
+		let take = rng.gen_range(20..100);
+		iter.seek_to_last().unwrap();
+		let got = std::iter::from_fn(|| iter.prev().unwrap())
+			.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
+			.take(take)
+			.collect::<Vec<_>>();
+		let expected = expected.iter().rev().take(take).copied().collect::<Vec<_>>();
+		assert_eq!(got, expected);
 	}
 
 	fn test_basic(change_set: &[(Vec<u8>, Option<Vec<u8>>)]) {
@@ -1568,10 +1690,9 @@ mod tests {
 		let col_nb = 0u8;
 		let mut options = Options::with_columns(tmp.path(), 5);
 		options.columns[col_nb as usize].btree_index = true;
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = true;
 		let db_test = EnableCommitPipelineStages::DbFile;
-		inner_options.commit_stages = db_test;
+		let inner_options =
+			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		let mut iter = db.iter(col_nb).unwrap();
@@ -1858,8 +1979,8 @@ mod tests {
 	}
 	fn test_btree_iter_inner(
 		db_test: EnableCommitPipelineStages,
-		data_start: &Vec<(u8, Vec<u8>, Option<Vec<u8>>)>,
-		data_change: &Vec<(u8, Vec<u8>, Option<Vec<u8>>)>,
+		data_start: &[(u8, Vec<u8>, Option<Value>)],
+		data_change: &[(u8, Vec<u8>, Option<Value>)],
 		start_state: &BTreeMap<Vec<u8>, Vec<u8>>,
 		end_state: &BTreeMap<Vec<u8>, Vec<u8>>,
 		commit_at: usize,
@@ -1868,9 +1989,8 @@ mod tests {
 		let mut options = Options::with_columns(tmp.path(), 5);
 		let col_nb = 0;
 		options.columns[col_nb as usize].btree_index = true;
-		let mut inner_options = InternalOptions::default();
-		inner_options.create = true;
-		inner_options.commit_stages = db_test;
+		let inner_options =
+			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		db.commit(data_start.iter().cloned()).unwrap();
@@ -1900,6 +2020,14 @@ mod tests {
 			}
 			let iter_next = iter.next().unwrap();
 			assert_eq!(state_next, iter_next.as_ref().map(|(k, v)| (k, v)));
+		}
+
+		let mut iter_state_rev = end_state.iter().rev();
+		let mut iter = db.iter(col_nb).unwrap();
+		iter.seek_to_last().unwrap();
+		for _ in 0..100 {
+			let next = iter.prev().unwrap();
+			assert_eq!(iter_state_rev.next(), next.as_ref().map(|(k, v)| (k, v)));
 		}
 	}
 }

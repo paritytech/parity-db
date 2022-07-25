@@ -29,7 +29,7 @@ pub fn run() -> Result<(), String> {
 
 	let mut builder = Builder::from_default_env();
 	let mut logs = cli.shared().log.clone();
-	if logs.len() == 0 {
+	if logs.is_empty() {
 		logs.push("info".to_string());
 	}
 	builder.parse_filters(logs.as_slice().join(",").as_str());
@@ -66,17 +66,17 @@ pub fn run() -> Result<(), String> {
 			let db = parity_db::Db::open_read_only(&options)
 				.map_err(|e| format!("Invalid db: {:?}", e))?;
 			if stat.clear {
-				db.clear_stats(stat.column.clone());
+				db.clear_stats(stat.column);
 			} else {
 				let mut out = std::io::stdout();
-				db.collect_stats(&mut out, stat.column.clone());
+				db.collect_stats(&mut out, stat.column);
 			}
 		},
 		SubCommand::Migrate(args) => {
 			use parity_db::Options;
 			let dest_meta = Options::load_metadata_file(&args.dest_meta)
 				.map_err(|e| format!("Error loading dest metadata: {:?}", e))?
-				.ok_or_else(|| format!("Error opening dest metadata file"))?;
+				.ok_or_else(|| "Error opening dest metadata file".to_string())?;
 
 			let dest_columns = dest_meta.columns;
 
