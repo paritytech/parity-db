@@ -6,18 +6,12 @@ publish = false
 edition = "2018"
 
 [dependencies]
-parity-db = { path = ".." }
-log = { version = "0.4.8" }
+clap = { version = "3.2", features = ["derive"] }
+env_logger = "0.9.0"
 fdlimit = "0.2.1"
-structopt = { version = "0.3.8" }
-
-[dependencies.env_logger]
-version = "0.7.1"
-#default-features = false
-
-[dependencies.rand]
-features = ["small_rng"]
-version = "0.7.3"
+log = "0.4.8"
+parity-db = { path = ".." }
+rand = { version = "0.8.5", features = ["small_rng"] }
 
 [target.'cfg(all(not(windows), not(target_env = "musl")))'.dependencies]
 jemallocator = "0.3.0"

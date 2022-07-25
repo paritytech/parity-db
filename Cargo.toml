@@ -9,23 +9,23 @@ repository = "https://github.com/paritytech/parity-db/"
 description = "Key-value database for the blockchain"
 
 [dependencies]
-log = "0.4.8"
-parking_lot = "0.11"
-memmap2 = "0.2"
 blake2-rfc = "0.2.18"
-libc = "0.2"
 crc32fast = "1.2.0"
-rand = "0.8.2"
-hex = "0.4.2"
 fs2 = "0.4.3"
+hex = "0.4.2"
+libc = "0.2"
+log = "0.4.8"
 lz4 = "1.23.2"
+memmap2 = "0.5"
+parking_lot = "0.12.0"
+rand = "0.8.4"
 snap = "1"
 
 [dev-dependencies]
-env_logger = "0.8.2"
+env_logger = "0.9.0"
 fdlimit = "0.2.1"
-tempfile = "3.2"
 rand = { version = "0.8.2", features = ["small_rng"] }
+tempfile = "3.2"
 
 [profile.release]
 panic = "abort"
