@@ -45,9 +45,15 @@ pub struct BTreeIterator<'a> {
 	iter: BtreeIterBackend,
 	col: ColId,
 	pending_next_backend: Option<Option<(Vec<u8>, Vec<u8>)>>,
-	last_key: Option<Vec<u8>>,
-	from_seek: bool,
-	direction: IterDirection,
+	last_key: LastKey,
+	direction: IterDirection, // TODO should be removable.
+}
+
+pub enum LastKey {
+	Start,
+	End, // for seek_end (currently seek end with commit overlay is not the same as with backend
+	Some(Vec<u8>),
+	Before(Vec<u8>),
 }
 
 pub struct BtreeIterBackend(BTree, BTreeIterState);
@@ -67,8 +73,7 @@ impl<'a> BTreeIterator<'a> {
 			iter: BtreeIterBackend(tree, iter),
 			col,
 			pending_next_backend: None,
-			last_key: None,
-			direction: IterDirection::Forward,
+			last_key: LastKey::Start,
 			from_seek: false,
 			log,
 			commit_overlay,
@@ -79,8 +84,7 @@ impl<'a> BTreeIterator<'a> {
 		// seek require log do not change
 		let log = self.log.read();
 		let record_id = log.last_record_id(self.col);
-		self.from_seek = true;
-		self.last_key = Some(key.to_vec());
+		self.last_key = LastKey::Before(key.to_vec());
 		self.pending_next_backend = None;
 		self.seek_backend(key, record_id, self.table, &*log, SeekTo::At, self.direction)
 	}
@@ -106,10 +110,8 @@ impl<'a> BTreeIterator<'a> {
 
 		// Lock log over function call (no btree struct change).
 		let commit_overlay = self.commit_overlay.read();
-		self.from_seek |= self.direction == IterDirection::Backward;
-		let next_commit_overlay = commit_overlay
-			.get(col as usize)
-			.and_then(|o| o.btree_next(&self.last_key, self.from_seek));
+		let next_commit_overlay =
+			commit_overlay.get(col as usize).and_then(|o| o.btree_next(&self.last_key));
 		let log = self.log.read();
 		let record_id = log.last_record_id(self.col);
 		// No consistency over iteration, allows dropping lock to overlay.
@@ -126,51 +128,34 @@ impl<'a> BTreeIterator<'a> {
 
 		match (next_commit_overlay, next_backend) {
 			(Some((commit_key, commit_value)), Some((backend_key, backend_value))) =>
-				match (commit_key.cmp(&backend_key), commit_value) {
-					(std::cmp::Ordering::Less, Some(value)) => {
-						self.last_key = Some(commit_key.clone());
-						self.from_seek = false;
-						self.pending_next_backend = Some(Some((backend_key, backend_value)));
-						Ok(Some((commit_key, value)))
-					},
-					(std::cmp::Ordering::Less, None) => {
-						self.last_key = Some(commit_key);
-						self.from_seek = false;
-						self.pending_next_backend = Some(Some((backend_key, backend_value)));
-						std::mem::drop(log);
-						self.next()
-					},
-					(std::cmp::Ordering::Greater, _) => {
-						self.last_key = Some(backend_key.clone());
+				match commit_key.cmp(&backend_key) {
+					std::cmp::Ordering::Less =>
+						if let Some(value) = commit_value {
+							self.last_key = LastKey::Some(commit_key.clone());
+							self.pending_next_backend = Some(Some((backend_key, backend_value)));
+							Ok(Some((commit_key, value)))
+						} else {
+							self.last_key = LastKey::Some(commit_key);
+							self.pending_next_backend = Some(Some((backend_key, backend_value)));
+							std::mem::drop(log);
+							self.next()
+						},
+					std::cmp::Ordering::Greater => {
+						self.last_key = LastKey::Some(backend_key.clone());
 						Ok(Some((backend_key, backend_value)))
 					},
-					(std::cmp::Ordering::Equal, Some(value)) => {
-						self.last_key = Some(commit_key);
-						self.from_seek = false;
-						Ok(Some((backend_key, value)))
-					},
-					(std::cmp::Ordering::Equal, None) => {
-						self.last_key = Some(commit_key);
-						self.from_seek = false;
-						std::mem::drop(log);
-						self.next()
-					},
+					std::cmp::Ordering::Equal =>
+						if let Some(value) = commit_value {
+							self.last_key = LastKey::Some(commit_key);
+							Ok(Some((backend_key, value)))
+						} else {
+							self.last_key = LastKey::Some(commit_key);
+							std::mem::drop(log);
+							self.next()
+						},
 				},
-			(Some((commit_key, Some(commit_value))), None) => {
-				self.last_key = Some(commit_key.clone());
-				self.from_seek = false;
-				self.pending_next_backend = Some(None);
-				Ok(Some((commit_key, commit_value)))
-			},
-			(Some((commit_key, None)), None) => {
-				self.last_key = Some(commit_key);
-				self.from_seek = false;
-				self.pending_next_backend = Some(None);
-				std::mem::drop(log);
-				self.next()
-			},
 			(None, Some((backend_key, backend_value))) => {
-				self.last_key = Some(backend_key.clone());
+				self.last_key = LastKey::Some(backend_key.clone());
 				Ok(Some((backend_key, backend_value)))
 			},
 			(None, None) => {
@@ -271,10 +256,33 @@ impl<'a> BTreeIterator<'a> {
 			self.direction = IterDirection::Forward;
 			let new_tree = col.with_locked(|btree| BTree::open(btree, log, record_id))?;
 			*tree = new_tree;
-			if let Some(last_key) = self.last_key.as_ref() {
-				self.pending_next_backend = None;
-				let seek_to = if self.from_seek { SeekTo::At } else { SeekTo::After };
-				iter.seek(last_key.as_slice(), tree, col, log, seek_to, IterDirection::Forward)?;
+			match &self.last_key {
+				LastKey::Some(last_key) => {
+					iter.seek(
+						last_key.as_slice(),
+						tree,
+						col,
+						log,
+						SeekTo::At,
+						IterDirection::Forward,
+					)?;
+				},
+				LastKey::Before(last_key) => {
+					iter.seek(
+						last_key.as_slice(),
+						tree,
+						col,
+						log,
+						SeekTo::At,
+						IterDirection::Forward,
+					)?;
+				},
+				LastKey::Start => {
+					iter.seek_to_first()?;
+				},
+				LastKey::End => {
+					iter.seek_to_last()?;
+				},
 			}
 			iter.record_id = record_id;
 		}

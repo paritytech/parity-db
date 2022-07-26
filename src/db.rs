@@ -1039,26 +1039,31 @@ impl CommitOverlay {
 		self.btree_indexed.get(key).map(|(_, v)| v.as_ref())
 	}
 
-	pub fn btree_next(
-		&self,
-		last_key: &Option<Vec<u8>>,
-		from_seek: bool,
-	) -> Option<(Value, Option<Value>)> {
-		let key = if let Some(key) = last_key.as_ref() {
-			key
-		} else {
-			return self.btree_indexed.iter().next().map(|(k, (_, v))| (k.clone(), v.clone()))
-		};
-
-		let mut iter = self.btree_indexed.range::<Vec<u8>, _>(key..);
-
-		let (k, v) = if let Some((k, (_, v))) = iter.next() { (k, v) } else { return None };
-
-		if from_seek || k != key {
-			return Some((k.clone(), v.clone()))
+	pub fn btree_next(&self, last_key: &crate::btree::LastKey) -> Option<(Value, Option<Value>)> {
+		use crate::btree::LastKey;
+		match &last_key {
+			LastKey::Start => self
+				.btree_indexed
+				.range::<Vec<u8>, _>(..)
+				.next()
+				.map(|(k, (_, v))| (k.clone(), v.clone())),
+			LastKey::End => return None,
+			LastKey::Some(key) => {
+				let mut iter = self.btree_indexed.range::<Vec<u8>, _>(key..);
+				let next = iter.next();
+				if next.as_ref().map(|(k, _)| k != &key).unwrap_or(false) {
+					next
+				} else {
+					iter.next()
+				}
+				.map(|(k, (_, v))| (k.clone(), v.clone()))
+			},
+			LastKey::Before(key) => self
+				.btree_indexed
+				.range::<Vec<u8>, _>(key..)
+				.next()
+				.map(|(k, (_, v))| (k.clone(), v.clone())),
 		}
-
-		iter.next().map(|(k, (_, v))| (k.clone(), v.clone()))
 	}
 
 	pub fn btree_prev(

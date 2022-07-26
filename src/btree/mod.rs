@@ -46,7 +46,7 @@ use crate::{
 		Entry as ValueTableEntry, Value, ValueTable,
 	},
 };
-pub use iter::BTreeIterator;
+pub use iter::{BTreeIterator, LastKey};
 use node::SeparatorInner;
 use parking_lot::RwLock;
 
