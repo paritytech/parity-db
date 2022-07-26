@@ -230,7 +230,7 @@ impl<'a> BTreeIterator<'a> {
 				self.last_key = LastKey::Some(commit_key);
 				self.pending_next_backend = Some(None);
 				std::mem::drop(log);
-				self.next()
+				self.prev()
 			},
 			(None, Some((backend_key, backend_value))) => {
 				self.last_key = LastKey::Some(backend_key.clone());
@@ -261,7 +261,7 @@ impl<'a> BTreeIterator<'a> {
 						tree,
 						col,
 						log,
-						SeekTo::At,
+						SeekTo::After,
 						IterDirection::Forward,
 					)?;
 				},
@@ -307,7 +307,7 @@ impl<'a> BTreeIterator<'a> {
 						tree,
 						col,
 						log,
-						SeekTo::At,
+						SeekTo::After,
 						IterDirection::Backward,
 					)?;
 				},
