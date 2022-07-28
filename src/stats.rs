@@ -48,6 +48,25 @@ pub struct ColumnStats {
 	compression_delta: [AtomicI64; HISTOGRAM_BUCKETS],
 }
 
+/// Database statistics summary.
+pub struct StatSummary {
+	/// Per column statistics.
+	/// Statistics may be available only for some columns.
+	pub columns: Vec<Option<ColumnStatSummary>>,
+}
+
+/// Column statistics summary.
+pub struct ColumnStatSummary {
+	/// Current number of values in the column.
+	pub total_values: u64,
+	/// Total size of (compressed) values in the column. This does not include key size and any
+	/// other overhead.
+	pub total_bytes: u64,
+	/// Total size of values in the column before compression. This does not include key size and
+	/// any other overhead.
+	pub uncompressed_bytes: u64,
+}
+
 fn read_u32(cursor: &mut Cursor<&[u8]>) -> AtomicU32 {
 	let mut buf = [0u8; 4];
 	cursor.read_exact(&mut buf).expect("Incorrect stats buffer");
@@ -168,6 +187,38 @@ impl ColumnStats {
 		}
 	}
 
+	pub fn clear(&self) {
+		// This may break stat consistency, but we don't care too much.
+		for v in &self.value_histogram {
+			v.store(0, Ordering::Relaxed)
+		}
+		for v in &self.query_histogram {
+			v.store(0, Ordering::Relaxed)
+		}
+		self.oversized.store(0, Ordering::Relaxed);
+		self.oversized_bytes.store(0, Ordering::Relaxed);
+		self.total_values.store(0, Ordering::Relaxed);
+		self.total_bytes.store(0, Ordering::Relaxed);
+		self.commits.store(0, Ordering::Relaxed);
+		self.inserted_new.store(0, Ordering::Relaxed);
+		self.inserted_overwrite.store(0, Ordering::Relaxed);
+		self.removed_hit.store(0, Ordering::Relaxed);
+		self.removed_miss.store(0, Ordering::Relaxed);
+		self.queries_miss.store(0, Ordering::Relaxed);
+		self.uncompressed_bytes.store(0, Ordering::Relaxed);
+		for v in &self.compression_delta {
+			v.store(0, Ordering::Relaxed)
+		}
+	}
+
+	pub fn summary(&self) -> ColumnStatSummary {
+		ColumnStatSummary {
+			total_values: self.total_values.load(Ordering::Relaxed),
+			total_bytes: self.total_bytes.load(Ordering::Relaxed),
+			uncompressed_bytes: self.uncompressed_bytes.load(Ordering::Relaxed),
+		}
+	}
+
 	pub fn to_slice(&self, data: &mut [u8]) {
 		let mut cursor = Cursor::new(data);
 		for item in &self.value_histogram {
@@ -192,7 +243,7 @@ impl ColumnStats {
 		}
 	}
 
-	fn write_stats(&self, writer: &mut impl std::io::Write, col: ColId) -> Result<()> {
+	pub fn write_stats_text(&self, writer: &mut impl std::io::Write, col: ColId) -> Result<()> {
 		writeln!(writer, "Column {}", col)?;
 		writeln!(writer, "Total values: {}", self.total_values.load(Ordering::Relaxed))?;
 		writeln!(writer, "Total bytes: {}", self.total_bytes.load(Ordering::Relaxed))?;
@@ -254,10 +305,6 @@ impl ColumnStats {
 		}
 		writeln!(writer)?;
 		Ok(())
-	}
-
-	pub fn write_summary(&self, writer: &mut impl std::io::Write, col: ColId) {
-		let _ = self.write_stats(writer, col);
 	}
 
 	pub fn query_hit(&self, size_tier: u8) {

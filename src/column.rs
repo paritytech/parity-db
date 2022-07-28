@@ -23,7 +23,7 @@ use crate::{
 	index::{Address, IndexTable, PlanOutcome, TableId as IndexTableId},
 	log::{Log, LogAction, LogOverlays, LogQuery, LogReader, LogWriter},
 	options::{ColumnOptions, Metadata, Options},
-	stats::ColumnStats,
+	stats::{ColumnStatSummary, ColumnStats},
 	table::{
 		key::{TableKey, TableKeyQuery},
 		TableId as ValueTableId, Value, ValueTable, SIZE_TIERS,
@@ -645,16 +645,20 @@ impl HashColumn {
 		Ok(())
 	}
 
-	pub fn write_stats(&self, writer: &mut impl std::io::Write) {
+	pub fn write_stats_text(&self, writer: &mut impl std::io::Write) -> Result<()> {
 		let tables = self.tables.read();
 		tables.index.write_stats(&self.stats);
-		self.stats.write_summary(writer, tables.index.id.col());
+		self.stats.write_stats_text(writer, tables.index.id.col())
 	}
 
-	pub fn clear_stats(&self) {
+	fn stat_summary(&self) -> ColumnStatSummary {
+		self.stats.summary()
+	}
+
+	fn clear_stats(&self) {
 		let tables = self.tables.read();
-		let empty_stats = ColumnStats::empty();
-		tables.index.write_stats(&empty_stats);
+		self.stats.clear();
+		tables.index.write_stats(&self.stats);
 	}
 
 	pub fn iter_while(&self, log: &Log, mut f: impl FnMut(IterState) -> bool) -> Result<()> {
@@ -1031,10 +1035,10 @@ impl Column {
 		}
 	}
 
-	pub fn write_stats(&self, writer: &mut impl std::io::Write) {
+	pub fn write_stats_text(&self, writer: &mut impl std::io::Write) -> Result<()> {
 		match self {
-			Column::Hash(column) => column.write_stats(writer),
-			Column::Tree(_column) => (),
+			Column::Hash(column) => column.write_stats_text(writer),
+			Column::Tree(_column) => Ok(()),
 		}
 	}
 
@@ -1042,6 +1046,13 @@ impl Column {
 		match self {
 			Column::Hash(column) => column.clear_stats(),
 			Column::Tree(_column) => (),
+		}
+	}
+
+	pub fn stats(&self) -> Option<ColumnStatSummary> {
+		match self {
+			Column::Hash(column) => Some(column.stat_summary()),
+			Column::Tree(_column) => None,
 		}
 	}
 
