@@ -34,6 +34,7 @@ pub use db::{check::CheckOptions, Db, Value};
 pub use error::{Error, Result};
 pub use migration::{clear_column, migrate};
 pub use options::{ColumnOptions, Options};
+pub use stats::{ColumnStatSummary, StatSummary};
 
 #[derive(Default)]
 pub struct IdentityKeyHash(u64);

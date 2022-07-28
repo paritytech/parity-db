@@ -21,6 +21,7 @@ use crate::{
 	index::PlanOutcome,
 	log::{Log, LogAction},
 	options::Options,
+	stats::StatSummary,
 	Key,
 };
 use fs2::FileExt;
@@ -731,7 +732,9 @@ impl DbInner {
 			match std::fs::File::create(path) {
 				Ok(file) => {
 					let mut writer = std::io::BufWriter::new(file);
-					self.collect_stats(&mut writer, None)
+					if let Err(e) = self.write_stats_text(&mut writer, None) {
+						log::warn!(target: "parity-db", "Error writing stats file: {:?}", e)
+					}
 				},
 				Err(e) => log::warn!(target: "parity-db", "Error creating stats file: {:?}", e),
 			}
@@ -739,13 +742,14 @@ impl DbInner {
 		Ok(())
 	}
 
-	fn collect_stats(&self, writer: &mut impl std::io::Write, column: Option<u8>) {
+	fn write_stats_text(&self, writer: &mut impl std::io::Write, column: Option<u8>) -> Result<()> {
 		if let Some(col) = column {
-			self.columns[col as usize].write_stats(writer);
+			self.columns[col as usize].write_stats_text(writer)
 		} else {
 			for c in self.columns.iter() {
-				c.write_stats(writer);
+				c.write_stats_text(writer)?;
 			}
+			Ok(())
 		}
 	}
 
@@ -757,6 +761,10 @@ impl DbInner {
 				c.clear_stats();
 			}
 		}
+	}
+
+	fn stats(&self) -> StatSummary {
+		StatSummary { columns: self.columns.iter().map(|c| c.stats()).collect() }
 	}
 
 	fn store_err(&self, result: Result<()>) {
@@ -968,8 +976,12 @@ impl Db {
 		Ok(())
 	}
 
-	pub fn collect_stats(&self, writer: &mut impl std::io::Write, column: Option<u8>) {
-		self.inner.collect_stats(writer, column)
+	pub fn write_stats_text(
+		&self,
+		writer: &mut impl std::io::Write,
+		column: Option<u8>,
+	) -> Result<()> {
+		self.inner.write_stats_text(writer, column)
 	}
 
 	pub fn clear_stats(&self, column: Option<u8>) {
@@ -985,6 +997,10 @@ impl Db {
 			}
 		}
 		Ok(())
+	}
+
+	pub fn stats(&self) -> StatSummary {
+		self.inner.stats()
 	}
 }
 
@@ -1286,7 +1302,7 @@ mod tests {
 
 	use super::{Db, EnableCommitPipelineStages, InternalOptions, Options};
 	use rand::Rng;
-	use std::collections::BTreeMap;
+	use std::collections::{BTreeMap, HashSet};
 	use tempfile::tempdir;
 
 	#[test]
@@ -1687,8 +1703,8 @@ mod tests {
 
 	fn test_basic(change_set: &[(Vec<u8>, Option<Vec<u8>>)]) {
 		let tmp = tempdir().unwrap();
-		let col_nb = 0u8;
-		let mut options = Options::with_columns(tmp.path(), 5);
+		let col_nb = 1u8;
+		let mut options = Options::with_columns(tmp.path(), 2);
 		options.columns[col_nb as usize].btree_index = true;
 		let db_test = EnableCommitPipelineStages::DbFile;
 		let inner_options =
@@ -1698,9 +1714,27 @@ mod tests {
 		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(iter.next().unwrap(), None);
 
+		db.commit(change_set.iter().map(|(k, v)| (0, k.clone(), v.clone()))).unwrap();
 		db.commit(change_set.iter().map(|(k, v)| (col_nb, k.clone(), v.clone())))
 			.unwrap();
 		db_test.run_stages(&db);
+
+		let stats = db.stats();
+		let col_stats = stats.columns.into_iter().next().unwrap().unwrap();
+		let mut keys = HashSet::new();
+		let mut expected_count: u64 = 0;
+		for (k, v) in change_set.iter() {
+			if v.is_some() {
+				if keys.insert(k) {
+					expected_count += 1;
+				}
+			} else {
+				if keys.remove(k) {
+					expected_count -= 1;
+				}
+			}
+		}
+		assert_eq!(col_stats.total_values, expected_count);
 
 		let state: BTreeMap<Vec<u8>, Option<Vec<u8>>> =
 			change_set.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
