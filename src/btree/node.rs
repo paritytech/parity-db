@@ -17,7 +17,7 @@
 //! BTree node struct and methods.
 
 use super::{
-	iter::{NodeType, SeekTo},
+	iter::{NodeType, SeekTo, LastIndex},
 	*,
 };
 use crate::{
@@ -506,83 +506,35 @@ impl Node {
 		values: TablesRef,
 		log: &impl LogQuery,
 		depth: u32,
-		stack: &mut Vec<(usize, NodeType, Self)>,
+		stack: &mut Vec<(LastIndex, NodeType, Self)>,
 		seek_to: SeekTo,
 	) -> Result<()> {
 		let (at, i) = from.position(key)?;
 		if at {
 			stack.push(match seek_to {
-				SeekTo::At => (i, NodeType::Separator, from),
-				SeekTo::After => (i + 1, NodeType::Child, from),
+				// TODO is before/after for next sep and at for next child
+				SeekTo::At => (LastIndex::Before(i), NodeType::Separator, from),
+				SeekTo::After => (LastIndex::At(i + 1), NodeType::Child, from),
+				SeekTo::Before => (LastIndex::At(i), NodeType::Child, from),
 			});
 			return Ok(())
 		}
 
 		if depth != 0 {
 			if let Some(child) = from.fetch_child(i, values, log)? {
-				stack.push((i, NodeType::Separator, from));
+				stack.push((LastIndex::After(i), NodeType::Separator, from));
 				return Self::seek(child, key, values, log, depth - 1, stack, seek_to)
 			}
 		}
-		stack.push((i, NodeType::Separator, from));
+		stack.push((LastIndex::After(i), NodeType::Separator, from));
 		Ok(())
 	}
 
-	pub fn seek_prev(
-		from: Self,
-		key: &[u8],
-		values: TablesRef,
-		log: &impl LogQuery,
-		depth: u32,
-		stack: &mut Vec<(usize, NodeType, Self)>,
-		seek_to: SeekTo,
-	) -> Result<()> {
-		// Try to find the separator with provided `key`. If we fail then `i` will be equal to
-		// index of the first element less than key
-		let (at, i) = match from.last_separator_index() {
-			Some(mut i) => loop {
-				let separator = from.separators[i].separator.as_ref().expect("Checked before");
-				match key[..].cmp(&separator.key[..]) {
-					Ordering::Less => (),
-					Ordering::Greater => break (false, i + 1),
-					Ordering::Equal => break (true, i),
-				}
-				if i == 0 {
-					break (false, 0)
-				}
-				i -= 1;
-			},
-			None => (false, 0),
-		};
-
-		if at {
-			stack.push(match seek_to {
-				SeekTo::At => (i, NodeType::Separator, from),
-				SeekTo::After => (i, NodeType::Child, from),
-			});
-
-			return Ok(())
-		}
-
-		if depth != 0 {
-			if let Some(child) = from.fetch_child(i, values, log)? {
-				if i > 0 {
-					stack.push((i - 1, NodeType::Separator, from));
-				}
-				return Self::seek_prev(child, key, values, log, depth - 1, stack, seek_to)
-			}
-		}
-		if i > 0 {
-			stack.push((i - 1, NodeType::Separator, from));
-		}
-		Ok(())
-	}
-
-	pub fn seek_to_last(from: Self, stack: &mut Vec<(usize, NodeType, Self)>) -> Result<()> {
+	pub fn seek_to_last(from: Self, stack: &mut Vec<(LastIndex, NodeType, Self)>) -> Result<()> {
 		if let Some(i) = from.last_child_index() {
-			stack.push((i, NodeType::Child, from))
+			stack.push((LastIndex::At(i), NodeType::Child, from))
 		} else if let Some(i) = from.last_separator_index() {
-			stack.push((i, NodeType::Separator, from))
+			stack.push((LastIndex::After(i), NodeType::Separator, from))
 		}
 		Ok(())
 	}

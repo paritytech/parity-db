@@ -15,7 +15,7 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-	btree::{commit_overlay::BTreeChangeSet, BTreeIterator, BTreeTable},
+	btree::{commit_overlay::BTreeChangeSet, BTreeIterator, BTreeTable, IterDirection},
 	column::{hash_key, ColId, Column, IterState, ReindexBatch},
 	error::{Error, Result},
 	index::PlanOutcome,
@@ -1066,7 +1066,7 @@ impl CommitOverlay {
 		}
 	}
 
-	pub fn btree_prev(&self, last_key: &crate::btree::LastKey) -> Option<(Value, Option<Value>)> {
+	pub fn btree_prev(&self, last_key: &crate::btree::LastKey, direction: IterDirection) -> Option<(Value, Option<Value>)> {
 		use crate::btree::LastKey;
 		match &last_key {
 			LastKey::End => self
@@ -1504,7 +1504,6 @@ mod tests {
 
 		iter.seek_to_first().unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
-		assert_eq!(iter.prev().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.prev().unwrap(), None);
 
 		iter.seek(&[0xff]).unwrap();
@@ -1630,7 +1629,7 @@ mod tests {
 
 		use std::collections::BTreeSet;
 
-		let mut rng = rand::rngs::SmallRng::from_rng(rand::thread_rng()).unwrap();
+		let mut rng = rand::rngs::SmallRng::seed_from_u64(0);
 
 		let tmp = tempdir().unwrap();
 		let col_nb = 0u8;

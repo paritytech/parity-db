@@ -65,6 +65,12 @@ const HEADER_ADDRESS: Address = {
 };
 const ENTRY_CAPACITY: usize = ORDER * 33 + ORDER * 8 + ORDER_CHILD * 8;
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum IterDirection {
+	Backward,
+	Forward,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct BTreeHeader {
 	pub root: Address,
