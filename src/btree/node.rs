@@ -17,7 +17,7 @@
 //! BTree node struct and methods.
 
 use super::{
-	iter::{NodeType, SeekTo, LastIndex},
+	iter::{LastIndex, NodeType, SeekTo},
 	*,
 };
 use crate::{
@@ -30,10 +30,6 @@ use crate::{
 use std::cmp::Ordering;
 
 impl Node {
-	pub(crate) fn last_child_index(&self) -> Option<usize> {
-		self.children.iter().rposition(|child| child.entry_index.is_some())
-	}
-
 	pub(crate) fn last_separator_index(&self) -> Option<usize> {
 		self.separators.iter().rposition(|separator| separator.separator.is_some())
 	}
@@ -508,34 +504,64 @@ impl Node {
 		depth: u32,
 		stack: &mut Vec<(LastIndex, NodeType, Self)>,
 		seek_to: SeekTo,
+		direction: IterDirection,
 	) -> Result<()> {
 		let (at, i) = from.position(key)?;
 		if at {
-			stack.push(match seek_to {
-				// TODO is before/after for next sep and at for next child
-				SeekTo::At => (LastIndex::Before(i), NodeType::Separator, from),
-				SeekTo::After => (LastIndex::At(i + 1), NodeType::Child, from),
-				SeekTo::Before => (LastIndex::At(i), NodeType::Child, from),
+			stack.push(match (seek_to, direction) {
+				(SeekTo::At, _) => (LastIndex::At(i), NodeType::Separator, from),
+				(SeekTo::Before, IterDirection::Forward) =>
+					(LastIndex::Seeked(i), NodeType::Child, from),
+				(SeekTo::Before, IterDirection::Backward) =>
+					(LastIndex::Seeked(i), NodeType::Child, from),
 			});
 			return Ok(())
 		}
 
-		if depth != 0 {
-			if let Some(child) = from.fetch_child(i, values, log)? {
-				stack.push((LastIndex::After(i), NodeType::Separator, from));
-				return Self::seek(child, key, values, log, depth - 1, stack, seek_to)
-			}
+		match direction {
+			IterDirection::Forward =>
+				if depth != 0 {
+					if let Some(child) = from.fetch_child(i, values, log)? {
+						stack.push((LastIndex::Descend(i), NodeType::Separator, from));
+						return Self::seek(
+							child,
+							key,
+							values,
+							log,
+							depth - 1,
+							stack,
+							seek_to,
+							direction,
+						)
+					} else {
+						unreachable!()
+					}
+				},
+			IterDirection::Backward =>
+				if depth != 0 && i < ORDER {
+					if let Some(child) = from.fetch_child(i + 1, values, log)? {
+						stack.push((LastIndex::Descend(i + 1), NodeType::Separator, from));
+						return Self::seek(
+							child,
+							key,
+							values,
+							log,
+							depth - 1,
+							stack,
+							seek_to,
+							direction,
+						)
+					} else {
+						unreachable!()
+					}
+				},
 		}
-		stack.push((LastIndex::After(i), NodeType::Separator, from));
-		Ok(())
-	}
+		if i == 0 {
+			stack.push((LastIndex::Start, NodeType::Separator, from));
+		} else {
+			stack.push((LastIndex::Before(i), NodeType::Separator, from));
+		}
 
-	pub fn seek_to_last(from: Self, stack: &mut Vec<(LastIndex, NodeType, Self)>) -> Result<()> {
-		if let Some(i) = from.last_child_index() {
-			stack.push((LastIndex::At(i), NodeType::Child, from))
-		} else if let Some(i) = from.last_separator_index() {
-			stack.push((LastIndex::After(i), NodeType::Separator, from))
-		}
 		Ok(())
 	}
 
