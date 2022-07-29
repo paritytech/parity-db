@@ -1635,11 +1635,10 @@ mod tests {
 
 	#[test]
 	fn test_indexed_btree_3() {
-		test_indexed_btree_inner_3(EnableCommitPipelineStages::Standard);
 		test_indexed_btree_inner_3(EnableCommitPipelineStages::CommitOverlay);
 		test_indexed_btree_inner_3(EnableCommitPipelineStages::LogOverlay);
 		test_indexed_btree_inner_3(EnableCommitPipelineStages::DbFile);
-//		test_indexed_btree_inner_3(EnableCommitPipelineStages::Standard);
+		test_indexed_btree_inner_3(EnableCommitPipelineStages::Standard);
 	}
 
 	fn test_indexed_btree_inner_3(db_test: EnableCommitPipelineStages) {
@@ -1681,6 +1680,9 @@ mod tests {
 				let expected = expected.range(at..).take(take).copied().collect::<Vec<_>>();
 				assert_eq!(got, expected);
 				if got.len() == 0 {
+					prev_run = false;
+				}
+				if got.len() < take {
 					prev_run = false;
 				}
 				expected.last().copied().unwrap_or(at)

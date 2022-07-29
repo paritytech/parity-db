@@ -510,51 +510,18 @@ impl Node {
 		if at {
 			stack.push(match (seek_to, direction) {
 				(SeekTo::Exclude, _) => (LastIndex::At(i), from),
-				(SeekTo::Include, IterDirection::Forward) =>
-					(LastIndex::Seeked(i), from),
-				(SeekTo::Include, IterDirection::Backward) =>
-					(LastIndex::Seeked(i), from),
+				(SeekTo::Include, IterDirection::Forward) => (LastIndex::Seeked(i), from),
+				(SeekTo::Include, IterDirection::Backward) => (LastIndex::Seeked(i), from),
 			});
 			return Ok(())
 		}
-
-		match direction {
-			IterDirection::Forward =>
-				if depth != 0 {
-					if let Some(child) = from.fetch_child(i, values, log)? {
-						stack.push((LastIndex::Descend(i), from));
-						return Self::seek(
-							child,
-							key,
-							values,
-							log,
-							depth - 1,
-							stack,
-							seek_to,
-							direction,
-						)
-					} else {
-						unreachable!()
-					}
-				},
-			IterDirection::Backward =>
-				if depth != 0 && i < ORDER {
-					if let Some(child) = from.fetch_child(i + 1, values, log)? {
-						stack.push((LastIndex::Descend(i + 1), from));
-						return Self::seek(
-							child,
-							key,
-							values,
-							log,
-							depth - 1,
-							stack,
-							seek_to,
-							direction,
-						)
-					} else {
-						unreachable!()
-					}
-				},
+		if depth != 0 {
+			if let Some(child) = from.fetch_child(i, values, log)? {
+				stack.push((LastIndex::Descend(i), from));
+				return Self::seek(child, key, values, log, depth - 1, stack, seek_to, direction)
+			} else {
+				unreachable!()
+			}
 		}
 		if i == 0 {
 			stack.push((LastIndex::Start, from));

@@ -38,7 +38,7 @@ pub struct BTreeIterator<'a> {
 	commit_overlay: &'a RwLock<Vec<CommitOverlay>>,
 	iter: BtreeIterBackend,
 	col: ColId,
-	pending_backend: Option<Option<(Vec<u8>, Vec<u8>)>>,
+	pending_backend: Option<(Option<(Vec<u8>, Vec<u8>)>, Option<IterDirection>)>,
 	last_key: LastKey,
 }
 
@@ -89,7 +89,14 @@ impl<'a> BTreeIterator<'a> {
 		let record_id = log.last_record_id(self.col);
 		self.last_key = LastKey::Seeked(key.to_vec());
 		self.pending_backend = None;
-		self.seek_backend(key, record_id, self.table, &*log, SeekTo::Include, IterDirection::Forward)
+		self.seek_backend(
+			key,
+			record_id,
+			self.table,
+			&*log,
+			SeekTo::Include,
+			IterDirection::Forward,
+		)
 	}
 
 	pub fn seek_to_first(&mut self) -> Result<()> {
@@ -128,58 +135,70 @@ impl<'a> BTreeIterator<'a> {
 		if record_id != self.iter.1.record_id {
 			self.pending_backend = None;
 		}
-		let next_backend = self.next_backend(record_id, self.table, &*log, direction)?;
-
-		match (next_commit_overlay, next_backend) {
+		let next_backend = if let Some((backend, prev_direction)) = self.pending_backend.take() {
+			if prev_direction.map(|d| d != direction).unwrap_or(true) {
+				// commit overlay last return, being in between, simply dropping pending.
+				self.next_backend(record_id, self.table, &*log, direction)?
+			} else {
+				backend
+			}
+		} else {
+			self.next_backend(record_id, self.table, &*log, direction)?
+		};
+		let result = match (next_commit_overlay, next_backend) {
 			(Some((commit_key, commit_value)), Some((backend_key, backend_value))) =>
 				match (direction, commit_key.cmp(&backend_key)) {
 					(IterDirection::Backward, std::cmp::Ordering::Greater) |
-					(IterDirection::Forward, std::cmp::Ordering::Less) =>
+					(IterDirection::Forward, std::cmp::Ordering::Less) => {
+						self.pending_backend =
+							Some((Some((backend_key, backend_value)), Some(direction)));
 						if let Some(value) = commit_value {
-							self.last_key = LastKey::At(commit_key.clone());
-							self.pending_backend = Some(Some((backend_key, backend_value)));
-							Ok(Some((commit_key, value)))
+							Some((commit_key, value))
 						} else {
-							self.last_key = LastKey::At(commit_key);
-							self.pending_backend = Some(Some((backend_key, backend_value)));
 							std::mem::drop(log);
-							self.iter_inner(direction)
-						},
-					(IterDirection::Backward, std::cmp::Ordering::Less) |
-					(IterDirection::Forward, std::cmp::Ordering::Greater) => {
-						self.last_key = LastKey::At(backend_key.clone());
-						Ok(Some((backend_key, backend_value)))
+							self.last_key = LastKey::At(commit_key.clone());
+							self.iter_inner(direction)?
+						}
 					},
+					(IterDirection::Backward, std::cmp::Ordering::Less) |
+					(IterDirection::Forward, std::cmp::Ordering::Greater) => Some((backend_key, backend_value)),
 					(_, std::cmp::Ordering::Equal) =>
 						if let Some(value) = commit_value {
-							self.last_key = LastKey::At(commit_key);
-							Ok(Some((backend_key, value)))
+							Some((backend_key, value))
 						} else {
-							self.last_key = LastKey::At(commit_key);
 							std::mem::drop(log);
-							self.iter_inner(direction)
+							self.last_key = LastKey::At(commit_key.clone());
+							self.iter_inner(direction)?
 						},
 				},
 			(Some((commit_key, Some(commit_value))), None) => {
-				self.last_key = LastKey::At(commit_key.clone());
-				self.pending_backend = Some(None);
-				Ok(Some((commit_key, commit_value)))
+				self.pending_backend = Some((None, Some(direction)));
+				Some((commit_key, commit_value))
 			},
-			(Some((commit_key, None)), None) => {
-				self.last_key = LastKey::At(commit_key);
-				self.pending_backend = Some(None);
+			(Some((k, None)), None) => {
+				self.pending_backend = Some((None, Some(direction)));
 				std::mem::drop(log);
-				self.iter_inner(direction)
+				self.last_key = LastKey::At(k.clone());
+				self.iter_inner(direction)?
 			},
-			(None, Some((backend_key, backend_value))) => {
-				self.last_key = LastKey::At(backend_key.clone());
-				Ok(Some((backend_key, backend_value)))
-			},
+			(None, Some((backend_key, backend_value))) => Some((backend_key, backend_value)),
 			(None, None) => {
-				self.pending_backend = Some(None);
-				Ok(None)
+				self.pending_backend = Some((None, None));
+				None
 			},
+		};
+
+		match result.as_ref() {
+			Some((key, _)) => {
+				self.last_key = LastKey::At(key.clone());
+			},
+			None =>
+				self.last_key = match direction {
+					IterDirection::Backward => LastKey::Start,
+					IterDirection::Forward => LastKey::End,
+				},
 		}
+		Ok(result)
 	}
 
 	pub fn next_backend(
@@ -269,11 +288,19 @@ impl BTreeIterState {
 		self.state.push((direction.starting(), node))
 	}
 
-	fn exit(&mut self, direction: IterDirection) {
+	fn exit(&mut self, direction: IterDirection) -> bool {
 		loop {
-			if self.state.pop().is_none() {
-				break
+			if self.state.len() < 2 {
+				// keep root
+				if let Some((ix, _)) = self.state.last_mut() {
+					*ix = match direction {
+						IterDirection::Forward => LastIndex::End,
+						IterDirection::Backward => LastIndex::Start,
+					};
+				}
+				return true
 			}
+			self.state.pop();
 			if let Some((ix, node)) = self.state.last_mut() {
 				debug_assert!(matches!(ix, LastIndex::Descend(_)));
 				if let LastIndex::Descend(child) = ix {
@@ -289,10 +316,12 @@ impl BTreeIterState {
 					break
 				} else {
 					self.state.clear(); // should actually be unreachable
+					self.fetch_root = false;
 					break
 				}
 			}
 		}
+		false
 	}
 
 	pub fn new(record_id: u64) -> BTreeIterState {
@@ -329,7 +358,9 @@ impl BTreeIterState {
 					(IterDirection::Forward, LastIndex::After(sep))
 						if is_leaf && *sep + 1 == ORDER =>
 					{
-						self.exit(direction);
+						if self.exit(direction) {
+							break
+						}
 						continue
 					},
 					(IterDirection::Forward, LastIndex::At(sep)) |
@@ -343,20 +374,26 @@ impl BTreeIterState {
 					(IterDirection::Forward, LastIndex::Before(sep))
 						if *sep == ORDER =>
 					{
-						self.exit(direction);
+						if self.exit(direction) {
+							break
+						}
 						continue
 					},
 					(IterDirection::Forward, LastIndex::Seeked(sep)) |
 					(IterDirection::Forward, LastIndex::Before(sep)) => LastIndex::At(*sep),
 					(IterDirection::Forward, LastIndex::End) => {
-						self.exit(direction);
+						if self.exit(direction) {
+							break
+						}
 						continue
 					},
 					(IterDirection::Backward, LastIndex::End) if is_leaf => {
 						if let Some(at) = state.1.last_separator_index() {
 							LastIndex::At(at)
 						} else {
-							self.exit(direction);
+							if self.exit(direction) {
+								break
+							}
 							continue
 						}
 					},
@@ -364,7 +401,9 @@ impl BTreeIterState {
 						if let Some(at) = state.1.last_separator_index() {
 							LastIndex::Descend(at + 1)
 						} else {
-							self.exit(direction);
+							if self.exit(direction) {
+								break
+							}
 							continue
 						}
 					},
@@ -372,7 +411,9 @@ impl BTreeIterState {
 					(IterDirection::Backward, LastIndex::Before(sep))
 						if is_leaf && *sep == 0 =>
 					{
-						self.exit(direction);
+						if self.exit(direction) {
+							break
+						}
 						continue
 					},
 					(IterDirection::Backward, LastIndex::At(sep)) |
@@ -384,7 +425,9 @@ impl BTreeIterState {
 					(IterDirection::Backward, LastIndex::Seeked(sep)) |
 					(IterDirection::Backward, LastIndex::After(sep)) => LastIndex::At(*sep),
 					(IterDirection::Backward, LastIndex::Start) => {
-						self.exit(direction);
+						if self.exit(direction) {
+							break
+						}
 						continue
 					},
 				};
@@ -398,7 +441,9 @@ impl BTreeIterState {
 							return Ok(r.map(|r| (key, r.1)))
 						} else {
 							// forward end
-							self.exit(direction);
+							if self.exit(direction) {
+								break
+							}
 						}
 					},
 					LastIndex::Descend(child_ix) => {
@@ -407,7 +452,9 @@ impl BTreeIterState {
 						{
 							self.enter(child_ix, child, direction);
 						} else {
-							self.exit(direction);
+							if self.exit(direction) {
+								break
+							}
 						}
 					},
 					_ => unreachable!(),
