@@ -17,7 +17,7 @@
 //! BTree node struct and methods.
 
 use super::{
-	iter::{LastIndex, NodeType, SeekTo},
+	iter::{LastIndex, SeekTo},
 	*,
 };
 use crate::{
@@ -502,18 +502,18 @@ impl Node {
 		values: TablesRef,
 		log: &impl LogQuery,
 		depth: u32,
-		stack: &mut Vec<(LastIndex, NodeType, Self)>,
+		stack: &mut Vec<(LastIndex, Self)>,
 		seek_to: SeekTo,
 		direction: IterDirection,
 	) -> Result<()> {
 		let (at, i) = from.position(key)?;
 		if at {
 			stack.push(match (seek_to, direction) {
-				(SeekTo::At, _) => (LastIndex::At(i), NodeType::Separator, from),
-				(SeekTo::Before, IterDirection::Forward) =>
-					(LastIndex::Seeked(i), NodeType::Child, from),
-				(SeekTo::Before, IterDirection::Backward) =>
-					(LastIndex::Seeked(i), NodeType::Child, from),
+				(SeekTo::Exclude, _) => (LastIndex::At(i), from),
+				(SeekTo::Include, IterDirection::Forward) =>
+					(LastIndex::Seeked(i), from),
+				(SeekTo::Include, IterDirection::Backward) =>
+					(LastIndex::Seeked(i), from),
 			});
 			return Ok(())
 		}
@@ -522,7 +522,7 @@ impl Node {
 			IterDirection::Forward =>
 				if depth != 0 {
 					if let Some(child) = from.fetch_child(i, values, log)? {
-						stack.push((LastIndex::Descend(i), NodeType::Separator, from));
+						stack.push((LastIndex::Descend(i), from));
 						return Self::seek(
 							child,
 							key,
@@ -540,7 +540,7 @@ impl Node {
 			IterDirection::Backward =>
 				if depth != 0 && i < ORDER {
 					if let Some(child) = from.fetch_child(i + 1, values, log)? {
-						stack.push((LastIndex::Descend(i + 1), NodeType::Separator, from));
+						stack.push((LastIndex::Descend(i + 1), from));
 						return Self::seek(
 							child,
 							key,
@@ -557,9 +557,9 @@ impl Node {
 				},
 		}
 		if i == 0 {
-			stack.push((LastIndex::Start, NodeType::Separator, from));
+			stack.push((LastIndex::Start, from));
 		} else {
-			stack.push((LastIndex::Before(i), NodeType::Separator, from));
+			stack.push((LastIndex::Before(i), from));
 		}
 
 		Ok(())

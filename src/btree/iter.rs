@@ -28,8 +28,8 @@ use parking_lot::RwLock;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum SeekTo {
-	At,     // TODO rename exclude
-	Before, // TODO rename include
+	Include,
+	Exclude,
 }
 
 pub struct BTreeIterator<'a> {
@@ -38,9 +38,8 @@ pub struct BTreeIterator<'a> {
 	commit_overlay: &'a RwLock<Vec<CommitOverlay>>,
 	iter: BtreeIterBackend,
 	col: ColId,
-	pending_next_backend: Option<Option<(Vec<u8>, Vec<u8>)>>, // TODO rename (no next)
+	pending_backend: Option<Option<(Vec<u8>, Vec<u8>)>>,
 	last_key: LastKey,
-	direction: IterDirection, // TODO should be removable.
 }
 
 pub enum LastKey {
@@ -77,9 +76,8 @@ impl<'a> BTreeIterator<'a> {
 			table,
 			iter: BtreeIterBackend(tree, iter),
 			col,
-			pending_next_backend: None,
+			pending_backend: None,
 			last_key: LastKey::Start,
-			direction: IterDirection::Forward,
 			log,
 			commit_overlay,
 		})
@@ -90,8 +88,8 @@ impl<'a> BTreeIterator<'a> {
 		let log = self.log.read();
 		let record_id = log.last_record_id(self.col);
 		self.last_key = LastKey::Seeked(key.to_vec());
-		self.pending_next_backend = None;
-		self.seek_backend(key, record_id, self.table, &*log, SeekTo::Before, self.direction)
+		self.pending_backend = None;
+		self.seek_backend(key, record_id, self.table, &*log, SeekTo::Include, IterDirection::Forward)
 	}
 
 	pub fn seek_to_first(&mut self) -> Result<()> {
@@ -119,17 +117,16 @@ impl<'a> BTreeIterator<'a> {
 
 		// Lock log over function call (no btree struct change).
 		let commit_overlay = self.commit_overlay.read();
-		let next_commit_overlay =
-			commit_overlay.get(col as usize).and_then(|o| match direction{
-				IterDirection::Forward => o.btree_next(&self.last_key),
-				IterDirection::Backward => o.btree_prev(&self.last_key),
-			});
+		let next_commit_overlay = commit_overlay.get(col as usize).and_then(|o| match direction {
+			IterDirection::Forward => o.btree_next(&self.last_key),
+			IterDirection::Backward => o.btree_prev(&self.last_key),
+		});
 		let log = self.log.read();
 		let record_id = log.last_record_id(self.col);
 		// No consistency over iteration, allows dropping lock to overlay.
 		std::mem::drop(commit_overlay);
 		if record_id != self.iter.1.record_id {
-			self.pending_next_backend = None;
+			self.pending_backend = None;
 		}
 		let next_backend = self.next_backend(record_id, self.table, &*log, direction)?;
 
@@ -140,11 +137,11 @@ impl<'a> BTreeIterator<'a> {
 					(IterDirection::Forward, std::cmp::Ordering::Less) =>
 						if let Some(value) = commit_value {
 							self.last_key = LastKey::At(commit_key.clone());
-							self.pending_next_backend = Some(Some((backend_key, backend_value)));
+							self.pending_backend = Some(Some((backend_key, backend_value)));
 							Ok(Some((commit_key, value)))
 						} else {
 							self.last_key = LastKey::At(commit_key);
-							self.pending_next_backend = Some(Some((backend_key, backend_value)));
+							self.pending_backend = Some(Some((backend_key, backend_value)));
 							std::mem::drop(log);
 							self.iter_inner(direction)
 						},
@@ -165,12 +162,12 @@ impl<'a> BTreeIterator<'a> {
 				},
 			(Some((commit_key, Some(commit_value))), None) => {
 				self.last_key = LastKey::At(commit_key.clone());
-				self.pending_next_backend = Some(None);
+				self.pending_backend = Some(None);
 				Ok(Some((commit_key, commit_value)))
 			},
 			(Some((commit_key, None)), None) => {
 				self.last_key = LastKey::At(commit_key);
-				self.pending_next_backend = Some(None);
+				self.pending_backend = Some(None);
 				std::mem::drop(log);
 				self.iter_inner(direction)
 			},
@@ -179,7 +176,7 @@ impl<'a> BTreeIterator<'a> {
 				Ok(Some((backend_key, backend_value)))
 			},
 			(None, None) => {
-				self.pending_next_backend = Some(None);
+				self.pending_backend = Some(None);
 				Ok(None)
 			},
 		}
@@ -198,7 +195,7 @@ impl<'a> BTreeIterator<'a> {
 			*tree = new_tree;
 			match &self.last_key {
 				LastKey::At(last_key) => {
-					iter.seek(last_key.as_slice(), tree, col, log, SeekTo::At, direction)?;
+					iter.seek(last_key.as_slice(), tree, col, log, SeekTo::Exclude, direction)?;
 				},
 				LastKey::Seeked(last_key) => {
 					iter.seek(
@@ -206,12 +203,12 @@ impl<'a> BTreeIterator<'a> {
 						tree,
 						col,
 						log,
-						SeekTo::Before,
+						SeekTo::Include,
 						IterDirection::Forward,
 					)?;
 				},
 				LastKey::Start => {
-					iter.seek(&[], tree, col, log, SeekTo::Before, IterDirection::Forward)?;
+					iter.seek(&[], tree, col, log, SeekTo::Include, IterDirection::Forward)?;
 				},
 				LastKey::End => {
 					iter.seek_to_last(tree, col, log)?;
@@ -257,25 +254,19 @@ impl<'a> BTreeIterator<'a> {
 	}
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum NodeType {
-	Child,
-	Separator,
-}
-
 #[derive(Debug)]
 pub struct BTreeIterState {
-	state: Vec<(LastIndex, NodeType, Node)>,
+	state: Vec<(LastIndex, Node)>,
 	fetch_root: bool,
 	pub record_id: u64,
 }
 
 impl BTreeIterState {
 	fn enter(&mut self, at: usize, node: Node, direction: IterDirection) {
-		if let Some((ix, _, _)) = self.state.last_mut() {
+		if let Some((ix, _)) = self.state.last_mut() {
 			*ix = LastIndex::Descend(at);
 		}
-		self.state.push((direction.starting(), NodeType::Separator, node))
+		self.state.push((direction.starting(), node))
 	}
 
 	fn exit(&mut self, direction: IterDirection) {
@@ -283,7 +274,7 @@ impl BTreeIterState {
 			if self.state.pop().is_none() {
 				break
 			}
-			if let Some((ix, _, node)) = self.state.last_mut() {
+			if let Some((ix, node)) = self.state.last_mut() {
 				debug_assert!(matches!(ix, LastIndex::Descend(_)));
 				if let LastIndex::Descend(child) = ix {
 					*ix = match direction {
@@ -323,7 +314,7 @@ impl BTreeIterState {
 			let root = col.with_locked(|tables| {
 				BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), tables, log)
 			})?;
-			self.state.push((direction.starting(), NodeType::Child, root));
+			self.state.push((direction.starting(), root));
 			self.fetch_root = false;
 		}
 
@@ -349,7 +340,9 @@ impl BTreeIterState {
 					(IterDirection::Forward, LastIndex::After(sep)) => LastIndex::Descend(*sep + 1),
 					// TODO this check should not be needed: should be End
 					(IterDirection::Forward, LastIndex::Seeked(sep)) |
-					(IterDirection::Forward, LastIndex::Before(sep)) if *sep == ORDER => {
+					(IterDirection::Forward, LastIndex::Before(sep))
+						if *sep == ORDER =>
+					{
 						self.exit(direction);
 						continue
 					},
@@ -360,7 +353,7 @@ impl BTreeIterState {
 						continue
 					},
 					(IterDirection::Backward, LastIndex::End) if is_leaf => {
-						if let Some(at) = state.2.last_separator_index() {
+						if let Some(at) = state.1.last_separator_index() {
 							LastIndex::At(at)
 						} else {
 							self.exit(direction);
@@ -368,7 +361,7 @@ impl BTreeIterState {
 						}
 					},
 					(IterDirection::Backward, LastIndex::End) => {
-						if let Some(at) = state.2.last_separator_index() {
+						if let Some(at) = state.1.last_separator_index() {
 							LastIndex::Descend(at + 1)
 						} else {
 							self.exit(direction);
@@ -397,9 +390,9 @@ impl BTreeIterState {
 				};
 				match next {
 					LastIndex::At(at) => {
-						if let Some(address) = state.2.separator_address(at) {
+						if let Some(address) = state.1.separator_address(at) {
 							state.0 = LastIndex::At(at);
-							let key = state.2.separator_key(at).unwrap();
+							let key = state.1.separator_key(at).unwrap();
 							let key_query = TableKeyQuery::Fetch(None);
 							let r = col.get_at_value_index(key_query, address, log)?;
 							return Ok(r.map(|r| (key, r.1)))
@@ -410,7 +403,7 @@ impl BTreeIterState {
 					},
 					LastIndex::Descend(child_ix) => {
 						if let Some(child) =
-							col.with_locked(|btree| state.2.fetch_child(child_ix, btree, log))?
+							col.with_locked(|btree| state.1.fetch_child(child_ix, btree, log))?
 						{
 							self.enter(child_ix, child, direction);
 						} else {
@@ -454,7 +447,7 @@ impl BTreeIterState {
 		self.fetch_root = false;
 		col.with_locked(|b| {
 			let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), b, log)?;
-			self.state.push((LastIndex::End, NodeType::Child, root));
+			self.state.push((LastIndex::End, root));
 			Ok(())
 		})
 	}

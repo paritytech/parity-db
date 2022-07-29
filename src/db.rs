@@ -1636,10 +1636,10 @@ mod tests {
 	#[test]
 	fn test_indexed_btree_3() {
 		test_indexed_btree_inner_3(EnableCommitPipelineStages::Standard);
-		/*test_indexed_btree_inner_3(EnableCommitPipelineStages::CommitOverlay);
+		test_indexed_btree_inner_3(EnableCommitPipelineStages::CommitOverlay);
 		test_indexed_btree_inner_3(EnableCommitPipelineStages::LogOverlay);
 		test_indexed_btree_inner_3(EnableCommitPipelineStages::DbFile);
-		test_indexed_btree_inner_3(EnableCommitPipelineStages::Standard);*/
+//		test_indexed_btree_inner_3(EnableCommitPipelineStages::Standard);
 	}
 
 	fn test_indexed_btree_inner_3(db_test: EnableCommitPipelineStages) {
@@ -1667,7 +1667,7 @@ mod tests {
 		let expected = (0u64..1024).filter(|i| i % 2 == 1).collect::<BTreeSet<_>>();
 		let mut iter = db.iter(0).unwrap();
 
-		for l in 0..100 {
+		for _ in 0..100 {
 			let at = rng.gen_range(0u64..=1024);
 			iter.seek(&at.to_be_bytes()).unwrap();
 
