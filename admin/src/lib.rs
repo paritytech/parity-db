@@ -41,7 +41,7 @@ pub fn run() -> Result<(), String> {
 		.unwrap_or_else(|| std::env::current_dir().expect("Cannot resolve current dir"));
 	let nb_column = cli.shared().columns.unwrap_or(1);
 	let mut options = if let Some(metadata) = parity_db::Options::load_metadata(&db_path)
-		.map_err(|e| format!("Error resolving metas: {:?}", e))?
+		.map_err(|e| format!("Error resolving metadata: {:?}", e))?
 	{
 		let mut options = parity_db::Options::with_columns(db_path.as_path(), 0);
 		options.columns = metadata.columns;
@@ -68,7 +68,7 @@ pub fn run() -> Result<(), String> {
 				db.clear_stats(stat.column);
 			} else {
 				let mut out = std::io::stdout();
-				db.collect_stats(&mut out, stat.column);
+				db.write_stats_text(&mut out, stat.column).unwrap();
 			}
 		},
 		SubCommand::Migrate(args) => {
