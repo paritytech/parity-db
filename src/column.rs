@@ -520,22 +520,19 @@ impl HashColumn {
 			log,
 			stats,
 		)? {
-			(Some(outcome), _, _) => return Ok(outcome),
-			(None, Some(value_address), new_value) => {
-				if new_value {
-					// If it was found in an older index we just insert a new entry. Reindex won't
-					// overwrite it.
-					let sub_index =
-						if index.id == tables.index.id { Some(sub_index) } else { None };
-					return tables.index.write_insert_plan(key, value_address, sub_index, log)
-				} else {
-					log::trace!(target: "parity-db", "{}: Removing from index {}", tables.index.id, hex(key));
-					index.write_remove_plan(key, sub_index, log)?;
-				}
+			(Some(outcome), _) => return Ok(outcome),
+			(None, Some(value_address)) => {
+				// If it was found in an older index we just insert a new entry. Reindex won't
+				// overwrite it.
+				let sub_index = if index.id == tables.index.id { Some(sub_index) } else { None };
+				return tables.index.write_insert_plan(key, value_address, sub_index, log)
 			},
-			_ => unreachable!(),
+			(None, None) => {
+				log::trace!(target: "parity-db", "{}: Removing from index {}", tables.index.id, hex(key));
+				index.write_remove_plan(key, sub_index, log)?;
+				Ok(PlanOutcome::Written)
+			},
 		}
-		Ok(PlanOutcome::Skipped)
 	}
 
 	fn write_plan_new<'a, 'b>(
@@ -889,7 +886,7 @@ impl Column {
 		change: &Change<K, V>,
 		log: &mut LogWriter,
 		stats: Option<&ColumnStats>,
-	) -> Result<(Option<PlanOutcome>, Option<Address>, bool)> {
+	) -> Result<(Option<PlanOutcome>, Option<Address>)> {
 		let tier = address.size_tier() as usize;
 
 		let fetch_size = || -> Result<(u32, u32)> {
@@ -914,9 +911,9 @@ impl Column {
 				if tables.ref_counted {
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.col, key);
 					tables.tables[tier].write_inc_ref(address.offset(), log)?;
-					return Ok((Some(PlanOutcome::Written), None, false))
+					return Ok((Some(PlanOutcome::Written), None))
 				} else {
-					return Ok((Some(PlanOutcome::Skipped), None, false))
+					return Ok((Some(PlanOutcome::Skipped), None))
 				},
 			Change::DecRc(_) =>
 				if tables.ref_counted {
@@ -931,19 +928,19 @@ impl Column {
 							}
 						}
 					}
-					return Ok((Some(PlanOutcome::Written), None, false))
+					return Ok((Some(PlanOutcome::Written), None))
 				} else {
-					return Ok((Some(PlanOutcome::Skipped), None, false))
+					return Ok((Some(PlanOutcome::Skipped), None))
 				},
 			Change::SetValue(_, val) => {
 				if tables.ref_counted {
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.col, key);
 					tables.tables[tier].write_inc_ref(address.offset(), log)?;
-					return Ok((Some(PlanOutcome::Written), None, true))
+					return Ok((Some(PlanOutcome::Written), None))
 				}
 				if tables.preimage {
 					// Replace is not supported
-					return Ok((Some(PlanOutcome::Skipped), None, true))
+					return Ok((Some(PlanOutcome::Skipped), None))
 				}
 
 				let (cval, target_tier) =
@@ -971,14 +968,14 @@ impl Column {
 						log,
 						compressed,
 					)?;
-					Ok((Some(PlanOutcome::Written), None, true))
+					Ok((Some(PlanOutcome::Written), None))
 				} else {
 					log::trace!(target: "parity-db", "{}: Replacing in a new table {}", tables.col, key);
 					tables.tables[tier].write_remove_plan(address.offset(), log)?;
 					let new_offset =
 						tables.tables[target_tier].write_insert_plan(key, cval, log, compressed)?;
 					let new_address = Address::new(new_offset, target_tier as u8);
-					Ok((None, Some(new_address), true))
+					Ok((None, Some(new_address)))
 				}
 			},
 			Change::RemoveValue(_) => {
@@ -999,9 +996,9 @@ impl Column {
 							stats.remove_val(uncompressed_size, compressed_size);
 						}
 					}
-					Ok((None, Some(address), false))
+					Ok((None, None))
 				} else {
-					Ok((Some(PlanOutcome::Written), None, false))
+					Ok((Some(PlanOutcome::Written), None))
 				}
 			},
 		}

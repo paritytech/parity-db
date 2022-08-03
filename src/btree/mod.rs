@@ -363,7 +363,7 @@ impl BTreeTable {
 		tables.compression = &crate::compress::NO_COMPRESSION;
 		let result = Ok(if let Some(existing) = node_id {
 			let k = TableKey::NoHash;
-			if let (_, Some(new_index), _) = Column::write_existing_value_plan(
+			if let (_, Some(new_index)) = Column::write_existing_value_plan(
 				&k,
 				tables,
 				existing,
