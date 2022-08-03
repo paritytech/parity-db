@@ -917,7 +917,6 @@ impl Column {
 				},
 			Change::DecRc(_) =>
 				if tables.ref_counted {
-					// TODO this should be part of write_dec_ref?
 					let cur_size = if stats.is_some() { Some(fetch_size()?) } else { None };
 					log::trace!(target: "parity-db", "{}: Decrement ref {}", tables.col, key);
 					let removed = !tables.tables[tier].write_dec_ref(address.offset(), log)?;

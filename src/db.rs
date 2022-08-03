@@ -1237,8 +1237,6 @@ impl IndexedChangeSet {
 				Change::IncRc(..) | Change::DecRc(..) => {
 					// Don't add (we allow remove value in overlay when using rc: some
 					// indexing on top of it is expected).
-					// TODO consider a strict Rc (rather the overhead on DecRc so very
-					// questionable).
 					if !ref_counted {
 						return Err(Error::InvalidInput(format!("No Rc for column {}", self.col)))
 					}
