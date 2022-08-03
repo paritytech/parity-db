@@ -91,8 +91,7 @@ impl Node {
 			let r = match &changes[0] {
 				Change::SetValue(key, value) =>
 					self.insert(depth, key, value, changes, btree, log)?,
-				Change::RemoveValue(key) => self.remove(depth, key, changes, btree, log)?,
-				_ => unimplemented!("TODO impl maybe fuse insert and remove"),
+				_ => self.on_existing(depth, changes, btree, log)?,
 			};
 			if r.0.is_some() || r.1 {
 				return Ok(r)
@@ -253,14 +252,15 @@ impl Node {
 		}
 	}
 
-	fn remove(
+	fn on_existing(
 		&mut self,
 		depth: u32,
-		key: &[u8],
 		changes: &mut &[Change<Vec<u8>, Vec<u8>>],
 		values: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
+		let change = &changes[0];
+		let key = change.key();
 		let has_child = depth != 0;
 		let (at, i) = self.position(key)?;
 		if at {
@@ -270,7 +270,7 @@ impl Node {
 					&TableKey::NoHash,
 					values,
 					existing,
-					&Change::RemoveValue(key),
+					change,
 					log,
 					None,
 				)?;
