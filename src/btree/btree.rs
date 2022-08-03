@@ -20,10 +20,10 @@ use super::*;
 use crate::{
 	btree::BTreeTable,
 	column::Column,
-	db::{Change, InputChange},
 	error::Result,
 	log::{LogQuery, LogWriter},
 	table::key::TableKeyQuery,
+	Change,
 };
 
 pub struct BTree {
@@ -47,7 +47,7 @@ impl BTree {
 
 	pub fn write_sorted_changes(
 		&mut self,
-		mut changes: &[InputChange],
+		mut changes: &[Change<Vec<u8>, Vec<u8>>],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<()> {

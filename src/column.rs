@@ -467,7 +467,11 @@ impl HashColumn {
 		Ok(None)
 	}
 
-	pub fn write_plan(&self, change: &Change<Key>, log: &mut LogWriter) -> Result<PlanOutcome> {
+	pub fn write_plan(
+		&self,
+		change: &Change<Key, Vec<u8>>,
+		log: &mut LogWriter,
+	) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
 		let existing = Self::search_all_indexes(change.key(), &*tables, &*reindex, log)?;
@@ -498,7 +502,7 @@ impl HashColumn {
 	fn write_plan_existing(
 		&self,
 		tables: &Tables,
-		change: &Change<Key>,
+		change: &Change<Key, Vec<u8>>,
 		log: &mut LogWriter,
 		index: &IndexTable,
 		sub_index: usize,
@@ -508,7 +512,6 @@ impl HashColumn {
 
 		let key = change.key();
 		let table_key = TableKey::Partial(*key);
-		let mut is_insert_value = false;
 		match Column::write_existing_value_plan(
 			&table_key,
 			self.as_ref(&tables.value),
@@ -879,11 +882,11 @@ impl HashColumn {
 }
 
 impl Column {
-	pub fn write_existing_value_plan<K>(
-		key: &TableKey, // TODO rem key? (already in change)
+	pub fn write_existing_value_plan<K, V: AsRef<[u8]>>(
+		key: &TableKey,
 		tables: TablesRef,
 		address: Address,
-		change: &Change<K>,
+		change: &Change<K, V>,
 		log: &mut LogWriter,
 		stats: Option<&ColumnStats>,
 	) -> Result<(Option<PlanOutcome>, Option<Address>, bool)> {
@@ -944,13 +947,20 @@ impl Column {
 				}
 
 				let (cval, target_tier) =
-					Column::compress(tables.compression, key, val, tables.tables);
-				let (cval, compressed) =
-					cval.as_ref().map(|cval| (cval.as_slice(), true)).unwrap_or((val, false));
+					Column::compress(tables.compression, key, val.as_ref(), tables.tables);
+				let (cval, compressed) = cval
+					.as_ref()
+					.map(|cval| (cval.as_slice(), true))
+					.unwrap_or((val.as_ref(), false));
 
 				if let Some(stats) = stats {
 					let (cur_size, uncompressed) = fetch_size()?;
-					stats.replace_val(cur_size, uncompressed, val.len() as u32, cval.len() as u32);
+					stats.replace_val(
+						cur_size,
+						uncompressed,
+						val.as_ref().len() as u32,
+						cval.len() as u32,
+					);
 				}
 				if tier == target_tier {
 					log::trace!(target: "parity-db", "{}: Replacing {}", tables.col, key);

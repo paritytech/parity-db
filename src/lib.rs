@@ -30,7 +30,7 @@ mod table;
 
 pub use btree::BTreeIterator;
 pub use compress::CompressionType;
-pub use db::{check::CheckOptions, Change, Db, InputChange, Value};
+pub use db::{check::CheckOptions, Change, Db, Value};
 pub use error::{Error, Result};
 pub use migration::{clear_column, migrate};
 pub use options::{ColumnOptions, Options};

@@ -73,7 +73,7 @@ struct Commit {
 	// removal (keys)
 	bytes: usize,
 	// Operations.
-	changeset: CommitChangeSet<'static>,
+	changeset: CommitChangeSet,
 }
 
 // Pending commits. This may not grow beyond `MAX_COMMIT_QUEUE_BYTES` bytes.
@@ -264,16 +264,17 @@ impl DbInner {
 			(
 				c,
 				match v {
-					Some(v) => InputChange::Owned(Change::SetValue(k.as_ref().into(), v)),
-					None => InputChange::Owned(Change::RemoveValue(k.as_ref().into())),
+					Some(v) => Change::SetValue(k, v),
+					None => Change::RemoveValue(k),
 				},
 			)
 		}))
 	}
 
-	fn commit_changes<I>(&self, tx: I) -> Result<()>
+	fn commit_changes<I, K>(&self, tx: I) -> Result<()>
 	where
-		I: IntoIterator<Item = (ColId, InputChange<'static>)>,
+		I: IntoIterator<Item = (ColId, Change<K, Vec<u8>>)>,
+		K: AsRef<[u8]>,
 	{
 		let mut commit: CommitChangeSet = Default::default();
 		for (col, change) in tx.into_iter() {
@@ -282,10 +283,10 @@ impl DbInner {
 					.btree_indexed
 					.entry(col)
 					.or_insert_with(|| BTreeChangeSet::new(col))
-					.push(change)
+					.push(change.to_key_vec())
 			} else {
 				commit.indexed.entry(col).or_insert_with(|| IndexedChangeSet::new(col)).push(
-					change,
+					change.to_key_vec(),
 					&self.options,
 					self.db_version,
 				)
@@ -295,7 +296,7 @@ impl DbInner {
 		self.commit_raw(commit)
 	}
 
-	fn commit_raw(&self, commit: CommitChangeSet<'static>) -> Result<()> {
+	fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
 		let mut queue = self.commit_queue.lock();
 		if queue.bytes > MAX_COMMIT_QUEUE_BYTES {
 			log::debug!(target: "parity-db", "Waiting, queue size={}", queue.bytes);
@@ -320,7 +321,7 @@ impl DbInner {
 				record_id,
 				&mut bytes,
 				&self.options,
-			);
+			)?;
 		}
 
 		for (c, iterset) in &commit.btree_indexed {
@@ -329,7 +330,7 @@ impl DbInner {
 				record_id,
 				&mut bytes,
 				&self.options,
-			);
+			)?;
 		}
 
 		let commit = Commit { id: record_id, changeset: commit, bytes };
@@ -921,7 +922,7 @@ impl Db {
 		self.inner.commit(tx)
 	}
 
-	pub fn commit_raw(&self, commit: CommitChangeSet<'static>) -> Result<()> {
+	pub fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
 		self.inner.commit_raw(commit)
 	}
 
@@ -1114,27 +1115,7 @@ impl CommitOverlay {
 	}
 }
 
-pub enum InputChange<'a> {
-	Ref(Change<&'a [u8]>),
-	Owned(Change<Vec<u8>>),
-}
-
-impl<'a> InputChange<'a> {
-	pub fn key(&'a self) -> &'a [u8] {
-		match &self {
-			InputChange::Ref(change) => change.key().as_ref(),
-			InputChange::Owned(change) => change.key().as_ref(),
-		}
-	}
-	pub fn is_rc_ops(&'a self) -> bool {
-		match &self {
-			InputChange::Ref(change) => change.is_rc_ops(),
-			InputChange::Owned(change) => change.is_rc_ops(),
-		}
-	}
-}
-
-pub enum Change<Key> {
+pub enum Change<Key, Value> {
 	SetValue(Key, Value),
 	RemoveValue(Key),
 	IncRc(Key),
@@ -1143,7 +1124,7 @@ pub enum Change<Key> {
 	             * overlay) and decrc not touching commit overlay. */
 }
 
-impl<Key> Change<Key> {
+impl<Key, Value> Change<Key, Value> {
 	pub fn key(&self) -> &Key {
 		match self {
 			Change::SetValue(k, _) |
@@ -1163,25 +1144,32 @@ impl<Key> Change<Key> {
 	}
 	pub fn is_rc_ops(&self) -> bool {
 		match self {
-			Change::SetValue(..) |
-			Change::RemoveValue(..) => false,
-			Change::IncRc(..) |
-			Change::DecRc(..) => true,
+			Change::SetValue(..) | Change::RemoveValue(..) => false,
+			Change::IncRc(..) | Change::DecRc(..) => true,
 		}
 	}
+}
 
-
+impl<K: AsRef<[u8]>, Value> Change<K, Value> {
+	pub fn to_key_vec(self) -> Change<Vec<u8>, Value> {
+		match self {
+			Change::SetValue(k, v) => Change::SetValue(k.as_ref().to_vec(), v),
+			Change::RemoveValue(k) => Change::RemoveValue(k.as_ref().to_vec()),
+			Change::IncRc(k) => Change::IncRc(k.as_ref().to_vec()),
+			Change::DecRc(k) => Change::DecRc(k.as_ref().to_vec()),
+		}
+	}
 }
 
 #[derive(Default)]
-pub struct CommitChangeSet<'a> {
+pub struct CommitChangeSet {
 	pub indexed: HashMap<ColId, IndexedChangeSet>,
-	pub btree_indexed: HashMap<ColId, BTreeChangeSet<'a>>,
+	pub btree_indexed: HashMap<ColId, BTreeChangeSet>,
 }
 
 pub struct IndexedChangeSet {
 	pub col: ColId,
-	pub changes: Vec<Change<Key>>,
+	pub changes: Vec<Change<Key, Vec<u8>>>,
 }
 
 impl IndexedChangeSet {
@@ -1189,16 +1177,9 @@ impl IndexedChangeSet {
 		IndexedChangeSet { col, changes: Default::default() }
 	}
 
-	fn push(&mut self, change: InputChange, options: &Options, db_version: u32) {
-		match change {
-			InputChange::Ref(change) => self.push_change_unhashed(change, options, db_version),
-			InputChange::Owned(change) => self.push_change_unhashed(change, options, db_version),
-		}
-	}
-
-	fn push_change_unhashed<K: AsRef<[u8]>>(
+	fn push<K: AsRef<[u8]>>(
 		&mut self,
-		change: Change<K>,
+		change: Change<K, Vec<u8>>,
 		options: &Options,
 		db_version: u32,
 	) {
@@ -1215,7 +1196,7 @@ impl IndexedChangeSet {
 		})
 	}
 
-	fn push_change_hashed(&mut self, change: Change<Key>) {
+	fn push_change_hashed(&mut self, change: Change<Key, Vec<u8>>) {
 		self.changes.push(change);
 	}
 
