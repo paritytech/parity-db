@@ -455,8 +455,6 @@ pub mod commit_overlay {
 				Change::IncRc(..) | Change::DecRc(..) => {
 					// Don't add (we allow remove value in overlay when using rc: some
 					// indexing on top of it is expected).
-					// TODO consider a strict Rc (rather the overhead on DecRc so very
-					// questionable).
 					if !ref_counted {
 						return Err(Error::InvalidInput(format!("No Rc for column {}", col)))
 					}
@@ -493,8 +491,7 @@ pub mod commit_overlay {
 				BTreeHeader { root: tree.root_index.unwrap_or(NULL_ADDRESS), depth: tree.depth };
 			let old_btree_header = btree_header.clone();
 
-			// TODO impl Ord and just use sort
-			self.changes.sort_by_key(|change| change.key().to_vec());
+			self.changes.sort();
 			tree.write_sorted_changes(self.changes.as_slice(), locked, writer)?;
 			*ops += self.changes.len() as u64;
 			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_header)?;

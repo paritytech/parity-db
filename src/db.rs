@@ -1115,6 +1115,7 @@ impl CommitOverlay {
 	}
 }
 
+#[derive(PartialEq, Eq)]
 pub enum Change<Key, Value> {
 	SetValue(Key, Value),
 	RemoveValue(Key),
@@ -1122,6 +1123,18 @@ pub enum Change<Key, Value> {
 	DecRc(Key), /* TODO remove ? (same as RemoveValue) -> could have different semantic:
 	             * remove value forcing removal (at least pushing in commit
 	             * overlay) and decrc not touching commit overlay. */
+}
+
+impl<Key: Ord, Value: Eq> PartialOrd<Self> for Change<Key, Value> {
+	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl<Key: Ord, Value: Eq> Ord for Change<Key, Value> {
+	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+		self.key().cmp(other.key())
+	}
 }
 
 impl<Key, Value> Change<Key, Value> {
