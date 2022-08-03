@@ -17,7 +17,7 @@
 use crate::{
 	btree::BTreeTable,
 	compress::Compress,
-	db::check::CheckDisplay,
+	db::{check::CheckDisplay, Change},
 	display::hex,
 	error::{Error, Result},
 	index::{Address, IndexTable, PlanOutcome, TableId as IndexTableId},
@@ -467,26 +467,30 @@ impl HashColumn {
 		Ok(None)
 	}
 
-	pub fn write_plan(
-		&self,
-		key: &Key,
-		value: Option<&[u8]>,
-		log: &mut LogWriter,
-	) -> Result<PlanOutcome> {
+	pub fn write_plan(&self, change: &Change<Key>, log: &mut LogWriter) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
-		let existing = Self::search_all_indexes(key, &*tables, &*reindex, log)?;
+		let existing = Self::search_all_indexes(change.key(), &*tables, &*reindex, log)?;
 		if let Some((table, sub_index, existing_address)) = existing {
-			self.write_plan_existing(&*tables, key, value, log, table, sub_index, existing_address)
-		} else if let Some(value) = value {
-			let (r, _, _) = self.write_plan_new(tables, reindex, key, value, log)?;
-			Ok(r)
+			self.write_plan_existing(&*tables, change, log, table, sub_index, existing_address)
 		} else {
-			log::trace!(target: "parity-db", "{}: Deleting missing key {}", tables.index.id, hex(key));
-			if self.collect_stats {
-				self.stats.remove_miss();
+			match change {
+				Change::SetValue(key, value) => {
+					let (r, _, _) = self.write_plan_new(tables, reindex, key, value, log)?;
+					Ok(r)
+				},
+				Change::RemoveValue(key) | Change::DecRc(key) => {
+					log::trace!(target: "parity-db", "{}: Deleting missing key {}", tables.index.id, hex(key));
+					if self.collect_stats {
+						self.stats.remove_miss();
+					}
+					Ok(PlanOutcome::Skipped)
+				},
+				Change::IncRc(key) => {
+					log::trace!(target: "parity-db", "{}: Ignoring increase rc, missing key {}", tables.index.id, hex(key));
+					Ok(PlanOutcome::Skipped)
+				},
 			}
-			Ok(PlanOutcome::Skipped)
 		}
 	}
 
@@ -494,8 +498,7 @@ impl HashColumn {
 	fn write_plan_existing(
 		&self,
 		tables: &Tables,
-		key: &Key,
-		value: Option<&[u8]>,
+		change: &Change<Key>,
 		log: &mut LogWriter,
 		index: &IndexTable,
 		sub_index: usize,
@@ -503,18 +506,20 @@ impl HashColumn {
 	) -> Result<PlanOutcome> {
 		let stats = if self.collect_stats { Some(&self.stats) } else { None };
 
+		let key = change.key();
 		let table_key = TableKey::Partial(*key);
+		let mut is_insert_value = false;
 		match Column::write_existing_value_plan(
 			&table_key,
 			self.as_ref(&tables.value),
 			existing_address,
-			value,
+			change,
 			log,
 			stats,
 		)? {
-			(Some(outcome), _) => return Ok(outcome),
-			(None, Some(value_address)) => {
-				if value.is_some() {
+			(Some(outcome), _, _) => return Ok(outcome),
+			(None, Some(value_address), new_value) => {
+				if new_value {
 					// If it was found in an older index we just insert a new entry. Reindex won't
 					// overwrite it.
 					let sub_index =
@@ -874,108 +879,121 @@ impl HashColumn {
 }
 
 impl Column {
-	pub fn write_existing_value_plan(
-		key: &TableKey,
+	pub fn write_existing_value_plan<K>(
+		key: &TableKey, // TODO rem key? (already in change)
 		tables: TablesRef,
 		address: Address,
-		value: Option<&[u8]>,
+		change: &Change<K>,
 		log: &mut LogWriter,
 		stats: Option<&ColumnStats>,
-	) -> Result<(Option<PlanOutcome>, Option<Address>)> {
+	) -> Result<(Option<PlanOutcome>, Option<Address>, bool)> {
 		let tier = address.size_tier() as usize;
-		if let Some(val) = value.as_ref() {
-			if tables.ref_counted {
-				log::trace!(target: "parity-db", "{}: Increment ref {}", tables.col, key);
-				tables.tables[tier].write_inc_ref(address.offset(), log)?;
-				return Ok((Some(PlanOutcome::Written), None))
-			}
-			if tables.preimage {
-				// Replace is not supported
-				return Ok((Some(PlanOutcome::Skipped), None))
-			}
 
-			let (cval, target_tier) = Column::compress(tables.compression, key, val, tables.tables);
-			let (cval, compressed) =
-				cval.as_ref().map(|cval| (cval.as_slice(), true)).unwrap_or((val, false));
+		let fetch_size = || -> Result<(u32, u32)> {
+			let (cur_size, compressed) =
+				tables.tables[tier].size(key, address.offset(), log)?.unwrap_or((0, false));
+			Ok(if compressed {
+				// This is very costly.
+				let compressed = tables.tables[tier]
+					.get(key, address.offset(), log)?
+					.expect("Same query as size")
+					.0;
+				let uncompressed = tables.compression.decompress(compressed.as_slice())?;
 
-			if let Some(stats) = stats {
-				let (cur_size, compressed) =
-					tables.tables[tier].size(key, address.offset(), log)?.unwrap_or((0, false));
-				if compressed {
-					// This is very costly.
-					let compressed = tables.tables[tier]
-						.get(key, address.offset(), log)?
-						.expect("Same query as size")
-						.0;
-					let uncompressed = tables.compression.decompress(compressed.as_slice())?;
+				(cur_size, uncompressed.len() as u32)
+			} else {
+				(cur_size, cur_size)
+			})
+		};
 
-					stats.replace_val(
-						cur_size,
-						uncompressed.len() as u32,
-						val.len() as u32,
-						cval.len() as u32,
-					);
+		match change {
+			Change::IncRc(_) =>
+				if tables.ref_counted {
+					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.col, key);
+					tables.tables[tier].write_inc_ref(address.offset(), log)?;
+					return Ok((Some(PlanOutcome::Written), None, false))
 				} else {
-					stats.replace_val(cur_size, cur_size, val.len() as u32, cval.len() as u32);
-				}
-			}
-			if tier == target_tier {
-				log::trace!(target: "parity-db", "{}: Replacing {}", tables.col, key);
-				tables.tables[target_tier].write_replace_plan(
-					address.offset(),
-					key,
-					cval,
-					log,
-					compressed,
-				)?;
-				Ok((Some(PlanOutcome::Written), None))
-			} else {
-				log::trace!(target: "parity-db", "{}: Replacing in a new table {}", tables.col, key);
-				tables.tables[tier].write_remove_plan(address.offset(), log)?;
-				let new_offset =
-					tables.tables[target_tier].write_insert_plan(key, cval, log, compressed)?;
-				let new_address = Address::new(new_offset, target_tier as u8);
-				Ok((None, Some(new_address)))
-			}
-		} else {
-			// Deletion
-			let cur_size = if stats.is_some() {
-				let (cur_size, compressed) =
-					tables.tables[tier].size(key, address.offset(), log)?.unwrap_or((0, false));
-				Some(if compressed {
-					// This is very costly.
-					let compressed = tables.tables[tier]
-						.get(key, address.offset(), log)?
-						.expect("Same query as size")
-						.0;
-					let uncompressed = tables.compression.decompress(compressed.as_slice())?;
-
-					(cur_size, uncompressed.len() as u32)
-				} else {
-					(cur_size, cur_size)
-				})
-			} else {
-				None
-			};
-			let remove = if tables.ref_counted {
-				let removed = !tables.tables[tier].write_dec_ref(address.offset(), log)?;
-				log::trace!(target: "parity-db", "{}: Dereference {}, deleted={}", tables.col, key, removed);
-				removed
-			} else {
-				log::trace!(target: "parity-db", "{}: Deleting {}", tables.col, key);
-				tables.tables[tier].write_remove_plan(address.offset(), log)?;
-				true
-			};
-			if remove {
-				if let Some((compressed_size, uncompressed_size)) = cur_size {
-					if let Some(stats) = stats {
-						stats.remove_val(uncompressed_size, compressed_size);
+					return Ok((Some(PlanOutcome::Skipped), None, false))
+				},
+			Change::DecRc(_) =>
+				if tables.ref_counted {
+					// TODO this should be part of write_dec_ref?
+					let cur_size = if stats.is_some() { Some(fetch_size()?) } else { None };
+					log::trace!(target: "parity-db", "{}: Decrement ref {}", tables.col, key);
+					let removed = !tables.tables[tier].write_dec_ref(address.offset(), log)?;
+					if removed {
+						if let Some((compressed_size, uncompressed_size)) = cur_size {
+							if let Some(stats) = stats {
+								stats.remove_val(uncompressed_size, compressed_size);
+							}
+						}
 					}
+					return Ok((Some(PlanOutcome::Written), None, false))
+				} else {
+					return Ok((Some(PlanOutcome::Skipped), None, false))
+				},
+			Change::SetValue(_, val) => {
+				if tables.ref_counted {
+					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.col, key);
+					tables.tables[tier].write_inc_ref(address.offset(), log)?;
+					return Ok((Some(PlanOutcome::Written), None, true))
 				}
-				Ok((None, Some(address)))
-			} else {
-				Ok((Some(PlanOutcome::Written), None))
-			}
+				if tables.preimage {
+					// Replace is not supported
+					return Ok((Some(PlanOutcome::Skipped), None, true))
+				}
+
+				let (cval, target_tier) =
+					Column::compress(tables.compression, key, val, tables.tables);
+				let (cval, compressed) =
+					cval.as_ref().map(|cval| (cval.as_slice(), true)).unwrap_or((val, false));
+
+				if let Some(stats) = stats {
+					let (cur_size, uncompressed) = fetch_size()?;
+					stats.replace_val(cur_size, uncompressed, val.len() as u32, cval.len() as u32);
+				}
+				if tier == target_tier {
+					log::trace!(target: "parity-db", "{}: Replacing {}", tables.col, key);
+					tables.tables[target_tier].write_replace_plan(
+						address.offset(),
+						key,
+						cval,
+						log,
+						compressed,
+					)?;
+					Ok((Some(PlanOutcome::Written), None, true))
+				} else {
+					log::trace!(target: "parity-db", "{}: Replacing in a new table {}", tables.col, key);
+					tables.tables[tier].write_remove_plan(address.offset(), log)?;
+					let new_offset =
+						tables.tables[target_tier].write_insert_plan(key, cval, log, compressed)?;
+					let new_address = Address::new(new_offset, target_tier as u8);
+					Ok((None, Some(new_address), true))
+				}
+			},
+			Change::RemoveValue(_) => {
+				// Deletion
+				let cur_size = if stats.is_some() { Some(fetch_size()?) } else { None };
+				let remove = if tables.ref_counted {
+					let removed = !tables.tables[tier].write_dec_ref(address.offset(), log)?;
+					log::trace!(target: "parity-db", "{}: Dereference {}, deleted={}", tables.col, key, removed);
+					removed
+				} else {
+					log::trace!(target: "parity-db", "{}: Deleting {}", tables.col, key);
+					tables.tables[tier].write_remove_plan(address.offset(), log)?;
+					true
+				};
+				if remove {
+					if let Some((compressed_size, uncompressed_size)) = cur_size {
+						if let Some(stats) = stats {
+							stats.remove_val(uncompressed_size, compressed_size);
+						}
+					}
+					Ok((None, Some(address), false))
+				} else {
+					Ok((Some(PlanOutcome::Written), None, false))
+				}
+			},
 		}
 	}
 

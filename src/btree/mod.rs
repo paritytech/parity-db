@@ -45,6 +45,7 @@ use crate::{
 		key::{TableKey, TableKeyQuery},
 		Entry as ValueTableEntry, Value, ValueTable,
 	},
+	Change,
 };
 pub use iter::BTreeIterator;
 use node::SeparatorInner;
@@ -304,7 +305,7 @@ impl BTreeTable {
 			&TableKey::NoHash,
 			tables,
 			node_index,
-			None,
+			&Change::RemoveValue(()),
 			writer,
 			None,
 		)?;
@@ -363,11 +364,11 @@ impl BTreeTable {
 		let mut write_node = || {
 			Ok(if let Some(existing) = node_id {
 				let k = TableKey::NoHash;
-				if let (_, Some(new_index)) = Column::write_existing_value_plan(
+				if let (_, Some(new_index), _) = Column::write_existing_value_plan(
 					&k,
 					tables,
 					existing,
-					Some(entry.encoded.as_ref()),
+					&Change::SetValue((), entry.encoded.as_ref().into()),
 					writer,
 					None,
 				)? {
@@ -397,23 +398,23 @@ pub mod commit_overlay {
 	use super::*;
 	use crate::{
 		column::{ColId, Column},
-		db::BTreeCommitOverlay,
+		db::{BTreeCommitOverlay, Change, InputChange},
 		error::Result,
 	};
 
-	pub struct BTreeChangeSet {
+	pub struct BTreeChangeSet<'a> {
 		pub col: ColId,
-		pub changes: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+		pub changes: Vec<InputChange<'a>>,
 	}
 
-	impl BTreeChangeSet {
+	impl<'a> BTreeChangeSet<'a> {
 		pub fn new(col: ColId) -> Self {
 			BTreeChangeSet { col, changes: Default::default() }
 		}
 
-		pub fn push(&mut self, k: &[u8], v: Option<Vec<u8>>) {
+		pub fn push(&mut self, change: InputChange<'a>) {
 			// No key hashing
-			self.changes.push((k.to_vec(), v));
+			self.changes.push(change);
 		}
 
 		pub fn copy_to_overlay(
@@ -422,31 +423,74 @@ pub mod commit_overlay {
 			record_id: u64,
 			bytes: &mut usize,
 			options: &Options,
-		) {
+		) -> Result<()> {
 			let ref_counted = options.columns[self.col as usize].ref_counted;
 			for commit in self.changes.iter() {
 				match commit {
-					(key, Some(value)) => {
-						*bytes += key.len();
-						*bytes += value.len();
-						overlay.insert(key.clone(), (record_id, Some(value.clone())));
-					},
-					(key, None) => {
-						*bytes += key.len();
-						// Don't add removed ref-counted values to overlay.
-						// (current ref_counted implementation does not
-						// make much sense for btree indexed content).
-						if !ref_counted {
-							overlay.insert(key.clone(), (record_id, None));
-						}
-					},
+					InputChange::Ref(change) => Self::copy_to_overlay_inner(
+						overlay,
+						change,
+						record_id,
+						bytes,
+						ref_counted,
+						self.col,
+					)?,
+					InputChange::Owned(change) => Self::copy_to_overlay_inner(
+						overlay,
+						change,
+						record_id,
+						bytes,
+						ref_counted,
+						self.col,
+					)?,
 				}
 			}
+			Ok(())
+		}
+
+		pub fn copy_to_overlay_inner<K: AsRef<[u8]>>(
+			overlay: &mut BTreeCommitOverlay,
+			change: &Change<K>,
+			record_id: u64,
+			bytes: &mut usize,
+			ref_counted: bool,
+			col: ColId,
+		) -> Result<()> {
+			match change {
+				Change::SetValue(key, value) => {
+					*bytes += key.as_ref().len();
+					*bytes += value.len();
+					overlay.insert(key.as_ref().into(), (record_id, Some(value.clone())));
+				},
+				Change::RemoveValue(key) => {
+					// Don't add removed ref-counted values to overlay.
+					// (current ref_counted implementation does not
+					// make much sense for btree indexed content).
+					if !ref_counted {
+						*bytes += key.as_ref().len();
+						overlay.insert(key.as_ref().into(), (record_id, None));
+					}
+				},
+				Change::IncRc(..) | Change::DecRc(..) => {
+					// Don't add (we allow remove value in overlay when using rc: some
+					// indexing on top of it is expected).
+					// TODO consider a strict Rc (rather the overhead on DecRc so very
+					// questionable).
+					if !ref_counted {
+						return Err(Error::InvalidInput(format!("No Rc for column {}", col)))
+					}
+				},
+			}
+			Ok(())
 		}
 
 		pub fn clean_overlay(&mut self, overlay: &mut BTreeCommitOverlay, record_id: u64) {
 			use std::collections::btree_map::Entry;
-			for (key, _) in self.changes.drain(..) {
+			for change in self.changes.drain(..) {
+				let key = match change {
+					InputChange::Owned(change) => change.into_key(),
+					InputChange::Ref(change) => change.into_key().into(),
+				};
 				if let Entry::Occupied(e) = overlay.entry(key) {
 					if e.get().0 == record_id {
 						e.remove_entry();
@@ -471,7 +515,8 @@ pub mod commit_overlay {
 				BTreeHeader { root: tree.root_index.unwrap_or(NULL_ADDRESS), depth: tree.depth };
 			let old_btree_header = btree_header.clone();
 
-			self.changes.sort_by_key(|(k, _)| k.clone());
+			// TODO impl Ord and just use sort
+			self.changes.sort_by_key(|change| change.key().to_vec());
 			tree.write_sorted_changes(self.changes.as_slice(), locked, writer)?;
 			*ops += self.changes.len() as u64;
 			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_header)?;
@@ -483,7 +528,7 @@ pub mod commit_overlay {
 					&TableKey::NoHash,
 					locked,
 					HEADER_ADDRESS,
-					Some(&entry.encoded.as_ref()[..HEADER_SIZE as usize]),
+					&Change::SetValue((), entry.encoded.as_ref()[..HEADER_SIZE as usize].into()),
 					writer,
 					None,
 				)?;

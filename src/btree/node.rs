@@ -26,6 +26,7 @@ use crate::{
 	index::Address,
 	log::{LogQuery, LogWriter},
 	table::key::TableKey,
+	Change, InputChange,
 };
 use std::cmp::Ordering;
 
@@ -71,24 +72,33 @@ impl Node {
 		&mut self,
 		parent: Option<(&mut Self, usize)>,
 		depth: u32,
-		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
+		changes: &mut &[InputChange],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
 		loop {
 			if changes.len() > 1 {
-				if changes[0].0 == changes[1].0 {
+				if changes[0].key() == changes[1].key() && !changes[0].is_rc_ops() && !changes[1].is_rc_ops() {
 					// TODO only when advancing (here rec call useless)
 					*changes = &changes[1..];
 					continue
 				}
-				debug_assert!(changes[0].0 < changes[1].0);
+				debug_assert!(changes[0].key() < changes[1].key());
 			}
-			let (key, value) = &changes[0];
-			let r = if let Some(value) = value {
-				self.insert(depth, key, value, changes, btree, log)?
-			} else {
-				self.remove(depth, key, changes, btree, log)?
+			let r = match &changes[0] {
+				InputChange::Ref(Change::SetValue(key, value)) => {
+					self.insert(depth, key, value, changes, btree, log)?
+				},
+				InputChange::Owned(Change::SetValue(key, value)) => {
+					self.insert(depth, key, value, changes, btree, log)?
+				},
+				InputChange::Ref(Change::RemoveValue(key)) => {
+					self.remove(depth, key, changes, btree, log)?
+				},
+				InputChange::Owned(Change::RemoveValue(key)) => {
+					self.remove(depth, key, changes, btree, log)?
+				},
+				_ => unimplemented!("TODO impl maybe fuse insert and remove"),
 			};
 			if r.0.is_some() || r.1 {
 				return Ok(r)
@@ -97,7 +107,7 @@ impl Node {
 				break
 			}
 			if let Some((parent, p)) = &parent {
-				let key = &changes[1].0;
+				let key = &changes[1].key();
 				let (at, i) = self.position(key)?; // TODO could start position from current
 				if at || i < self.number_separator() {
 					*changes = &changes[1..];
@@ -122,7 +132,7 @@ impl Node {
 		depth: u32,
 		key: &[u8],
 		value: &[u8],
-		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
+		changes: &mut &[InputChange],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
@@ -253,7 +263,7 @@ impl Node {
 		&mut self,
 		depth: u32,
 		key: &[u8],
-		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
+		changes: &mut &[InputChange],
 		values: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
@@ -266,7 +276,7 @@ impl Node {
 					&TableKey::NoHash,
 					values,
 					existing,
-					None,
+					&Change::RemoveValue(key),
 					log,
 					None,
 				)?;
@@ -739,7 +749,7 @@ impl Node {
 				&TableKey::NoHash,
 				btree,
 				address,
-				Some(value),
+				&Change::SetValue((), value.into()),
 				log,
 				None,
 			)?

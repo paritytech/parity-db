@@ -16,7 +16,7 @@
 
 use crate::{
 	column::{ColId, IterState},
-	db::{CommitChangeSet, Db, IndexedChangeSet},
+	db::{Change, CommitChangeSet, Db, IndexedChangeSet},
 	options::Options,
 	Error, Result,
 };
@@ -97,7 +97,7 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 					.entry(c)
 					.or_insert_with(|| IndexedChangeSet::new(c))
 					.changes
-					.push((key, Some(value)));
+					.push(Change::SetValue(key, value));
 				nb_commit += 1;
 				if nb_commit == COMMIT_SIZE {
 					ncommits += 1;

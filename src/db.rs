@@ -73,7 +73,7 @@ struct Commit {
 	// removal (keys)
 	bytes: usize,
 	// Operations.
-	changeset: CommitChangeSet,
+	changeset: CommitChangeSet<'static>,
 }
 
 // Pending commits. This may not grow beyond `MAX_COMMIT_QUEUE_BYTES` bytes.
@@ -260,18 +260,32 @@ impl DbInner {
 		I: IntoIterator<Item = (ColId, K, Option<Value>)>,
 		K: AsRef<[u8]>,
 	{
+		self.commit_changes(tx.into_iter().map(|(c, k, v)| {
+			(
+				c,
+				match v {
+					Some(v) => InputChange::Owned(Change::SetValue(k.as_ref().into(), v)),
+					None => InputChange::Owned(Change::RemoveValue(k.as_ref().into())),
+				},
+			)
+		}))
+	}
+
+	fn commit_changes<I>(&self, tx: I) -> Result<()>
+	where
+		I: IntoIterator<Item = (ColId, InputChange<'static>)>,
+	{
 		let mut commit: CommitChangeSet = Default::default();
-		for (c, k, v) in tx.into_iter() {
-			if self.options.columns[c as usize].btree_index {
+		for (col, change) in tx.into_iter() {
+			if self.options.columns[col as usize].btree_index {
 				commit
 					.btree_indexed
-					.entry(c)
-					.or_insert_with(|| BTreeChangeSet::new(c))
-					.push(k.as_ref(), v)
+					.entry(col)
+					.or_insert_with(|| BTreeChangeSet::new(col))
+					.push(change)
 			} else {
-				commit.indexed.entry(c).or_insert_with(|| IndexedChangeSet::new(c)).push(
-					k.as_ref(),
-					v,
+				commit.indexed.entry(col).or_insert_with(|| IndexedChangeSet::new(col)).push(
+					change,
 					&self.options,
 					self.db_version,
 				)
@@ -281,7 +295,7 @@ impl DbInner {
 		self.commit_raw(commit)
 	}
 
-	fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
+	fn commit_raw(&self, commit: CommitChangeSet<'static>) -> Result<()> {
 		let mut queue = self.commit_queue.lock();
 		if queue.bytes > MAX_COMMIT_QUEUE_BYTES {
 			log::debug!(target: "parity-db", "Waiting, queue size={}", queue.bytes);
@@ -907,7 +921,7 @@ impl Db {
 		self.inner.commit(tx)
 	}
 
-	pub fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
+	pub fn commit_raw(&self, commit: CommitChangeSet<'static>) -> Result<()> {
 		self.inner.commit_raw(commit)
 	}
 
@@ -1100,15 +1114,74 @@ impl CommitOverlay {
 	}
 }
 
+pub enum InputChange<'a> {
+	Ref(Change<&'a [u8]>),
+	Owned(Change<Vec<u8>>),
+}
+
+impl<'a> InputChange<'a> {
+	pub fn key(&'a self) -> &'a [u8] {
+		match &self {
+			InputChange::Ref(change) => change.key().as_ref(),
+			InputChange::Owned(change) => change.key().as_ref(),
+		}
+	}
+	pub fn is_rc_ops(&'a self) -> bool {
+		match &self {
+			InputChange::Ref(change) => change.is_rc_ops(),
+			InputChange::Owned(change) => change.is_rc_ops(),
+		}
+	}
+}
+
+pub enum Change<Key> {
+	SetValue(Key, Value),
+	RemoveValue(Key),
+	IncRc(Key),
+	DecRc(Key), /* TODO remove ? (same as RemoveValue) -> could have different semantic:
+	             * remove value forcing removal (at least pushing in commit
+	             * overlay) and decrc not touching commit overlay. */
+}
+
+impl<Key> Change<Key> {
+	pub fn key(&self) -> &Key {
+		match self {
+			Change::SetValue(k, _) |
+			Change::RemoveValue(k) |
+			Change::IncRc(k) |
+			Change::DecRc(k) => k,
+		}
+	}
+
+	pub fn into_key(self) -> Key {
+		match self {
+			Change::SetValue(k, _) |
+			Change::RemoveValue(k) |
+			Change::IncRc(k) |
+			Change::DecRc(k) => k,
+		}
+	}
+	pub fn is_rc_ops(&self) -> bool {
+		match self {
+			Change::SetValue(..) |
+			Change::RemoveValue(..) => false,
+			Change::IncRc(..) |
+			Change::DecRc(..) => true,
+		}
+	}
+
+
+}
+
 #[derive(Default)]
-pub struct CommitChangeSet {
+pub struct CommitChangeSet<'a> {
 	pub indexed: HashMap<ColId, IndexedChangeSet>,
-	pub btree_indexed: HashMap<ColId, BTreeChangeSet>,
+	pub btree_indexed: HashMap<ColId, BTreeChangeSet<'a>>,
 }
 
 pub struct IndexedChangeSet {
 	pub col: ColId,
-	pub changes: Vec<(Key, Option<Value>)>,
+	pub changes: Vec<Change<Key>>,
 }
 
 impl IndexedChangeSet {
@@ -1116,10 +1189,34 @@ impl IndexedChangeSet {
 		IndexedChangeSet { col, changes: Default::default() }
 	}
 
-	fn push(&mut self, key: &[u8], v: Option<Value>, options: &Options, db_version: u32) {
+	fn push(&mut self, change: InputChange, options: &Options, db_version: u32) {
+		match change {
+			InputChange::Ref(change) => self.push_change_unhashed(change, options, db_version),
+			InputChange::Owned(change) => self.push_change_unhashed(change, options, db_version),
+		}
+	}
+
+	fn push_change_unhashed<K: AsRef<[u8]>>(
+		&mut self,
+		change: Change<K>,
+		options: &Options,
+		db_version: u32,
+	) {
 		let salt = options.salt.unwrap_or_default();
-		let k = hash_key(key, &salt, options.columns[self.col as usize].uniform, db_version);
-		self.changes.push((k, v));
+		let hash_key = |key: &[u8]| -> Key {
+			hash_key(key, &salt, options.columns[self.col as usize].uniform, db_version)
+		};
+
+		self.push_change_hashed(match change {
+			Change::SetValue(k, v) => Change::SetValue(hash_key(k.as_ref()), v),
+			Change::RemoveValue(k) => Change::RemoveValue(hash_key(k.as_ref())),
+			Change::IncRc(k) => Change::IncRc(hash_key(k.as_ref())),
+			Change::DecRc(k) => Change::DecRc(hash_key(k.as_ref())),
+		})
+	}
+
+	fn push_change_hashed(&mut self, change: Change<Key>) {
+		self.changes.push(change);
 	}
 
 	fn copy_to_overlay(
@@ -1128,16 +1225,33 @@ impl IndexedChangeSet {
 		record_id: u64,
 		bytes: &mut usize,
 		options: &Options,
-	) {
+	) -> Result<()> {
 		let ref_counted = options.columns[self.col as usize].ref_counted;
-		for (k, v) in self.changes.iter() {
-			*bytes += k.len();
-			*bytes += v.as_ref().map_or(0, |v| v.len());
-			// Don't add removed ref-counted values to overlay.
-			if !ref_counted || v.is_some() {
-				overlay.indexed.insert(*k, (record_id, v.clone()));
+		for change in self.changes.iter() {
+			match &change {
+				Change::SetValue(k, v) => {
+					*bytes += k.len();
+					*bytes += v.len();
+					overlay.indexed.insert(*k, (record_id, Some(v.clone())));
+				},
+				Change::RemoveValue(k) => {
+					// Don't add removed ref-counted values to overlay.
+					if !ref_counted {
+						overlay.indexed.insert(*k, (record_id, None));
+					}
+				},
+				Change::IncRc(..) | Change::DecRc(..) => {
+					// Don't add (we allow remove value in overlay when using rc: some
+					// indexing on top of it is expected).
+					// TODO consider a strict Rc (rather the overhead on DecRc so very
+					// questionable).
+					if !ref_counted {
+						return Err(Error::InvalidInput(format!("No Rc for column {}", self.col)))
+					}
+				},
 			}
 		}
+		Ok(())
 	}
 
 	fn write_plan(
@@ -1154,10 +1268,8 @@ impl IndexedChangeSet {
 				return Ok(())
 			},
 		};
-		for (key, value) in self.changes.iter() {
-			if let PlanOutcome::NeedReindex =
-				column.write_plan(key, value.as_ref().map(|v| v.as_slice()), writer)?
-			{
+		for change in self.changes.iter() {
+			if let PlanOutcome::NeedReindex = column.write_plan(change, writer)? {
 				// Reindex has triggered another reindex.
 				*reindex = true;
 			}
@@ -1168,11 +1280,15 @@ impl IndexedChangeSet {
 
 	fn clean_overlay(&self, overlay: &mut CommitOverlay, record_id: u64) {
 		use std::collections::hash_map::Entry;
-		for (key, _) in self.changes.iter() {
-			if let Entry::Occupied(e) = overlay.indexed.entry(*key) {
-				if e.get().0 == record_id {
-					e.remove_entry();
-				}
+		for change in self.changes.iter() {
+			match change {
+				Change::SetValue(k, _) | Change::RemoveValue(k) =>
+					if let Entry::Occupied(e) = overlay.indexed.entry(*k) {
+						if e.get().0 == record_id {
+							e.remove_entry();
+						}
+					},
+				Change::IncRc(..) | Change::DecRc(..) => (),
 			}
 		}
 	}
