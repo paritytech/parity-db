@@ -483,7 +483,7 @@ impl HashColumn {
 					let (r, _, _) = self.write_plan_new(tables, reindex, key, value, log)?;
 					Ok(r)
 				},
-				Change::RemoveValue(key) | Change::DecRc(key) => {
+				Change::RemoveValue(key) => {
 					log::trace!(target: "parity-db", "{}: Deleting missing key {}", tables.index.id, hex(key));
 					if self.collect_stats {
 						self.stats.remove_miss();
@@ -911,22 +911,6 @@ impl Column {
 				if tables.ref_counted {
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.col, key);
 					tables.tables[tier].write_inc_ref(address.offset(), log)?;
-					return Ok((Some(PlanOutcome::Written), None))
-				} else {
-					return Ok((Some(PlanOutcome::Skipped), None))
-				},
-			Change::DecRc(_) =>
-				if tables.ref_counted {
-					let cur_size = if stats.is_some() { Some(fetch_size()?) } else { None };
-					log::trace!(target: "parity-db", "{}: Decrement ref {}", tables.col, key);
-					let removed = !tables.tables[tier].write_dec_ref(address.offset(), log)?;
-					if removed {
-						if let Some((compressed_size, uncompressed_size)) = cur_size {
-							if let Some(stats) = stats {
-								stats.remove_val(uncompressed_size, compressed_size);
-							}
-						}
-					}
 					return Ok((Some(PlanOutcome::Written), None))
 				} else {
 					return Ok((Some(PlanOutcome::Skipped), None))

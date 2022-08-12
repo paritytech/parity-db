@@ -432,11 +432,14 @@ pub mod commit_overlay {
 							overlay.insert(key.clone(), (record_id, None));
 						}
 					},
-					Change::IncRc(..) | Change::DecRc(..) => {
+					Change::IncRc(..) => {
 						// Don't add (we allow remove value in overlay when using rc: some
 						// indexing on top of it is expected).
 						if !ref_counted {
-							return Err(Error::InvalidInput(format!("No Rc for column {}", self.col)))
+							return Err(Error::InvalidInput(format!(
+								"No Rc for column {}",
+								self.col
+							)))
 						}
 					},
 				}

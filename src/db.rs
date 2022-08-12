@@ -1120,9 +1120,6 @@ pub enum Change<Key, Value> {
 	SetValue(Key, Value),
 	RemoveValue(Key),
 	IncRc(Key),
-	DecRc(Key), /* TODO remove ? (same as RemoveValue) -> could have different semantic:
-	             * remove value forcing removal (at least pushing in commit
-	             * overlay) and decrc not touching commit overlay. */
 }
 
 impl<Key: Ord, Value: Eq> PartialOrd<Self> for Change<Key, Value> {
@@ -1140,25 +1137,20 @@ impl<Key: Ord, Value: Eq> Ord for Change<Key, Value> {
 impl<Key, Value> Change<Key, Value> {
 	pub fn key(&self) -> &Key {
 		match self {
-			Change::SetValue(k, _) |
-			Change::RemoveValue(k) |
-			Change::IncRc(k) |
-			Change::DecRc(k) => k,
+			Change::SetValue(k, _) | Change::RemoveValue(k) | Change::IncRc(k) => k,
 		}
 	}
 
 	pub fn into_key(self) -> Key {
 		match self {
-			Change::SetValue(k, _) |
-			Change::RemoveValue(k) |
-			Change::IncRc(k) |
-			Change::DecRc(k) => k,
+			Change::SetValue(k, _) | Change::RemoveValue(k) | Change::IncRc(k) => k,
 		}
 	}
+
 	pub fn is_rc_ops(&self) -> bool {
 		match self {
 			Change::SetValue(..) | Change::RemoveValue(..) => false,
-			Change::IncRc(..) | Change::DecRc(..) => true,
+			Change::IncRc(..) => true,
 		}
 	}
 }
@@ -1169,7 +1161,6 @@ impl<K: AsRef<[u8]>, Value> Change<K, Value> {
 			Change::SetValue(k, v) => Change::SetValue(k.as_ref().to_vec(), v),
 			Change::RemoveValue(k) => Change::RemoveValue(k.as_ref().to_vec()),
 			Change::IncRc(k) => Change::IncRc(k.as_ref().to_vec()),
-			Change::DecRc(k) => Change::DecRc(k.as_ref().to_vec()),
 		}
 	}
 }
@@ -1205,7 +1196,6 @@ impl IndexedChangeSet {
 			Change::SetValue(k, v) => Change::SetValue(hash_key(k.as_ref()), v),
 			Change::RemoveValue(k) => Change::RemoveValue(hash_key(k.as_ref())),
 			Change::IncRc(k) => Change::IncRc(hash_key(k.as_ref())),
-			Change::DecRc(k) => Change::DecRc(hash_key(k.as_ref())),
 		})
 	}
 
@@ -1234,7 +1224,7 @@ impl IndexedChangeSet {
 						overlay.indexed.insert(*k, (record_id, None));
 					}
 				},
-				Change::IncRc(..) | Change::DecRc(..) => {
+				Change::IncRc(..) => {
 					// Don't add (we allow remove value in overlay when using rc: some
 					// indexing on top of it is expected).
 					if !ref_counted {
@@ -1280,7 +1270,7 @@ impl IndexedChangeSet {
 							e.remove_entry();
 						}
 					},
-				Change::IncRc(..) | Change::DecRc(..) => (),
+				Change::IncRc(..) => (),
 			}
 		}
 	}
