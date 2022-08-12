@@ -417,48 +417,29 @@ pub mod commit_overlay {
 		) -> Result<()> {
 			let ref_counted = options.columns[self.col as usize].ref_counted;
 			for change in self.changes.iter() {
-				Self::copy_to_overlay_inner(
-					overlay,
-					change,
-					record_id,
-					bytes,
-					ref_counted,
-					self.col,
-				)?
-			}
-			Ok(())
-		}
-
-		pub fn copy_to_overlay_inner<K: AsRef<[u8]>>(
-			overlay: &mut BTreeCommitOverlay,
-			change: &Change<K, Vec<u8>>,
-			record_id: u64,
-			bytes: &mut usize,
-			ref_counted: bool,
-			col: ColId,
-		) -> Result<()> {
-			match change {
-				Change::SetValue(key, value) => {
-					*bytes += key.as_ref().len();
-					*bytes += value.len();
-					overlay.insert(key.as_ref().into(), (record_id, Some(value.clone())));
-				},
-				Change::RemoveValue(key) => {
-					// Don't add removed ref-counted values to overlay.
-					// (current ref_counted implementation does not
-					// make much sense for btree indexed content).
-					if !ref_counted {
-						*bytes += key.as_ref().len();
-						overlay.insert(key.as_ref().into(), (record_id, None));
-					}
-				},
-				Change::IncRc(..) | Change::DecRc(..) => {
-					// Don't add (we allow remove value in overlay when using rc: some
-					// indexing on top of it is expected).
-					if !ref_counted {
-						return Err(Error::InvalidInput(format!("No Rc for column {}", col)))
-					}
-				},
+				match change {
+					Change::SetValue(key, value) => {
+						*bytes += key.len();
+						*bytes += value.len();
+						overlay.insert(key.clone(), (record_id, Some(value.clone())));
+					},
+					Change::RemoveValue(key) => {
+						// Don't add removed ref-counted values to overlay.
+						// (current ref_counted implementation does not
+						// make much sense for btree indexed content).
+						if !ref_counted {
+							*bytes += key.len();
+							overlay.insert(key.clone(), (record_id, None));
+						}
+					},
+					Change::IncRc(..) | Change::DecRc(..) => {
+						// Don't add (we allow remove value in overlay when using rc: some
+						// indexing on top of it is expected).
+						if !ref_counted {
+							return Err(Error::InvalidInput(format!("No Rc for column {}", self.col)))
+						}
+					},
+				}
 			}
 			Ok(())
 		}
