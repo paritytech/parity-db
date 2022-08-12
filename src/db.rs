@@ -264,17 +264,16 @@ impl DbInner {
 			(
 				c,
 				match v {
-					Some(v) => Change::SetValue(k, v),
-					None => Change::RemoveValue(k),
+					Some(v) => Change::SetValue(k.as_ref().to_vec(), v),
+					None => Change::RemoveValue(k.as_ref().to_vec()),
 				},
 			)
 		}))
 	}
 
-	fn commit_changes<I, K>(&self, tx: I) -> Result<()>
+	fn commit_changes<I>(&self, tx: I) -> Result<()>
 	where
-		I: IntoIterator<Item = (ColId, Change<K, Vec<u8>>)>,
-		K: AsRef<[u8]>,
+		I: IntoIterator<Item = (ColId, Change<Vec<u8>, Vec<u8>>)>,
 	{
 		let mut commit: CommitChangeSet = Default::default();
 		for (col, change) in tx.into_iter() {
@@ -283,10 +282,10 @@ impl DbInner {
 					.btree_indexed
 					.entry(col)
 					.or_insert_with(|| BTreeChangeSet::new(col))
-					.push(change.to_key_vec())
+					.push(change)
 			} else {
 				commit.indexed.entry(col).or_insert_with(|| IndexedChangeSet::new(col)).push(
-					change.to_key_vec(),
+					change,
 					&self.options,
 					self.db_version,
 				)
@@ -920,6 +919,13 @@ impl Db {
 		K: AsRef<[u8]>,
 	{
 		self.inner.commit(tx)
+	}
+
+	pub fn commit_changes<I>(&self, tx: I) -> Result<()>
+	where
+		I: IntoIterator<Item = (ColId, Change<Vec<u8>, Vec<u8>>)>,
+	{
+		self.inner.commit_changes(tx)
 	}
 
 	pub fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
