@@ -492,6 +492,9 @@ impl HashColumn {
 				},
 				Operation::Reference(key) => {
 					log::trace!(target: "parity-db", "{}: Ignoring increase rc, missing key {}", tables.index.id, hex(key));
+					if self.collect_stats {
+						self.stats.reference_increase_miss();
+					}
 					Ok(PlanOutcome::Skipped)
 				},
 			}
@@ -911,6 +914,9 @@ impl Column {
 				if tables.ref_counted {
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.col, key);
 					tables.tables[tier].write_inc_ref(address.offset(), log)?;
+					if let Some(stats) = stats {
+						stats.reference_increase();
+					}
 					return Ok((Some(PlanOutcome::Written), None))
 				} else {
 					return Ok((Some(PlanOutcome::Skipped), None))
