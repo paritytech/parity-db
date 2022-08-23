@@ -17,7 +17,7 @@
 use crate::{
 	btree::BTreeTable,
 	compress::Compress,
-	db::{check::CheckDisplay, Change},
+	db::{check::CheckDisplay, Operation},
 	display::hex,
 	error::{Error, Result},
 	index::{Address, IndexTable, PlanOutcome, TableId as IndexTableId},
@@ -469,7 +469,7 @@ impl HashColumn {
 
 	pub fn write_plan(
 		&self,
-		change: &Change<Key, Vec<u8>>,
+		change: &Operation<Key, Vec<u8>>,
 		log: &mut LogWriter,
 	) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
@@ -479,18 +479,18 @@ impl HashColumn {
 			self.write_plan_existing(&*tables, change, log, table, sub_index, existing_address)
 		} else {
 			match change {
-				Change::SetValue(key, value) => {
+				Operation::Set(key, value) => {
 					let (r, _, _) = self.write_plan_new(tables, reindex, key, value, log)?;
 					Ok(r)
 				},
-				Change::RemoveValue(key) => {
+				Operation::Dereference(key) => {
 					log::trace!(target: "parity-db", "{}: Deleting missing key {}", tables.index.id, hex(key));
 					if self.collect_stats {
 						self.stats.remove_miss();
 					}
 					Ok(PlanOutcome::Skipped)
 				},
-				Change::IncRc(key) => {
+				Operation::Reference(key) => {
 					log::trace!(target: "parity-db", "{}: Ignoring increase rc, missing key {}", tables.index.id, hex(key));
 					Ok(PlanOutcome::Skipped)
 				},
@@ -502,7 +502,7 @@ impl HashColumn {
 	fn write_plan_existing(
 		&self,
 		tables: &Tables,
-		change: &Change<Key, Vec<u8>>,
+		change: &Operation<Key, Vec<u8>>,
 		log: &mut LogWriter,
 		index: &IndexTable,
 		sub_index: usize,
@@ -883,7 +883,7 @@ impl Column {
 		key: &TableKey,
 		tables: TablesRef,
 		address: Address,
-		change: &Change<K, V>,
+		change: &Operation<K, V>,
 		log: &mut LogWriter,
 		stats: Option<&ColumnStats>,
 	) -> Result<(Option<PlanOutcome>, Option<Address>)> {
@@ -907,7 +907,7 @@ impl Column {
 		};
 
 		match change {
-			Change::IncRc(_) =>
+			Operation::Reference(_) =>
 				if tables.ref_counted {
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.col, key);
 					tables.tables[tier].write_inc_ref(address.offset(), log)?;
@@ -915,7 +915,7 @@ impl Column {
 				} else {
 					return Ok((Some(PlanOutcome::Skipped), None))
 				},
-			Change::SetValue(_, val) => {
+			Operation::Set(_, val) => {
 				if tables.ref_counted {
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.col, key);
 					tables.tables[tier].write_inc_ref(address.offset(), log)?;
@@ -961,7 +961,7 @@ impl Column {
 					Ok((None, Some(new_address)))
 				}
 			},
-			Change::RemoveValue(_) => {
+			Operation::Dereference(_) => {
 				// Deletion
 				let cur_size = if stats.is_some() { Some(fetch_size()?) } else { None };
 				let remove = if tables.ref_counted {

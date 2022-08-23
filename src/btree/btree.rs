@@ -23,7 +23,7 @@ use crate::{
 	error::Result,
 	log::{LogQuery, LogWriter},
 	table::key::TableKeyQuery,
-	Change,
+	Operation,
 };
 
 pub struct BTree {
@@ -47,7 +47,7 @@ impl BTree {
 
 	pub fn write_sorted_changes(
 		&mut self,
-		mut changes: &[Change<Vec<u8>, Vec<u8>>],
+		mut changes: &[Operation<Vec<u8>, Vec<u8>>],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<()> {

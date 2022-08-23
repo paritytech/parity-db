@@ -26,7 +26,7 @@ use crate::{
 	index::Address,
 	log::{LogQuery, LogWriter},
 	table::key::TableKey,
-	Change,
+	Operation,
 };
 use std::cmp::Ordering;
 
@@ -72,15 +72,15 @@ impl Node {
 		&mut self,
 		parent: Option<(&mut Self, usize)>,
 		depth: u32,
-		changes: &mut &[Change<Vec<u8>, Vec<u8>>],
+		changes: &mut &[Operation<Vec<u8>, Vec<u8>>],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
 		loop {
 			if changes.len() > 1 {
 				if changes[0].key() == changes[1].key() &&
-					!changes[0].is_rc_ops() &&
-					!changes[1].is_rc_ops()
+					!changes[0].is_reference_ops() &&
+					!changes[1].is_reference_ops()
 				{
 					// TODO only when advancing (here rec call useless)
 					*changes = &changes[1..];
@@ -89,7 +89,7 @@ impl Node {
 				debug_assert!(changes[0].key() < changes[1].key());
 			}
 			let r = match &changes[0] {
-				Change::SetValue(key, value) =>
+				Operation::Set(key, value) =>
 					self.insert(depth, key, value, changes, btree, log)?,
 				_ => self.on_existing(depth, changes, btree, log)?,
 			};
@@ -125,7 +125,7 @@ impl Node {
 		depth: u32,
 		key: &[u8],
 		value: &[u8],
-		changes: &mut &[Change<Vec<u8>, Vec<u8>>],
+		changes: &mut &[Operation<Vec<u8>, Vec<u8>>],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
@@ -255,7 +255,7 @@ impl Node {
 	fn on_existing(
 		&mut self,
 		depth: u32,
-		changes: &mut &[Change<Vec<u8>, Vec<u8>>],
+		changes: &mut &[Operation<Vec<u8>, Vec<u8>>],
 		values: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
@@ -743,7 +743,7 @@ impl Node {
 				&TableKey::NoHash,
 				btree,
 				address,
-				&Change::SetValue((), value),
+				&Operation::Set((), value),
 				log,
 				None,
 			)?

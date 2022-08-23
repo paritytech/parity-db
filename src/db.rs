@@ -264,8 +264,8 @@ impl DbInner {
 			(
 				c,
 				match v {
-					Some(v) => Change::SetValue(k.as_ref().to_vec(), v),
-					None => Change::RemoveValue(k.as_ref().to_vec()),
+					Some(v) => Operation::Set(k.as_ref().to_vec(), v),
+					None => Operation::Dereference(k.as_ref().to_vec()),
 				},
 			)
 		}))
@@ -273,7 +273,7 @@ impl DbInner {
 
 	fn commit_changes<I>(&self, tx: I) -> Result<()>
 	where
-		I: IntoIterator<Item = (ColId, Change<Vec<u8>, Vec<u8>>)>,
+		I: IntoIterator<Item = (ColId, Operation<Vec<u8>, Vec<u8>>)>,
 	{
 		let mut commit: CommitChangeSet = Default::default();
 		for (col, change) in tx.into_iter() {
@@ -923,7 +923,7 @@ impl Db {
 
 	pub fn commit_changes<I>(&self, tx: I) -> Result<()>
 	where
-		I: IntoIterator<Item = (ColId, Change<Vec<u8>, Vec<u8>>)>,
+		I: IntoIterator<Item = (ColId, Operation<Vec<u8>, Vec<u8>>)>,
 	{
 		self.inner.commit_changes(tx)
 	}
@@ -1121,52 +1121,62 @@ impl CommitOverlay {
 	}
 }
 
+/// Different operations allowed for a commit.
+/// Behavior may differs depending on column configuration.
 #[derive(PartialEq, Eq)]
-pub enum Change<Key, Value> {
-	SetValue(Key, Value),
-	RemoveValue(Key),
-	IncRc(Key),
+pub enum Operation<Key, Value> {
+	/// Insert or update the value for a given key.
+	Set(Key, Value),
+
+	/// Dereference at a given key, resulting in
+	/// either removal of a key value or decrement of its
+	/// reference count counter.
+	Dereference(Key),
+
+	/// Increment the reference count counter of an existing value for a given key.
+	/// If no value exists for the key, this operation is skipped.
+	Reference(Key),
 }
 
-impl<Key: Ord, Value: Eq> PartialOrd<Self> for Change<Key, Value> {
+impl<Key: Ord, Value: Eq> PartialOrd<Self> for Operation<Key, Value> {
 	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
 		Some(self.cmp(other))
 	}
 }
 
-impl<Key: Ord, Value: Eq> Ord for Change<Key, Value> {
+impl<Key: Ord, Value: Eq> Ord for Operation<Key, Value> {
 	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
 		self.key().cmp(other.key())
 	}
 }
 
-impl<Key, Value> Change<Key, Value> {
+impl<Key, Value> Operation<Key, Value> {
 	pub fn key(&self) -> &Key {
 		match self {
-			Change::SetValue(k, _) | Change::RemoveValue(k) | Change::IncRc(k) => k,
+			Operation::Set(k, _) | Operation::Dereference(k) | Operation::Reference(k) => k,
 		}
 	}
 
 	pub fn into_key(self) -> Key {
 		match self {
-			Change::SetValue(k, _) | Change::RemoveValue(k) | Change::IncRc(k) => k,
+			Operation::Set(k, _) | Operation::Dereference(k) | Operation::Reference(k) => k,
 		}
 	}
 
-	pub fn is_rc_ops(&self) -> bool {
+	pub fn is_reference_ops(&self) -> bool {
 		match self {
-			Change::SetValue(..) | Change::RemoveValue(..) => false,
-			Change::IncRc(..) => true,
+			Operation::Set(..) | Operation::Dereference(..) => false,
+			Operation::Reference(..) => true,
 		}
 	}
 }
 
-impl<K: AsRef<[u8]>, Value> Change<K, Value> {
-	pub fn to_key_vec(self) -> Change<Vec<u8>, Value> {
+impl<K: AsRef<[u8]>, Value> Operation<K, Value> {
+	pub fn to_key_vec(self) -> Operation<Vec<u8>, Value> {
 		match self {
-			Change::SetValue(k, v) => Change::SetValue(k.as_ref().to_vec(), v),
-			Change::RemoveValue(k) => Change::RemoveValue(k.as_ref().to_vec()),
-			Change::IncRc(k) => Change::IncRc(k.as_ref().to_vec()),
+			Operation::Set(k, v) => Operation::Set(k.as_ref().to_vec(), v),
+			Operation::Dereference(k) => Operation::Dereference(k.as_ref().to_vec()),
+			Operation::Reference(k) => Operation::Reference(k.as_ref().to_vec()),
 		}
 	}
 }
@@ -1179,7 +1189,7 @@ pub struct CommitChangeSet {
 
 pub struct IndexedChangeSet {
 	pub col: ColId,
-	pub changes: Vec<Change<Key, Vec<u8>>>,
+	pub changes: Vec<Operation<Key, Vec<u8>>>,
 }
 
 impl IndexedChangeSet {
@@ -1189,7 +1199,7 @@ impl IndexedChangeSet {
 
 	fn push<K: AsRef<[u8]>>(
 		&mut self,
-		change: Change<K, Vec<u8>>,
+		change: Operation<K, Vec<u8>>,
 		options: &Options,
 		db_version: u32,
 	) {
@@ -1199,13 +1209,13 @@ impl IndexedChangeSet {
 		};
 
 		self.push_change_hashed(match change {
-			Change::SetValue(k, v) => Change::SetValue(hash_key(k.as_ref()), v),
-			Change::RemoveValue(k) => Change::RemoveValue(hash_key(k.as_ref())),
-			Change::IncRc(k) => Change::IncRc(hash_key(k.as_ref())),
+			Operation::Set(k, v) => Operation::Set(hash_key(k.as_ref()), v),
+			Operation::Dereference(k) => Operation::Dereference(hash_key(k.as_ref())),
+			Operation::Reference(k) => Operation::Reference(hash_key(k.as_ref())),
 		})
 	}
 
-	fn push_change_hashed(&mut self, change: Change<Key, Vec<u8>>) {
+	fn push_change_hashed(&mut self, change: Operation<Key, Vec<u8>>) {
 		self.changes.push(change);
 	}
 
@@ -1219,18 +1229,18 @@ impl IndexedChangeSet {
 		let ref_counted = options.columns[self.col as usize].ref_counted;
 		for change in self.changes.iter() {
 			match &change {
-				Change::SetValue(k, v) => {
+				Operation::Set(k, v) => {
 					*bytes += k.len();
 					*bytes += v.len();
 					overlay.indexed.insert(*k, (record_id, Some(v.clone())));
 				},
-				Change::RemoveValue(k) => {
+				Operation::Dereference(k) => {
 					// Don't add removed ref-counted values to overlay.
 					if !ref_counted {
 						overlay.indexed.insert(*k, (record_id, None));
 					}
 				},
-				Change::IncRc(..) => {
+				Operation::Reference(..) => {
 					// Don't add (we allow remove value in overlay when using rc: some
 					// indexing on top of it is expected).
 					if !ref_counted {
@@ -1270,13 +1280,13 @@ impl IndexedChangeSet {
 		use std::collections::hash_map::Entry;
 		for change in self.changes.iter() {
 			match change {
-				Change::SetValue(k, _) | Change::RemoveValue(k) =>
+				Operation::Set(k, _) | Operation::Dereference(k) =>
 					if let Entry::Occupied(e) = overlay.indexed.entry(*k) {
 						if e.get().0 == record_id {
 							e.remove_entry();
 						}
 					},
-				Change::IncRc(..) => (),
+				Operation::Reference(..) => (),
 			}
 		}
 	}

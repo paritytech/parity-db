@@ -45,7 +45,7 @@ use crate::{
 		key::{TableKey, TableKeyQuery},
 		Entry as ValueTableEntry, Value, ValueTable,
 	},
-	Change,
+	Operation,
 };
 pub use iter::BTreeIterator;
 use node::SeparatorInner;
@@ -305,7 +305,7 @@ impl BTreeTable {
 			&TableKey::NoHash,
 			tables,
 			node_index,
-			&Change::RemoveValue(()),
+			&Operation::Dereference(()),
 			writer,
 			None,
 		)?;
@@ -367,7 +367,7 @@ impl BTreeTable {
 				&k,
 				tables,
 				existing,
-				&Change::SetValue((), entry.encoded),
+				&Operation::Set((), entry.encoded),
 				writer,
 				None,
 			)? {
@@ -389,13 +389,13 @@ pub mod commit_overlay {
 	use super::*;
 	use crate::{
 		column::{ColId, Column},
-		db::{BTreeCommitOverlay, Change},
+		db::{BTreeCommitOverlay, Operation},
 		error::Result,
 	};
 
 	pub struct BTreeChangeSet {
 		pub col: ColId,
-		pub changes: Vec<Change<Vec<u8>, Vec<u8>>>,
+		pub changes: Vec<Operation<Vec<u8>, Vec<u8>>>,
 	}
 
 	impl BTreeChangeSet {
@@ -403,7 +403,7 @@ pub mod commit_overlay {
 			BTreeChangeSet { col, changes: Default::default() }
 		}
 
-		pub fn push(&mut self, change: Change<Vec<u8>, Vec<u8>>) {
+		pub fn push(&mut self, change: Operation<Vec<u8>, Vec<u8>>) {
 			// No key hashing
 			self.changes.push(change);
 		}
@@ -418,12 +418,12 @@ pub mod commit_overlay {
 			let ref_counted = options.columns[self.col as usize].ref_counted;
 			for change in self.changes.iter() {
 				match change {
-					Change::SetValue(key, value) => {
+					Operation::Set(key, value) => {
 						*bytes += key.len();
 						*bytes += value.len();
 						overlay.insert(key.clone(), (record_id, Some(value.clone())));
 					},
-					Change::RemoveValue(key) => {
+					Operation::Dereference(key) => {
 						// Don't add removed ref-counted values to overlay.
 						// (current ref_counted implementation does not
 						// make much sense for btree indexed content).
@@ -432,7 +432,7 @@ pub mod commit_overlay {
 							overlay.insert(key.clone(), (record_id, None));
 						}
 					},
-					Change::IncRc(..) => {
+					Operation::Reference(..) => {
 						// Don't add (we allow remove value in overlay when using rc: some
 						// indexing on top of it is expected).
 						if !ref_counted {
@@ -487,7 +487,7 @@ pub mod commit_overlay {
 					&TableKey::NoHash,
 					locked,
 					HEADER_ADDRESS,
-					&Change::SetValue((), &entry.encoded.as_ref()[..HEADER_SIZE as usize]),
+					&Operation::Set((), &entry.encoded.as_ref()[..HEADER_SIZE as usize]),
 					writer,
 					None,
 				)?;
