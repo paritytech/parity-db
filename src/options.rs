@@ -57,6 +57,9 @@ pub struct ColumnOptions {
 	/// Allows for skipping additional key hashing.
 	pub uniform: bool,
 	/// Use reference counting for values.
+	///
+	/// Reference counting do not enforce immediate removal
+	/// and user should not check for missing value.
 	pub ref_counted: bool,
 	/// Compression to use for this column.
 	pub compression: CompressionType,

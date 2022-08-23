@@ -26,6 +26,7 @@ use crate::{
 	index::Address,
 	log::{LogQuery, LogWriter},
 	table::key::TableKey,
+	Operation,
 };
 use std::cmp::Ordering;
 
@@ -71,24 +72,26 @@ impl Node {
 		&mut self,
 		parent: Option<(&mut Self, usize)>,
 		depth: u32,
-		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
+		changes: &mut &[Operation<Vec<u8>, Vec<u8>>],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
 		loop {
 			if changes.len() > 1 {
-				if changes[0].0 == changes[1].0 {
+				if changes[0].key() == changes[1].key() &&
+					!changes[0].is_reference_ops() &&
+					!changes[1].is_reference_ops()
+				{
 					// TODO only when advancing (here rec call useless)
 					*changes = &changes[1..];
 					continue
 				}
-				debug_assert!(changes[0].0 < changes[1].0);
+				debug_assert!(changes[0].key() < changes[1].key());
 			}
-			let (key, value) = &changes[0];
-			let r = if let Some(value) = value {
-				self.insert(depth, key, value, changes, btree, log)?
-			} else {
-				self.remove(depth, key, changes, btree, log)?
+			let r = match &changes[0] {
+				Operation::Set(key, value) =>
+					self.insert(depth, key, value, changes, btree, log)?,
+				_ => self.on_existing(depth, changes, btree, log)?,
 			};
 			if r.0.is_some() || r.1 {
 				return Ok(r)
@@ -97,7 +100,7 @@ impl Node {
 				break
 			}
 			if let Some((parent, p)) = &parent {
-				let key = &changes[1].0;
+				let key = &changes[1].key();
 				let (at, i) = self.position(key)?; // TODO could start position from current
 				if at || i < self.number_separator() {
 					*changes = &changes[1..];
@@ -122,7 +125,7 @@ impl Node {
 		depth: u32,
 		key: &[u8],
 		value: &[u8],
-		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
+		changes: &mut &[Operation<Vec<u8>, Vec<u8>>],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
@@ -249,24 +252,25 @@ impl Node {
 		}
 	}
 
-	fn remove(
+	fn on_existing(
 		&mut self,
 		depth: u32,
-		key: &[u8],
-		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
+		changes: &mut &[Operation<Vec<u8>, Vec<u8>>],
 		values: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
+		let change = &changes[0];
+		let key = change.key();
 		let has_child = depth != 0;
 		let (at, i) = self.position(key)?;
 		if at {
 			let existing = self.separator_address(i);
 			if let Some(existing) = existing {
-				Column::write_existing_value_plan(
+				Column::write_existing_value_plan::<_, Vec<u8>>(
 					&TableKey::NoHash,
 					values,
 					existing,
-					None,
+					change,
 					log,
 					None,
 				)?;
@@ -739,7 +743,7 @@ impl Node {
 				&TableKey::NoHash,
 				btree,
 				address,
-				Some(value),
+				&Operation::Set((), value),
 				log,
 				None,
 			)?

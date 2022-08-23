@@ -28,7 +28,7 @@ const HISTOGRAM_BUCKETS: usize = 1024;
 const HISTOGRAM_BUCKET_BITS: u8 = 5;
 
 pub const TOTAL_SIZE: usize =
-	4 * HISTOGRAM_BUCKETS + 8 * HISTOGRAM_BUCKETS + 8 * SIZE_TIERS + 8 * 11;
+	4 * HISTOGRAM_BUCKETS + 8 * HISTOGRAM_BUCKETS + 8 * SIZE_TIERS + 8 * 13;
 
 // TODO: get rid of the struct and use index meta directly.
 pub struct ColumnStats {
@@ -41,6 +41,8 @@ pub struct ColumnStats {
 	commits: AtomicU64,
 	inserted_new: AtomicU64,
 	inserted_overwrite: AtomicU64,
+	reference_increase_hit: AtomicU64,
+	reference_increase_miss: AtomicU64,
 	removed_hit: AtomicU64,
 	removed_miss: AtomicU64,
 	queries_miss: AtomicU64,
@@ -145,6 +147,8 @@ impl ColumnStats {
 		let queries_miss = read_u64(cursor);
 		let uncompressed_bytes = read_u64(cursor);
 		let compression_delta = read_array(cursor, read_i64);
+		let reference_increase_hit = read_u64(cursor);
+		let reference_increase_miss = read_u64(cursor);
 
 		ColumnStats {
 			value_histogram,
@@ -156,6 +160,8 @@ impl ColumnStats {
 			commits,
 			inserted_new,
 			inserted_overwrite,
+			reference_increase_hit,
+			reference_increase_miss,
 			removed_hit,
 			removed_miss,
 			queries_miss,
@@ -179,6 +185,8 @@ impl ColumnStats {
 			commits: Default::default(),
 			inserted_new: Default::default(),
 			inserted_overwrite: Default::default(),
+			reference_increase_hit: Default::default(),
+			reference_increase_miss: Default::default(),
 			removed_hit: Default::default(),
 			removed_miss: Default::default(),
 			queries_miss: Default::default(),
@@ -202,6 +210,8 @@ impl ColumnStats {
 		self.commits.store(0, Ordering::Relaxed);
 		self.inserted_new.store(0, Ordering::Relaxed);
 		self.inserted_overwrite.store(0, Ordering::Relaxed);
+		self.reference_increase_hit.store(0, Ordering::Relaxed);
+		self.reference_increase_miss.store(0, Ordering::Relaxed);
 		self.removed_hit.store(0, Ordering::Relaxed);
 		self.removed_miss.store(0, Ordering::Relaxed);
 		self.queries_miss.store(0, Ordering::Relaxed);
@@ -241,6 +251,8 @@ impl ColumnStats {
 		for item in &self.compression_delta {
 			write_i64(&mut cursor, item);
 		}
+		write_u64(&mut cursor, &self.reference_increase_hit);
+		write_u64(&mut cursor, &self.reference_increase_miss);
 	}
 
 	pub fn write_stats_text(&self, writer: &mut impl std::io::Write, col: ColId) -> Result<()> {
@@ -259,6 +271,16 @@ impl ColumnStats {
 			writer,
 			"Existing value insertions: {}",
 			self.inserted_overwrite.load(Ordering::Relaxed)
+		)?;
+		writeln!(
+			writer,
+			"Reference increases: {}",
+			self.reference_increase_hit.load(Ordering::Relaxed)
+		)?;
+		writeln!(
+			writer,
+			"Missed reference increases: {}",
+			self.reference_increase_miss.load(Ordering::Relaxed)
 		)?;
 		writeln!(writer, "Removals: {}", self.removed_hit.load(Ordering::Relaxed))?;
 		writeln!(writer, "Missed removals: {}", self.removed_miss.load(Ordering::Relaxed))?;
@@ -351,6 +373,14 @@ impl ColumnStats {
 	pub fn remove_val(&self, size: u32, compressed: u32) {
 		self.removed_hit.fetch_add(1, Ordering::Relaxed);
 		self.remove(size, compressed);
+	}
+
+	pub fn reference_increase(&self) {
+		self.reference_increase_hit.fetch_add(1, Ordering::Relaxed);
+	}
+
+	pub fn reference_increase_miss(&self) {
+		self.reference_increase_miss.fetch_add(1, Ordering::Relaxed);
 	}
 
 	pub fn remove_miss(&self) {

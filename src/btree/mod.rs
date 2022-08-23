@@ -45,6 +45,7 @@ use crate::{
 		key::{TableKey, TableKeyQuery},
 		Entry as ValueTableEntry, Value, ValueTable,
 	},
+	Operation,
 };
 pub use iter::BTreeIterator;
 use node::SeparatorInner;
@@ -300,11 +301,11 @@ impl BTreeTable {
 		writer: &mut LogWriter,
 		node_index: Address,
 	) -> Result<()> {
-		Column::write_existing_value_plan(
+		Column::write_existing_value_plan::<_, Vec<u8>>(
 			&TableKey::NoHash,
 			tables,
 			node_index,
-			None,
+			&Operation::Dereference(()),
 			writer,
 			None,
 		)?;
@@ -360,33 +361,24 @@ impl BTreeTable {
 
 		let old_comp = tables.compression;
 		tables.compression = &crate::compress::NO_COMPRESSION;
-		let mut write_node = || {
-			Ok(if let Some(existing) = node_id {
-				let k = TableKey::NoHash;
-				if let (_, Some(new_index)) = Column::write_existing_value_plan(
-					&k,
-					tables,
-					existing,
-					Some(entry.encoded.as_ref()),
-					writer,
-					None,
-				)? {
-					Some(new_index)
-				} else {
-					None
-				}
+		let result = Ok(if let Some(existing) = node_id {
+			let k = TableKey::NoHash;
+			if let (_, Some(new_index)) = Column::write_existing_value_plan(
+				&k,
+				tables,
+				existing,
+				&Operation::Set((), entry.encoded),
+				writer,
+				None,
+			)? {
+				Some(new_index)
 			} else {
-				let k = TableKey::NoHash;
-				Some(Column::write_new_value_plan(
-					&k,
-					tables,
-					entry.encoded.as_ref(),
-					writer,
-					None,
-				)?)
-			})
-		};
-		let result = write_node();
+				None
+			}
+		} else {
+			let k = TableKey::NoHash;
+			Some(Column::write_new_value_plan(&k, tables, entry.encoded.as_ref(), writer, None)?)
+		});
 		tables.compression = old_comp;
 
 		result
@@ -397,13 +389,13 @@ pub mod commit_overlay {
 	use super::*;
 	use crate::{
 		column::{ColId, Column},
-		db::BTreeCommitOverlay,
+		db::{BTreeCommitOverlay, Operation},
 		error::Result,
 	};
 
 	pub struct BTreeChangeSet {
 		pub col: ColId,
-		pub changes: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+		pub changes: Vec<Operation<Vec<u8>, Vec<u8>>>,
 	}
 
 	impl BTreeChangeSet {
@@ -411,9 +403,9 @@ pub mod commit_overlay {
 			BTreeChangeSet { col, changes: Default::default() }
 		}
 
-		pub fn push(&mut self, k: &[u8], v: Option<Vec<u8>>) {
+		pub fn push(&mut self, change: Operation<Vec<u8>, Vec<u8>>) {
 			// No key hashing
-			self.changes.push((k.to_vec(), v));
+			self.changes.push(change);
 		}
 
 		pub fn copy_to_overlay(
@@ -422,31 +414,43 @@ pub mod commit_overlay {
 			record_id: u64,
 			bytes: &mut usize,
 			options: &Options,
-		) {
+		) -> Result<()> {
 			let ref_counted = options.columns[self.col as usize].ref_counted;
-			for commit in self.changes.iter() {
-				match commit {
-					(key, Some(value)) => {
+			for change in self.changes.iter() {
+				match change {
+					Operation::Set(key, value) => {
 						*bytes += key.len();
 						*bytes += value.len();
 						overlay.insert(key.clone(), (record_id, Some(value.clone())));
 					},
-					(key, None) => {
-						*bytes += key.len();
+					Operation::Dereference(key) => {
 						// Don't add removed ref-counted values to overlay.
 						// (current ref_counted implementation does not
 						// make much sense for btree indexed content).
 						if !ref_counted {
+							*bytes += key.len();
 							overlay.insert(key.clone(), (record_id, None));
+						}
+					},
+					Operation::Reference(..) => {
+						// Don't add (we allow remove value in overlay when using rc: some
+						// indexing on top of it is expected).
+						if !ref_counted {
+							return Err(Error::InvalidInput(format!(
+								"No Rc for column {}",
+								self.col
+							)))
 						}
 					},
 				}
 			}
+			Ok(())
 		}
 
 		pub fn clean_overlay(&mut self, overlay: &mut BTreeCommitOverlay, record_id: u64) {
 			use std::collections::btree_map::Entry;
-			for (key, _) in self.changes.drain(..) {
+			for change in self.changes.drain(..) {
+				let key = change.into_key();
 				if let Entry::Occupied(e) = overlay.entry(key) {
 					if e.get().0 == record_id {
 						e.remove_entry();
@@ -471,7 +475,7 @@ pub mod commit_overlay {
 				BTreeHeader { root: tree.root_index.unwrap_or(NULL_ADDRESS), depth: tree.depth };
 			let old_btree_header = btree_header.clone();
 
-			self.changes.sort_by_key(|(k, _)| k.clone());
+			self.changes.sort();
 			tree.write_sorted_changes(self.changes.as_slice(), locked, writer)?;
 			*ops += self.changes.len() as u64;
 			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_header)?;
@@ -483,7 +487,7 @@ pub mod commit_overlay {
 					&TableKey::NoHash,
 					locked,
 					HEADER_ADDRESS,
-					Some(&entry.encoded.as_ref()[..HEADER_SIZE as usize]),
+					&Operation::Set((), &entry.encoded.as_ref()[..HEADER_SIZE as usize]),
 					writer,
 					None,
 				)?;
