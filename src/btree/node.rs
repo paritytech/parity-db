@@ -505,7 +505,7 @@ impl Node {
 	}
 
 	pub fn seek(
-		mut from: Self,
+		mut self,
 		key: &[u8],
 		values: TablesRef,
 		log: &impl LogQuery,
@@ -514,33 +514,33 @@ impl Node {
 		seek_to: SeekTo,
 	) -> Result<()> {
 		loop {
-			let (at, i) = from.position(key)?;
+			let (at, i) = self.position(key)?;
 			if at {
 				stack.push(match seek_to {
-					SeekTo::At => (i, NodeType::Separator, from),
-					SeekTo::After => (i + 1, NodeType::Child, from),
+					SeekTo::At => (i, NodeType::Separator, self),
+					SeekTo::After => (i + 1, NodeType::Child, self),
 				});
 				return Ok(())
 			}
 			if depth == 0 {
-				stack.push((i, NodeType::Separator, from));
+				stack.push((i, NodeType::Separator, self));
 				return Ok(())
 			}
 
-			let child = if let Some(child) = from.fetch_child(i, values, log)? {
+			let child = if let Some(child) = self.fetch_child(i, values, log)? {
 				child
 			} else {
 				return Ok(())
 			};
 
-			stack.push((i, NodeType::Separator, from));
+			stack.push((i, NodeType::Separator, self));
 			depth -= 1;
-			from = child;
+			self = child;
 		}
 	}
 
 	pub fn seek_prev(
-		mut from: Self,
+		mut self,
 		key: &[u8],
 		values: TablesRef,
 		log: &impl LogQuery,
@@ -551,9 +551,9 @@ impl Node {
 		loop {
 			// Try to find the separator with provided `key`. If we fail then `i` will be equal to
 			// index of the first element less than key
-			let (at, i) = match from.last_separator_index() {
+			let (at, i) = match self.last_separator_index() {
 				Some(mut i) => loop {
-					let separator = from.separators[i].separator.as_ref().expect("Checked before");
+					let separator = self.separators[i].separator.as_ref().expect("Checked before");
 					match key[..].cmp(&separator.key[..]) {
 						Ordering::Less => (),
 						Ordering::Greater => break (false, i + 1),
@@ -569,8 +569,8 @@ impl Node {
 
 			if at {
 				stack.push(match seek_to {
-					SeekTo::At => (i, NodeType::Separator, from),
-					SeekTo::After => (i, NodeType::Child, from),
+					SeekTo::At => (i, NodeType::Separator, self),
+					SeekTo::After => (i, NodeType::Child, self),
 				});
 
 				return Ok(())
@@ -578,19 +578,19 @@ impl Node {
 
 			if depth == 0 {
 				if i > 0 {
-					stack.push((i - 1, NodeType::Separator, from));
+					stack.push((i - 1, NodeType::Separator, self));
 				}
 				return Ok(())
 			}
 
-			from = if let Some(child) = from.fetch_child(i, values, log)? {
+			self = if let Some(child) = self.fetch_child(i, values, log)? {
 				if i > 0 {
-					stack.push((i - 1, NodeType::Separator, from));
+					stack.push((i - 1, NodeType::Separator, self));
 				}
 				child
 			} else {
 				if i > 0 {
-					stack.push((i - 1, NodeType::Separator, from));
+					stack.push((i - 1, NodeType::Separator, self));
 				}
 				return Ok(())
 			};

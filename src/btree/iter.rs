@@ -449,9 +449,9 @@ impl BTreeIterState {
 			let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), b, log)?;
 			match direction {
 				IterDirection::Forward =>
-					Node::seek(root, key, b, log, btree.depth, &mut self.state, seek_to),
+					root.seek(key, b, log, btree.depth, &mut self.state, seek_to),
 				IterDirection::Backward =>
-					Node::seek_prev(root, key, b, log, btree.depth, &mut self.state, seek_to),
+					root.seek_prev(key, b, log, btree.depth, &mut self.state, seek_to),
 			}
 		})
 	}
