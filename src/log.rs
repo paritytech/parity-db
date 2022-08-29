@@ -35,16 +35,19 @@ const INSERT_VALUE: u8 = 3;
 const END_RECORD: u8 = 4;
 const DROP_TABLE: u8 = 5;
 
+#[derive(Debug)]
 pub struct InsertIndexAction {
 	pub table: IndexTableId,
 	pub index: u64,
 }
 
+#[derive(Debug)]
 pub struct InsertValueAction {
 	pub table: ValueTableId,
 	pub index: u64,
 }
 
+#[derive(Debug)]
 pub enum LogAction {
 	BeginRecord,
 	InsertIndex(InsertIndexAction),
@@ -63,7 +66,7 @@ pub trait LogQuery {
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool;
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct LogOverlays {
 	index: HashMap<IndexTableId, IndexLogOverlay>,
 	value: HashMap<ValueTableId, ValueLogOverlay>,
@@ -116,12 +119,13 @@ impl LogQuery for LogOverlays {
 	}
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Cleared {
 	index: Vec<(IndexTableId, u64)>,
 	values: Vec<(ValueTableId, u64)>,
 }
 
+#[derive(Debug)]
 pub struct LogReader<'a> {
 	file: MappedRwLockWriteGuard<'a, std::io::BufReader<std::fs::File>>,
 	record_id: u64,
@@ -243,6 +247,7 @@ impl<'a> LogReader<'a> {
 	}
 }
 
+#[derive(Debug)]
 pub struct LogChange {
 	local_index: HashMap<IndexTableId, IndexLogOverlay>,
 	local_values: HashMap<ValueTableId, ValueLogOverlay>,
@@ -314,12 +319,14 @@ impl LogChange {
 	}
 }
 
+#[derive(Debug)]
 struct FlushedLog {
 	index: HashMap<IndexTableId, IndexLogOverlay>,
 	values: HashMap<ValueTableId, ValueLogOverlay>,
 	bytes: u64,
 }
 
+#[derive(Debug)]
 pub struct LogWriter<'a> {
 	overlays: &'a RwLock<LogOverlays>,
 	log: LogChange,
@@ -398,7 +405,7 @@ impl<'a> LogQuery for LogWriter<'a> {
 }
 
 // Identity hash.
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct IdentityHash(u64);
 pub type BuildIdHash = std::hash::BuildHasherDefault<IdentityHash>;
 
@@ -441,39 +448,43 @@ impl std::hash::Hasher for IdentityHash {
 	}
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct IndexLogOverlay {
 	pub map: HashMap<u64, (u64, u64, IndexChunk)>, // index -> (record_id, modified_mask, entry)
 }
 
 // We use identity hash for value overlay/log records so that writes to value tables are in order.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ValueLogOverlay {
 	pub map: HashMap<u64, (u64, Vec<u8>), BuildIdHash>, // index -> (record_id, entry)
 }
 
+#[derive(Debug)]
 struct Appending {
 	id: u32,
 	file: std::io::BufWriter<std::fs::File>,
 	size: u64,
 }
 
+#[derive(Debug)]
 struct Flushing {
 	id: u32,
 	file: std::fs::File,
 }
 
+#[derive(Debug)]
 struct Reading {
 	id: u32,
 	file: std::io::BufReader<std::fs::File>,
 }
 
-#[derive(Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum ReadingState {
 	Reading,
 	Idle,
 }
 
+#[derive(Debug)]
 pub struct Log {
 	overlays: RwLock<LogOverlays>,
 	appending: RwLock<Option<Appending>>,

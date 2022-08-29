@@ -70,6 +70,7 @@ fn fsync(file: &std::fs::File) -> Result<()> {
 
 const GROW_SIZE_BYTES: u64 = 256 * 1024;
 
+#[derive(Debug)]
 pub struct TableFile {
 	pub file: RwLock<Option<std::fs::File>>,
 	pub path: std::path::PathBuf,

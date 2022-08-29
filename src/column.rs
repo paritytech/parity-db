@@ -80,22 +80,26 @@ const SIZES: [u16; SIZE_TIERS - 1] = [
 	24265, 24936, 25626, 26335, 27064, 27812, 28582, 29372, 30185, 31020, 31878, 32760,
 ];
 
+#[derive(Debug)]
 struct Tables {
 	index: IndexTable,
 	value: Vec<ValueTable>,
 }
 
+#[derive(Debug)]
 struct Reindex {
 	queue: VecDeque<IndexTable>,
 	progress: AtomicU64,
 }
 
 #[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
 pub enum Column {
 	Hash(HashColumn),
 	Tree(BTreeTable),
 }
 
+#[derive(Debug)]
 pub struct HashColumn {
 	col: ColId,
 	tables: RwLock<Tables>,

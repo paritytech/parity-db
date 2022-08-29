@@ -64,7 +64,7 @@ const KEEP_LOGS: usize = 16;
 pub type Value = Vec<u8>;
 
 // Commit data passed to `commit`
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Commit {
 	// Commit ID. This is not the same as log record id, as some records
 	// are originated within the DB. E.g. reindex.
@@ -77,7 +77,7 @@ struct Commit {
 }
 
 // Pending commits. This may not grow beyond `MAX_COMMIT_QUEUE_BYTES` bytes.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct CommitQueue {
 	// Log record.
 	record_id: u64,
@@ -87,6 +87,7 @@ struct CommitQueue {
 	commits: VecDeque<Commit>,
 }
 
+#[derive(Debug)]
 struct DbInner {
 	columns: Vec<Column>,
 	options: Options,
@@ -109,6 +110,7 @@ struct DbInner {
 	_lock_file: std::fs::File,
 }
 
+#[derive(Debug)]
 struct WaitCondvar<S> {
 	cv: Condvar,
 	work: Mutex<S>,
@@ -1043,6 +1045,7 @@ impl Drop for Db {
 pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<Value>), crate::IdentityBuildHasher>;
 pub type BTreeCommitOverlay = BTreeMap<Vec<u8>, (u64, Option<Value>)>;
 
+#[derive(Debug)]
 pub struct CommitOverlay {
 	indexed: IndexedCommitOverlay,
 	btree_indexed: BTreeCommitOverlay,
@@ -1123,7 +1126,7 @@ impl CommitOverlay {
 
 /// Different operations allowed for a commit.
 /// Behavior may differs depending on column configuration.
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Operation<Key, Value> {
 	/// Insert or update the value for a given key.
 	Set(Key, Value),
@@ -1181,12 +1184,13 @@ impl<K: AsRef<[u8]>, Value> Operation<K, Value> {
 	}
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct CommitChangeSet {
 	pub indexed: HashMap<ColId, IndexedChangeSet>,
 	pub btree_indexed: HashMap<ColId, BTreeChangeSet>,
 }
 
+#[derive(Debug)]
 pub struct IndexedChangeSet {
 	pub col: ColId,
 	pub changes: Vec<Operation<Key, Vec<u8>>>,

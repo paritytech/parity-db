@@ -96,7 +96,7 @@ const LOCKED_REF: u32 = u32::MAX;
 
 pub type Value = Vec<u8>;
 
-#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct TableId(u16);
 
 impl TableId {
@@ -135,6 +135,7 @@ impl std::fmt::Display for TableId {
 	}
 }
 
+#[derive(Debug)]
 pub struct ValueTable {
 	pub id: TableId,
 	pub entry_size: u16,

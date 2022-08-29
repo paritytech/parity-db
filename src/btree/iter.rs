@@ -38,6 +38,7 @@ pub enum SeekTo {
 	After,
 }
 
+#[derive(Debug)]
 pub struct BTreeIterator<'a> {
 	table: &'a BTreeTable,
 	log: &'a RwLock<crate::log::LogOverlays>,
@@ -50,6 +51,7 @@ pub struct BTreeIterator<'a> {
 	direction: IterDirection,
 }
 
+#[derive(Debug)]
 pub struct BtreeIterBackend(BTree, BTreeIterState);
 
 impl<'a> BTreeIterator<'a> {
