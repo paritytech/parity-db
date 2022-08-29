@@ -1116,7 +1116,7 @@ mod test {
 		}
 
 		fn log(&self) -> Log {
-			let options = Options::with_columns(&*self.0, 1);
+			let options = Options::with_columns(&self.0, 1);
 			Log::open(&options).unwrap()
 		}
 	}

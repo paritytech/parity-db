@@ -190,7 +190,7 @@ impl BTreeTable {
 		log: &impl LogQuery,
 	) -> Result<Option<(u8, Value)>> {
 		let tables = self.tables.read();
-		let btree = self.locked(&*tables);
+		let btree = self.locked(&tables);
 		Column::get_value(key, address, btree, log)
 	}
 
@@ -468,7 +468,7 @@ pub mod commit_overlay {
 			let record_id = writer.record_id();
 
 			let locked_tables = btree.tables.read();
-			let locked = btree.locked(&*locked_tables);
+			let locked = btree.locked(&locked_tables);
 			let mut tree = BTree::open(locked, writer, record_id)?;
 
 			let mut btree_header =
