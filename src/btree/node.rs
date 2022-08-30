@@ -530,6 +530,7 @@ impl Node {
 			let child = if let Some(child) = self.fetch_child(i, values, log)? {
 				child
 			} else {
+				stack.push((i, NodeType::Separator, self));
 				return Ok(())
 			};
 
