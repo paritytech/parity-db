@@ -1842,10 +1842,8 @@ mod tests {
 				if keys.insert(k) {
 					expected_count += 1;
 				}
-			} else {
-				if keys.remove(k) {
-					expected_count -= 1;
-				}
+			} else if keys.remove(k) {
+				expected_count -= 1;
 			}
 		}
 		assert_eq!(col_stats.total_values, expected_count);

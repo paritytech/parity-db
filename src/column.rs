@@ -408,7 +408,7 @@ impl HashColumn {
 		address: Address,
 		log: &mut LogWriter,
 	) -> Result<PlanOutcome> {
-		if Self::search_index(key, &tables.index, &*tables, log)?.is_some() {
+		if Self::search_index(key, &tables.index, &tables, log)?.is_some() {
 			return Ok(PlanOutcome::Skipped)
 		}
 		match tables.index.write_insert_plan(key, address, None, log)? {
@@ -474,9 +474,9 @@ impl HashColumn {
 	) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
-		let existing = Self::search_all_indexes(change.key(), &*tables, &*reindex, log)?;
+		let existing = Self::search_all_indexes(change.key(), &tables, &reindex, log)?;
 		if let Some((table, sub_index, existing_address)) = existing {
-			self.write_plan_existing(&*tables, change, log, table, sub_index, existing_address)
+			self.write_plan_existing(&tables, change, log, table, sub_index, existing_address)
 		} else {
 			match change {
 				Operation::Set(key, value) => {
@@ -523,12 +523,12 @@ impl HashColumn {
 			log,
 			stats,
 		)? {
-			(Some(outcome), _) => return Ok(outcome),
+			(Some(outcome), _) => Ok(outcome),
 			(None, Some(value_address)) => {
 				// If it was found in an older index we just insert a new entry. Reindex won't
 				// overwrite it.
 				let sub_index = if index.id == tables.index.id { Some(sub_index) } else { None };
-				return tables.index.write_insert_plan(key, value_address, sub_index, log)
+				tables.index.write_insert_plan(key, value_address, sub_index, log)
 			},
 			(None, None) => {
 				log::trace!(target: "parity-db", "{}: Removing from index {}", tables.index.id, hex(key));
@@ -550,7 +550,7 @@ impl HashColumn {
 		RwLockUpgradableReadGuard<'a, Tables>,
 		RwLockUpgradableReadGuard<'b, Reindex>,
 	)> {
-		let stats = self.collect_stats.then(|| &self.stats);
+		let stats = self.collect_stats.then_some(&self.stats);
 		let table_key = TableKey::Partial(*key);
 		let address = Column::write_new_value_plan(
 			&table_key,
@@ -693,7 +693,7 @@ impl HashColumn {
 			// We have to assume hashing scheme however.
 			for table in &tables.value[..tables.value.len() - 1] {
 				log::debug!( target: "parity-db", "{}: Iterating table {}", source.id, table.id);
-				table.iter_while(&*log.overlays(), |index, rc, value, compressed| {
+				table.iter_while(log.overlays(), |index, rc, value, compressed| {
 					let value = if compressed {
 						if let Ok(value) = self.compression.decompress(&value) {
 							value
@@ -718,7 +718,7 @@ impl HashColumn {
 		}
 
 		for c in start_chunk..source.id.total_chunks() {
-			let entries = source.entries(c, &*log.overlays());
+			let entries = source.entries(c, log.overlays());
 			for entry in entries.iter() {
 				if entry.is_empty() {
 					continue
@@ -739,8 +739,7 @@ impl HashColumn {
 				{
 					continue
 				}
-				let value =
-					tables.value[size_tier as usize].get_with_meta(offset, &*log.overlays());
+				let value = tables.value[size_tier as usize].get_with_meta(offset, log.overlays());
 				let (value, rc, pk, compressed) = match value {
 					Ok(Some(v)) => v,
 					Ok(None) => {
@@ -843,7 +842,7 @@ impl HashColumn {
 				log::debug!(target: "parity-db", "{}: Continue reindex at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				while source_index < source.id.total_chunks() && plan.len() < MAX_REINDEX_BATCH {
 					log::trace!(target: "parity-db", "{}: Reindexing {}", source.id, source_index);
-					let entries = source.entries(source_index, &*log.overlays());
+					let entries = source.entries(source_index, log.overlays());
 					for entry in entries.iter() {
 						if entry.is_empty() {
 							continue
@@ -917,9 +916,9 @@ impl Column {
 					if let Some(stats) = stats {
 						stats.reference_increase();
 					}
-					return Ok((Some(PlanOutcome::Written), None))
+					Ok((Some(PlanOutcome::Written), None))
 				} else {
-					return Ok((Some(PlanOutcome::Skipped), None))
+					Ok((Some(PlanOutcome::Skipped), None))
 				},
 			Operation::Set(_, val) => {
 				if tables.ref_counted {
