@@ -132,6 +132,7 @@ pub enum PlanOutcome {
 	Skipped,
 }
 
+#[derive(Debug)]
 pub struct IndexTable {
 	pub id: TableId,
 	map: RwLock<Option<memmap2::MmapMut>>,
@@ -150,7 +151,7 @@ fn file_size(index_bits: u8) -> u64 {
 	total_entries(index_bits) * 8 + META_SIZE as u64
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct TableId(u16);
 
 impl TableId {

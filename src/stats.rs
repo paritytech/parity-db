@@ -31,6 +31,7 @@ pub const TOTAL_SIZE: usize =
 	4 * HISTOGRAM_BUCKETS + 8 * HISTOGRAM_BUCKETS + 8 * SIZE_TIERS + 8 * 13;
 
 // TODO: get rid of the struct and use index meta directly.
+#[derive(Debug)]
 pub struct ColumnStats {
 	value_histogram: [AtomicU32; HISTOGRAM_BUCKETS],
 	query_histogram: [AtomicU64; SIZE_TIERS], // Per size tier

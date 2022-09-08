@@ -26,6 +26,7 @@ use crate::{
 	Operation,
 };
 
+#[derive(Debug)]
 pub struct BTree {
 	pub(super) depth: u32,
 	pub(super) root_index: Option<Address>,

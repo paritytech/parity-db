@@ -29,6 +29,7 @@ pub enum CompressionType {
 }
 
 /// Compression implementation.
+#[derive(Debug)]
 pub struct Compress {
 	inner: Compressor,
 	pub threshold: u32,
@@ -43,6 +44,7 @@ impl Compress {
 pub const NO_COMPRESSION: Compress =
 	Compress { inner: Compressor::NoCompression(NoCompression), threshold: u32::MAX };
 
+#[derive(Debug)]
 enum Compressor {
 	NoCompression(NoCompression),
 	Lz4(lz4::Lz4),
@@ -106,6 +108,7 @@ impl Compress {
 	}
 }
 
+#[derive(Debug)]
 struct NoCompression;
 
 impl NoCompression {
@@ -121,6 +124,7 @@ impl NoCompression {
 mod lz4 {
 	use crate::error::{Error, Result};
 
+	#[derive(Debug)]
 	pub(super) struct Lz4;
 
 	impl Lz4 {
@@ -142,6 +146,7 @@ mod snappy {
 	use crate::error::{Error, Result};
 	use std::io::{Read, Write};
 
+	#[derive(Debug)]
 	pub(super) struct Snappy;
 
 	impl Snappy {

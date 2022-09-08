@@ -142,6 +142,7 @@ impl Entry {
 	}
 }
 
+#[derive(Debug)]
 pub struct BTreeTable {
 	id: ColId,
 	tables: RwLock<Vec<ValueTable>>,
@@ -393,6 +394,7 @@ pub mod commit_overlay {
 		error::Result,
 	};
 
+	#[derive(Debug)]
 	pub struct BTreeChangeSet {
 		pub col: ColId,
 		pub changes: Vec<Operation<Vec<u8>, Vec<u8>>>,
