@@ -832,7 +832,8 @@ impl Db {
 	}
 
 	pub fn open_read_only(options: &Options) -> Result<Db> {
-		let inner_options = InternalOptions { read_only: true, ..Default::default() };
+		let inner_options =
+			InternalOptions { read_only: true, skip_check_lock: true, ..Default::default() };
 		Self::open_inner(options, &inner_options)
 	}
 
@@ -1476,6 +1477,18 @@ mod tests {
 		let options = Options::with_columns(tmp.path(), 5);
 		assert!(Db::open_or_create(&options).is_ok(), "New database should be created");
 		assert!(Db::open(&options).is_ok(), "Existing database should be reopened");
+	}
+
+	#[test]
+	fn test_db_open_multiple_times_read_only() {
+		let tmp = tempdir().unwrap();
+		let options = Options::with_columns(tmp.path(), 5);
+		let _db = Db::open_or_create(&options).expect("Failed to open db");
+		let _db_ro_1 = Db::open_read_only(&options).expect("Failed to open db in read only mode");
+		let _db_ro_2 = Db::open_read_only(&options).expect("Failed to open db in read only mode");
+
+		// Should fail if we try to open again using write capabilities.
+		assert!(Db::open_or_create(&options).is_err());
 	}
 
 	#[test]
