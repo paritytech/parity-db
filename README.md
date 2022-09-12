@@ -59,3 +59,16 @@ Finally, another thread handles the finalization queue. It reads the binary log 
 
 On startup if any log files exist, they are validated for corruption and enacted upon the tables.
 
+## License
+
+`ParityDb` is primarily distributed under the terms of both the MIT
+license and the APACHE license (Version 2.0), at your choice.
+
+See `LICENSE-APACHE` and `LICENSE-MIT` for details.
+
+## Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in `ParityDb` by you, as defined in the APACHE 2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
+

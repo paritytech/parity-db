@@ -1,37 +1,5 @@
-// Copyright 2022 Parity Technologies (UK) Ltd.
-// This file is part of Parity.
-
-// Parity is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// Parity is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Parity.  If not, see <http://www.gnu.org/licenses/>.
-
-// BTree indexes are stored as node value.
-// The header is stored at a fix address, the first offset of the
-// first value table that can contain the header.
-//
-// Header (metadata)
-// [ROOT: 8][DEPTH: 4]
-//
-// ROOT: u64 LE current index for root node.
-// DEPTH: u32 LE current tree depth.
-//
-// Complete entry:
-// [CHILD: 8]: Child node address, 0 for undefined (points to the metadata).
-// [VALUE_PTR: 8]: Address of the value for this key. 0, for no value.
-// [KEY_HEADER: 1]: Header of key, contains length up to 254. If 255, then the length is u32
-// encoded on the next 4 bytes.
-// [KEY: KEYSIZE]: stored key.
-//
-// This sequence is repeated ORDER times, followed by an additional CHILD index.
+// Copyright 2021-2022 Parity Technologies (UK) Ltd.
+// This file is dual-licensed as Apache-2.0 or MIT.
 
 use crate::{
 	btree::{btree::BTree, node::Node},
