@@ -73,7 +73,6 @@ impl Node {
 					*changes = &changes[1..];
 					continue
 				}
-				debug_assert!(changes[0].key() < changes[1].key());
 			}
 			let r = match &changes[0] {
 				Operation::Set(key, value) =>
