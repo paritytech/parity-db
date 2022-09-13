@@ -5,8 +5,8 @@
 //! Experimental, some functionality may not
 //! guarantee db durability.
 
-#[cfg_attr(any(target_os = "linux", target_os = "macos"), global_allocator)]
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg_attr(not(target_env = "msvc"), global_allocator)]
+#[cfg(not(target_env = "msvc"))]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 fn main() {
