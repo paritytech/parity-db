@@ -5,6 +5,7 @@ use crate::{
 	btree::{commit_overlay::BTreeChangeSet, BTreeIterator, BTreeTable},
 	column::{hash_key, ColId, Column, IterState, ReindexBatch},
 	error::{Error, Result},
+	hash::IdentityBuildHasher,
 	index::PlanOutcome,
 	log::{Log, LogAction},
 	options::Options,
@@ -1029,7 +1030,7 @@ impl Drop for Db {
 	}
 }
 
-pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<Value>), crate::IdentityBuildHasher>;
+pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<Value>), IdentityBuildHasher>;
 pub type BTreeCommitOverlay = BTreeMap<Vec<u8>, (u64, Option<Value>)>;
 
 #[derive(Debug)]

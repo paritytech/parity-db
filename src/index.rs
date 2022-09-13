@@ -3,7 +3,6 @@
 
 use crate::{
 	column::ColId,
-	const_assert,
 	display::hex,
 	error::{Error, Result},
 	log::{LogQuery, LogReader, LogWriter},
@@ -27,7 +26,8 @@ const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
 
 pub type Chunk = [u8; CHUNK_LEN];
 
-const_assert!(META_SIZE >= HEADER_SIZE + stats::TOTAL_SIZE);
+#[allow(clippy::assertions_on_constants)]
+const _: () = assert!(META_SIZE >= HEADER_SIZE + stats::TOTAL_SIZE);
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct Entry(u64);
