@@ -510,7 +510,7 @@ impl Log {
 							}
 						} else {
 							log::debug!(target: "parity-db", "Removing log {}", nlog);
-							std::mem::drop(file);
+							drop(file);
 							std::fs::remove_file(&path)?;
 						}
 					}
@@ -581,7 +581,7 @@ impl Log {
 		{
 			let replay_logs = std::mem::take(&mut *self.replay_queue.write());
 			for (id, _, file) in replay_logs {
-				std::mem::drop(file);
+				drop(file);
 				self.drop_log(id)?;
 			}
 		}
@@ -600,7 +600,7 @@ impl Log {
 	}
 
 	pub fn end_record(&self, log: LogChange) -> Result<u64> {
-		assert!(log.record_id + 1 == self.next_record_id.load(Ordering::Relaxed));
+		assert_eq!(log.record_id + 1, self.next_record_id.load(Ordering::Relaxed));
 		let record_id = log.record_id;
 		let mut appending = self.appending.write();
 		if appending.is_none() {
@@ -769,7 +769,7 @@ impl Log {
 		if pool.len() > MAX_LOG_POOL_SIZE {
 			let removed = pool.drain(MAX_LOG_POOL_SIZE..);
 			for (id, file) in removed {
-				std::mem::drop(file);
+				drop(file);
 				self.drop_log(id)?;
 			}
 		}
@@ -814,11 +814,11 @@ impl Log {
 	pub fn kill_logs(&self) -> Result<()> {
 		let mut log_pool = self.log_pool.write();
 		for (id, file) in log_pool.drain(..) {
-			std::mem::drop(file);
+			drop(file);
 			self.drop_log(id)?;
 		}
 		if let Some(reading) = self.reading.write().take() {
-			std::mem::drop(reading.file);
+			drop(reading.file);
 			self.drop_log(reading.id)?;
 		}
 		Ok(())

@@ -332,9 +332,9 @@ impl IndexTable {
 		let new_entry = Entry::new(address, partial_key, self.id.index_bits());
 		if let Some(i) = sub_index {
 			let entry = Self::read_entry(&chunk, i);
-			assert!(
-				entry.partial_key(self.id.index_bits()) ==
-					new_entry.partial_key(self.id.index_bits())
+			assert_eq!(
+				entry.partial_key(self.id.index_bits()),
+				new_entry.partial_key(self.id.index_bits())
 			);
 			Self::write_entry(&new_entry, i, &mut chunk);
 			log::trace!(target: "parity-db", "{}: Replaced at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
@@ -493,7 +493,7 @@ impl IndexTable {
 	}
 
 	pub fn drop_file(self) -> Result<()> {
-		std::mem::drop(self.map);
+		drop(self.map);
 		std::fs::remove_file(self.path.as_path())?;
 		log::debug!(target: "parity-db", "{}: Dropped table", self.id);
 		Ok(())

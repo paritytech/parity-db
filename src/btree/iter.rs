@@ -103,7 +103,7 @@ impl<'a> BTreeIterator<'a> {
 			let log = self.log.read();
 			let record_id = log.last_record_id(self.col);
 			// No consistency over iteration, allows dropping lock to overlay.
-			std::mem::drop(commit_overlay);
+			drop(commit_overlay);
 			if record_id != self.iter.1.record_id {
 				self.pending_next_backend = None;
 			}
@@ -179,7 +179,7 @@ impl<'a> BTreeIterator<'a> {
 			let log = self.log.read();
 			let record_id = log.last_record_id(self.col);
 			// No consistency over iteration, allows dropping lock to overlay.
-			std::mem::drop(commit_overlay);
+			drop(commit_overlay);
 			if record_id != self.iter.1.record_id {
 				self.pending_next_backend = None;
 			}

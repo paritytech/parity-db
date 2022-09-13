@@ -30,7 +30,7 @@ impl BTree {
 
 		let root_index =
 			if btree_header.root == NULL_ADDRESS { None } else { Some(btree_header.root) };
-		Ok(btree::BTree::new(root_index, btree_header.depth, record_id))
+		Ok(BTree::new(root_index, btree_header.depth, record_id))
 	}
 
 	pub fn write_sorted_changes(

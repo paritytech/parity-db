@@ -68,7 +68,7 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 	for c in 0..source_options.columns.len() as ColId {
 		if !to_migrate.contains(&c) {
 			if !overwrite {
-				std::mem::drop(dest);
+				drop(dest);
 				copy_column(c, from, &to.path)?;
 				dest = Db::open_or_create(&to)?;
 			}
@@ -106,12 +106,12 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 			dest.commit_raw(commit)?;
 			commit = Default::default();
 			nb_commit = 0;
-			std::mem::drop(dest);
+			drop(dest);
 			dest = Db::open_or_create(&to)?; // This is needed to flush logs.
 			log::info!("Collection migrated {}, imported", c);
 
-			std::mem::drop(dest);
-			std::mem::drop(source);
+			drop(dest);
+			drop(source);
 			let mut tmp_dir = from.to_path_buf();
 			tmp_dir.push(OVERWRITE_TMP_PATH);
 			let remove_tmp_dir = || -> Result<()> {
@@ -166,7 +166,7 @@ pub fn clear_column(path: &Path, column: ColId) -> Result<()> {
 	options.columns = meta.columns;
 	options.salt = Some(meta.salt);
 	let _db = Db::open(&options)?;
-	std::mem::drop(_db);
+	drop(_db);
 
 	// It is not specified how read_dir behaves when deleting and iterating in the same loop
 	// We collect a list of paths to be deleted first.
