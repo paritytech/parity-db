@@ -64,11 +64,19 @@ impl Node {
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
 		loop {
-			if changes.len() > 1 {
-				if changes[0].key() == changes[1].key() &&
-					!changes[0].is_reference_ops() &&
-					!changes[1].is_reference_ops()
-				{
+			if changes.len() > 1 && !changes[0].is_reference_ops() {
+				let mut skip = false;
+				for next in changes[1..].iter() {
+					if changes[0].key() == next.key() {
+						if !next.is_reference_ops() {
+							skip = true;
+							break
+						}
+					} else {
+						break
+					}
+				}
+				if skip {
 					// TODO only when advancing (here rec call useless)
 					*changes = &changes[1..];
 					continue
