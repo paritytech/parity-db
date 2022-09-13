@@ -27,7 +27,8 @@ jobs:
         with:
           toolchain: nightly
           override: true
-      - run: rustup component add rustfmt
+          profile: minimal
+          components: rustfmt
       - uses: actions-rs/cargo@v1
         with:
           command: fmt
@@ -40,7 +41,24 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
+          profile: minimal
+          components: clippy
       - uses: actions-rs/cargo@v1
         with:
           command: clippy
           args: --all-targets
+
+  address_sanitizer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --verbose --target x86_64-unknown-linux-gnu
+        env:
+          RUSTFLAGS: -Z sanitizer=address
