@@ -5,7 +5,7 @@
 pub struct HexDisplay<'a>(&'a [u8]);
 
 impl<'a> HexDisplay<'a> {
-	pub fn from<R: std::convert::AsRef<[u8]> + ?Sized>(d: &'a R) -> Self {
+	pub fn from<R: AsRef<[u8]> + ?Sized>(d: &'a R) -> Self {
 		HexDisplay(d.as_ref())
 	}
 }
@@ -13,7 +13,7 @@ impl<'a> HexDisplay<'a> {
 impl<'a> std::fmt::Display for HexDisplay<'a> {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		for byte in self.0 {
-			f.write_fmt(format_args!("{:02x}", byte))?;
+			write!(f, "{:02x}", byte)?;
 		}
 		Ok(())
 	}
@@ -22,12 +22,12 @@ impl<'a> std::fmt::Display for HexDisplay<'a> {
 impl<'a> std::fmt::Debug for HexDisplay<'a> {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		for byte in self.0 {
-			f.write_fmt(format_args!("{:02x}", byte))?;
+			write!(f, "{:02x}", byte)?;
 		}
 		Ok(())
 	}
 }
 
-pub fn hex<R: std::convert::AsRef<[u8]> + ?Sized>(r: &R) -> HexDisplay<'_> {
+pub fn hex<R: AsRef<[u8]> + ?Sized>(r: &R) -> HexDisplay<'_> {
 	HexDisplay::from(r)
 }

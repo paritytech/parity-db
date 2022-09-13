@@ -976,7 +976,7 @@ impl ValueTable {
 		let mut log = LogWriter::new(&empty_overlays, 0);
 		let at = self.overwrite_chain(&TableKey::NoHash, entry, &mut log, None, false)?;
 		self.complete_plan(&mut log)?;
-		assert!(at == 1);
+		assert_eq!(at, 1);
 		let log = log.drain();
 		let change = log.local_values_changes(self.id).expect("entry written above");
 		for (at, (_rec_id, entry)) in change.map.iter() {
@@ -1028,7 +1028,7 @@ pub mod key {
 			}
 		}
 
-		pub fn fetch_partial(buf: &mut super::FullEntry) -> Result<[u8; PARTIAL_SIZE]> {
+		pub fn fetch_partial(buf: &mut FullEntry) -> Result<[u8; PARTIAL_SIZE]> {
 			let mut result = [0u8; PARTIAL_SIZE];
 			if buf.1.len() >= PARTIAL_SIZE {
 				let pks = buf.read_partial();
@@ -1038,7 +1038,7 @@ pub mod key {
 			Err(crate::error::Error::InvalidValueData)
 		}
 
-		pub fn fetch(&self, buf: &mut super::FullEntry) -> Result<Option<[u8; PARTIAL_SIZE]>> {
+		pub fn fetch(&self, buf: &mut FullEntry) -> Result<Option<[u8; PARTIAL_SIZE]>> {
 			match self {
 				TableKey::Partial(_k) => Ok(Some(Self::fetch_partial(buf)?)),
 				TableKey::NoHash => Ok(None),

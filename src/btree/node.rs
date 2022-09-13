@@ -147,21 +147,21 @@ impl Node {
 				let insert = i;
 				let insert_separator = Self::create_separator(key, value, btree, log, None)?;
 
-				match insert.cmp(&middle) {
-					std::cmp::Ordering::Equal => {
+				return match insert.cmp(&middle) {
+					Ordering::Equal => {
 						let (right, right_ix) = self.split(middle, true, None, None, has_child);
 						let right = Self::write_split_child(right_ix, right, btree, log)?;
-						return Ok((Some((insert_separator, right)), false))
+						Ok((Some((insert_separator, right)), false))
 					},
-					std::cmp::Ordering::Less => {
+					Ordering::Less => {
 						let (right, right_ix) = self.split(middle, false, None, None, has_child);
 						let sep = self.remove_separator(middle - 1);
 						self.shift_from(insert, has_child, false);
 						self.set_separator(insert, insert_separator);
 						let right = Self::write_split_child(right_ix, right, btree, log)?;
-						return Ok((Some((sep, right)), false))
+						Ok((Some((sep, right)), false))
 					},
-					std::cmp::Ordering::Greater => {
+					Ordering::Greater => {
 						let (right, right_ix) = self.split(
 							middle + 1,
 							false,
@@ -171,7 +171,7 @@ impl Node {
 						);
 						let sep = self.remove_separator(middle);
 						let right = Self::write_split_child(right_ix, right, btree, log)?;
-						return Ok((Some((sep, right)), false))
+						Ok((Some((sep, right)), false))
 					},
 				}
 			}
@@ -203,13 +203,13 @@ impl Node {
 			let insert = at;
 
 			match insert.cmp(&middle) {
-				std::cmp::Ordering::Equal => {
+				Ordering::Equal => {
 					let (mut right, right_ix) = self.split(middle, true, None, None, has_child);
 					right.set_child(0, child);
 					let right = Self::write_split_child(right_ix, right, btree, log)?;
 					Ok(Some((separator, right)))
 				},
-				std::cmp::Ordering::Less => {
+				Ordering::Less => {
 					let (right, right_ix) = self.split(middle, false, None, None, has_child);
 					let sep = self.remove_separator(middle - 1);
 					self.shift_from(insert, has_child, false);
@@ -218,7 +218,7 @@ impl Node {
 					let right = Self::write_split_child(right_ix, right, btree, log)?;
 					Ok(Some((sep, right)))
 				},
-				std::cmp::Ordering::Greater => {
+				Ordering::Greater => {
 					let (right, right_ix) = self.split(
 						middle + 1,
 						false,
@@ -282,10 +282,10 @@ impl Node {
 			if !has_child {
 				return Ok((None, false))
 			}
-			if let Some(mut child) = self.fetch_child(i, values, log)? {
+			return if let Some(mut child) = self.fetch_child(i, values, log)? {
 				let r = child.change(Some((self, i)), depth - 1, changes, values, log)?;
 				self.write_child(i, child, values, log)?;
-				return Ok(match r {
+				Ok(match r {
 					(Some((sep, right)), _) => {
 						// insert from child
 						(self.insert_node(depth, i, sep, right, values, log)?, false)
@@ -297,7 +297,7 @@ impl Node {
 					r => r,
 				})
 			} else {
-				return Ok((None, false))
+				Ok((None, false))
 			}
 		}
 
@@ -628,8 +628,8 @@ impl Node {
 /// (there we need one entry per record id).
 #[derive(Clone, Debug)]
 pub struct Node {
-	pub(super) separators: [node::Separator; ORDER],
-	pub(super) children: [node::Child; ORDER_CHILD],
+	pub(super) separators: [Separator; ORDER],
+	pub(super) children: [Child; ORDER_CHILD],
 	pub(super) changed: bool,
 }
 

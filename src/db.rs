@@ -164,7 +164,7 @@ impl DbInner {
 		Ok(DbInner {
 			columns,
 			options,
-			shutdown: std::sync::atomic::AtomicBool::new(false),
+			shutdown: AtomicBool::new(false),
 			log,
 			commit_queue: Mutex::new(Default::default()),
 			commit_queue_full_cv: Condvar::new(),
@@ -526,7 +526,7 @@ impl DbInner {
 							self.last_enacted.load(Ordering::Relaxed) + 1,
 							reader.record_id(),
 						);
-						std::mem::drop(reader);
+						drop(reader);
 						self.log.clear_replay_logs()?;
 						return Ok(false)
 					}
@@ -536,7 +536,7 @@ impl DbInner {
 							Ok(next) => next,
 							Err(e) => {
 								log::debug!(target: "parity-db", "Error reading log: {:?}", e);
-								std::mem::drop(reader);
+								drop(reader);
 								self.log.clear_replay_logs()?;
 								return Ok(false)
 							},
@@ -544,7 +544,7 @@ impl DbInner {
 						match next {
 							LogAction::BeginRecord => {
 								log::debug!(target: "parity-db", "Unexpected log header");
-								std::mem::drop(reader);
+								drop(reader);
 								self.log.clear_replay_logs()?;
 								return Ok(false)
 							},
@@ -555,7 +555,7 @@ impl DbInner {
 									.validate_plan(LogAction::InsertIndex(insertion), &mut reader)
 								{
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
-									std::mem::drop(reader);
+									drop(reader);
 									self.log.clear_replay_logs()?;
 									return Ok(false)
 								}
@@ -566,7 +566,7 @@ impl DbInner {
 									.validate_plan(LogAction::InsertValue(insertion), &mut reader)
 								{
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
-									std::mem::drop(reader);
+									drop(reader);
 									self.log.clear_replay_logs()?;
 									return Ok(false)
 								}
@@ -1541,7 +1541,7 @@ mod tests {
 		])
 		.unwrap();
 		db_test.run_stages(&db);
-		std::mem::drop(db);
+		drop(db);
 
 		// issue with some file reopening when no delay
 		std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1686,7 +1686,7 @@ mod tests {
 
 		db.commit(vec![(col_nb, key1.clone(), Some(b"value1".to_vec()))]).unwrap();
 		EnableCommitPipelineStages::DbFile.run_stages(&db);
-		std::mem::drop(db);
+		drop(db);
 
 		// issue with some file reopening when no delay
 		std::thread::sleep(std::time::Duration::from_millis(100));

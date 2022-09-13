@@ -126,7 +126,7 @@ impl Default for ColumnOptions {
 }
 
 impl Options {
-	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Options {
+	pub fn with_columns(path: &Path, num_columns: u8) -> Options {
 		Options {
 			path: path.into(),
 			sync_wal: true,
@@ -138,14 +138,14 @@ impl Options {
 	}
 
 	// TODO on next major version remove in favor of write_metadata_with_version
-	pub fn write_metadata(&self, path: &std::path::Path, salt: &Salt) -> Result<()> {
+	pub fn write_metadata(&self, path: &Path, salt: &Salt) -> Result<()> {
 		let mut path = path.to_path_buf();
 		path.push("metadata");
 		self.write_metadata_file(&path, salt)
 	}
 
 	// TODO on next major version remove in favor of write_metadata_with_version
-	pub fn write_metadata_file(&self, path: &std::path::Path, salt: &Salt) -> Result<()> {
+	pub fn write_metadata_file(&self, path: &Path, salt: &Salt) -> Result<()> {
 		let mut file = std::fs::File::create(path)?;
 		writeln!(file, "version={}", CURRENT_VERSION)?;
 		writeln!(file, "salt={}", hex::encode(salt))?;
@@ -157,7 +157,7 @@ impl Options {
 
 	pub fn write_metadata_with_version(
 		&self,
-		path: &std::path::Path,
+		path: &Path,
 		salt: &Salt,
 		version: Option<u32>,
 	) -> Result<()> {
@@ -168,7 +168,7 @@ impl Options {
 
 	pub fn write_metadata_file_with_version(
 		&self,
-		path: &std::path::Path,
+		path: &Path,
 		salt: &Salt,
 		version: Option<u32>,
 	) -> Result<()> {

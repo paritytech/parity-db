@@ -121,7 +121,7 @@ pub fn run() -> Result<(), String> {
 				}
 			}
 			let db = parity_db::Db::open_or_create(&db_options).unwrap();
-			crate::bench::run_internal(args, db);
+			bench::run_internal(args, db);
 		},
 	}
 	Ok(())
