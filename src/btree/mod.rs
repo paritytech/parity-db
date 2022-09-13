@@ -466,22 +466,3 @@ pub mod commit_overlay {
 		}
 	}
 }
-
-#[test]
-fn test_duplicated_reference_on_ref_counted_btree() {
-	use crate::Db;
-	use tempfile::tempdir;
-	let tmp = tempdir().unwrap();
-	let mut options = Options::with_columns(tmp.path(), 1);
-	options.columns[0].ref_counted = true;
-	options.columns[0].btree_index = true;
-	let db = Db::open_or_create(&options).unwrap();
-	db.commit_changes(vec![
-		(0, Operation::Set(vec![255], vec![8])),
-		(0, Operation::Reference(vec![255])),
-		(0, Operation::Reference(vec![255])),
-		(0, Operation::Set(vec![255], vec![5])),
-	])
-	.unwrap();
-	assert_eq!(db.get(0, &[255]).unwrap(), Some(vec![5]));
-}
