@@ -70,8 +70,8 @@ pub struct Metadata {
 impl ColumnOptions {
 	fn as_string(&self) -> String {
 		format!(
-			"preimage: {}, uniform: {}, refc: {}, compression: {}, ordered: {}",
-			self.preimage, self.uniform, self.ref_counted, self.compression as u8, self.btree_index,
+			"preimage: {}, uniform: {}, refc: {}, compression: {}, compression-threshold: {}, ordered: {}",
+			self.preimage, self.uniform, self.ref_counted, self.compression as u8, self.compression_threshold, self.btree_index,
 		)
 	}
 
@@ -99,6 +99,10 @@ impl ColumnOptions {
 		let uniform = vals.get("uniform")?.parse().ok()?;
 		let ref_counted = vals.get("refc")?.parse().ok()?;
 		let compression: u8 = vals.get("compression").and_then(|c| c.parse().ok()).unwrap_or(0);
+		let compression_threshold = vals
+			.get("compression-threshold")
+			.and_then(|c| c.parse().ok())
+			.unwrap_or(ColumnOptions::default().compression_threshold);
 		let btree_index = vals.get("ordered").and_then(|c| c.parse().ok()).unwrap_or(false);
 
 		Some(ColumnOptions {
@@ -106,7 +110,7 @@ impl ColumnOptions {
 			uniform,
 			ref_counted,
 			compression: compression.into(),
-			compression_threshold: ColumnOptions::default().compression_threshold,
+			compression_threshold,
 			btree_index,
 		})
 	}
