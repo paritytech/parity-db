@@ -13,6 +13,8 @@ pub const CURRENT_VERSION: u32 = 7;
 // TODO on last supported 5, remove MULTIHEAD_V4 and MULTIPART_V4
 const LAST_SUPPORTED_VERSION: u32 = 4;
 
+pub const DEFAULT_COMPRESSION_THRESHOLD: u32 = 4096;
+
 /// Database configuration.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -31,6 +33,10 @@ pub struct Options {
 	/// Override salt value. If `None` is specified salt is loaded from metadata
 	/// or randomly generated when creating a new database.
 	pub salt: Option<Salt>,
+	/// Minimal value size threshold to attempt compressing a value per column.
+	///
+	/// Optional. A sensible default is used if nothing is set for a given column.
+	pub compression_threshold: HashMap<ColId, u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,8 +56,6 @@ pub struct ColumnOptions {
 	pub ref_counted: bool,
 	/// Compression to use for this column.
 	pub compression: CompressionType,
-	/// Minimal value size threshold to attempt compressing a value.
-	pub compression_threshold: u32,
 	/// Column is using a btree indexing.
 	pub btree_index: bool,
 }
@@ -106,7 +110,6 @@ impl ColumnOptions {
 			uniform,
 			ref_counted,
 			compression: compression.into(),
-			compression_threshold: ColumnOptions::default().compression_threshold,
 			btree_index,
 		})
 	}
@@ -119,7 +122,6 @@ impl Default for ColumnOptions {
 			uniform: false,
 			ref_counted: false,
 			compression: CompressionType::NoCompression,
-			compression_threshold: 4096,
 			btree_index: false,
 		}
 	}
@@ -134,6 +136,7 @@ impl Options {
 			stats: true,
 			salt: None,
 			columns: (0..num_columns).map(|_| Default::default()).collect(),
+			compression_threshold: HashMap::new(),
 		}
 	}
 

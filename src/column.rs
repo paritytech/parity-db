@@ -9,7 +9,7 @@ use crate::{
 	error::{Error, Result},
 	index::{Address, IndexTable, PlanOutcome, TableId as IndexTableId},
 	log::{Log, LogAction, LogOverlays, LogQuery, LogReader, LogWriter},
-	options::{ColumnOptions, Metadata, Options},
+	options::{ColumnOptions, Metadata, Options, DEFAULT_COMPRESSION_THRESHOLD},
 	stats::{ColumnStatSummary, ColumnStats},
 	table::{
 		key::{TableKey, TableKeyQuery},
@@ -271,7 +271,7 @@ impl Column {
 			.collect::<Result<_>>()?;
 
 		if column_options.btree_index {
-			Ok(Column::Tree(BTreeTable::open(col, value, metadata)?))
+			Ok(Column::Tree(BTreeTable::open(col, value, options, metadata)?))
 		} else {
 			Ok(Column::Hash(HashColumn::open(col, value, options, metadata)?))
 		}
@@ -300,20 +300,27 @@ impl HashColumn {
 		let (index, reindexing, stats) = Self::open_index(&options.path, col)?;
 		let collect_stats = options.stats;
 		let path = &options.path;
-		let options = &metadata.columns[col as usize];
+		let col_options = &metadata.columns[col as usize];
 		let db_version = metadata.version;
 		Ok(HashColumn {
 			col,
 			tables: RwLock::new(Tables { index, value }),
 			reindex: RwLock::new(Reindex { queue: reindexing, progress: AtomicU64::new(0) }),
 			path: path.into(),
-			preimage: options.preimage,
-			uniform_keys: options.uniform,
-			ref_counted: options.ref_counted,
+			preimage: col_options.preimage,
+			uniform_keys: col_options.uniform,
+			ref_counted: col_options.ref_counted,
 			collect_stats,
 			salt: metadata.salt,
 			stats,
-			compression: Compress::new(options.compression, options.compression_threshold),
+			compression: Compress::new(
+				col_options.compression,
+				options
+					.compression_threshold
+					.get(&col)
+					.copied()
+					.unwrap_or(DEFAULT_COMPRESSION_THRESHOLD),
+			),
 			db_version,
 		})
 	}

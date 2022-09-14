@@ -8,7 +8,7 @@ use crate::{
 	error::{Error, Result},
 	index::Address,
 	log::{LogAction, LogQuery, LogReader, LogWriter},
-	options::Options,
+	options::{Metadata, Options, DEFAULT_COMPRESSION_THRESHOLD},
 	table::{
 		key::{TableKey, TableKeyQuery},
 		Entry as ValueTableEntry, Value, ValueTable,
@@ -122,7 +122,8 @@ impl BTreeTable {
 	pub fn open(
 		id: ColId,
 		values: Vec<ValueTable>,
-		metadata: &crate::options::Metadata,
+		options: &Options,
+		metadata: &Metadata,
 	) -> Result<Self> {
 		let size_tier = HEADER_ADDRESS.size_tier() as usize;
 		if !values[size_tier].is_init() {
@@ -131,12 +132,19 @@ impl BTreeTable {
 			entry.write_header(&btree_header);
 			values[size_tier].init_with_entry(&*entry.encoded.inner_mut())?;
 		}
-		let options = &metadata.columns[id as usize];
+		let col_options = &metadata.columns[id as usize];
 		Ok(BTreeTable {
 			id,
 			tables: RwLock::new(values),
-			ref_counted: options.ref_counted,
-			compression: Compress::new(options.compression, options.compression_threshold),
+			ref_counted: col_options.ref_counted,
+			compression: Compress::new(
+				col_options.compression,
+				options
+					.compression_threshold
+					.get(&id)
+					.copied()
+					.unwrap_or(DEFAULT_COMPRESSION_THRESHOLD),
+			),
 		})
 	}
 
