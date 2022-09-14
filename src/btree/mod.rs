@@ -256,23 +256,6 @@ impl BTreeTable {
 		Ok(())
 	}
 
-	pub fn write_plan(
-		tables: TablesRef,
-		btree: &mut BTree,
-		writer: &mut LogWriter,
-		record_id: u64,
-		btree_header: &mut BTreeHeader,
-	) -> Result<()> {
-		let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), tables, writer)?;
-		if let Some(ix) = Self::write_node_plan(tables, root, writer, btree.root_index)? {
-			btree.root_index = Some(ix);
-		}
-		btree.record_id = record_id;
-		btree_header.root = btree.root_index.unwrap_or(NULL_ADDRESS);
-		btree_header.depth = btree.depth;
-		Ok(())
-	}
-
 	fn write_plan_remove_node(
 		tables: TablesRef,
 		writer: &mut LogWriter,
@@ -285,6 +268,7 @@ impl BTreeTable {
 			&Operation::Dereference(()),
 			writer,
 			None,
+			true,
 		)?;
 		Ok(())
 	}
@@ -347,6 +331,7 @@ impl BTreeTable {
 				&Operation::Set((), entry.encoded),
 				writer,
 				None,
+				true,
 			)? {
 				Some(new_index)
 			} else {
@@ -456,7 +441,9 @@ pub mod commit_overlay {
 			self.changes.sort();
 			tree.write_sorted_changes(self.changes.as_slice(), locked, writer)?;
 			*ops += self.changes.len() as u64;
-			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_header)?;
+
+			btree_header.root = tree.root_index.unwrap_or(NULL_ADDRESS);
+			btree_header.depth = tree.depth;
 
 			if old_btree_header != btree_header {
 				let mut entry = Entry::empty();
@@ -468,8 +455,11 @@ pub mod commit_overlay {
 					&Operation::Set((), &entry.encoded.as_ref()[..HEADER_SIZE as usize]),
 					writer,
 					None,
+					true,
 				)?;
 			}
+			#[cfg(test)]
+			tree.is_balanced(locked, writer)?;
 			Ok(())
 		}
 	}
