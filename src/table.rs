@@ -1,18 +1,5 @@
-// Copyright 2015-2021 Parity Technologies (UK) Ltd.
-// This file is part of Parity.
-
-// Parity is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// Parity is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Parity.  If not, see <http://www.gnu.org/licenses/>.
+// Copyright 2021-2022 Parity Technologies (UK) Ltd.
+// This file is dual-licensed as Apache-2.0 or MIT.
 
 // On disk data layout for value tables.
 // All numerical values are little endian.
@@ -96,7 +83,7 @@ const LOCKED_REF: u32 = u32::MAX;
 
 pub type Value = Vec<u8>;
 
-#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct TableId(u16);
 
 impl TableId {
@@ -135,6 +122,7 @@ impl std::fmt::Display for TableId {
 	}
 }
 
+#[derive(Debug)]
 pub struct ValueTable {
 	pub id: TableId,
 	pub entry_size: u16,
@@ -988,7 +976,7 @@ impl ValueTable {
 		let mut log = LogWriter::new(&empty_overlays, 0);
 		let at = self.overwrite_chain(&TableKey::NoHash, entry, &mut log, None, false)?;
 		self.complete_plan(&mut log)?;
-		assert!(at == 1);
+		assert_eq!(at, 1);
 		let log = log.drain();
 		let change = log.local_values_changes(self.id).expect("entry written above");
 		for (at, (_rec_id, entry)) in change.map.iter() {
@@ -1040,7 +1028,7 @@ pub mod key {
 			}
 		}
 
-		pub fn fetch_partial(buf: &mut super::FullEntry) -> Result<[u8; PARTIAL_SIZE]> {
+		pub fn fetch_partial(buf: &mut FullEntry) -> Result<[u8; PARTIAL_SIZE]> {
 			let mut result = [0u8; PARTIAL_SIZE];
 			if buf.1.len() >= PARTIAL_SIZE {
 				let pks = buf.read_partial();
@@ -1050,7 +1038,7 @@ pub mod key {
 			Err(crate::error::Error::InvalidValueData)
 		}
 
-		pub fn fetch(&self, buf: &mut super::FullEntry) -> Result<Option<[u8; PARTIAL_SIZE]>> {
+		pub fn fetch(&self, buf: &mut FullEntry) -> Result<Option<[u8; PARTIAL_SIZE]>> {
 			match self {
 				TableKey::Partial(_k) => Ok(Some(Self::fetch_partial(buf)?)),
 				TableKey::NoHash => Ok(None),
@@ -1116,7 +1104,7 @@ mod test {
 		}
 
 		fn log(&self) -> Log {
-			let options = Options::with_columns(&*self.0, 1);
+			let options = Options::with_columns(&self.0, 1);
 			Log::open(&options).unwrap()
 		}
 	}

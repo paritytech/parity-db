@@ -1,18 +1,5 @@
-// Copyright 2022 Parity Technologies (UK) Ltd.
-// This file is part of Parity.
-
-// Parity is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// Parity is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Parity.  If not, see <http://www.gnu.org/licenses/>.
+// Copyright 2021-2022 Parity Technologies (UK) Ltd.
+// This file is dual-licensed as Apache-2.0 or MIT.
 
 //! Btree overlay definition and methods.
 
@@ -23,8 +10,10 @@ use crate::{
 	error::Result,
 	log::{LogQuery, LogWriter},
 	table::key::TableKeyQuery,
+	Operation,
 };
 
+#[derive(Debug)]
 pub struct BTree {
 	pub(super) depth: u32,
 	pub(super) root_index: Option<Address>,
@@ -41,12 +30,12 @@ impl BTree {
 
 		let root_index =
 			if btree_header.root == NULL_ADDRESS { None } else { Some(btree_header.root) };
-		Ok(btree::BTree::new(root_index, btree_header.depth, record_id))
+		Ok(BTree::new(root_index, btree_header.depth, record_id))
 	}
 
 	pub fn write_sorted_changes(
 		&mut self,
-		mut changes: &[(Vec<u8>, Option<Vec<u8>>)],
+		mut changes: &[Operation<Vec<u8>, Vec<u8>>],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<()> {

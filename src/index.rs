@@ -1,22 +1,8 @@
-// Copyright 2015-2020 Parity Technologies (UK) Ltd.
-// This file is part of Parity.
-
-// Parity is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// Parity is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Parity.  If not, see <http://www.gnu.org/licenses/>.
+// Copyright 2021-2022 Parity Technologies (UK) Ltd.
+// This file is dual-licensed as Apache-2.0 or MIT.
 
 use crate::{
 	column::ColId,
-	const_assert,
 	display::hex,
 	error::{Error, Result},
 	log::{LogQuery, LogReader, LogWriter},
@@ -40,7 +26,8 @@ const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
 
 pub type Chunk = [u8; CHUNK_LEN];
 
-const_assert!(META_SIZE >= HEADER_SIZE + stats::TOTAL_SIZE);
+#[allow(clippy::assertions_on_constants)]
+const _: () = assert!(META_SIZE >= HEADER_SIZE + stats::TOTAL_SIZE);
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct Entry(u64);
@@ -132,6 +119,7 @@ pub enum PlanOutcome {
 	Skipped,
 }
 
+#[derive(Debug)]
 pub struct IndexTable {
 	pub id: TableId,
 	map: RwLock<Option<memmap2::MmapMut>>,
@@ -150,7 +138,7 @@ fn file_size(index_bits: u8) -> u64 {
 	total_entries(index_bits) * 8 + META_SIZE as u64
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct TableId(u16);
 
 impl TableId {
@@ -344,9 +332,9 @@ impl IndexTable {
 		let new_entry = Entry::new(address, partial_key, self.id.index_bits());
 		if let Some(i) = sub_index {
 			let entry = Self::read_entry(&chunk, i);
-			assert!(
-				entry.partial_key(self.id.index_bits()) ==
-					new_entry.partial_key(self.id.index_bits())
+			assert_eq!(
+				entry.partial_key(self.id.index_bits()),
+				new_entry.partial_key(self.id.index_bits())
 			);
 			Self::write_entry(&new_entry, i, &mut chunk);
 			log::trace!(target: "parity-db", "{}: Replaced at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
@@ -505,7 +493,7 @@ impl IndexTable {
 	}
 
 	pub fn drop_file(self) -> Result<()> {
-		std::mem::drop(self.map);
+		drop(self.map);
 		std::fs::remove_file(self.path.as_path())?;
 		log::debug!(target: "parity-db", "{}: Dropped table", self.id);
 		Ok(())

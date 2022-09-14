@@ -1,37 +1,5 @@
-// Copyright 2022 Parity Technologies (UK) Ltd.
-// This file is part of Parity.
-
-// Parity is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// Parity is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Parity.  If not, see <http://www.gnu.org/licenses/>.
-
-// BTree indexes are stored as node value.
-// The header is stored at a fix address, the first offset of the
-// first value table that can contain the header.
-//
-// Header (metadata)
-// [ROOT: 8][DEPTH: 4]
-//
-// ROOT: u64 LE current index for root node.
-// DEPTH: u32 LE current tree depth.
-//
-// Complete entry:
-// [CHILD: 8]: Child node address, 0 for undefined (points to the metadata).
-// [VALUE_PTR: 8]: Address of the value for this key. 0, for no value.
-// [KEY_HEADER: 1]: Header of key, contains length up to 254. If 255, then the length is u32
-// encoded on the next 4 bytes.
-// [KEY: KEYSIZE]: stored key.
-//
-// This sequence is repeated ORDER times, followed by an additional CHILD index.
+// Copyright 2021-2022 Parity Technologies (UK) Ltd.
+// This file is dual-licensed as Apache-2.0 or MIT.
 
 use crate::{
 	btree::{btree::BTree, node::Node},
@@ -40,11 +8,12 @@ use crate::{
 	error::{Error, Result},
 	index::Address,
 	log::{LogAction, LogQuery, LogReader, LogWriter},
-	options::Options,
+	options::{Metadata, Options, DEFAULT_COMPRESSION_THRESHOLD},
 	table::{
 		key::{TableKey, TableKeyQuery},
 		Entry as ValueTableEntry, Value, ValueTable,
 	},
+	Operation,
 };
 pub use iter::{BTreeIterator, LastIndex, LastKey};
 use node::SeparatorInner;
@@ -156,6 +125,7 @@ impl Entry {
 	}
 }
 
+#[derive(Debug)]
 pub struct BTreeTable {
 	id: ColId,
 	tables: RwLock<Vec<ValueTable>>,
@@ -167,7 +137,8 @@ impl BTreeTable {
 	pub fn open(
 		id: ColId,
 		values: Vec<ValueTable>,
-		metadata: &crate::options::Metadata,
+		options: &Options,
+		metadata: &Metadata,
 	) -> Result<Self> {
 		let size_tier = HEADER_ADDRESS.size_tier() as usize;
 		if !values[size_tier].is_init() {
@@ -176,12 +147,19 @@ impl BTreeTable {
 			entry.write_header(&btree_header);
 			values[size_tier].init_with_entry(&*entry.encoded.inner_mut())?;
 		}
-		let options = &metadata.columns[id as usize];
+		let col_options = &metadata.columns[id as usize];
 		Ok(BTreeTable {
 			id,
 			tables: RwLock::new(values),
-			ref_counted: options.ref_counted,
-			compression: Compress::new(options.compression, options.compression_threshold),
+			ref_counted: col_options.ref_counted,
+			compression: Compress::new(
+				col_options.compression,
+				options
+					.compression_threshold
+					.get(&id)
+					.copied()
+					.unwrap_or(DEFAULT_COMPRESSION_THRESHOLD),
+			),
 		})
 	}
 
@@ -204,7 +182,7 @@ impl BTreeTable {
 		log: &impl LogQuery,
 	) -> Result<Option<(u8, Value)>> {
 		let tables = self.tables.read();
-		let btree = self.locked(&*tables);
+		let btree = self.locked(&tables);
 		Column::get_value(key, address, btree, log)
 	}
 
@@ -315,11 +293,11 @@ impl BTreeTable {
 		writer: &mut LogWriter,
 		node_index: Address,
 	) -> Result<()> {
-		Column::write_existing_value_plan(
+		Column::write_existing_value_plan::<_, Vec<u8>>(
 			&TableKey::NoHash,
 			tables,
 			node_index,
-			None,
+			&Operation::Dereference(()),
 			writer,
 			None,
 		)?;
@@ -375,33 +353,24 @@ impl BTreeTable {
 
 		let old_comp = tables.compression;
 		tables.compression = &crate::compress::NO_COMPRESSION;
-		let mut write_node = || {
-			Ok(if let Some(existing) = node_id {
-				let k = TableKey::NoHash;
-				if let (_, Some(new_index)) = Column::write_existing_value_plan(
-					&k,
-					tables,
-					existing,
-					Some(entry.encoded.as_ref()),
-					writer,
-					None,
-				)? {
-					Some(new_index)
-				} else {
-					None
-				}
+		let result = Ok(if let Some(existing) = node_id {
+			let k = TableKey::NoHash;
+			if let (_, Some(new_index)) = Column::write_existing_value_plan(
+				&k,
+				tables,
+				existing,
+				&Operation::Set((), entry.encoded),
+				writer,
+				None,
+			)? {
+				Some(new_index)
 			} else {
-				let k = TableKey::NoHash;
-				Some(Column::write_new_value_plan(
-					&k,
-					tables,
-					entry.encoded.as_ref(),
-					writer,
-					None,
-				)?)
-			})
-		};
-		let result = write_node();
+				None
+			}
+		} else {
+			let k = TableKey::NoHash;
+			Some(Column::write_new_value_plan(&k, tables, entry.encoded.as_ref(), writer, None)?)
+		});
 		tables.compression = old_comp;
 
 		result
@@ -412,13 +381,14 @@ pub mod commit_overlay {
 	use super::*;
 	use crate::{
 		column::{ColId, Column},
-		db::BTreeCommitOverlay,
+		db::{BTreeCommitOverlay, Operation},
 		error::Result,
 	};
 
+	#[derive(Debug)]
 	pub struct BTreeChangeSet {
 		pub col: ColId,
-		pub changes: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+		pub changes: Vec<Operation<Vec<u8>, Vec<u8>>>,
 	}
 
 	impl BTreeChangeSet {
@@ -426,9 +396,9 @@ pub mod commit_overlay {
 			BTreeChangeSet { col, changes: Default::default() }
 		}
 
-		pub fn push(&mut self, k: &[u8], v: Option<Vec<u8>>) {
+		pub fn push(&mut self, change: Operation<Vec<u8>, Vec<u8>>) {
 			// No key hashing
-			self.changes.push((k.to_vec(), v));
+			self.changes.push(change);
 		}
 
 		pub fn copy_to_overlay(
@@ -437,31 +407,43 @@ pub mod commit_overlay {
 			record_id: u64,
 			bytes: &mut usize,
 			options: &Options,
-		) {
+		) -> Result<()> {
 			let ref_counted = options.columns[self.col as usize].ref_counted;
-			for commit in self.changes.iter() {
-				match commit {
-					(key, Some(value)) => {
+			for change in self.changes.iter() {
+				match change {
+					Operation::Set(key, value) => {
 						*bytes += key.len();
 						*bytes += value.len();
 						overlay.insert(key.clone(), (record_id, Some(value.clone())));
 					},
-					(key, None) => {
-						*bytes += key.len();
+					Operation::Dereference(key) => {
 						// Don't add removed ref-counted values to overlay.
 						// (current ref_counted implementation does not
 						// make much sense for btree indexed content).
 						if !ref_counted {
+							*bytes += key.len();
 							overlay.insert(key.clone(), (record_id, None));
+						}
+					},
+					Operation::Reference(..) => {
+						// Don't add (we allow remove value in overlay when using rc: some
+						// indexing on top of it is expected).
+						if !ref_counted {
+							return Err(Error::InvalidInput(format!(
+								"No Rc for column {}",
+								self.col
+							)))
 						}
 					},
 				}
 			}
+			Ok(())
 		}
 
 		pub fn clean_overlay(&mut self, overlay: &mut BTreeCommitOverlay, record_id: u64) {
 			use std::collections::btree_map::Entry;
-			for (key, _) in self.changes.drain(..) {
+			for change in self.changes.drain(..) {
+				let key = change.into_key();
 				if let Entry::Occupied(e) = overlay.entry(key) {
 					if e.get().0 == record_id {
 						e.remove_entry();
@@ -479,14 +461,14 @@ pub mod commit_overlay {
 			let record_id = writer.record_id();
 
 			let locked_tables = btree.tables.read();
-			let locked = btree.locked(&*locked_tables);
+			let locked = btree.locked(&locked_tables);
 			let mut tree = BTree::open(locked, writer, record_id)?;
 
 			let mut btree_header =
 				BTreeHeader { root: tree.root_index.unwrap_or(NULL_ADDRESS), depth: tree.depth };
 			let old_btree_header = btree_header.clone();
 
-			self.changes.sort_by_key(|(k, _)| k.clone());
+			self.changes.sort();
 			tree.write_sorted_changes(self.changes.as_slice(), locked, writer)?;
 			*ops += self.changes.len() as u64;
 			BTreeTable::write_plan(locked, &mut tree, writer, record_id, &mut btree_header)?;
@@ -498,7 +480,7 @@ pub mod commit_overlay {
 					&TableKey::NoHash,
 					locked,
 					HEADER_ADDRESS,
-					Some(&entry.encoded.as_ref()[..HEADER_SIZE as usize]),
+					&Operation::Set((), &entry.encoded.as_ref()[..HEADER_SIZE as usize]),
 					writer,
 					None,
 				)?;

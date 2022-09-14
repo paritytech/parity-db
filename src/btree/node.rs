@@ -1,18 +1,5 @@
-// Copyright 2022 Parity Technologies (UK) Ltd.
-// This file is part of Parity.
-
-// Parity is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// Parity is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Parity.  If not, see <http://www.gnu.org/licenses/>.
+// Copyright 2021-2022 Parity Technologies (UK) Ltd.
+// This file is dual-licensed as Apache-2.0 or MIT.
 
 //! BTree node struct and methods.
 
@@ -26,6 +13,7 @@ use crate::{
 	index::Address,
 	log::{LogQuery, LogWriter},
 	table::key::TableKey,
+	Operation,
 };
 use std::cmp::Ordering;
 
@@ -67,24 +55,33 @@ impl Node {
 		&mut self,
 		parent: Option<(&mut Self, usize)>,
 		depth: u32,
-		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
+		changes: &mut &[Operation<Vec<u8>, Vec<u8>>],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
 		loop {
-			if changes.len() > 1 {
-				if changes[0].0 == changes[1].0 {
+			if changes.len() > 1 && !changes[0].is_reference_ops() {
+				let mut skip = false;
+				for next in changes[1..].iter() {
+					if changes[0].key() == next.key() {
+						if !next.is_reference_ops() {
+							skip = true;
+							break
+						}
+					} else {
+						break
+					}
+				}
+				if skip {
 					// TODO only when advancing (here rec call useless)
 					*changes = &changes[1..];
 					continue
 				}
-				debug_assert!(changes[0].0 < changes[1].0);
 			}
-			let (key, value) = &changes[0];
-			let r = if let Some(value) = value {
-				self.insert(depth, key, value, changes, btree, log)?
-			} else {
-				self.remove(depth, key, changes, btree, log)?
+			let r = match &changes[0] {
+				Operation::Set(key, value) =>
+					self.insert(depth, key, value, changes, btree, log)?,
+				_ => self.on_existing(depth, changes, btree, log)?,
 			};
 			if r.0.is_some() || r.1 {
 				return Ok(r)
@@ -93,7 +90,7 @@ impl Node {
 				break
 			}
 			if let Some((parent, p)) = &parent {
-				let key = &changes[1].0;
+				let key = &changes[1].key();
 				let (at, i) = self.position(key)?; // TODO could start position from current
 				if at || i < self.number_separator() {
 					*changes = &changes[1..];
@@ -118,7 +115,7 @@ impl Node {
 		depth: u32,
 		key: &[u8],
 		value: &[u8],
-		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
+		changes: &mut &[Operation<Vec<u8>, Vec<u8>>],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
@@ -153,21 +150,21 @@ impl Node {
 				let insert = i;
 				let insert_separator = Self::create_separator(key, value, btree, log, None)?;
 
-				match insert.cmp(&middle) {
-					std::cmp::Ordering::Equal => {
+				return match insert.cmp(&middle) {
+					Ordering::Equal => {
 						let (right, right_ix) = self.split(middle, true, None, None, has_child);
 						let right = Self::write_split_child(right_ix, right, btree, log)?;
-						return Ok((Some((insert_separator, right)), false))
+						Ok((Some((insert_separator, right)), false))
 					},
-					std::cmp::Ordering::Less => {
+					Ordering::Less => {
 						let (right, right_ix) = self.split(middle, false, None, None, has_child);
 						let sep = self.remove_separator(middle - 1);
 						self.shift_from(insert, has_child, false);
 						self.set_separator(insert, insert_separator);
 						let right = Self::write_split_child(right_ix, right, btree, log)?;
-						return Ok((Some((sep, right)), false))
+						Ok((Some((sep, right)), false))
 					},
-					std::cmp::Ordering::Greater => {
+					Ordering::Greater => {
 						let (right, right_ix) = self.split(
 							middle + 1,
 							false,
@@ -177,7 +174,7 @@ impl Node {
 						);
 						let sep = self.remove_separator(middle);
 						let right = Self::write_split_child(right_ix, right, btree, log)?;
-						return Ok((Some((sep, right)), false))
+						Ok((Some((sep, right)), false))
 					},
 				}
 			}
@@ -209,13 +206,13 @@ impl Node {
 			let insert = at;
 
 			match insert.cmp(&middle) {
-				std::cmp::Ordering::Equal => {
+				Ordering::Equal => {
 					let (mut right, right_ix) = self.split(middle, true, None, None, has_child);
 					right.set_child(0, child);
 					let right = Self::write_split_child(right_ix, right, btree, log)?;
 					Ok(Some((separator, right)))
 				},
-				std::cmp::Ordering::Less => {
+				Ordering::Less => {
 					let (right, right_ix) = self.split(middle, false, None, None, has_child);
 					let sep = self.remove_separator(middle - 1);
 					self.shift_from(insert, has_child, false);
@@ -224,7 +221,7 @@ impl Node {
 					let right = Self::write_split_child(right_ix, right, btree, log)?;
 					Ok(Some((sep, right)))
 				},
-				std::cmp::Ordering::Greater => {
+				Ordering::Greater => {
 					let (right, right_ix) = self.split(
 						middle + 1,
 						false,
@@ -245,24 +242,25 @@ impl Node {
 		}
 	}
 
-	fn remove(
+	fn on_existing(
 		&mut self,
 		depth: u32,
-		key: &[u8],
-		changes: &mut &[(Vec<u8>, Option<Vec<u8>>)],
+		changes: &mut &[Operation<Vec<u8>, Vec<u8>>],
 		values: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
+		let change = &changes[0];
+		let key = change.key();
 		let has_child = depth != 0;
 		let (at, i) = self.position(key)?;
 		if at {
 			let existing = self.separator_address(i);
 			if let Some(existing) = existing {
-				Column::write_existing_value_plan(
+				Column::write_existing_value_plan::<_, Vec<u8>>(
 					&TableKey::NoHash,
 					values,
 					existing,
-					None,
+					change,
 					log,
 					None,
 				)?;
@@ -287,10 +285,10 @@ impl Node {
 			if !has_child {
 				return Ok((None, false))
 			}
-			if let Some(mut child) = self.fetch_child(i, values, log)? {
+			return if let Some(mut child) = self.fetch_child(i, values, log)? {
 				let r = child.change(Some((self, i)), depth - 1, changes, values, log)?;
 				self.write_child(i, child, values, log)?;
-				return Ok(match r {
+				Ok(match r {
 					(Some((sep, right)), _) => {
 						// insert from child
 						(self.insert_node(depth, i, sep, right, values, log)?, false)
@@ -302,7 +300,7 @@ impl Node {
 					r => r,
 				})
 			} else {
-				return Ok((None, false))
+				Ok((None, false))
 			}
 		}
 
@@ -497,39 +495,42 @@ impl Node {
 	}
 
 	pub fn seek(
-		from: Self,
+		self,
 		key: &[u8],
 		values: TablesRef,
 		log: &impl LogQuery,
-		depth: u32,
+		mut depth: u32,
 		stack: &mut Vec<(LastIndex, Self)>,
 		seek_to: SeekTo,
 		direction: IterDirection,
 	) -> Result<()> {
-		let (at, i) = from.position(key)?;
-		if at {
-			stack.push(match (seek_to, direction) {
-				(SeekTo::Exclude, _) => (LastIndex::At(i), from),
-				(SeekTo::Include, IterDirection::Forward) => (LastIndex::Seeked(i), from),
-				(SeekTo::Include, IterDirection::Backward) => (LastIndex::Seeked(i), from),
-			});
-			return Ok(())
-		}
-		if depth != 0 {
+		let mut from = self;
+		loop {
+			let (at, i) = from.position(key)?;
+			if at {
+				stack.push(match (seek_to, direction) {
+					(SeekTo::Exclude, _) => (LastIndex::At(i), from),
+					(SeekTo::Include, IterDirection::Forward) => (LastIndex::Seeked(i), from),
+					(SeekTo::Include, IterDirection::Backward) => (LastIndex::Seeked(i), from),
+				});
+				return Ok(())
+			}
+			if depth == 0 {
+				if i == 0 {
+					stack.push((LastIndex::Start, from));
+				} else {
+					stack.push((LastIndex::Before(i), from));
+				}
+				return Ok(())
+			}
 			if let Some(child) = from.fetch_child(i, values, log)? {
 				stack.push((LastIndex::Descend(i), from));
-				return Self::seek(child, key, values, log, depth - 1, stack, seek_to, direction)
+				from = child;
+				depth = depth - 1
 			} else {
 				unreachable!()
 			}
 		}
-		if i == 0 {
-			stack.push((LastIndex::Start, from));
-		} else {
-			stack.push((LastIndex::Before(i), from));
-		}
-
-		Ok(())
 	}
 
 	#[cfg(test)]
@@ -565,8 +566,8 @@ impl Node {
 /// (there we need one entry per record id).
 #[derive(Clone, Debug)]
 pub struct Node {
-	pub(super) separators: [node::Separator; ORDER],
-	pub(super) children: [node::Child; ORDER_CHILD],
+	pub(super) separators: [Separator; ORDER],
+	pub(super) children: [Child; ORDER_CHILD],
 	pub(super) changed: bool,
 }
 
@@ -684,7 +685,7 @@ impl Node {
 				&TableKey::NoHash,
 				btree,
 				address,
-				Some(value),
+				&Operation::Set((), value),
 				log,
 				None,
 			)?

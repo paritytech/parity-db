@@ -14,7 +14,7 @@ The database is a universal key-value storage that supports transactions. The AP
 Database supports multiple concurrent readers. All writes are serialized. Writes are performed in batches, also known as transactions. Transactions are applied atomically. Either all of the transaction data is written, or none. Queries can't retrieve partially committed data.
 
 ### No cache
-Database does implement any custom data caching. Instead it relies on OS page cache. Performance of a large database therefore depends on how much system memory is available to be used in OS page cache.
+Database does implement any custom data caching. Instead, it relies on OS page cache. Performance of a large database therefore depends on how much system memory is available to be used in OS page cache.
 
 ### Durability
 Database is restored to consistent state if IO is interrupted at any point.
@@ -28,7 +28,7 @@ Each column stores data in a set of 256 value tables, with 255 tables containing
 Metadata file contains database definition. This includes a set of columns with configuration specified for each column.
 
 ### Hash index
-Hash index is an is mmap-backed dynamically sized probing hash table. For each key the index computes a uniformly distributed 256-bit hash 'k'. For index of size `n`, the first `n` bits of `k` map to the 512 byte index page. Each page is an unordered list of 64 8-byte entries. Each 8-byte entry contains a value address and some additional bits of `k`. An empty entry is denoted with a zero value. An empty database starts with `n` = 16. A value address includes a 8-bit value table index and an index of an entry in that table.
+Hash index is an is mmap-backed dynamically sized probing hash table. For each key the index computes a uniformly distributed 256-bit hash 'k'. For index of size `n`, the first `n` bits of `k` map to the 512 byte index page. Each page is an unordered list of 64 8-byte entries. Each 8-byte entry contains a value address and some additional bits of `k`. An empty entry is denoted with a zero value. An empty database starts with `n` = 16. A value address includes an 8-bit value table index and an index of an entry in that table.
 The first 16 kbytes of each index file is used to store statistics for the column.
 
 ### Value tables
@@ -43,7 +43,7 @@ Value table is a linear array of fixed-size entries that can grow as necessary. 
 Compute `k`, find index page using first `n` bits. Search for a matching entry that has matching key bits. Use the address in the entry to query the partial `k` and value from a value table. Confirm that `k` matches expected value.
 
 ### Hash index insertion
-If an insertion is attempted into a full index page a reindex is triggered. 
+If an insertion is attempted into a full index page a reindex is triggered.
 Page size of 64 index entries trigger a reindex once load factor reaches about 0.52.
 
 ### Reindex
@@ -58,4 +58,17 @@ Commit queue is processed by a commit worker that collects data that would be mo
 Finally, another thread handles the finalization queue. It reads the binary log file and applies all changes to the tables, clearing the page overlay.
 
 On startup if any log files exist, they are validated for corruption and enacted upon the tables.
+
+## License
+
+`ParityDb` is primarily distributed under the terms of both the MIT
+license and the APACHE license (Version 2.0), at your choice.
+
+See `LICENSE-APACHE` and `LICENSE-MIT` for details.
+
+## Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in `ParityDb` by you, as defined in the APACHE 2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
 

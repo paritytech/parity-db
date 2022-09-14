@@ -1,23 +1,11 @@
-// Copyright 2015-2022 Parity Technologies (UK) Ltd.
-// This file is part of Parity.
-
-// Parity is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// Parity is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Parity.  If not, see <http://www.gnu.org/licenses/>.
+// Copyright 2021-2022 Parity Technologies (UK) Ltd.
+// This file is dual-licensed as Apache-2.0 or MIT.
 
 use crate::{
 	btree::{commit_overlay::BTreeChangeSet, BTreeIterator, BTreeTable},
 	column::{hash_key, ColId, Column, IterState, ReindexBatch},
 	error::{Error, Result},
+	hash::IdentityBuildHasher,
 	index::PlanOutcome,
 	log::{Log, LogAction},
 	options::Options,
@@ -64,7 +52,7 @@ const KEEP_LOGS: usize = 16;
 pub type Value = Vec<u8>;
 
 // Commit data passed to `commit`
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Commit {
 	// Commit ID. This is not the same as log record id, as some records
 	// are originated within the DB. E.g. reindex.
@@ -77,7 +65,7 @@ struct Commit {
 }
 
 // Pending commits. This may not grow beyond `MAX_COMMIT_QUEUE_BYTES` bytes.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct CommitQueue {
 	// Log record.
 	record_id: u64,
@@ -87,6 +75,7 @@ struct CommitQueue {
 	commits: VecDeque<Commit>,
 }
 
+#[derive(Debug)]
 struct DbInner {
 	columns: Vec<Column>,
 	options: Options,
@@ -109,6 +98,7 @@ struct DbInner {
 	_lock_file: std::fs::File,
 }
 
+#[derive(Debug)]
 struct WaitCondvar<S> {
 	cv: Condvar,
 	work: Mutex<S>,
@@ -174,7 +164,7 @@ impl DbInner {
 		Ok(DbInner {
 			columns,
 			options,
-			shutdown: std::sync::atomic::AtomicBool::new(false),
+			shutdown: AtomicBool::new(false),
 			log,
 			commit_queue: Mutex::new(Default::default()),
 			commit_queue_full_cv: Condvar::new(),
@@ -260,18 +250,32 @@ impl DbInner {
 		I: IntoIterator<Item = (ColId, K, Option<Value>)>,
 		K: AsRef<[u8]>,
 	{
+		self.commit_changes(tx.into_iter().map(|(c, k, v)| {
+			(
+				c,
+				match v {
+					Some(v) => Operation::Set(k.as_ref().to_vec(), v),
+					None => Operation::Dereference(k.as_ref().to_vec()),
+				},
+			)
+		}))
+	}
+
+	fn commit_changes<I>(&self, tx: I) -> Result<()>
+	where
+		I: IntoIterator<Item = (ColId, Operation<Vec<u8>, Vec<u8>>)>,
+	{
 		let mut commit: CommitChangeSet = Default::default();
-		for (c, k, v) in tx.into_iter() {
-			if self.options.columns[c as usize].btree_index {
+		for (col, change) in tx.into_iter() {
+			if self.options.columns[col as usize].btree_index {
 				commit
 					.btree_indexed
-					.entry(c)
-					.or_insert_with(|| BTreeChangeSet::new(c))
-					.push(k.as_ref(), v)
+					.entry(col)
+					.or_insert_with(|| BTreeChangeSet::new(col))
+					.push(change)
 			} else {
-				commit.indexed.entry(c).or_insert_with(|| IndexedChangeSet::new(c)).push(
-					k.as_ref(),
-					v,
+				commit.indexed.entry(col).or_insert_with(|| IndexedChangeSet::new(col)).push(
+					change,
 					&self.options,
 					self.db_version,
 				)
@@ -306,7 +310,7 @@ impl DbInner {
 				record_id,
 				&mut bytes,
 				&self.options,
-			);
+			)?;
 		}
 
 		for (c, iterset) in &commit.btree_indexed {
@@ -315,7 +319,7 @@ impl DbInner {
 				record_id,
 				&mut bytes,
 				&self.options,
-			);
+			)?;
 		}
 
 		let commit = Commit { id: record_id, changeset: commit, bytes };
@@ -522,7 +526,7 @@ impl DbInner {
 							self.last_enacted.load(Ordering::Relaxed) + 1,
 							reader.record_id(),
 						);
-						std::mem::drop(reader);
+						drop(reader);
 						self.log.clear_replay_logs()?;
 						return Ok(false)
 					}
@@ -532,7 +536,7 @@ impl DbInner {
 							Ok(next) => next,
 							Err(e) => {
 								log::debug!(target: "parity-db", "Error reading log: {:?}", e);
-								std::mem::drop(reader);
+								drop(reader);
 								self.log.clear_replay_logs()?;
 								return Ok(false)
 							},
@@ -540,7 +544,7 @@ impl DbInner {
 						match next {
 							LogAction::BeginRecord => {
 								log::debug!(target: "parity-db", "Unexpected log header");
-								std::mem::drop(reader);
+								drop(reader);
 								self.log.clear_replay_logs()?;
 								return Ok(false)
 							},
@@ -551,7 +555,7 @@ impl DbInner {
 									.validate_plan(LogAction::InsertIndex(insertion), &mut reader)
 								{
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
-									std::mem::drop(reader);
+									drop(reader);
 									self.log.clear_replay_logs()?;
 									return Ok(false)
 								}
@@ -562,7 +566,7 @@ impl DbInner {
 									.validate_plan(LogAction::InsertValue(insertion), &mut reader)
 								{
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
-									std::mem::drop(reader);
+									drop(reader);
 									self.log.clear_replay_logs()?;
 									return Ok(false)
 								}
@@ -907,7 +911,14 @@ impl Db {
 		self.inner.commit(tx)
 	}
 
-	pub fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
+	pub fn commit_changes<I>(&self, tx: I) -> Result<()>
+	where
+		I: IntoIterator<Item = (ColId, Operation<Vec<u8>, Vec<u8>>)>,
+	{
+		self.inner.commit_changes(tx)
+	}
+
+	pub(crate) fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
 		self.inner.commit_raw(commit)
 	}
 
@@ -1008,10 +1019,26 @@ impl Drop for Db {
 	fn drop(&mut self) {
 		if self.join_on_shutdown {
 			self.inner.shutdown();
-			self.log_thread.take().map(|t| t.join());
-			self.flush_thread.take().map(|t| t.join());
-			self.commit_thread.take().map(|t| t.join());
-			self.cleanup_thread.take().map(|t| t.join());
+			if let Some(t) = self.log_thread.take() {
+				if let Err(e) = t.join() {
+					log::warn!(target: "parity-db", "Log thread shutdown error: {:?}", e);
+				}
+			}
+			if let Some(t) = self.flush_thread.take() {
+				if let Err(e) = t.join() {
+					log::warn!(target: "parity-db", "Flush thread shutdown error: {:?}", e);
+				}
+			}
+			if let Some(t) = self.commit_thread.take() {
+				if let Err(e) = t.join() {
+					log::warn!(target: "parity-db", "Commit thread shutdown error: {:?}", e);
+				}
+			}
+			if let Some(t) = self.cleanup_thread.take() {
+				if let Err(e) = t.join() {
+					log::warn!(target: "parity-db", "Cleanup thread shutdown error: {:?}", e);
+				}
+			}
 			if let Err(e) = self.inner.kill_logs() {
 				log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
 			}
@@ -1019,9 +1046,10 @@ impl Drop for Db {
 	}
 }
 
-pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<Value>), crate::IdentityBuildHasher>;
+pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<Value>), IdentityBuildHasher>;
 pub type BTreeCommitOverlay = BTreeMap<Vec<u8>, (u64, Option<Value>)>;
 
+#[derive(Debug)]
 pub struct CommitOverlay {
 	indexed: IndexedCommitOverlay,
 	btree_indexed: BTreeCommitOverlay,
@@ -1113,15 +1141,76 @@ impl CommitOverlay {
 	}
 }
 
-#[derive(Default)]
+/// Different operations allowed for a commit.
+/// Behavior may differs depending on column configuration.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Operation<Key, Value> {
+	/// Insert or update the value for a given key.
+	Set(Key, Value),
+
+	/// Dereference at a given key, resulting in
+	/// either removal of a key value or decrement of its
+	/// reference count counter.
+	Dereference(Key),
+
+	/// Increment the reference count counter of an existing value for a given key.
+	/// If no value exists for the key, this operation is skipped.
+	Reference(Key),
+}
+
+impl<Key: Ord, Value: Eq> PartialOrd<Self> for Operation<Key, Value> {
+	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl<Key: Ord, Value: Eq> Ord for Operation<Key, Value> {
+	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+		self.key().cmp(other.key())
+	}
+}
+
+impl<Key, Value> Operation<Key, Value> {
+	pub fn key(&self) -> &Key {
+		match self {
+			Operation::Set(k, _) | Operation::Dereference(k) | Operation::Reference(k) => k,
+		}
+	}
+
+	pub fn into_key(self) -> Key {
+		match self {
+			Operation::Set(k, _) | Operation::Dereference(k) | Operation::Reference(k) => k,
+		}
+	}
+
+	pub fn is_reference_ops(&self) -> bool {
+		match self {
+			Operation::Set(..) | Operation::Dereference(..) => false,
+			Operation::Reference(..) => true,
+		}
+	}
+}
+
+impl<K: AsRef<[u8]>, Value> Operation<K, Value> {
+	pub fn to_key_vec(self) -> Operation<Vec<u8>, Value> {
+		match self {
+			Operation::Set(k, v) => Operation::Set(k.as_ref().to_vec(), v),
+			Operation::Dereference(k) => Operation::Dereference(k.as_ref().to_vec()),
+			Operation::Reference(k) => Operation::Reference(k.as_ref().to_vec()),
+		}
+	}
+}
+
+#[derive(Debug, Default)]
 pub struct CommitChangeSet {
 	pub indexed: HashMap<ColId, IndexedChangeSet>,
 	pub btree_indexed: HashMap<ColId, BTreeChangeSet>,
 }
 
+#[derive(Debug)]
 pub struct IndexedChangeSet {
 	pub col: ColId,
-	pub changes: Vec<(Key, Option<Value>)>,
+	pub changes: Vec<Operation<Key, Vec<u8>>>,
 }
 
 impl IndexedChangeSet {
@@ -1129,10 +1218,26 @@ impl IndexedChangeSet {
 		IndexedChangeSet { col, changes: Default::default() }
 	}
 
-	fn push(&mut self, key: &[u8], v: Option<Value>, options: &Options, db_version: u32) {
+	fn push<K: AsRef<[u8]>>(
+		&mut self,
+		change: Operation<K, Vec<u8>>,
+		options: &Options,
+		db_version: u32,
+	) {
 		let salt = options.salt.unwrap_or_default();
-		let k = hash_key(key, &salt, options.columns[self.col as usize].uniform, db_version);
-		self.changes.push((k, v));
+		let hash_key = |key: &[u8]| -> Key {
+			hash_key(key, &salt, options.columns[self.col as usize].uniform, db_version)
+		};
+
+		self.push_change_hashed(match change {
+			Operation::Set(k, v) => Operation::Set(hash_key(k.as_ref()), v),
+			Operation::Dereference(k) => Operation::Dereference(hash_key(k.as_ref())),
+			Operation::Reference(k) => Operation::Reference(hash_key(k.as_ref())),
+		})
+	}
+
+	fn push_change_hashed(&mut self, change: Operation<Key, Vec<u8>>) {
+		self.changes.push(change);
 	}
 
 	fn copy_to_overlay(
@@ -1141,16 +1246,31 @@ impl IndexedChangeSet {
 		record_id: u64,
 		bytes: &mut usize,
 		options: &Options,
-	) {
+	) -> Result<()> {
 		let ref_counted = options.columns[self.col as usize].ref_counted;
-		for (k, v) in self.changes.iter() {
-			*bytes += k.len();
-			*bytes += v.as_ref().map_or(0, |v| v.len());
-			// Don't add removed ref-counted values to overlay.
-			if !ref_counted || v.is_some() {
-				overlay.indexed.insert(*k, (record_id, v.clone()));
+		for change in self.changes.iter() {
+			match &change {
+				Operation::Set(k, v) => {
+					*bytes += k.len();
+					*bytes += v.len();
+					overlay.indexed.insert(*k, (record_id, Some(v.clone())));
+				},
+				Operation::Dereference(k) => {
+					// Don't add removed ref-counted values to overlay.
+					if !ref_counted {
+						overlay.indexed.insert(*k, (record_id, None));
+					}
+				},
+				Operation::Reference(..) => {
+					// Don't add (we allow remove value in overlay when using rc: some
+					// indexing on top of it is expected).
+					if !ref_counted {
+						return Err(Error::InvalidInput(format!("No Rc for column {}", self.col)))
+					}
+				},
 			}
 		}
+		Ok(())
 	}
 
 	fn write_plan(
@@ -1167,10 +1287,8 @@ impl IndexedChangeSet {
 				return Ok(())
 			},
 		};
-		for (key, value) in self.changes.iter() {
-			if let PlanOutcome::NeedReindex =
-				column.write_plan(key, value.as_ref().map(|v| v.as_slice()), writer)?
-			{
+		for change in self.changes.iter() {
+			if let PlanOutcome::NeedReindex = column.write_plan(change, writer)? {
 				// Reindex has triggered another reindex.
 				*reindex = true;
 			}
@@ -1181,11 +1299,15 @@ impl IndexedChangeSet {
 
 	fn clean_overlay(&self, overlay: &mut CommitOverlay, record_id: u64) {
 		use std::collections::hash_map::Entry;
-		for (key, _) in self.changes.iter() {
-			if let Entry::Occupied(e) = overlay.indexed.entry(*key) {
-				if e.get().0 == record_id {
-					e.remove_entry();
-				}
+		for change in self.changes.iter() {
+			match change {
+				Operation::Set(k, _) | Operation::Dereference(k) =>
+					if let Entry::Occupied(e) = overlay.indexed.entry(*k) {
+						if e.get().0 == record_id {
+							e.remove_entry();
+						}
+					},
+				Operation::Reference(..) => (),
 			}
 		}
 	}
@@ -1448,7 +1570,7 @@ mod tests {
 		])
 		.unwrap();
 		db_test.run_stages(&db);
-		std::mem::drop(db);
+		drop(db);
 
 		// issue with some file reopening when no delay
 		std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1592,7 +1714,7 @@ mod tests {
 
 		db.commit(vec![(col_nb, key1.clone(), Some(b"value1".to_vec()))]).unwrap();
 		EnableCommitPipelineStages::DbFile.run_stages(&db);
-		std::mem::drop(db);
+		drop(db);
 
 		// issue with some file reopening when no delay
 		std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1761,10 +1883,8 @@ mod tests {
 				if keys.insert(k) {
 					expected_count += 1;
 				}
-			} else {
-				if keys.remove(k) {
-					expected_count -= 1;
-				}
+			} else if keys.remove(k) {
+				expected_count -= 1;
 			}
 		}
 		assert_eq!(col_stats.total_values, expected_count);

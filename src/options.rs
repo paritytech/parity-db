@@ -1,18 +1,5 @@
-// Copyright 2015-2020 Parity Technologies (UK) Ltd.
-// This file is part of Parity.
-
-// Parity is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// Parity is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Parity.  If not, see <http://www.gnu.org/licenses/>.
+// Copyright 2021-2022 Parity Technologies (UK) Ltd.
+// This file is dual-licensed as Apache-2.0 or MIT.
 
 use crate::{
 	column::{ColId, Salt},
@@ -25,6 +12,8 @@ use std::{collections::HashMap, io::Write, path::Path};
 pub const CURRENT_VERSION: u32 = 7;
 // TODO on last supported 5, remove MULTIHEAD_V4 and MULTIPART_V4
 const LAST_SUPPORTED_VERSION: u32 = 4;
+
+pub const DEFAULT_COMPRESSION_THRESHOLD: u32 = 4096;
 
 /// Database configuration.
 #[derive(Clone, Debug)]
@@ -44,6 +33,10 @@ pub struct Options {
 	/// Override salt value. If `None` is specified salt is loaded from metadata
 	/// or randomly generated when creating a new database.
 	pub salt: Option<Salt>,
+	/// Minimal value size threshold to attempt compressing a value per column.
+	///
+	/// Optional. A sensible default is used if nothing is set for a given column.
+	pub compression_threshold: HashMap<ColId, u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,11 +50,12 @@ pub struct ColumnOptions {
 	/// Allows for skipping additional key hashing.
 	pub uniform: bool,
 	/// Use reference counting for values.
+	///
+	/// Reference counting do not enforce immediate removal
+	/// and user should not check for missing value.
 	pub ref_counted: bool,
 	/// Compression to use for this column.
 	pub compression: CompressionType,
-	/// Minimal value size threshold to attempt compressing a value.
-	pub compression_threshold: u32,
 	/// Column is using a btree indexing.
 	pub btree_index: bool,
 }
@@ -116,7 +110,6 @@ impl ColumnOptions {
 			uniform,
 			ref_counted,
 			compression: compression.into(),
-			compression_threshold: ColumnOptions::default().compression_threshold,
 			btree_index,
 		})
 	}
@@ -129,14 +122,13 @@ impl Default for ColumnOptions {
 			uniform: false,
 			ref_counted: false,
 			compression: CompressionType::NoCompression,
-			compression_threshold: 4096,
 			btree_index: false,
 		}
 	}
 }
 
 impl Options {
-	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Options {
+	pub fn with_columns(path: &Path, num_columns: u8) -> Options {
 		Options {
 			path: path.into(),
 			sync_wal: true,
@@ -144,18 +136,19 @@ impl Options {
 			stats: true,
 			salt: None,
 			columns: (0..num_columns).map(|_| Default::default()).collect(),
+			compression_threshold: HashMap::new(),
 		}
 	}
 
 	// TODO on next major version remove in favor of write_metadata_with_version
-	pub fn write_metadata(&self, path: &std::path::Path, salt: &Salt) -> Result<()> {
+	pub fn write_metadata(&self, path: &Path, salt: &Salt) -> Result<()> {
 		let mut path = path.to_path_buf();
 		path.push("metadata");
 		self.write_metadata_file(&path, salt)
 	}
 
 	// TODO on next major version remove in favor of write_metadata_with_version
-	pub fn write_metadata_file(&self, path: &std::path::Path, salt: &Salt) -> Result<()> {
+	pub fn write_metadata_file(&self, path: &Path, salt: &Salt) -> Result<()> {
 		let mut file = std::fs::File::create(path)?;
 		writeln!(file, "version={}", CURRENT_VERSION)?;
 		writeln!(file, "salt={}", hex::encode(salt))?;
@@ -167,7 +160,7 @@ impl Options {
 
 	pub fn write_metadata_with_version(
 		&self,
-		path: &std::path::Path,
+		path: &Path,
 		salt: &Salt,
 		version: Option<u32>,
 	) -> Result<()> {
@@ -178,7 +171,7 @@ impl Options {
 
 	pub fn write_metadata_file_with_version(
 		&self,
-		path: &std::path::Path,
+		path: &Path,
 		salt: &Salt,
 		version: Option<u32>,
 	) -> Result<()> {

@@ -1,18 +1,5 @@
-// Copyright 2022 Parity Technologies (UK) Ltd.
-// This file is part of Parity.
-
-// Parity is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// Parity is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Parity.  If not, see <http://www.gnu.org/licenses/>.
+// Copyright 2021-2022 Parity Technologies (UK) Ltd.
+// This file is dual-licensed as Apache-2.0 or MIT.
 
 /// BTree iterator implementation.
 /// This does not enforce consistency.
@@ -32,6 +19,7 @@ pub enum SeekTo {
 	Exclude,
 }
 
+#[derive(Debug)]
 pub struct BTreeIterator<'a> {
 	table: &'a BTreeTable,
 	log: &'a RwLock<crate::log::LogOverlays>,
@@ -42,6 +30,7 @@ pub struct BTreeIterator<'a> {
 	last_key: LastKey,
 }
 
+#[derive(Debug)]
 pub enum LastKey {
 	Start,
 	End,
@@ -60,6 +49,7 @@ pub enum LastIndex {
 	Descend(usize),
 }
 
+#[derive(Debug)]
 pub struct BtreeIterBackend(BTree, BTreeIterState);
 
 impl<'a> BTreeIterator<'a> {
@@ -112,14 +102,25 @@ impl<'a> BTreeIterator<'a> {
 
 	#[allow(clippy::should_implement_trait)]
 	pub fn next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-		self.iter_inner(IterDirection::Forward)
+		loop {
+			if let Ok(result) = self.iter_inner(IterDirection::Forward)? {
+				return Ok(result)
+			}
+		}
 	}
 
 	pub fn prev(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-		self.iter_inner(IterDirection::Backward)
+		loop {
+			if let Ok(result) = self.iter_inner(IterDirection::Backward)? {
+				return Ok(result)
+			}
+		}
 	}
 
-	fn iter_inner(&mut self, direction: IterDirection) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+	fn iter_inner(
+		&mut self,
+		direction: IterDirection,
+	) -> Result<std::result::Result<Option<(Vec<u8>, Vec<u8>)>, ()>> {
 		let col = self.col;
 
 		// Lock log over function call (no btree struct change).
@@ -157,7 +158,8 @@ impl<'a> BTreeIterator<'a> {
 						} else {
 							std::mem::drop(log);
 							self.last_key = LastKey::At(commit_key.clone());
-							self.iter_inner(direction)?
+							// recurse
+							return Ok(Err(()))
 						}
 					},
 					(IterDirection::Backward, std::cmp::Ordering::Less) |
@@ -168,7 +170,8 @@ impl<'a> BTreeIterator<'a> {
 						} else {
 							std::mem::drop(log);
 							self.last_key = LastKey::At(commit_key.clone());
-							self.iter_inner(direction)?
+							// recurse
+							return Ok(Err(()))
 						},
 				},
 			(Some((commit_key, Some(commit_value))), None) => {
@@ -179,7 +182,8 @@ impl<'a> BTreeIterator<'a> {
 				self.pending_backend = Some((None, Some(direction)));
 				std::mem::drop(log);
 				self.last_key = LastKey::At(k.clone());
-				self.iter_inner(direction)?
+				// recurse
+				return Ok(Err(()))
 			},
 			(None, Some((backend_key, backend_value))) => Some((backend_key, backend_value)),
 			(None, None) => {
@@ -198,7 +202,7 @@ impl<'a> BTreeIterator<'a> {
 					IterDirection::Forward => LastKey::End,
 				},
 		}
-		Ok(result)
+		Ok(Ok(result))
 	}
 
 	pub fn next_backend(
@@ -335,10 +339,6 @@ impl BTreeIterState {
 		log: &impl LogQuery,
 		direction: IterDirection,
 	) -> Result<Option<(Vec<u8>, Value)>> {
-		if !self.fetch_root && self.state.is_empty() {
-			return Ok(None)
-		}
-
 		if self.fetch_root {
 			let root = col.with_locked(|tables| {
 				BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), tables, log)

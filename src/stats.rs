@@ -1,18 +1,5 @@
-// Copyright 2015-2020 Parity Technologies (UK) Ltd.
-// This file is part of Parity.
-
-// Parity is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// Parity is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Parity.  If not, see <http://www.gnu.org/licenses/>.
+// Copyright 2021-2022 Parity Technologies (UK) Ltd.
+// This file is dual-licensed as Apache-2.0 or MIT.
 
 use crate::{column::ColId, error::Result, table::SIZE_TIERS};
 /// Database statistics.
@@ -28,9 +15,10 @@ const HISTOGRAM_BUCKETS: usize = 1024;
 const HISTOGRAM_BUCKET_BITS: u8 = 5;
 
 pub const TOTAL_SIZE: usize =
-	4 * HISTOGRAM_BUCKETS + 8 * HISTOGRAM_BUCKETS + 8 * SIZE_TIERS + 8 * 11;
+	4 * HISTOGRAM_BUCKETS + 8 * HISTOGRAM_BUCKETS + 8 * SIZE_TIERS + 8 * 13;
 
 // TODO: get rid of the struct and use index meta directly.
+#[derive(Debug)]
 pub struct ColumnStats {
 	value_histogram: [AtomicU32; HISTOGRAM_BUCKETS],
 	query_histogram: [AtomicU64; SIZE_TIERS], // Per size tier
@@ -41,6 +29,8 @@ pub struct ColumnStats {
 	commits: AtomicU64,
 	inserted_new: AtomicU64,
 	inserted_overwrite: AtomicU64,
+	reference_increase_hit: AtomicU64,
+	reference_increase_miss: AtomicU64,
 	removed_hit: AtomicU64,
 	removed_miss: AtomicU64,
 	queries_miss: AtomicU64,
@@ -145,6 +135,8 @@ impl ColumnStats {
 		let queries_miss = read_u64(cursor);
 		let uncompressed_bytes = read_u64(cursor);
 		let compression_delta = read_array(cursor, read_i64);
+		let reference_increase_hit = read_u64(cursor);
+		let reference_increase_miss = read_u64(cursor);
 
 		ColumnStats {
 			value_histogram,
@@ -156,6 +148,8 @@ impl ColumnStats {
 			commits,
 			inserted_new,
 			inserted_overwrite,
+			reference_increase_hit,
+			reference_increase_miss,
 			removed_hit,
 			removed_miss,
 			queries_miss,
@@ -179,6 +173,8 @@ impl ColumnStats {
 			commits: Default::default(),
 			inserted_new: Default::default(),
 			inserted_overwrite: Default::default(),
+			reference_increase_hit: Default::default(),
+			reference_increase_miss: Default::default(),
 			removed_hit: Default::default(),
 			removed_miss: Default::default(),
 			queries_miss: Default::default(),
@@ -202,6 +198,8 @@ impl ColumnStats {
 		self.commits.store(0, Ordering::Relaxed);
 		self.inserted_new.store(0, Ordering::Relaxed);
 		self.inserted_overwrite.store(0, Ordering::Relaxed);
+		self.reference_increase_hit.store(0, Ordering::Relaxed);
+		self.reference_increase_miss.store(0, Ordering::Relaxed);
 		self.removed_hit.store(0, Ordering::Relaxed);
 		self.removed_miss.store(0, Ordering::Relaxed);
 		self.queries_miss.store(0, Ordering::Relaxed);
@@ -241,9 +239,11 @@ impl ColumnStats {
 		for item in &self.compression_delta {
 			write_i64(&mut cursor, item);
 		}
+		write_u64(&mut cursor, &self.reference_increase_hit);
+		write_u64(&mut cursor, &self.reference_increase_miss);
 	}
 
-	pub fn write_stats_text(&self, writer: &mut impl std::io::Write, col: ColId) -> Result<()> {
+	pub fn write_stats_text(&self, writer: &mut impl Write, col: ColId) -> Result<()> {
 		writeln!(writer, "Column {}", col)?;
 		writeln!(writer, "Total values: {}", self.total_values.load(Ordering::Relaxed))?;
 		writeln!(writer, "Total bytes: {}", self.total_bytes.load(Ordering::Relaxed))?;
@@ -259,6 +259,16 @@ impl ColumnStats {
 			writer,
 			"Existing value insertions: {}",
 			self.inserted_overwrite.load(Ordering::Relaxed)
+		)?;
+		writeln!(
+			writer,
+			"Reference increases: {}",
+			self.reference_increase_hit.load(Ordering::Relaxed)
+		)?;
+		writeln!(
+			writer,
+			"Missed reference increases: {}",
+			self.reference_increase_miss.load(Ordering::Relaxed)
 		)?;
 		writeln!(writer, "Removals: {}", self.removed_hit.load(Ordering::Relaxed))?;
 		writeln!(writer, "Missed removals: {}", self.removed_miss.load(Ordering::Relaxed))?;
@@ -351,6 +361,14 @@ impl ColumnStats {
 	pub fn remove_val(&self, size: u32, compressed: u32) {
 		self.removed_hit.fetch_add(1, Ordering::Relaxed);
 		self.remove(size, compressed);
+	}
+
+	pub fn reference_increase(&self) {
+		self.reference_increase_hit.fetch_add(1, Ordering::Relaxed);
+	}
+
+	pub fn reference_increase_miss(&self) {
+		self.reference_increase_miss.fetch_add(1, Ordering::Relaxed);
 	}
 
 	pub fn remove_miss(&self) {

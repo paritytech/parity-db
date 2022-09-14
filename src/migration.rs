@@ -1,22 +1,9 @@
-// Copyright 2015-2020 Parity Technologies (UK) Ltd.
-// This file is part of Parity.
-
-// Parity is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// Parity is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Parity.  If not, see <http://www.gnu.org/licenses/>.
+// Copyright 2021-2022 Parity Technologies (UK) Ltd.
+// This file is dual-licensed as Apache-2.0 or MIT.
 
 use crate::{
 	column::{ColId, IterState},
-	db::{CommitChangeSet, Db, IndexedChangeSet},
+	db::{CommitChangeSet, Db, IndexedChangeSet, Operation},
 	options::Options,
 	Error, Result,
 };
@@ -81,7 +68,7 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 	for c in 0..source_options.columns.len() as ColId {
 		if !to_migrate.contains(&c) {
 			if !overwrite {
-				std::mem::drop(dest);
+				drop(dest);
 				copy_column(c, from, &to.path)?;
 				dest = Db::open_or_create(&to)?;
 			}
@@ -97,7 +84,7 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 					.entry(c)
 					.or_insert_with(|| IndexedChangeSet::new(c))
 					.changes
-					.push((key, Some(value)));
+					.push(Operation::Set(key, value));
 				nb_commit += 1;
 				if nb_commit == COMMIT_SIZE {
 					ncommits += 1;
@@ -119,12 +106,12 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 			dest.commit_raw(commit)?;
 			commit = Default::default();
 			nb_commit = 0;
-			std::mem::drop(dest);
+			drop(dest);
 			dest = Db::open_or_create(&to)?; // This is needed to flush logs.
 			log::info!("Collection migrated {}, imported", c);
 
-			std::mem::drop(dest);
-			std::mem::drop(source);
+			drop(dest);
+			drop(source);
 			let mut tmp_dir = from.to_path_buf();
 			tmp_dir.push(OVERWRITE_TMP_PATH);
 			let remove_tmp_dir = || -> Result<()> {
@@ -179,7 +166,7 @@ pub fn clear_column(path: &Path, column: ColId) -> Result<()> {
 	options.columns = meta.columns;
 	options.salt = Some(meta.salt);
 	let _db = Db::open(&options)?;
-	std::mem::drop(_db);
+	drop(_db);
 
 	// It is not specified how read_dir behaves when deleting and iterating in the same loop
 	// We collect a list of paths to be deleted first.

@@ -1,17 +1,5 @@
-// Copyright 2015-2020 Parity Technologies (UK) Ltd. This file is part of Parity.
-
-// Parity is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// Parity is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Parity.  If not, see <http://www.gnu.org/licenses/>.
+// Copyright 2021-2022 Parity Technologies (UK) Ltd.
+// This file is dual-licensed as Apache-2.0 or MIT.
 
 use crate::{
 	column::ColId,
@@ -35,16 +23,19 @@ const INSERT_VALUE: u8 = 3;
 const END_RECORD: u8 = 4;
 const DROP_TABLE: u8 = 5;
 
+#[derive(Debug)]
 pub struct InsertIndexAction {
 	pub table: IndexTableId,
 	pub index: u64,
 }
 
+#[derive(Debug)]
 pub struct InsertValueAction {
 	pub table: ValueTableId,
 	pub index: u64,
 }
 
+#[derive(Debug)]
 pub enum LogAction {
 	BeginRecord,
 	InsertIndex(InsertIndexAction),
@@ -63,7 +54,7 @@ pub trait LogQuery {
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool;
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct LogOverlays {
 	index: HashMap<IndexTableId, IndexLogOverlay>,
 	value: HashMap<ValueTableId, ValueLogOverlay>,
@@ -116,12 +107,13 @@ impl LogQuery for LogOverlays {
 	}
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Cleared {
 	index: Vec<(IndexTableId, u64)>,
 	values: Vec<(ValueTableId, u64)>,
 }
 
+#[derive(Debug)]
 pub struct LogReader<'a> {
 	file: MappedRwLockWriteGuard<'a, std::io::BufReader<std::fs::File>>,
 	record_id: u64,
@@ -243,6 +235,7 @@ impl<'a> LogReader<'a> {
 	}
 }
 
+#[derive(Debug)]
 pub struct LogChange {
 	local_index: HashMap<IndexTableId, IndexLogOverlay>,
 	local_values: HashMap<ValueTableId, ValueLogOverlay>,
@@ -314,12 +307,14 @@ impl LogChange {
 	}
 }
 
+#[derive(Debug)]
 struct FlushedLog {
 	index: HashMap<IndexTableId, IndexLogOverlay>,
 	values: HashMap<ValueTableId, ValueLogOverlay>,
 	bytes: u64,
 }
 
+#[derive(Debug)]
 pub struct LogWriter<'a> {
 	overlays: &'a RwLock<LogOverlays>,
 	log: LogChange,
@@ -398,7 +393,7 @@ impl<'a> LogQuery for LogWriter<'a> {
 }
 
 // Identity hash.
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct IdentityHash(u64);
 pub type BuildIdHash = std::hash::BuildHasherDefault<IdentityHash>;
 
@@ -441,39 +436,43 @@ impl std::hash::Hasher for IdentityHash {
 	}
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct IndexLogOverlay {
 	pub map: HashMap<u64, (u64, u64, IndexChunk)>, // index -> (record_id, modified_mask, entry)
 }
 
 // We use identity hash for value overlay/log records so that writes to value tables are in order.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ValueLogOverlay {
 	pub map: HashMap<u64, (u64, Vec<u8>), BuildIdHash>, // index -> (record_id, entry)
 }
 
+#[derive(Debug)]
 struct Appending {
 	id: u32,
 	file: std::io::BufWriter<std::fs::File>,
 	size: u64,
 }
 
+#[derive(Debug)]
 struct Flushing {
 	id: u32,
 	file: std::fs::File,
 }
 
+#[derive(Debug)]
 struct Reading {
 	id: u32,
 	file: std::io::BufReader<std::fs::File>,
 }
 
-#[derive(Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum ReadingState {
 	Reading,
 	Idle,
 }
 
+#[derive(Debug)]
 pub struct Log {
 	overlays: RwLock<LogOverlays>,
 	appending: RwLock<Option<Appending>>,
@@ -511,7 +510,7 @@ impl Log {
 							}
 						} else {
 							log::debug!(target: "parity-db", "Removing log {}", nlog);
-							std::mem::drop(file);
+							drop(file);
 							std::fs::remove_file(&path)?;
 						}
 					}
@@ -582,7 +581,7 @@ impl Log {
 		{
 			let replay_logs = std::mem::take(&mut *self.replay_queue.write());
 			for (id, _, file) in replay_logs {
-				std::mem::drop(file);
+				drop(file);
 				self.drop_log(id)?;
 			}
 		}
@@ -601,7 +600,7 @@ impl Log {
 	}
 
 	pub fn end_record(&self, log: LogChange) -> Result<u64> {
-		assert!(log.record_id + 1 == self.next_record_id.load(Ordering::Relaxed));
+		assert_eq!(log.record_id + 1, self.next_record_id.load(Ordering::Relaxed));
 		let record_id = log.record_id;
 		let mut appending = self.appending.write();
 		if appending.is_none() {
@@ -770,7 +769,7 @@ impl Log {
 		if pool.len() > MAX_LOG_POOL_SIZE {
 			let removed = pool.drain(MAX_LOG_POOL_SIZE..);
 			for (id, file) in removed {
-				std::mem::drop(file);
+				drop(file);
 				self.drop_log(id)?;
 			}
 		}
@@ -815,11 +814,11 @@ impl Log {
 	pub fn kill_logs(&self) -> Result<()> {
 		let mut log_pool = self.log_pool.write();
 		for (id, file) in log_pool.drain(..) {
-			std::mem::drop(file);
+			drop(file);
 			self.drop_log(id)?;
 		}
 		if let Some(reading) = self.reading.write().take() {
-			std::mem::drop(reading.file);
+			drop(reading.file);
 			self.drop_log(reading.id)?;
 		}
 		Ok(())
