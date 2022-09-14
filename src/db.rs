@@ -918,7 +918,7 @@ impl Db {
 		self.inner.commit_changes(tx)
 	}
 
-	pub fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
+	pub(crate) fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
 		self.inner.commit_raw(commit)
 	}
 
