@@ -7,7 +7,8 @@
 #![no_main]
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::collections::btree_map::BTreeMap;
+use parity_db_fuzz::*;
+use std::collections::{btree_map::BTreeMap, HashMap};
 use tempfile::tempdir;
 
 #[derive(Arbitrary, Debug)]
@@ -16,30 +17,13 @@ enum Action {
 	Restart,
 }
 
-#[derive(Arbitrary, Debug, Clone, Copy)]
-enum CompressionType {
-	NoCompression,
-	Snappy,
-	Lz4,
-}
-
-#[derive(Arbitrary, Debug)]
-struct Config {
-	btree_index: bool,
-	compression: CompressionType,
-}
-
 fuzz_target!(|entry: (Config, Vec<Action>)| {
 	let (config, actions) = entry;
 	let dir = tempdir().unwrap();
 	let options = parity_db::Options {
 		path: dir.path().to_owned(),
 		columns: vec![parity_db::ColumnOptions {
-			compression: match config.compression {
-				CompressionType::NoCompression => parity_db::CompressionType::NoCompression,
-				CompressionType::Snappy => parity_db::CompressionType::Snappy,
-				CompressionType::Lz4 => parity_db::CompressionType::Lz4,
-			},
+			compression: config.compression.into(),
 			btree_index: config.btree_index,
 			..parity_db::ColumnOptions::default()
 		}],
@@ -47,6 +31,7 @@ fuzz_target!(|entry: (Config, Vec<Action>)| {
 		sync_data: true,
 		stats: false,
 		salt: None,
+		compression_threshold: HashMap::new(),
 	};
 	let mut db = parity_db::Db::open_or_create(&options).unwrap();
 	let mut model = BTreeMap::<u8, u8>::default();
@@ -73,30 +58,10 @@ fuzz_target!(|entry: (Config, Vec<Action>)| {
 				},
 		}
 
-		// We check the state
-		for (k, v) in &model {
-			assert_eq!(db.get(0, &[*k]).unwrap(), Some(vec![*v]));
-		}
-
-		if config.btree_index {
-			// We check the BTree forward iterator
-			let mut model_content = model.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>();
-			let mut db_iter = db.iter(0).unwrap();
-			db_iter.seek_to_first().unwrap();
-			let mut db_content = Vec::new();
-			while let Some((k, v)) = db_iter.next().unwrap() {
-				db_content.push((k[0], v[0]));
-			}
-			assert_eq!(db_content, model_content);
-
-			// We check the BTree backward iterator
-			model_content.reverse();
-			db_iter.seek_to_last().unwrap();
-			let mut db_content = Vec::new();
-			while let Some((k, v)) = db_iter.prev().unwrap() {
-				db_content.push((k[0], v[0]));
-			}
-			assert_eq!(db_content, model_content);
-		}
+		assert_db_and_model_are_equals(
+			&db,
+			model.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(),
+			config.btree_index,
+		);
 	}
 });
