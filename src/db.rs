@@ -1019,10 +1019,26 @@ impl Drop for Db {
 	fn drop(&mut self) {
 		if self.join_on_shutdown {
 			self.inner.shutdown();
-			self.log_thread.take().map(|t| t.join());
-			self.flush_thread.take().map(|t| t.join());
-			self.commit_thread.take().map(|t| t.join());
-			self.cleanup_thread.take().map(|t| t.join());
+			if let Some(t) = self.log_thread.take() {
+				if let Err(e) = t.join() {
+					log::warn!(target: "parity-db", "Log thread shutdown error: {:?}", e);
+				}
+			}
+			if let Some(t) = self.flush_thread.take() {
+				if let Err(e) = t.join() {
+					log::warn!(target: "parity-db", "Flush thread shutdown error: {:?}", e);
+				}
+			}
+			if let Some(t) = self.commit_thread.take() {
+				if let Err(e) = t.join() {
+					log::warn!(target: "parity-db", "Commit thread shutdown error: {:?}", e);
+				}
+			}
+			if let Some(t) = self.cleanup_thread.take() {
+				if let Err(e) = t.join() {
+					log::warn!(target: "parity-db", "Cleanup thread shutdown error: {:?}", e);
+				}
+			}
 			if let Err(e) = self.inner.kill_logs() {
 				log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
 			}
