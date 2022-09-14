@@ -16,7 +16,7 @@ use tempfile::tempdir;
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum Operation {
-	Set(u8, u8),
+	Set(u8),
 	Dereference(u8),
 	Reference(u8),
 }
@@ -34,6 +34,7 @@ fuzz_target!(|entry: (Config, Vec<Action>)| {
 		path: dir.path().to_owned(),
 		columns: vec![parity_db::ColumnOptions {
 			ref_counted: true,
+			preimage: true,
 			compression: config.compression.into(),
 			btree_index: config.btree_index,
 			..parity_db::ColumnOptions::default()
@@ -45,7 +46,7 @@ fuzz_target!(|entry: (Config, Vec<Action>)| {
 		compression_threshold: HashMap::new(),
 	};
 	let mut db = parity_db::Db::open_or_create(&options).unwrap();
-	let mut model = BTreeMap::<u8, (usize, u8)>::default();
+	let mut model = BTreeMap::<u8, u8>::default();
 	for action in actions {
 		// We apply the action on both the database and the model
 		match action {
@@ -54,7 +55,7 @@ fuzz_target!(|entry: (Config, Vec<Action>)| {
 					(
 						0u8,
 						match op {
-							Operation::Set(k, v) => parity_db::Operation::Set(vec![k], vec![v]),
+							Operation::Set(k) => parity_db::Operation::Set(vec![k], vec![k]),
 							Operation::Dereference(k) => parity_db::Operation::Dereference(vec![k]),
 							Operation::Reference(k) => parity_db::Operation::Reference(vec![k]),
 						},
@@ -63,21 +64,21 @@ fuzz_target!(|entry: (Config, Vec<Action>)| {
 				.unwrap();
 				for op in operations {
 					match op {
-						Operation::Set(k, v) => {
-							model.insert(k, (1, v));
+						Operation::Set(k) => {
+							*model.entry(k).or_default() += 1;
 						},
 						Operation::Dereference(k) => {
 							if let Entry::Occupied(mut e) = model.entry(k) {
-								let (mut counter, _) = e.get_mut();
-								counter -= 1;
-								if counter == 0 {
+								let counter = e.get_mut();
+								*counter -= 1;
+								if *counter == 0 {
 									e.remove_entry();
 								}
 							}
 						},
 						Operation::Reference(k) =>
-							if let Some((counter, _)) = model.get_mut(&k) {
-								*counter += 1;
+							if let Entry::Occupied(mut e) = model.entry(k) {
+								*e.get_mut() += 1;
 							},
 					}
 				}
@@ -91,7 +92,10 @@ fuzz_target!(|entry: (Config, Vec<Action>)| {
 
 		assert_db_and_model_are_equals(
 			&db,
-			model.iter().map(|(k, (_, v))| (*k, *v)).collect::<Vec<_>>(),
+			model
+				.iter()
+				.filter_map(|(k, c)| if *c > 0 { Some((*k, *k)) } else { None })
+				.collect::<Vec<_>>(),
 			config.btree_index,
 		);
 	}
