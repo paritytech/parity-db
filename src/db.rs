@@ -1116,7 +1116,7 @@ impl CommitOverlay {
 				.rev()
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
-			LastKey::Start => return None,
+			LastKey::Start => None,
 			LastKey::At(key) => self
 				.btree_indexed
 				.range::<Vec<u8>, _>(..key)
@@ -1793,7 +1793,7 @@ mod tests {
 					.collect::<Vec<_>>();
 				let expected = expected.range(at..).take(take).copied().collect::<Vec<_>>();
 				assert_eq!(got, expected);
-				if got.len() == 0 {
+				if got.is_empty() {
 					prev_run = false;
 				}
 				if got.len() < take {
@@ -1816,7 +1816,7 @@ mod tests {
 					expected.range(..=at).rev().take(take).copied().collect::<Vec<_>>()
 				};
 				assert_eq!(got, expected);
-				prev_run = got.len() > 0;
+				prev_run = got.is_empty();
 				if take > got.len() {
 					prev_run = false;
 				}
