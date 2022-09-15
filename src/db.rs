@@ -1816,7 +1816,7 @@ mod tests {
 					expected.range(..=at).rev().take(take).copied().collect::<Vec<_>>()
 				};
 				assert_eq!(got, expected);
-				prev_run = got.is_empty();
+				prev_run = !got.is_empty();
 				if take > got.len() {
 					prev_run = false;
 				}

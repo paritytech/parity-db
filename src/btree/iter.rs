@@ -13,7 +13,7 @@ use crate::{
 };
 use parking_lot::RwLock;
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum SeekTo<'a> {
 	Include(&'a [u8]),
 	Exclude(&'a [u8]),
