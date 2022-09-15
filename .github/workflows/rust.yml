@@ -33,6 +33,10 @@ jobs:
         with:
           command: fmt
           args: --all -- --check
+      - uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all --manifest-path fuzz/Cargo.toml -- --check
 
   clippy:
     runs-on: ubuntu-latest
@@ -47,6 +51,10 @@ jobs:
         with:
           command: clippy
           args: --all-targets
+      - uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --all-targets --manifest-path fuzz/Cargo.toml
 
   address_sanitizer:
     runs-on: ubuntu-latest
