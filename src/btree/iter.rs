@@ -26,8 +26,14 @@ pub struct BTreeIterator<'a> {
 	commit_overlay: &'a RwLock<Vec<CommitOverlay>>,
 	iter: BtreeIterBackend,
 	col: ColId,
-	pending_backend: Option<(Option<(Vec<u8>, Vec<u8>)>, Option<IterDirection>)>,
+	pending_backend: Option<PendingBackend>,
 	last_key: LastKey,
+}
+
+#[derive(Debug)]
+struct PendingBackend {
+	next_item: Option<(Vec<u8>, Vec<u8>)>,
+	direction: IterDirection,
 }
 
 #[derive(Debug)]
@@ -136,12 +142,12 @@ impl<'a> BTreeIterator<'a> {
 		if record_id != self.iter.1.record_id {
 			self.pending_backend = None;
 		}
-		let next_backend = if let Some((backend, prev_direction)) = self.pending_backend.take() {
-			if prev_direction.map(|d| d != direction).unwrap_or(true) {
+		let next_backend = if let Some(pending) = self.pending_backend.take() {
+			if pending.direction != direction {
 				// commit overlay last return, being in between, simply dropping pending.
 				self.next_backend(record_id, self.table, &*log, direction)?
 			} else {
-				backend
+				pending.next_item
 			}
 		} else {
 			self.next_backend(record_id, self.table, &*log, direction)?
@@ -151,8 +157,10 @@ impl<'a> BTreeIterator<'a> {
 				match (direction, commit_key.cmp(&backend_key)) {
 					(IterDirection::Backward, std::cmp::Ordering::Greater) |
 					(IterDirection::Forward, std::cmp::Ordering::Less) => {
-						self.pending_backend =
-							Some((Some((backend_key, backend_value)), Some(direction)));
+						self.pending_backend = Some(PendingBackend {
+							next_item: Some((backend_key, backend_value)),
+							direction,
+						});
 						if let Some(value) = commit_value {
 							Some((commit_key, value))
 						} else {
@@ -175,11 +183,11 @@ impl<'a> BTreeIterator<'a> {
 						},
 				},
 			(Some((commit_key, Some(commit_value))), None) => {
-				self.pending_backend = Some((None, Some(direction)));
+				self.pending_backend = Some(PendingBackend { next_item: None, direction });
 				Some((commit_key, commit_value))
 			},
 			(Some((k, None)), None) => {
-				self.pending_backend = Some((None, Some(direction)));
+				self.pending_backend = Some(PendingBackend { next_item: None, direction });
 				std::mem::drop(log);
 				self.last_key = LastKey::At(k.clone());
 				// recurse
@@ -187,7 +195,8 @@ impl<'a> BTreeIterator<'a> {
 			},
 			(None, Some((backend_key, backend_value))) => Some((backend_key, backend_value)),
 			(None, None) => {
-				self.pending_backend = Some((None, None));
+				self.pending_backend = Some(PendingBackend { next_item: None, direction });
+
 				None
 			},
 		};
@@ -451,10 +460,8 @@ impl BTreeIterState {
 							col.with_locked(|btree| state.1.fetch_child(child_ix, btree, log))?
 						{
 							self.enter(child_ix, child, direction);
-						} else {
-							if self.exit(direction) {
-								break
-							}
+						} else if self.exit(direction) {
+							break
 						}
 					},
 					_ => unreachable!(),
