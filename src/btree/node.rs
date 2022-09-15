@@ -64,23 +64,13 @@ impl Node {
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
 		loop {
-			if changes.len() > 1 && !changes[0].is_reference_ops() {
-				let mut skip = false;
-				for next in changes[1..].iter() {
-					if changes[0].key() == next.key() {
-						if !next.is_reference_ops() {
-							skip = true;
-							break
-						}
-					} else {
-						break
-					}
-				}
-				if skip {
-					// TODO only when advancing (here rec call useless)
-					*changes = &changes[1..];
-					continue
-				}
+			if !btree.ref_counted &&
+				changes.len() > 1 &&
+				!matches!(changes[1], Operation::Reference(..)) &&
+				changes[0].key() == changes[1].key()
+			{
+				*changes = &changes[1..];
+				continue
 			}
 			let r = match &changes[0] {
 				Operation::Set(key, value) =>
@@ -260,30 +250,35 @@ impl Node {
 		if at {
 			let existing = self.separator_address(i);
 			if let Some(existing) = existing {
-				Column::write_existing_value_plan::<_, Vec<u8>>(
+				if Column::write_existing_value_plan::<_, Vec<u8>>(
 					&TableKey::NoHash,
 					values,
 					existing,
 					change,
 					log,
 					None,
-				)?;
-			}
-			let _ = self.remove_separator(i);
-			if depth != 0 {
-				// replace by bigger value in left child.
-				if let Some(mut child) = self.fetch_child(i, values, log)? {
-					let (need_balance, sep) = child.remove_last(depth - 1, values, log)?;
-					self.write_child(i, child, values, log)?;
-					if let Some(sep) = sep {
-						self.set_separator(i, sep);
-					}
-					if need_balance {
-						self.rebalance(depth, i, values, log)?;
+					values.ref_counted,
+				)?
+				.0
+				.is_none()
+				{
+					let _ = self.remove_separator(i);
+					if depth != 0 {
+						// replace by bigger value in left child.
+						if let Some(mut child) = self.fetch_child(i, values, log)? {
+							let (need_balance, sep) = child.remove_last(depth - 1, values, log)?;
+							self.write_child(i, child, values, log)?;
+							if let Some(sep) = sep {
+								self.set_separator(i, sep);
+							}
+							if need_balance {
+								self.rebalance(depth, i, values, log)?;
+							}
+						}
+					} else {
+						self.remove_from(i, false, true);
 					}
 				}
-			} else {
-				self.remove_from(i, false, true);
 			}
 		} else {
 			if !has_child {
@@ -665,12 +660,6 @@ pub struct Child {
 }
 
 impl Node {
-	pub fn clear(&mut self) {
-		self.separators = Default::default();
-		self.children = Default::default();
-		self.changed = true;
-	}
-
 	pub fn from_encoded(enc: Vec<u8>) -> Self {
 		let mut entry = Entry::from_encoded(enc);
 		let mut node =
@@ -757,13 +746,15 @@ impl Node {
 				&Operation::Set((), value),
 				log,
 				None,
+				btree.ref_counted,
 			)?
 			.1
 			.unwrap_or(address)
 		} else {
 			Column::write_new_value_plan(&TableKey::NoHash, btree, value, log, None)?
 		};
-		Ok(Separator { modified: true, separator: Some(SeparatorInner { key, value }) })
+		let modified = Some(value) != existing;
+		Ok(Separator { modified, separator: Some(SeparatorInner { key, value }) })
 	}
 
 	fn split(
