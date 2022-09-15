@@ -367,7 +367,7 @@ impl BTreeIterState {
 			let is_leaf = btree.depth as usize + 1 == self.state.len();
 			if let Some(state) = self.state.last_mut() {
 				let next = match (direction, &state.0) {
-					(_, LastIndex::Descend(_)) => unreachable!("exit function clean it"),
+					(_, LastIndex::Descend(sep)) => LastIndex::Descend(*sep),
 					(IterDirection::Forward, LastIndex::Start) if is_leaf => LastIndex::At(0),
 					(IterDirection::Forward, LastIndex::Start) => LastIndex::Descend(0),
 					(IterDirection::Forward, LastIndex::At(sep)) |
