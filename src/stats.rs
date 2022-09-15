@@ -1,7 +1,7 @@
 // Copyright 2021-2022 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or MIT.
 
-use crate::{column::ColId, error::Result, table::SIZE_TIERS};
+use crate::{column::ColId, table::SIZE_TIERS};
 /// Database statistics.
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::{
@@ -243,7 +243,7 @@ impl ColumnStats {
 		write_u64(&mut cursor, &self.reference_increase_miss);
 	}
 
-	pub fn write_stats_text(&self, writer: &mut impl Write, col: ColId) -> Result<()> {
+	pub fn write_stats_text(&self, writer: &mut impl Write, col: ColId) -> std::io::Result<()> {
 		writeln!(writer, "Column {}", col)?;
 		writeln!(writer, "Total values: {}", self.total_values.load(Ordering::Relaxed))?;
 		writeln!(writer, "Total bytes: {}", self.total_bytes.load(Ordering::Relaxed))?;

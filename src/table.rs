@@ -47,7 +47,7 @@
 use crate::{
 	column::ColId,
 	display::hex,
-	error::Result,
+	error::{try_io, Result},
 	log::{LogQuery, LogReader, LogWriter},
 	options::ColumnOptions as Options,
 	table::key::{TableKey, TableKeyQuery, PARTIAL_SIZE},
@@ -356,7 +356,7 @@ impl ValueTable {
 		let mut last_removed = 0;
 		if let Some(file) = &mut *file.file.write() {
 			let mut header = Header::default();
-			file.read_exact(&mut header.0)?;
+			try_io!(file.read_exact(&mut header.0));
 			last_removed = header.last_removed();
 			filled = header.filled();
 			if filled == 0 {

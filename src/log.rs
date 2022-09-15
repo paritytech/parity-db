@@ -3,7 +3,7 @@
 
 use crate::{
 	column::ColId,
-	error::{Error, Result},
+	error::{try_io, Error, Result},
 	index::{Chunk as IndexChunk, TableId as IndexTableId, ENTRY_BYTES},
 	options::Options,
 	table::TableId as ValueTableId,
@@ -144,7 +144,7 @@ impl<'a> LogReader<'a> {
 
 	pub fn reset(&mut self) -> Result<()> {
 		self.cleared = Default::default();
-		self.file.seek(std::io::SeekFrom::Current(-(self.read_bytes as i64)))?;
+		try_io!(self.file.seek(std::io::SeekFrom::Current(-(self.read_bytes as i64))));
 		self.read_bytes = 0;
 		self.record_id = 0;
 		self.crc32 = crc32fast::Hasher::new();
@@ -153,7 +153,7 @@ impl<'a> LogReader<'a> {
 
 	pub fn next(&mut self) -> Result<LogAction> {
 		let mut read_buf = |size, buf: &mut [u8; 8]| -> Result<()> {
-			self.file.read_exact(&mut buf[0..size])?;
+			try_io!(self.file.read_exact(&mut buf[0..size]));
 			self.read_bytes += size as u64;
 			if self.validate {
 				self.crc32.update(&buf[0..size]);
@@ -189,7 +189,7 @@ impl<'a> LogReader<'a> {
 				Ok(LogAction::InsertValue(InsertValueAction { table, index }))
 			},
 			END_RECORD => {
-				self.file.read_exact(&mut buf[0..4])?;
+				try_io!(self.file.read_exact(&mut buf[0..4]));
 				self.read_bytes += 4;
 				if self.validate {
 					let checksum = u32::from_le_bytes(buf[0..4].try_into().unwrap());
@@ -218,7 +218,7 @@ impl<'a> LogReader<'a> {
 	}
 
 	pub fn read(&mut self, buf: &mut [u8]) -> Result<()> {
-		self.file.read_exact(buf)?;
+		try_io!(self.file.read_exact(buf));
 		self.read_bytes += buf.len() as u64;
 		if self.validate {
 			self.crc32.update(buf);
@@ -262,7 +262,7 @@ impl LogChange {
 		let mut bytes: u64 = 0;
 
 		let mut write = |buf: &[u8]| -> Result<()> {
-			file.write_all(buf)?;
+			try_io!(file.write_all(buf));
 			crc32.update(buf);
 			bytes += buf.len() as u64;
 			Ok(())
@@ -300,9 +300,9 @@ impl LogChange {
 		}
 		write(&END_RECORD.to_le_bytes())?;
 		let checksum: u32 = crc32.finalize();
-		file.write_all(&checksum.to_le_bytes())?;
+		try_io!(file.write_all(&checksum.to_le_bytes()));
 		bytes += 4;
-		file.flush()?;
+		try_io!(file.flush());
 		Ok(FlushedLog { index: self.local_index, values: self.local_values, bytes })
 	}
 }
@@ -495,10 +495,10 @@ impl Log {
 		let path = options.path.clone();
 		let mut logs = VecDeque::new();
 		let mut max_log_id = 0;
-		for entry in std::fs::read_dir(&path)? {
-			let entry = entry?;
+		for entry in try_io!(std::fs::read_dir(&path)) {
+			let entry = try_io!(entry);
 			if let Some(name) = entry.file_name().as_os_str().to_str() {
-				if entry.metadata()?.is_file() && name.starts_with("log") {
+				if try_io!(entry.metadata()).is_file() && name.starts_with("log") {
 					if let Ok(nlog) = std::str::FromStr::from_str(&name[3..]) {
 						let path = Self::log_path(&path, nlog);
 						let (file, record_id) = Self::open_log_file(&path)?;
@@ -511,7 +511,7 @@ impl Log {
 						} else {
 							log::debug!(target: "parity-db", "Removing log {}", nlog);
 							drop(file);
-							std::fs::remove_file(&path)?;
+							try_io!(std::fs::remove_file(&path));
 						}
 					}
 				}
@@ -549,14 +549,14 @@ impl Log {
 	}
 
 	pub fn open_log_file(path: &std::path::Path) -> Result<(std::fs::File, Option<u64>)> {
-		let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
-		if file.metadata()?.len() == 0 {
+		let mut file = try_io!(std::fs::OpenOptions::new().read(true).write(true).open(path));
+		if try_io!(file.metadata()).len() == 0 {
 			return Ok((file, None))
 		}
 		// read first record id
 		let mut buf = [0; 9];
-		file.read_exact(&mut buf)?;
-		file.seek(std::io::SeekFrom::Start(0))?;
+		try_io!(file.read_exact(&mut buf));
+		try_io!(file.seek(std::io::SeekFrom::Start(0)));
 		let id = u64::from_le_bytes(buf[1..].try_into().unwrap());
 		log::debug!(target: "parity-db", "Opened existing log {}, first record_id = {}", path.display(), id);
 		Ok((file, Some(id)))
@@ -565,7 +565,7 @@ impl Log {
 	fn drop_log(&self, id: u32) -> Result<()> {
 		log::debug!(target: "parity-db", "Drop log {}", id);
 		let path = Self::log_path(&self.path, id);
-		std::fs::remove_file(&path)?;
+		try_io!(std::fs::remove_file(&path));
 		Ok(())
 	}
 
@@ -612,8 +612,11 @@ impl Log {
 				// find a free id
 				let id = self.next_log_id.fetch_add(1, Ordering::SeqCst);
 				let path = Self::log_path(&self.path, id);
-				let file =
-					std::fs::OpenOptions::new().create(true).read(true).write(true).open(path)?;
+				let file = try_io!(std::fs::OpenOptions::new()
+					.create(true)
+					.read(true)
+					.write(true)
+					.open(path));
 				log::debug!(target: "parity-db", "Flush: Activated new writer {}", id);
 				(id, file)
 			};
@@ -698,7 +701,7 @@ impl Log {
 
 				if let Some(mut flushing) = flushing.take() {
 					log::debug!(target: "parity-db", "Flush: Activated log reader {}", flushing.id);
-					flushing.file.seek(std::io::SeekFrom::Start(0))?;
+					try_io!(flushing.file.seek(std::io::SeekFrom::Start(0)));
 					*reading = Some(Reading {
 						id: flushing.id,
 						file: std::io::BufReader::new(flushing.file),
@@ -726,7 +729,7 @@ impl Log {
 		if self.sync {
 			if let Some(flushing) = flushing.as_ref() {
 				log::debug!(target: "parity-db", "Flush: Flushing log to disk");
-				flushing.file.sync_data()?;
+				try_io!(flushing.file.sync_data());
 				log::debug!(target: "parity-db", "Flush: Flushing log completed");
 			}
 		}
@@ -758,8 +761,8 @@ impl Log {
 		let mut cleaned: Vec<_> = { self.cleanup_queue.write().drain(0..count).collect() };
 		for (id, ref mut file) in cleaned.iter_mut() {
 			log::debug!(target: "parity-db", "Cleaned: {}", id);
-			file.seek(std::io::SeekFrom::Start(0))?;
-			file.set_len(0)?;
+			try_io!(file.seek(std::io::SeekFrom::Start(0)));
+			try_io!(file.set_len(0));
 		}
 		// Move cleaned logs back to the pool
 		let mut pool = self.log_pool.write();

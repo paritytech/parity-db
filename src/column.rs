@@ -664,7 +664,7 @@ impl HashColumn {
 	pub fn write_stats_text(&self, writer: &mut impl std::io::Write) -> Result<()> {
 		let tables = self.tables.read();
 		tables.index.write_stats(&self.stats);
-		self.stats.write_stats_text(writer, tables.index.id.col())
+		self.stats.write_stats_text(writer, tables.index.id.col()).map_err(Error::Io)
 	}
 
 	fn stat_summary(&self) -> ColumnStatSummary {

@@ -2,7 +2,7 @@
 // This file is dual-licensed as Apache-2.0 or MIT.
 
 use arbitrary::Arbitrary;
-use std::{fmt::Debug, path::Path};
+use std::{fmt::Debug, iter::once, path::Path};
 use tempfile::tempdir;
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -26,6 +26,7 @@ impl From<CompressionType> for parity_db::CompressionType {
 pub struct Config {
 	pub btree_index: bool,
 	pub compression: CompressionType,
+	pub number_of_allowed_io_operations: u8,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -49,37 +50,86 @@ pub trait DbSimulator {
 	fn simulate(config: Config, actions: Vec<Action<Self::Operation>>) -> parity_db::Result<()> {
 		let dir = tempdir().unwrap();
 		let options = Self::build_options(&config, dir.path());
-		let mut db = parity_db::Db::open_or_create(&options)?;
+		parity_db::set_number_of_allowed_io_operations(
+			config.number_of_allowed_io_operations.into(),
+		);
+		if let Err(e) = Self::apply_simulation(&options, &actions, config.btree_index) {
+			if e.to_string() != "IO Error: Instrumented failure" {
+				// Real error
+				panic!("DB error: {}", e);
+			}
+
+			// We check that the database is in a correct state
+			parity_db::set_number_of_allowed_io_operations(usize::MAX);
+			let db = parity_db::Db::open_or_create(&options).unwrap();
+			let mut model = Self::Model::default();
+			for action in once(Action::Transaction(vec![])).chain(actions) {
+				// We apply the action on both the database and the model
+				if let Action::Transaction(operations) = action {
+					for o in &operations {
+						Self::apply_operation_on_model(o, &mut model);
+					}
+					if check_db_and_model_are_equals(
+						&db,
+						Self::model_content(&model),
+						config.btree_index,
+					)
+					.unwrap()
+					.is_ok()
+					{
+						return Ok(()) //Ok
+					}
+				}
+			}
+			// We print an error message
+			if let Err(e) =
+				check_db_and_model_are_equals(&db, Self::model_content(&model), config.btree_index)
+					.unwrap()
+			{
+				panic!("Not able to recover to a proper state when coming back from an instrumented failure: {}", e);
+			}
+		}
+		Ok(())
+	}
+
+	fn apply_simulation(
+		options: &parity_db::Options,
+		actions: &[Action<Self::Operation>],
+		is_btree: bool,
+	) -> parity_db::Result<()> {
+		let mut db = parity_db::Db::open_or_create(options)?;
 		let mut model = Self::Model::default();
 		for action in actions {
 			// We apply the action on both the database and the model
 			match action {
 				Action::Transaction(operations) => {
 					db.commit_changes(operations.iter().map(|o| (0, Self::map_operation(o))))?;
-					for o in &operations {
+					for o in operations {
 						Self::apply_operation_on_model(o, &mut model);
 					}
 				},
 				Action::Restart =>
 					db = {
 						drop(db);
-						parity_db::Db::open_or_create(&options)?
+						parity_db::Db::open_or_create(options)?
 					},
 			}
 
-			assert_db_and_model_are_equals(&db, Self::model_content(&model), config.btree_index)?;
+			check_db_and_model_are_equals(&db, Self::model_content(&model), is_btree)?.unwrap();
 		}
 		Ok(())
 	}
 }
 
-fn assert_db_and_model_are_equals(
+fn check_db_and_model_are_equals(
 	db: &parity_db::Db,
 	mut model_content: Vec<(Vec<u8>, Vec<u8>)>,
 	is_db_b_tree: bool,
-) -> parity_db::Result<()> {
+) -> parity_db::Result<Result<(), String>> {
 	for (k, v) in &model_content {
-		assert_eq!(db.get(0, k)?.as_ref(), Some(v));
+		if db.get(0, k)?.as_ref() != Some(v) {
+			return Ok(Err(format!("The value {:?} for key {:?} is not in the database", k, v)))
+		}
 	}
 
 	if is_db_b_tree {
@@ -90,7 +140,12 @@ fn assert_db_and_model_are_equals(
 		while let Some(e) = db_iter.next()? {
 			db_content.push(e);
 		}
-		assert_eq!(db_content, model_content);
+		if db_content != model_content {
+			return Ok(Err(format!(
+				"The forward iterator for the db gives {:?} and not {:?}",
+				db_content, model_content
+			)))
+		}
 
 		// We check the BTree backward iterator
 		model_content.reverse();
@@ -100,7 +155,12 @@ fn assert_db_and_model_are_equals(
 		while let Some(e) = db_iter.prev()? {
 			db_content.push(e);
 		}
-		assert_eq!(db_content, model_content);
+		if db_content != model_content {
+			return Ok(Err(format!(
+				"The backward iterator for the db gives {:?} and not {:?}",
+				db_content, model_content
+			)))
+		}
 	}
-	Ok(())
+	Ok(Ok(()))
 }
