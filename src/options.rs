@@ -80,8 +80,8 @@ impl ColumnOptions {
 	}
 
 	pub fn is_valid(&self) -> bool {
-		if self.btree_index && self.preimage {
-			log::error!(target: "parity-db", "Using `preimage` option on an ordered column is not supported");
+		if self.ref_counted && !self.preimage {
+			log::error!(target: "parity-db", "Using `ref_counted` option without `preimage` enabled is not supported");
 			return false
 		}
 		true

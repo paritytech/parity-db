@@ -1833,6 +1833,7 @@ mod tests {
 		let mut options = Options::with_columns(tmp.path(), 2);
 		options.columns[col_nb as usize].btree_index = btree_index;
 		options.columns[col_nb as usize].ref_counted = ref_counted;
+		options.columns[col_nb as usize].preimage = ref_counted;
 		let db_test = EnableCommitPipelineStages::DbFile;
 		// ref counted and commit overlay currently don't support removal
 		assert!(!(ref_counted && matches!(db_test, EnableCommitPipelineStages::CommitOverlay)));
