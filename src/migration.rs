@@ -4,6 +4,7 @@
 use crate::{
 	column::{ColId, IterState},
 	db::{CommitChangeSet, Db, IndexedChangeSet, Operation},
+	error::try_io,
 	options::Options,
 	Error, Result,
 };
@@ -171,8 +172,8 @@ pub fn clear_column(path: &Path, column: ColId) -> Result<()> {
 	// It is not specified how read_dir behaves when deleting and iterating in the same loop
 	// We collect a list of paths to be deleted first.
 	let mut to_delete = Vec::new();
-	for entry in std::fs::read_dir(path)? {
-		let entry = entry?;
+	for entry in try_io!(std::fs::read_dir(path)) {
+		let entry = try_io!(entry);
 		if let Some(file) = entry.path().file_name().and_then(|f| f.to_str()) {
 			if crate::index::TableId::is_file_name(column, file) ||
 				crate::table::TableId::is_file_name(column, file)
@@ -185,7 +186,7 @@ pub fn clear_column(path: &Path, column: ColId) -> Result<()> {
 	for file in to_delete {
 		let mut path = path.to_path_buf();
 		path.push(file);
-		std::fs::remove_file(path)?;
+		try_io!(std::fs::remove_file(path));
 	}
 	Ok(())
 }
@@ -199,8 +200,8 @@ fn copy_column(c: ColId, from: &Path, to: &Path) -> Result<()> {
 }
 
 fn deplace_column(c: ColId, from: &Path, to: &Path, copy: bool) -> Result<()> {
-	for entry in std::fs::read_dir(from)? {
-		let entry = entry?;
+	for entry in try_io!(std::fs::read_dir(from)) {
+		let entry = try_io!(entry);
 		if let Some(file) = entry.path().file_name().and_then(|f| f.to_str()) {
 			if crate::index::TableId::is_file_name(c, file) ||
 				crate::table::TableId::is_file_name(c, file)
@@ -210,9 +211,9 @@ fn deplace_column(c: ColId, from: &Path, to: &Path, copy: bool) -> Result<()> {
 				let mut to = to.to_path_buf();
 				to.push(file);
 				if copy {
-					std::fs::copy(from, to)?;
+					try_io!(std::fs::copy(from, to));
 				} else {
-					std::fs::rename(from, to)?;
+					try_io!(std::fs::rename(from, to));
 				}
 			}
 		}

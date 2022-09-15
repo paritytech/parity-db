@@ -4,7 +4,7 @@
 use crate::{
 	column::{ColId, Salt},
 	compress::CompressionType,
-	error::{Error, Result},
+	error::{try_io, Error, Result},
 };
 use rand::Rng;
 use std::{collections::HashMap, path::Path};
@@ -174,7 +174,7 @@ impl Options {
 		for i in 0..self.columns.len() {
 			metadata.push(format!("col{}={}", i, self.columns[i].as_string()));
 		}
-		std::fs::write(path, metadata.join("\n"))?;
+		try_io!(std::fs::write(path, metadata.join("\n")));
 		Ok(())
 	}
 
@@ -220,12 +220,12 @@ impl Options {
 		if !path.exists() {
 			return Ok(None)
 		}
-		let file = std::io::BufReader::new(std::fs::File::open(path)?);
+		let file = std::io::BufReader::new(try_io!(std::fs::File::open(path)));
 		let mut salt = None;
 		let mut columns = Vec::new();
 		let mut version = 0;
 		for l in file.lines() {
-			let l = l?;
+			let l = try_io!(l);
 			let mut vals = l.split('=');
 			let k = vals.next().ok_or_else(|| Error::Corruption("Bad metadata".into()))?;
 			let v = vals.next().ok_or_else(|| Error::Corruption("Bad metadata".into()))?;

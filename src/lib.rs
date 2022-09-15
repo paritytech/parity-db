@@ -19,6 +19,8 @@ mod table;
 pub use btree::BTreeIterator;
 pub use compress::CompressionType;
 pub use db::{check::CheckOptions, Db, Operation, Value};
+#[cfg(feature = "instrumentation")]
+pub use error::set_number_of_allowed_io_operations;
 pub use error::{Error, Result};
 pub use migration::{clear_column, migrate};
 pub use options::{ColumnOptions, Options};

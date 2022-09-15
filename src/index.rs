@@ -4,7 +4,7 @@
 use crate::{
 	column::ColId,
 	display::hex,
-	error::{Error, Result},
+	error::{try_io, Error, Result},
 	log::{LogQuery, LogReader, LogWriter},
 	stats::{self, ColumnStats},
 	table::{key::TableKey, SIZE_TIERS_BITS},
@@ -192,12 +192,12 @@ impl IndexTable {
 
 		let file = match std::fs::OpenOptions::new().read(true).write(true).open(path.as_path()) {
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-			Err(e) => return Err(e.into()),
+			Err(e) => return Err(Error::Io(e)),
 			Ok(file) => file,
 		};
 
-		file.set_len(file_size(id.index_bits()))?;
-		let map = unsafe { memmap2::MmapMut::map_mut(&file)? };
+		try_io!(file.set_len(file_size(id.index_bits())));
+		let map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
 		log::debug!(target: "parity-db", "Opened existing index {}", id);
 		Ok(Some(IndexTable { id, path, map: RwLock::new(Some(map)) }))
 	}
@@ -429,15 +429,15 @@ impl IndexTable {
 		let mut map = self.map.upgradable_read();
 		if map.is_none() {
 			let mut wmap = RwLockUpgradableReadGuard::upgrade(map);
-			let file = std::fs::OpenOptions::new()
+			let file = try_io!(std::fs::OpenOptions::new()
 				.write(true)
 				.read(true)
 				.create_new(true)
-				.open(self.path.as_path())?;
+				.open(self.path.as_path()));
 			log::debug!(target: "parity-db", "Created new index {}", self.id);
 			//TODO: check for potential overflows on 32-bit platforms
-			file.set_len(file_size(self.id.index_bits()))?;
-			let mut mmap = unsafe { memmap2::MmapMut::map_mut(&file)? };
+			try_io!(file.set_len(file_size(self.id.index_bits())));
+			let mut mmap = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
 			self.madvise_random(&mut mmap);
 			*wmap = Some(mmap);
 			map = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wmap);
@@ -494,7 +494,7 @@ impl IndexTable {
 
 	pub fn drop_file(self) -> Result<()> {
 		drop(self.map);
-		std::fs::remove_file(self.path.as_path())?;
+		try_io!(std::fs::remove_file(self.path.as_path()));
 		log::debug!(target: "parity-db", "{}: Dropped table", self.id);
 		Ok(())
 	}
@@ -502,7 +502,7 @@ impl IndexTable {
 	pub fn flush(&self) -> Result<()> {
 		if let Some(map) = &*self.map.read() {
 			// Flush everything except stats.
-			map.flush_range(META_SIZE, map.len() - META_SIZE)?;
+			try_io!(map.flush_range(META_SIZE, map.len() - META_SIZE));
 		}
 		Ok(())
 	}

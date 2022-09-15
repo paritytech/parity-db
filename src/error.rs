@@ -2,20 +2,22 @@
 // This file is dual-licensed as Apache-2.0 or MIT.
 
 use crate::column::ColId;
-use std::{fmt, sync::Arc};
+#[cfg(feature = "instrumentation")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{fmt, io, sync::Arc};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
 pub enum Error {
-	Io(std::io::Error),
+	Io(io::Error),
 	Corruption(String),
 	InvalidConfiguration(String),
 	IncompatibleColumnConfig { id: ColId, reason: String },
 	InvalidInput(String),
 	InvalidValueData,
 	Background(Arc<Error>),
-	Locked(std::io::Error),
+	Locked(io::Error),
 	Migration(String),
 	Compression,
 	DatabaseNotFound,
@@ -40,19 +42,6 @@ impl fmt::Display for Error {
 	}
 }
 
-impl From<std::io::Error> for Error {
-	fn from(e: std::io::Error) -> Self {
-		Error::Io(e)
-	}
-}
-
-impl From<std::io::ErrorKind> for Error {
-	fn from(e: std::io::ErrorKind) -> Self {
-		let e: std::io::Error = e.into();
-		e.into()
-	}
-}
-
 impl std::error::Error for Error {
 	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
 		match self {
@@ -63,3 +52,37 @@ impl std::error::Error for Error {
 		}
 	}
 }
+
+#[cfg(feature = "instrumentation")]
+pub static IO_COUNTER_BEFORE_ERROR: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+#[cfg(feature = "instrumentation")]
+pub fn set_number_of_allowed_io_operations(val: usize) {
+	IO_COUNTER_BEFORE_ERROR.store(val, Ordering::Relaxed);
+}
+
+#[cfg(feature = "instrumentation")]
+macro_rules! try_io {
+	($e:expr) => {{
+		if crate::error::IO_COUNTER_BEFORE_ERROR
+			.fetch_sub(1, ::std::sync::atomic::Ordering::Relaxed) ==
+			0
+		{
+			Err(crate::error::Error::Io(::std::io::Error::new(
+				::std::io::ErrorKind::Other,
+				"Instrumented failure",
+			)))?
+		} else {
+			$e.map_err(crate::error::Error::Io)?
+		}
+	}};
+}
+
+#[cfg(not(feature = "instrumentation"))]
+macro_rules! try_io {
+	($e:expr) => {{
+		$e.map_err(crate::error::Error::Io)?
+	}};
+}
+
+pub(crate) use try_io;

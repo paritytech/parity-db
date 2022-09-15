@@ -4,7 +4,7 @@
 use crate::{
 	btree::{commit_overlay::BTreeChangeSet, BTreeIterator, BTreeTable},
 	column::{hash_key, ColId, Column, IterState, ReindexBatch},
-	error::{Error, Result},
+	error::{try_io, Error, Result},
 	hash::IdentityBuildHasher,
 	index::PlanOutcome,
 	log::{Log, LogAction},
@@ -131,18 +131,18 @@ impl WaitCondvar<bool> {
 impl DbInner {
 	fn open(options: &Options, inner_options: &InternalOptions) -> Result<DbInner> {
 		if inner_options.create {
-			std::fs::create_dir_all(&options.path)?;
+			try_io!(std::fs::create_dir_all(&options.path));
 		} else if !options.path.is_dir() {
 			return Err(Error::DatabaseNotFound)
 		}
 
 		let mut lock_path: std::path::PathBuf = options.path.clone();
 		lock_path.push("lock");
-		let lock_file = std::fs::OpenOptions::new()
+		let lock_file = try_io!(std::fs::OpenOptions::new()
 			.create(true)
 			.read(true)
 			.write(true)
-			.open(lock_path.as_path())?;
+			.open(lock_path.as_path()));
 		if !inner_options.skip_check_lock {
 			lock_file.try_lock_exclusive().map_err(Error::Locked)?;
 		}

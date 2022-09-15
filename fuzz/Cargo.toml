@@ -11,7 +11,7 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = { version = "1", features = ["derive"] }
 libfuzzer-sys = "0.4"
-parity-db = { path = ".." }
+parity-db = { path = "..", features = ["instrumentation"] }
 tempfile = "3"
 
 [workspace]
