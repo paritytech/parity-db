@@ -2,7 +2,6 @@
 // This file is dual-licensed as Apache-2.0 or MIT.
 
 use arbitrary::Arbitrary;
-use parity_db;
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 pub enum CompressionType {
