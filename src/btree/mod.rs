@@ -268,7 +268,7 @@ impl BTreeTable {
 			&Operation::Dereference(()),
 			writer,
 			None,
-			true,
+			false,
 		)?;
 		Ok(())
 	}
@@ -331,7 +331,7 @@ impl BTreeTable {
 				&Operation::Set((), entry.encoded),
 				writer,
 				None,
-				true,
+				false,
 			)? {
 				Some(new_index)
 			} else {
@@ -455,7 +455,7 @@ pub mod commit_overlay {
 					&Operation::Set((), &entry.encoded.as_ref()[..HEADER_SIZE as usize]),
 					writer,
 					None,
-					true,
+					false,
 				)?;
 			}
 			#[cfg(test)]

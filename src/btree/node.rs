@@ -257,7 +257,7 @@ impl Node {
 					change,
 					log,
 					None,
-					false,
+					values.ref_counted,
 				)?
 				.0
 				.is_none()
@@ -746,7 +746,7 @@ impl Node {
 				&Operation::Set((), value),
 				log,
 				None,
-				false,
+				btree.ref_counted,
 			)?
 			.1
 			.unwrap_or(address)
