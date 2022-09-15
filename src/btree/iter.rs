@@ -118,109 +118,94 @@ impl<'a> BTreeIterator<'a> {
 
 	#[allow(clippy::should_implement_trait)]
 	pub fn next(&mut self) -> IterResult {
-		loop {
-			if let Ok(result) = self.iter_inner(IterDirection::Forward) {
-				return result
-			}
-		}
+		self.iter_inner(IterDirection::Forward)
 	}
 
 	pub fn prev(&mut self) -> IterResult {
-		loop {
-			if let Ok(result) = self.iter_inner(IterDirection::Backward) {
-				return result
-			}
-		}
+		self.iter_inner(IterDirection::Backward)
 	}
 
-	fn iter_inner(&mut self, direction: IterDirection) -> std::result::Result<IterResult, ()> {
+	fn iter_inner(&mut self, direction: IterDirection) -> IterResult {
 		let col = self.col;
 
-		// Lock log over function call (no btree struct change).
-		let commit_overlay = self.commit_overlay.read();
-		let next_commit_overlay = commit_overlay.get(col as usize).and_then(|o| match direction {
-			IterDirection::Forward => o.btree_next(&self.last_key),
-			IterDirection::Backward => o.btree_prev(&self.last_key),
-		});
-		let log = self.log.read();
-		let record_id = log.last_record_id(self.col);
-		// No consistency over iteration, allows dropping lock to overlay.
-		std::mem::drop(commit_overlay);
-		if record_id != self.iter.1.record_id {
-			self.pending_backend = None;
-		}
-		let next_from_pending = self
-			.pending_backend
-			.take()
-			.and_then(|pending| (pending.direction == direction).then(|| pending.next_item));
-		let next_backend = if let Some(pending) = next_from_pending {
-			pending
-		} else {
-			match self.next_backend(record_id, self.table, &*log, direction) {
-				Ok(r) => r,
-				Err(e) => return Ok(Err(e)),
+		loop {
+			// Lock log over function call (no btree struct change).
+			let commit_overlay = self.commit_overlay.read();
+			let next_commit_overlay =
+				commit_overlay.get(col as usize).and_then(|o| match direction {
+					IterDirection::Forward => o.btree_next(&self.last_key),
+					IterDirection::Backward => o.btree_prev(&self.last_key),
+				});
+			let log = self.log.read();
+			let record_id = log.last_record_id(self.col);
+			// No consistency over iteration, allows dropping lock to overlay.
+			std::mem::drop(commit_overlay);
+			if record_id != self.iter.1.record_id {
+				self.pending_backend = None;
 			}
-		};
-		let result = match (next_commit_overlay, next_backend) {
-			(Some((commit_key, commit_value)), Some((backend_key, backend_value))) =>
-				match (direction, commit_key.cmp(&backend_key)) {
-					(IterDirection::Backward, std::cmp::Ordering::Greater) |
-					(IterDirection::Forward, std::cmp::Ordering::Less) => {
-						self.pending_backend = Some(PendingBackend {
-							next_item: Some((backend_key, backend_value)),
-							direction,
-						});
-						if let Some(value) = commit_value {
-							Some((commit_key, value))
-						} else {
-							std::mem::drop(log);
-							self.last_key = LastKey::At(commit_key);
-							// recurse
-							return Err(())
-						}
-					},
-					(IterDirection::Backward, std::cmp::Ordering::Less) |
-					(IterDirection::Forward, std::cmp::Ordering::Greater) => Some((backend_key, backend_value)),
-					(_, std::cmp::Ordering::Equal) =>
-						if let Some(value) = commit_value {
-							Some((backend_key, value))
-						} else {
-							std::mem::drop(log);
-							self.last_key = LastKey::At(commit_key);
-							// recurse
-							return Err(())
+			let next_from_pending = self
+				.pending_backend
+				.take()
+				.and_then(|pending| (pending.direction == direction).then(|| pending.next_item));
+			let next_backend = if let Some(pending) = next_from_pending {
+				pending
+			} else {
+				self.next_backend(record_id, self.table, &*log, direction)?
+			};
+			let result = match (next_commit_overlay, next_backend) {
+				(Some((commit_key, commit_value)), Some((backend_key, backend_value))) =>
+					match (direction, commit_key.cmp(&backend_key)) {
+						(IterDirection::Backward, std::cmp::Ordering::Greater) |
+						(IterDirection::Forward, std::cmp::Ordering::Less) => {
+							self.pending_backend = Some(PendingBackend {
+								next_item: Some((backend_key, backend_value)),
+								direction,
+							});
+							if let Some(value) = commit_value {
+								Some((commit_key, value))
+							} else {
+								self.last_key = LastKey::At(commit_key);
+								continue
+							}
 						},
+						(IterDirection::Backward, std::cmp::Ordering::Less) |
+						(IterDirection::Forward, std::cmp::Ordering::Greater) => Some((backend_key, backend_value)),
+						(_, std::cmp::Ordering::Equal) =>
+							if let Some(value) = commit_value {
+								Some((backend_key, value))
+							} else {
+								self.last_key = LastKey::At(commit_key);
+								continue
+							},
+					},
+				(Some((commit_key, Some(commit_value))), None) => {
+					self.pending_backend = Some(PendingBackend { next_item: None, direction });
+					Some((commit_key, commit_value))
 				},
-			(Some((commit_key, Some(commit_value))), None) => {
-				self.pending_backend = Some(PendingBackend { next_item: None, direction });
-				Some((commit_key, commit_value))
-			},
-			(Some((k, None)), None) => {
-				self.pending_backend = Some(PendingBackend { next_item: None, direction });
-				std::mem::drop(log);
-				self.last_key = LastKey::At(k);
-				// recurse
-				return Err(())
-			},
-			(None, Some((backend_key, backend_value))) => Some((backend_key, backend_value)),
-			(None, None) => {
-				self.pending_backend = Some(PendingBackend { next_item: None, direction });
-
-				None
-			},
-		};
-
-		match result.as_ref() {
-			Some((key, _)) => {
-				self.last_key = LastKey::At(key.clone());
-			},
-			None =>
-				self.last_key = match direction {
-					IterDirection::Backward => LastKey::Start,
-					IterDirection::Forward => LastKey::End,
+				(Some((k, None)), None) => {
+					self.pending_backend = Some(PendingBackend { next_item: None, direction });
+					self.last_key = LastKey::At(k);
+					continue
 				},
+				(None, Some((backend_key, backend_value))) => Some((backend_key, backend_value)),
+				(None, None) => {
+					self.pending_backend = Some(PendingBackend { next_item: None, direction });
+					None
+				},
+			};
+
+			match result.as_ref() {
+				Some((key, _)) => {
+					self.last_key = LastKey::At(key.clone());
+				},
+				None =>
+					self.last_key = match direction {
+						IterDirection::Backward => LastKey::Start,
+						IterDirection::Forward => LastKey::End,
+					},
+			}
+			return Ok(result)
 		}
-		Ok(Ok(result))
 	}
 
 	pub fn next_backend(
