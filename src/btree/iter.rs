@@ -14,9 +14,18 @@ use crate::{
 use parking_lot::RwLock;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub enum SeekTo {
-	Include,
-	Exclude,
+pub enum SeekTo<'a> {
+	Include(&'a [u8]),
+	Exclude(&'a [u8]),
+}
+
+impl<'a> SeekTo<'a> {
+	pub fn key(&self) -> &'a [u8] {
+		match self {
+			SeekTo::Include(key) => key,
+			SeekTo::Exclude(key) => key,
+		}
+	}
 }
 
 #[derive(Debug)]
@@ -29,6 +38,8 @@ pub struct BTreeIterator<'a> {
 	pending_backend: Option<PendingBackend>,
 	last_key: LastKey,
 }
+
+type IterResult = Result<Option<(Vec<u8>, Vec<u8>)>>;
 
 #[derive(Debug)]
 struct PendingBackend {
@@ -86,11 +97,10 @@ impl<'a> BTreeIterator<'a> {
 		self.last_key = LastKey::Seeked(key.to_vec());
 		self.pending_backend = None;
 		self.seek_backend(
-			key,
+			SeekTo::Include(key),
 			record_id,
 			self.table,
 			&*log,
-			SeekTo::Include,
 			IterDirection::Forward,
 		)
 	}
@@ -107,26 +117,23 @@ impl<'a> BTreeIterator<'a> {
 	}
 
 	#[allow(clippy::should_implement_trait)]
-	pub fn next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+	pub fn next(&mut self) -> IterResult {
 		loop {
-			if let Ok(result) = self.iter_inner(IterDirection::Forward)? {
-				return Ok(result)
+			if let Ok(result) = self.iter_inner(IterDirection::Forward) {
+				return result
 			}
 		}
 	}
 
-	pub fn prev(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+	pub fn prev(&mut self) -> IterResult {
 		loop {
-			if let Ok(result) = self.iter_inner(IterDirection::Backward)? {
-				return Ok(result)
+			if let Ok(result) = self.iter_inner(IterDirection::Backward) {
+				return result
 			}
 		}
 	}
 
-	fn iter_inner(
-		&mut self,
-		direction: IterDirection,
-	) -> Result<std::result::Result<Option<(Vec<u8>, Vec<u8>)>, ()>> {
+	fn iter_inner(&mut self, direction: IterDirection) -> std::result::Result<IterResult, ()> {
 		let col = self.col;
 
 		// Lock log over function call (no btree struct change).
@@ -142,15 +149,17 @@ impl<'a> BTreeIterator<'a> {
 		if record_id != self.iter.1.record_id {
 			self.pending_backend = None;
 		}
-		let next_backend = if let Some(pending) = self.pending_backend.take() {
-			if pending.direction != direction {
-				// commit overlay last return, being in between, simply dropping pending.
-				self.next_backend(record_id, self.table, &*log, direction)?
-			} else {
-				pending.next_item
-			}
+		let next_from_pending = self
+			.pending_backend
+			.take()
+			.and_then(|pending| (pending.direction == direction).then(|| pending.next_item));
+		let next_backend = if let Some(pending) = next_from_pending {
+			pending
 		} else {
-			self.next_backend(record_id, self.table, &*log, direction)?
+			match self.next_backend(record_id, self.table, &*log, direction) {
+				Ok(r) => r,
+				Err(e) => return Ok(Err(e)),
+			}
 		};
 		let result = match (next_commit_overlay, next_backend) {
 			(Some((commit_key, commit_value)), Some((backend_key, backend_value))) =>
@@ -165,9 +174,9 @@ impl<'a> BTreeIterator<'a> {
 							Some((commit_key, value))
 						} else {
 							std::mem::drop(log);
-							self.last_key = LastKey::At(commit_key.clone());
+							self.last_key = LastKey::At(commit_key);
 							// recurse
-							return Ok(Err(()))
+							return Err(())
 						}
 					},
 					(IterDirection::Backward, std::cmp::Ordering::Less) |
@@ -177,9 +186,9 @@ impl<'a> BTreeIterator<'a> {
 							Some((backend_key, value))
 						} else {
 							std::mem::drop(log);
-							self.last_key = LastKey::At(commit_key.clone());
+							self.last_key = LastKey::At(commit_key);
 							// recurse
-							return Ok(Err(()))
+							return Err(())
 						},
 				},
 			(Some((commit_key, Some(commit_value))), None) => {
@@ -189,9 +198,9 @@ impl<'a> BTreeIterator<'a> {
 			(Some((k, None)), None) => {
 				self.pending_backend = Some(PendingBackend { next_item: None, direction });
 				std::mem::drop(log);
-				self.last_key = LastKey::At(k.clone());
+				self.last_key = LastKey::At(k);
 				// recurse
-				return Ok(Err(()))
+				return Err(())
 			},
 			(None, Some((backend_key, backend_value))) => Some((backend_key, backend_value)),
 			(None, None) => {
@@ -227,20 +236,19 @@ impl<'a> BTreeIterator<'a> {
 			*tree = new_tree;
 			match &self.last_key {
 				LastKey::At(last_key) => {
-					iter.seek(last_key.as_slice(), tree, col, log, SeekTo::Exclude, direction)?;
+					iter.seek(SeekTo::Exclude(last_key.as_slice()), tree, col, log, direction)?;
 				},
 				LastKey::Seeked(last_key) => {
 					iter.seek(
-						last_key.as_slice(),
+						SeekTo::Include(last_key.as_slice()),
 						tree,
 						col,
 						log,
-						SeekTo::Include,
 						IterDirection::Forward,
 					)?;
 				},
 				LastKey::Start => {
-					iter.seek(&[], tree, col, log, SeekTo::Include, IterDirection::Forward)?;
+					iter.seek(SeekTo::Include(&[]), tree, col, log, IterDirection::Forward)?;
 				},
 				LastKey::End => {
 					iter.seek_to_last(tree, col, log)?;
@@ -254,11 +262,10 @@ impl<'a> BTreeIterator<'a> {
 
 	pub fn seek_backend(
 		&mut self,
-		key: &[u8],
+		seek_to: SeekTo,
 		record_id: u64,
 		col: &BTreeTable,
 		log: &impl LogQuery,
-		seek_to: SeekTo,
 		direction: IterDirection,
 	) -> Result<()> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
@@ -267,7 +274,7 @@ impl<'a> BTreeIterator<'a> {
 			*tree = new_tree;
 			iter.record_id = record_id;
 		}
-		iter.seek(key, tree, col, log, seek_to, direction)
+		iter.seek(seek_to, tree, col, log, direction)
 	}
 
 	pub fn seek_backend_to_last(
@@ -476,18 +483,17 @@ impl BTreeIterState {
 
 	pub fn seek(
 		&mut self,
-		key: &[u8],
+		seek_to: SeekTo,
 		btree: &mut BTree,
 		col: &BTreeTable,
 		log: &impl LogQuery,
-		seek_to: SeekTo,
 		direction: IterDirection,
 	) -> Result<()> {
 		self.state.clear();
 		self.fetch_root = false;
 		col.with_locked(|b| {
 			let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), b, log)?;
-			Node::seek(root, key, b, log, btree.depth, &mut self.state, seek_to, direction)
+			Node::seek(root, seek_to, b, log, btree.depth, &mut self.state, direction)
 		})
 	}
 

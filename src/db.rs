@@ -14,7 +14,6 @@ use crate::{
 };
 use fs2::FileExt;
 use parking_lot::{Condvar, Mutex, RwLock};
-use std::collections::{BTreeMap, HashMap, VecDeque};
 /// The database objects is split into `Db` and `DbInner`.
 /// `Db` creates shared `DbInner` instance and manages background
 /// worker threads that all use the inner object.
@@ -35,7 +34,10 @@ use std::sync::{
 	atomic::{AtomicBool, AtomicU64, Ordering},
 	Arc,
 };
-
+use std::{
+	collections::{BTreeMap, HashMap, VecDeque},
+	ops::Bound,
+};
 // Max size of commit queue. (Keys + Values). If the queue is
 // full `commit` will block.
 // These are in memory, so we use usize
@@ -1091,18 +1093,12 @@ impl CommitOverlay {
 				.range::<Vec<u8>, _>(..)
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
-			LastKey::End => return None,
-			LastKey::At(key) => {
-				let mut iter = self.btree_indexed.range::<Vec<u8>, _>(key..);
-				let next = iter.next();
-				if next.as_ref().map(|(k, _)| k != &key).unwrap_or(false) {
-					next
-				} else {
-					iter.next()
-				}
-				.map(|(k, (_, v))| (k.clone(), v.clone()))
-			},
-			// TODO could just get?
+			LastKey::End => None,
+			LastKey::At(key) => self
+				.btree_indexed
+				.range::<Vec<u8>, _>((Bound::Excluded(key), Bound::Unbounded))
+				.next()
+				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Seeked(key) => self
 				.btree_indexed
 				.range::<Vec<u8>, _>(key..)
@@ -1121,16 +1117,12 @@ impl CommitOverlay {
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Start => return None,
-			LastKey::At(key) => {
-				let mut iter = self.btree_indexed.range::<Vec<u8>, _>(..=key).rev();
-				let prev = iter.next();
-				if prev.as_ref().map(|(k, _)| k != &key).unwrap_or(false) {
-					prev
-				} else {
-					iter.next()
-				}
-				.map(|(k, (_, v))| (k.clone(), v.clone()))
-			},
+			LastKey::At(key) => self
+				.btree_indexed
+				.range::<Vec<u8>, _>(..key)
+				.rev()
+				.next()
+				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Seeked(key) => self
 				.btree_indexed
 				.range::<Vec<u8>, _>(..=key)

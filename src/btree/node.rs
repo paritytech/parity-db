@@ -496,22 +496,21 @@ impl Node {
 
 	pub fn seek(
 		self,
-		key: &[u8],
+		seek_to: SeekTo,
 		values: TablesRef,
 		log: &impl LogQuery,
 		mut depth: u32,
 		stack: &mut Vec<(LastIndex, Self)>,
-		seek_to: SeekTo,
 		direction: IterDirection,
 	) -> Result<()> {
 		let mut from = self;
 		loop {
-			let (at, i) = from.position(key)?;
+			let (at, i) = from.position(seek_to.key())?;
 			if at {
 				stack.push(match (seek_to, direction) {
-					(SeekTo::Exclude, _) => (LastIndex::At(i), from),
-					(SeekTo::Include, IterDirection::Forward) => (LastIndex::Seeked(i), from),
-					(SeekTo::Include, IterDirection::Backward) => (LastIndex::Seeked(i), from),
+					(SeekTo::Exclude(_), _) => (LastIndex::At(i), from),
+					(SeekTo::Include(_), IterDirection::Forward) => (LastIndex::Seeked(i), from),
+					(SeekTo::Include(_), IterDirection::Backward) => (LastIndex::Seeked(i), from),
 				});
 				return Ok(())
 			}
@@ -526,9 +525,9 @@ impl Node {
 			if let Some(child) = from.fetch_child(i, values, log)? {
 				stack.push((LastIndex::Descend(i), from));
 				from = child;
-				depth = depth - 1
+				depth -= 1
 			} else {
-				unreachable!()
+				return Err(Error::Corruption(format!("A btree node is missing a child at {:?}", i)))
 			}
 		}
 	}
