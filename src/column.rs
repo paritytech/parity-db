@@ -125,6 +125,11 @@ enum IterStateOrCorrupted {
 
 #[inline]
 pub fn hash_key(key: &[u8], salt: &Salt, uniform: bool, db_version: u32) -> Key {
+	use blake2::{
+		digest::{typenum::U32, FixedOutput, Update},
+		Blake2bMac,
+	};
+
 	let mut k = Key::default();
 	if uniform {
 		if db_version <= 5 {
@@ -137,7 +142,11 @@ pub fn hash_key(key: &[u8], salt: &Salt, uniform: bool, db_version: u32) -> Key 
 			}
 		}
 	} else {
-		k.copy_from_slice(blake2_rfc::blake2b::blake2b(32, salt, key).as_bytes());
+		let mut ctx = Blake2bMac::<U32>::new_with_salt_and_personal(salt, &[], &[])
+			.expect("Salt length (32) is a valid key length (<= 64)");
+		ctx.update(key);
+		let hash = ctx.finalize_fixed();
+		k.copy_from_slice(&hash);
 	}
 	k
 }
@@ -684,6 +693,8 @@ impl HashColumn {
 		start_chunk: u64,
 		skip_preimage_indexes: bool,
 	) -> Result<()> {
+		use blake2::{digest::typenum::U32, Blake2b, Digest};
+
 		let tables = self.tables.read();
 		let source = &tables.index;
 
@@ -702,8 +713,8 @@ impl HashColumn {
 					} else {
 						value
 					};
-					let key = blake2_rfc::blake2b::blake2b(32, &[], &value);
-					let key = self.hash_key(key.as_bytes());
+					let key = Blake2b::<U32>::digest(&value);
+					let key = self.hash_key(&key);
 					let state = IterStateOrCorrupted::Item(IterState {
 						chunk_index: index,
 						key,

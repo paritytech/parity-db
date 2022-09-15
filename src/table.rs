@@ -1147,8 +1147,10 @@ mod test {
 	}
 
 	fn key(k: u32) -> Key {
+		use blake2::{digest::typenum::U32, Blake2b, Digest};
 		let mut key = Key::default();
-		key.copy_from_slice(blake2_rfc::blake2b::blake2b(32, &[], &k.to_le_bytes()).as_bytes());
+		let hash = Blake2b::<U32>::digest(&k.to_le_bytes());
+		key.copy_from_slice(&hash);
 		key
 	}
 
