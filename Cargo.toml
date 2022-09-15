@@ -9,7 +9,7 @@ repository = "https://github.com/paritytech/parity-db/"
 description = "Key-value database for the blockchain"
 
 [dependencies]
-blake2-rfc = "0.2.18"
+blake2 = "0.10.4"
 crc32fast = "1.2.0"
 fs2 = "0.4.3"
 hex = "0.4.2"
