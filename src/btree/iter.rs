@@ -286,6 +286,10 @@ pub struct BTreeIterState {
 }
 
 impl BTreeIterState {
+	pub fn new(record_id: u64) -> BTreeIterState {
+		BTreeIterState { state: vec![], fetch_root: true, record_id }
+	}
+
 	fn enter(&mut self, at: usize, node: Node, direction: IterDirection) {
 		if let Some((ix, _)) = self.state.last_mut() {
 			*ix = LastIndex::Descend(at);
@@ -327,10 +331,6 @@ impl BTreeIterState {
 			}
 		}
 		false
-	}
-
-	pub fn new(record_id: u64) -> BTreeIterState {
-		BTreeIterState { state: vec![], fetch_root: true, record_id }
 	}
 
 	pub fn next(
