@@ -1174,13 +1174,6 @@ impl<Key, Value> Operation<Key, Value> {
 			Operation::Set(k, _) | Operation::Dereference(k) | Operation::Reference(k) => k,
 		}
 	}
-
-	pub fn is_reference_ops(&self) -> bool {
-		match self {
-			Operation::Set(..) | Operation::Dereference(..) => false,
-			Operation::Reference(..) => true,
-		}
-	}
 }
 
 impl<K: AsRef<[u8]>, Value> Operation<K, Value> {
@@ -1849,25 +1842,36 @@ mod tests {
 	}
 
 	fn test_basic(change_set: &[(Vec<u8>, Option<Vec<u8>>)]) {
+		test_basic_inner(change_set, false, false);
+		test_basic_inner(change_set, false, true);
+		test_basic_inner(change_set, true, false);
+		test_basic_inner(change_set, true, true);
+	}
+
+	fn test_basic_inner(
+		change_set: &[(Vec<u8>, Option<Vec<u8>>)],
+		btree_index: bool,
+		ref_counted: bool,
+	) {
 		let tmp = tempdir().unwrap();
 		let col_nb = 1u8;
 		let mut options = Options::with_columns(tmp.path(), 2);
-		options.columns[col_nb as usize].btree_index = true;
+		options.columns[col_nb as usize].btree_index = btree_index;
+		options.columns[col_nb as usize].ref_counted = ref_counted;
 		let db_test = EnableCommitPipelineStages::DbFile;
+		// ref counted and commit overlay currently don't support removal
+		assert!(!(ref_counted && matches!(db_test, EnableCommitPipelineStages::CommitOverlay)));
 		let inner_options =
 			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 
-		let mut iter = db.iter(col_nb).unwrap();
-		assert_eq!(iter.next().unwrap(), None);
+		let iter = btree_index.then(|| db.iter(col_nb).unwrap());
+		assert_eq!(iter.and_then(|mut i| i.next().unwrap()), None);
 
-		db.commit(change_set.iter().map(|(k, v)| (0, k.clone(), v.clone()))).unwrap();
 		db.commit(change_set.iter().map(|(k, v)| (col_nb, k.clone(), v.clone())))
 			.unwrap();
 		db_test.run_stages(&db);
 
-		let stats = db.stats();
-		let col_stats = stats.columns.into_iter().next().unwrap().unwrap();
 		let mut keys = HashSet::new();
 		let mut expected_count: u64 = 0;
 		for (k, v) in change_set.iter() {
@@ -1879,12 +1883,47 @@ mod tests {
 				expected_count -= 1;
 			}
 		}
-		assert_eq!(col_stats.total_values, expected_count);
+		if ref_counted {
+			let mut state: BTreeMap<Vec<u8>, Option<(Vec<u8>, usize)>> = Default::default();
+			for (k, v) in change_set.iter() {
+				let mut remove = false;
+				let mut insert = false;
+				match state.get_mut(k) {
+					Some(Some((_, counter))) =>
+						if v.is_some() {
+							*counter += 1;
+						} else if *counter == 1 {
+							remove = true;
+						} else {
+							*counter -= 1;
+						},
+					Some(None) | None =>
+						if v.is_some() {
+							insert = true;
+						},
+				}
+				if insert {
+					state.insert(k.clone(), v.clone().map(|v| (v, 1)));
+				}
+				if remove {
+					state.remove(k);
+				}
+			}
+			for (key, value) in state {
+				assert_eq!(db.get(col_nb, &key).unwrap(), value.map(|v| v.0));
+			}
+		} else {
+			let stats = db.stats();
+			// btree do not have stats implemented
+			if let Some(stats) = stats.columns[col_nb as usize].as_ref() {
+				assert_eq!(stats.total_values, expected_count);
+			}
 
-		let state: BTreeMap<Vec<u8>, Option<Vec<u8>>> =
-			change_set.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-		for (key, value) in state.iter() {
-			assert_eq!(&db.get(col_nb, key).unwrap(), value);
+			let state: BTreeMap<Vec<u8>, Option<Vec<u8>>> =
+				change_set.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+			for (key, value) in state.iter() {
+				assert_eq!(&db.get(col_nb, key).unwrap(), value);
+			}
 		}
 	}
 
@@ -1929,6 +1968,22 @@ mod tests {
 
 	#[test]
 	fn test_simple() {
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key1".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key1".to_vec(), None),
+			(b"key1".to_vec(), None),
+		]);
+		test_basic(&[
+			(b"key1".to_vec(), Some(b"value1".to_vec())),
+			(b"key1".to_vec(), Some(b"value2".to_vec())),
+		]);
+		test_basic(&[(b"key1".to_vec(), Some(b"value1".to_vec()))]);
 		test_basic(&[
 			(b"key1".to_vec(), Some(b"value1".to_vec())),
 			(b"key2".to_vec(), Some(b"value2".to_vec())),

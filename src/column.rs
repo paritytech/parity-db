@@ -520,6 +520,7 @@ impl HashColumn {
 			change,
 			log,
 			stats,
+			self.ref_counted,
 		)? {
 			(Some(outcome), _) => Ok(outcome),
 			(None, Some(value_address)) => {
@@ -886,6 +887,7 @@ impl Column {
 		change: &Operation<K, V>,
 		log: &mut LogWriter,
 		stats: Option<&ColumnStats>,
+		ref_counted: bool,
 	) -> Result<(Option<PlanOutcome>, Option<Address>)> {
 		let tier = address.size_tier() as usize;
 
@@ -908,7 +910,7 @@ impl Column {
 
 		match change {
 			Operation::Reference(_) =>
-				if tables.ref_counted {
+				if ref_counted {
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.col, key);
 					tables.tables[tier].write_inc_ref(address.offset(), log)?;
 					if let Some(stats) = stats {
@@ -919,7 +921,7 @@ impl Column {
 					Ok((Some(PlanOutcome::Skipped), None))
 				},
 			Operation::Set(_, val) => {
-				if tables.ref_counted {
+				if ref_counted {
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.col, key);
 					tables.tables[tier].write_inc_ref(address.offset(), log)?;
 					return Ok((Some(PlanOutcome::Written), None))
@@ -967,7 +969,7 @@ impl Column {
 			Operation::Dereference(_) => {
 				// Deletion
 				let cur_size = if stats.is_some() { Some(fetch_size()?) } else { None };
-				let remove = if tables.ref_counted {
+				let remove = if ref_counted {
 					let removed = !tables.tables[tier].write_dec_ref(address.offset(), log)?;
 					log::trace!(target: "parity-db", "{}: Dereference {}, deleted={}", tables.col, key, removed);
 					removed
