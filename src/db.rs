@@ -1884,7 +1884,7 @@ mod tests {
 					state.remove(k);
 				}
 			}
-			for (key, value) in state.into_iter() {
+			for (key, value) in state {
 				assert_eq!(db.get(col_nb, &key).unwrap(), value.map(|v| v.0));
 			}
 		} else {
