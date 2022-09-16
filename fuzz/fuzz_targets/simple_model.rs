@@ -5,63 +5,59 @@
 //! Checks that a sequence of operations and restarts behaves the same as an in-memory collection.
 
 #![no_main]
-use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use parity_db_fuzz::*;
-use std::collections::{btree_map::BTreeMap, HashMap};
-use tempfile::tempdir;
+use std::{
+	collections::{BTreeMap, HashMap},
+	path::Path,
+};
 
-#[derive(Arbitrary, Debug)]
-enum Action {
-	Transaction(Vec<(u8, Option<u8>)>),
-	Restart,
+struct Simulator;
+
+impl DbSimulator for Simulator {
+	type Operation = (u8, Option<u8>);
+	type Model = BTreeMap<u8, u8>;
+
+	fn build_options(config: &Config, path: &Path) -> parity_db::Options {
+		parity_db::Options {
+			path: path.to_owned(),
+			columns: vec![parity_db::ColumnOptions {
+				compression: config.compression.into(),
+				btree_index: config.btree_index,
+				..parity_db::ColumnOptions::default()
+			}],
+			sync_wal: true,
+			sync_data: true,
+			stats: false,
+			salt: None,
+			compression_threshold: HashMap::new(),
+		}
+	}
+
+	fn apply_operation_on_model(operation: &(u8, Option<u8>), model: &mut Self::Model) {
+		let (k, v) = operation;
+		if let Some(v) = *v {
+			model.insert(*k, v);
+		} else {
+			model.remove(k);
+		}
+	}
+
+	fn map_operation(operation: &(u8, Option<u8>)) -> parity_db::Operation<Vec<u8>, Vec<u8>> {
+		let (k, v) = operation;
+		if let Some(v) = *v {
+			parity_db::Operation::Set(vec![*k], vec![v])
+		} else {
+			parity_db::Operation::Dereference(vec![*k])
+		}
+	}
+
+	fn model_content(model: &BTreeMap<u8, u8>) -> Vec<(Vec<u8>, Vec<u8>)> {
+		model.iter().map(|(k, v)| (vec![*k], vec![*v])).collect::<Vec<_>>()
+	}
 }
 
-fuzz_target!(|entry: (Config, Vec<Action>)| {
+fuzz_target!(|entry: (Config, Vec<Action<(u8, Option<u8>)>>)| {
 	let (config, actions) = entry;
-	let dir = tempdir().unwrap();
-	let options = parity_db::Options {
-		path: dir.path().to_owned(),
-		columns: vec![parity_db::ColumnOptions {
-			compression: config.compression.into(),
-			btree_index: config.btree_index,
-			..parity_db::ColumnOptions::default()
-		}],
-		sync_wal: true,
-		sync_data: true,
-		stats: false,
-		salt: None,
-		compression_threshold: HashMap::new(),
-	};
-	let mut db = parity_db::Db::open_or_create(&options).unwrap();
-	let mut model = BTreeMap::<u8, u8>::default();
-	for action in actions {
-		// We apply the action on both the database and the model
-		match action {
-			Action::Transaction(operations) => {
-				db.commit(
-					operations.iter().copied().map(|(k, v)| (0u8, vec![k], v.map(|v| vec![v]))),
-				)
-				.unwrap();
-				for (k, v) in operations {
-					if let Some(v) = v {
-						model.insert(k, v);
-					} else {
-						model.remove(&k);
-					}
-				}
-			},
-			Action::Restart =>
-				db = {
-					drop(db);
-					parity_db::Db::open_or_create(&options).unwrap()
-				},
-		}
-
-		assert_db_and_model_are_equals(
-			&db,
-			model.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(),
-			config.btree_index,
-		);
-	}
+	Simulator::simulate(config, actions).unwrap();
 });
