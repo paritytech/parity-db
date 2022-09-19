@@ -14,7 +14,6 @@ use crate::{
 };
 use fs2::FileExt;
 use parking_lot::{Condvar, Mutex, RwLock};
-use std::collections::{BTreeMap, HashMap, VecDeque};
 /// The database objects is split into `Db` and `DbInner`.
 /// `Db` creates shared `DbInner` instance and manages background
 /// worker threads that all use the inner object.
@@ -35,7 +34,10 @@ use std::sync::{
 	atomic::{AtomicBool, AtomicU64, Ordering},
 	Arc,
 };
-
+use std::{
+	collections::{BTreeMap, HashMap, VecDeque},
+	ops::Bound,
+};
 // Max size of commit queue. (Keys + Values). If the queue is
 // full `commit` will block.
 // These are in memory, so we use usize
@@ -1083,48 +1085,51 @@ impl CommitOverlay {
 		self.btree_indexed.get(key).map(|(_, v)| v.as_ref())
 	}
 
-	pub fn btree_next(
-		&self,
-		last_key: &Option<Vec<u8>>,
-		from_seek: bool,
-	) -> Option<(Value, Option<Value>)> {
-		let key = if let Some(key) = last_key.as_ref() {
-			key
-		} else {
-			return self.btree_indexed.iter().next().map(|(k, (_, v))| (k.clone(), v.clone()))
-		};
-
-		let mut iter = self.btree_indexed.range::<Vec<u8>, _>(key..);
-
-		let (k, v) = if let Some((k, (_, v))) = iter.next() { (k, v) } else { return None };
-
-		if from_seek || k != key {
-			return Some((k.clone(), v.clone()))
+	pub fn btree_next(&self, last_key: &crate::btree::LastKey) -> Option<(Value, Option<Value>)> {
+		use crate::btree::LastKey;
+		match &last_key {
+			LastKey::Start => self
+				.btree_indexed
+				.range::<Vec<u8>, _>(..)
+				.next()
+				.map(|(k, (_, v))| (k.clone(), v.clone())),
+			LastKey::End => None,
+			LastKey::At(key) => self
+				.btree_indexed
+				.range::<Vec<u8>, _>((Bound::Excluded(key), Bound::Unbounded))
+				.next()
+				.map(|(k, (_, v))| (k.clone(), v.clone())),
+			LastKey::Seeked(key) => self
+				.btree_indexed
+				.range::<Vec<u8>, _>(key..)
+				.next()
+				.map(|(k, (_, v))| (k.clone(), v.clone())),
 		}
-
-		iter.next().map(|(k, (_, v))| (k.clone(), v.clone()))
 	}
 
-	pub fn btree_prev(
-		&self,
-		last_key: &Option<Vec<u8>>,
-		from_seek: bool,
-	) -> Option<(Value, Option<Value>)> {
-		let key = if let Some(key) = last_key.as_ref() {
-			key
-		} else {
-			return self.btree_indexed.iter().rev().next().map(|(k, (_, v))| (k.clone(), v.clone()))
-		};
-
-		let mut iter = self.btree_indexed.range::<Vec<u8>, _>(..=key).rev();
-
-		let (k, v) = if let Some((k, (_, v))) = iter.next() { (k, v) } else { return None };
-
-		if from_seek || k != key {
-			return Some((k.clone(), v.clone()))
+	pub fn btree_prev(&self, last_key: &crate::btree::LastKey) -> Option<(Value, Option<Value>)> {
+		use crate::btree::LastKey;
+		match &last_key {
+			LastKey::End => self
+				.btree_indexed
+				.range::<Vec<u8>, _>(..)
+				.rev()
+				.next()
+				.map(|(k, (_, v))| (k.clone(), v.clone())),
+			LastKey::Start => None,
+			LastKey::At(key) => self
+				.btree_indexed
+				.range::<Vec<u8>, _>(..key)
+				.rev()
+				.next()
+				.map(|(k, (_, v))| (k.clone(), v.clone())),
+			LastKey::Seeked(key) => self
+				.btree_indexed
+				.range::<Vec<u8>, _>(..=key)
+				.rev()
+				.next()
+				.map(|(k, (_, v))| (k.clone(), v.clone())),
 		}
-
-		iter.next().map(|(k, (_, v))| (k.clone(), v.clone()))
 	}
 }
 
@@ -1623,7 +1628,6 @@ mod tests {
 
 		iter.seek_to_first().unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
-		assert_eq!(iter.prev().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.prev().unwrap(), None);
 
 		iter.seek(&[0xff]).unwrap();
@@ -1749,7 +1753,7 @@ mod tests {
 
 		use std::collections::BTreeSet;
 
-		let mut rng = rand::rngs::SmallRng::from_rng(rand::thread_rng()).unwrap();
+		let mut rng = rand::rngs::SmallRng::seed_from_u64(0);
 
 		let tmp = tempdir().unwrap();
 		let col_nb = 0u8;
@@ -1773,7 +1777,8 @@ mod tests {
 			let at = rng.gen_range(0u64..=1024);
 			iter.seek(&at.to_be_bytes()).unwrap();
 
-			let at = if rng.gen() {
+			let mut prev_run: bool = rng.gen();
+			let at = if prev_run {
 				let take = rng.gen_range(1..100);
 				let got = std::iter::from_fn(|| iter.next().unwrap())
 					.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
@@ -1781,6 +1786,12 @@ mod tests {
 					.collect::<Vec<_>>();
 				let expected = expected.range(at..).take(take).copied().collect::<Vec<_>>();
 				assert_eq!(got, expected);
+				if got.is_empty() {
+					prev_run = false;
+				}
+				if got.len() < take {
+					prev_run = false;
+				}
 				expected.last().copied().unwrap_or(at)
 			} else {
 				at
@@ -1792,17 +1803,31 @@ mod tests {
 					.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
 					.take(take)
 					.collect::<Vec<_>>();
-				let expected = expected.range(..=at).rev().take(take).copied().collect::<Vec<_>>();
+				let expected = if prev_run {
+					expected.range(..at).rev().take(take).copied().collect::<Vec<_>>()
+				} else {
+					expected.range(..=at).rev().take(take).copied().collect::<Vec<_>>()
+				};
 				assert_eq!(got, expected);
+				prev_run = !got.is_empty();
+				if take > got.len() {
+					prev_run = false;
+				}
 				expected.last().copied().unwrap_or(at)
 			};
 
 			let take = rng.gen_range(1..100);
-			let got = std::iter::from_fn(|| iter.next().unwrap())
+			let mut got = std::iter::from_fn(|| iter.next().unwrap())
 				.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
 				.take(take)
 				.collect::<Vec<_>>();
-			let expected = expected.range(at..).take(take).copied().collect::<Vec<_>>();
+			let mut expected = expected.range(at..).take(take).copied().collect::<Vec<_>>();
+			if prev_run {
+				expected = expected.split_off(1);
+				if got.len() == take {
+					got.pop();
+				}
+			}
 			assert_eq!(got, expected);
 		}
 

@@ -4,7 +4,7 @@
 //! BTree node struct and methods.
 
 use super::{
-	iter::{NodeType, SeekTo},
+	iter::{LastIndex, SeekTo},
 	*,
 };
 use crate::{
@@ -18,10 +18,6 @@ use crate::{
 use std::cmp::Ordering;
 
 impl Node {
-	pub(crate) fn last_child_index(&self) -> Option<usize> {
-		self.children.iter().rposition(|child| child.entry_index.is_some())
-	}
-
 	pub(crate) fn last_separator_index(&self) -> Option<usize> {
 		self.separators.iter().rposition(|separator| separator.separator.is_some())
 	}
@@ -494,107 +490,41 @@ impl Node {
 	}
 
 	pub fn seek(
-		mut self,
-		key: &[u8],
+		self,
+		seek_to: SeekTo,
 		values: TablesRef,
 		log: &impl LogQuery,
 		mut depth: u32,
-		stack: &mut Vec<(usize, NodeType, Self)>,
-		seek_to: SeekTo,
+		stack: &mut Vec<(LastIndex, Self)>,
+		direction: IterDirection,
 	) -> Result<()> {
+		let mut from = self;
 		loop {
-			let (at, i) = self.position(key)?;
+			let (at, i) = from.position(seek_to.key())?;
 			if at {
-				stack.push(match seek_to {
-					SeekTo::At => (i, NodeType::Separator, self),
-					SeekTo::After => (i + 1, NodeType::Child, self),
+				stack.push(match (seek_to, direction) {
+					(SeekTo::Exclude(_), _) => (LastIndex::At(i), from),
+					(SeekTo::Include(_), IterDirection::Forward) => (LastIndex::Seeked(i), from),
+					(SeekTo::Include(_), IterDirection::Backward) => (LastIndex::Seeked(i), from),
 				});
 				return Ok(())
 			}
 			if depth == 0 {
-				stack.push((i, NodeType::Separator, self));
+				if i == 0 {
+					stack.push((LastIndex::Start, from));
+				} else {
+					stack.push((LastIndex::Before(i), from));
+				}
 				return Ok(())
 			}
-
-			let child = if let Some(child) = self.fetch_child(i, values, log)? {
-				child
+			if let Some(child) = from.fetch_child(i, values, log)? {
+				stack.push((LastIndex::Descend(i), from));
+				from = child;
+				depth -= 1
 			} else {
-				stack.push((i, NodeType::Separator, self));
-				return Ok(())
-			};
-
-			stack.push((i, NodeType::Separator, self));
-			depth -= 1;
-			self = child;
-		}
-	}
-
-	pub fn seek_prev(
-		mut self,
-		key: &[u8],
-		values: TablesRef,
-		log: &impl LogQuery,
-		mut depth: u32,
-		stack: &mut Vec<(usize, NodeType, Self)>,
-		seek_to: SeekTo,
-	) -> Result<()> {
-		loop {
-			// Try to find the separator with provided `key`. If we fail then `i` will be equal to
-			// index of the first element less than key
-			let (at, i) = match self.last_separator_index() {
-				Some(mut i) => loop {
-					let separator = self.separators[i].separator.as_ref().expect("Checked before");
-					match key[..].cmp(&separator.key[..]) {
-						Ordering::Less => (),
-						Ordering::Greater => break (false, i + 1),
-						Ordering::Equal => break (true, i),
-					}
-					if i == 0 {
-						break (false, 0)
-					}
-					i -= 1;
-				},
-				None => (false, 0),
-			};
-
-			if at {
-				stack.push(match seek_to {
-					SeekTo::At => (i, NodeType::Separator, self),
-					SeekTo::After => (i, NodeType::Child, self),
-				});
-
-				return Ok(())
+				return Err(Error::Corruption(format!("A btree node is missing a child at {:?}", i)))
 			}
-
-			if depth == 0 {
-				if i > 0 {
-					stack.push((i - 1, NodeType::Separator, self));
-				}
-				return Ok(())
-			}
-
-			self = if let Some(child) = self.fetch_child(i, values, log)? {
-				if i > 0 {
-					stack.push((i - 1, NodeType::Separator, self));
-				}
-				child
-			} else {
-				if i > 0 {
-					stack.push((i - 1, NodeType::Separator, self));
-				}
-				return Ok(())
-			};
-			depth -= 1;
 		}
-	}
-
-	pub fn seek_to_last(from: Self, stack: &mut Vec<(usize, NodeType, Self)>) -> Result<()> {
-		if let Some(i) = from.last_child_index() {
-			stack.push((i, NodeType::Child, from))
-		} else if let Some(i) = from.last_separator_index() {
-			stack.push((i, NodeType::Separator, from))
-		}
-		Ok(())
 	}
 
 	#[cfg(test)]

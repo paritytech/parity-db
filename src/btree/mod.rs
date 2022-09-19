@@ -15,7 +15,7 @@ use crate::{
 	},
 	Operation,
 };
-pub use iter::BTreeIterator;
+pub use iter::{BTreeIterator, LastIndex, LastKey};
 use node::SeparatorInner;
 use parking_lot::RwLock;
 
@@ -33,6 +33,21 @@ const HEADER_ADDRESS: Address = {
 	Address::new(1, 0)
 };
 const ENTRY_CAPACITY: usize = ORDER * 33 + ORDER * 8 + ORDER_CHILD * 8;
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum IterDirection {
+	Backward,
+	Forward,
+}
+
+impl IterDirection {
+	fn starting(&self) -> LastIndex {
+		match self {
+			IterDirection::Forward => LastIndex::Start,
+			IterDirection::Backward => LastIndex::End,
+		}
+	}
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct BTreeHeader {
