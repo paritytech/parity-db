@@ -7,7 +7,7 @@ use crate::{
 	error::{Error, Result},
 };
 use rand::Rng;
-use std::{collections::HashMap, io::Write, path::Path};
+use std::{collections::HashMap, path::Path};
 
 pub const CURRENT_VERSION: u32 = 7;
 // TODO on last supported 5, remove MULTIHEAD_V4 and MULTIPART_V4
@@ -142,20 +142,12 @@ impl Options {
 
 	// TODO on next major version remove in favor of write_metadata_with_version
 	pub fn write_metadata(&self, path: &Path, salt: &Salt) -> Result<()> {
-		let mut path = path.to_path_buf();
-		path.push("metadata");
-		self.write_metadata_file(&path, salt)
+		self.write_metadata_with_version(path, salt, None)
 	}
 
 	// TODO on next major version remove in favor of write_metadata_with_version
 	pub fn write_metadata_file(&self, path: &Path, salt: &Salt) -> Result<()> {
-		let mut file = std::fs::File::create(path)?;
-		writeln!(file, "version={}", CURRENT_VERSION)?;
-		writeln!(file, "salt={}", hex::encode(salt))?;
-		for i in 0..self.columns.len() {
-			writeln!(file, "col{}={}", i, self.columns[i].as_string())?;
-		}
-		Ok(())
+		self.write_metadata_file_with_version(path, salt, None)
 	}
 
 	pub fn write_metadata_with_version(
@@ -175,13 +167,14 @@ impl Options {
 		salt: &Salt,
 		version: Option<u32>,
 	) -> Result<()> {
-		let version = version.unwrap_or(CURRENT_VERSION);
-		let mut file = std::fs::File::create(path)?;
-		writeln!(file, "version={}", version)?;
-		writeln!(file, "salt={}", hex::encode(salt))?;
+		let mut metadata = vec![
+			format!("version={}", version.unwrap_or(CURRENT_VERSION)),
+			format!("salt={}", hex::encode(salt)),
+		];
 		for i in 0..self.columns.len() {
-			writeln!(file, "col{}={}", i, self.columns[i].as_string())?;
+			metadata.push(format!("col{}={}", i, self.columns[i].as_string()));
 		}
+		std::fs::write(path, metadata.join("\n"))?;
 		Ok(())
 	}
 
