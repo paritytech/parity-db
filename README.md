@@ -18,6 +18,8 @@ Database does implement any custom data caching. Instead, it relies on OS page c
 
 ### Durability
 Database is restored to consistent state if IO is interrupted at any point.
+Note that this state might not be the latest state before the interruption.
+Writes already committed but not already saved to disk by the background threads are lost.
 
 # Implementation details
 
