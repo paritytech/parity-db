@@ -2,7 +2,7 @@
 // This file is dual-licensed as Apache-2.0 or MIT.
 
 use arbitrary::Arbitrary;
-use std::{fmt::Debug, iter::once, path::Path};
+use std::{fmt::Debug, path::Path};
 use tempfile::tempdir;
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -47,78 +47,124 @@ pub trait DbSimulator {
 
 	fn model_content(model: &Self::Model) -> Vec<(Vec<u8>, Vec<u8>)>;
 
-	fn simulate(config: Config, actions: Vec<Action<Self::Operation>>) -> parity_db::Result<()> {
+	fn simulate(config: Config, actions: Vec<Action<Self::Operation>>) {
 		let dir = tempdir().unwrap();
 		let options = Self::build_options(&config, dir.path());
+
+		// We don't check for now failures inside of initialization.
+		parity_db::set_number_of_allowed_io_operations(usize::MAX);
+		let mut db = parity_db::Db::open_or_create(&options).unwrap();
+		let mut model = Self::Model::default();
 		parity_db::set_number_of_allowed_io_operations(
 			config.number_of_allowed_io_operations.into(),
 		);
-		if let Err(e) = Self::apply_simulation(&options, &actions, config.btree_index) {
-			if e.to_string() != "IO Error: Instrumented failure" {
-				// Real error
-				panic!("DB error: {}", e);
-			}
-
-			// We check that the database is in a correct state
-			parity_db::set_number_of_allowed_io_operations(usize::MAX);
-			let db = parity_db::Db::open_or_create(&options).unwrap();
-			let mut model = Self::Model::default();
-			for action in once(Action::Transaction(vec![])).chain(actions) {
-				// We apply the action on both the database and the model
-				if let Action::Transaction(operations) = action {
-					for o in &operations {
-						Self::apply_operation_on_model(o, &mut model);
-					}
-					if check_db_and_model_are_equals(
-						&db,
-						Self::model_content(&model),
-						config.btree_index,
-					)
-					.unwrap()
-					.is_ok()
-					{
-						return Ok(()) //Ok
-					}
-				}
-			}
-			// We print an error message
-			if let Err(e) =
-				check_db_and_model_are_equals(&db, Self::model_content(&model), config.btree_index)
-					.unwrap()
-			{
-				panic!("Not able to recover to a proper state when coming back from an instrumented failure: {}", e);
-			}
-		}
-		Ok(())
-	}
-
-	fn apply_simulation(
-		options: &parity_db::Options,
-		actions: &[Action<Self::Operation>],
-		is_btree: bool,
-	) -> parity_db::Result<()> {
-		let mut db = parity_db::Db::open_or_create(options)?;
-		let mut model = Self::Model::default();
-		for action in actions {
+		for action in &actions {
 			// We apply the action on both the database and the model
 			match action {
 				Action::Transaction(operations) => {
-					db.commit_changes(operations.iter().map(|o| (0, Self::map_operation(o))))?;
-					for o in operations {
-						Self::apply_operation_on_model(o, &mut model);
+					if let Err(e) =
+						db.commit_changes(operations.iter().map(|o| (0, Self::map_operation(o))))
+					{
+						drop(db);
+						let (d, m) = Self::fail_or_restart_after_db_error(
+							e,
+							&options,
+							&actions,
+							config.btree_index,
+						);
+						model = m;
+						db = d;
+					} else {
+						for o in operations {
+							Self::apply_operation_on_model(o, &mut model);
+						}
+						retry_operation(|| {
+							check_db_and_model_are_equals(
+								&db,
+								Self::model_content(&model),
+								config.btree_index,
+							)
+						})
+						.unwrap();
 					}
 				},
-				Action::Restart =>
+				Action::Restart => {
 					db = {
 						drop(db);
-						parity_db::Db::open_or_create(options)?
-					},
+						parity_db::Db::open_or_create(&options)
+					}
+					.and_then(|db| {
+						match check_db_and_model_are_equals(
+							&db,
+							Self::model_content(&model),
+							config.btree_index,
+						)? {
+							Ok(()) => Ok(db),
+							Err(_) =>
+								Err(parity_db::Error::Corruption("Instrumented failure".into())),
+						}
+					})
+					.unwrap_or_else(|e| {
+						let (db, m) = Self::fail_or_restart_after_db_error(
+							e,
+							&options,
+							&actions,
+							config.btree_index,
+						);
+						model = m;
+						db
+					});
+				},
+			}
+		}
+	}
+
+	fn fail_or_restart_after_db_error(
+		error: parity_db::Error,
+		options: &parity_db::Options,
+		actions: &[Action<Self::Operation>],
+		is_db_b_tree: bool,
+	) -> (parity_db::Db, Self::Model) {
+		if !error.to_string().contains("Instrumented failure") {
+			panic!("{}", error);
+		}
+
+		// Instrumented failure, we restart the database and check if it is back to a valid state
+
+		parity_db::set_number_of_allowed_io_operations(usize::MAX);
+		let db = parity_db::Db::open_or_create(options).unwrap();
+
+		// We look for the matching model
+		let mut model = Self::Model::default();
+		for action in actions {
+			if check_db_and_model_are_equals(&db, Self::model_content(&model), is_db_b_tree)
+				.unwrap()
+				.is_ok()
+			{
+				return (db, model) //We found it!
 			}
 
-			check_db_and_model_are_equals(&db, Self::model_content(&model), is_btree)?.unwrap();
+			if let Action::Transaction(operations) = action {
+				for o in operations {
+					Self::apply_operation_on_model(o, &mut model);
+				}
+			}
 		}
-		Ok(())
+		if let Err(e) =
+			check_db_and_model_are_equals(&db, Self::model_content(&model), is_db_b_tree).unwrap()
+		{
+			panic!("Not able to recover to a proper state when coming back from an instrumented failure: {}", e)
+		}
+		(db, model)
 	}
+}
+
+fn retry_operation<'a, T>(op: impl Fn() -> parity_db::Result<T> + 'a) -> T {
+	(op()).unwrap_or_else(|_| {
+		// We ignore the error and try to open the DB again
+		parity_db::set_number_of_allowed_io_operations(usize::MAX);
+		op().unwrap()
+	})
 }
 
 fn check_db_and_model_are_equals(

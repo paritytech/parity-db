@@ -79,5 +79,5 @@ impl DbSimulator for Simulator {
 
 fuzz_target!(|entry: (Config, Vec<Action<Operation>>)| {
 	let (config, actions) = entry;
-	Simulator::simulate(config, actions).unwrap();
+	Simulator::simulate(config, actions);
 });
