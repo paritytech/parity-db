@@ -12,7 +12,7 @@ use parking_lot::{Condvar, MappedRwLockWriteGuard, Mutex, RwLock, RwLockWriteGua
 use std::{
 	collections::{HashMap, VecDeque},
 	convert::TryInto,
-	io::{Read, Seek, Write},
+	io::{ErrorKind, Read, Seek, Write},
 	sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 
@@ -553,13 +553,24 @@ impl Log {
 		if try_io!(file.metadata()).len() == 0 {
 			return Ok((file, None))
 		}
-		// read first record id
+		match Self::read_first_record_id(&mut file) {
+			Err(Error::Io(e)) if e.kind() == ErrorKind::UnexpectedEof => {
+				log::error!(target: "parity-db", "Opened existing log {}. No first record id found", path.display());
+				Ok((file, None))
+			},
+			Err(e) => Err(e),
+			Ok(id) => {
+				try_io!(file.seek(std::io::SeekFrom::Start(0)));
+				log::debug!(target: "parity-db", "Opened existing log {}, first record_id = {}", path.display(), id);
+				Ok((file, Some(id)))
+			},
+		}
+	}
+
+	fn read_first_record_id(file: &mut std::fs::File) -> Result<u64> {
 		let mut buf = [0; 9];
 		try_io!(file.read_exact(&mut buf));
-		try_io!(file.seek(std::io::SeekFrom::Start(0)));
-		let id = u64::from_le_bytes(buf[1..].try_into().unwrap());
-		log::debug!(target: "parity-db", "Opened existing log {}, first record_id = {}", path.display(), id);
-		Ok((file, Some(id)))
+		Ok(u64::from_le_bytes(buf[1..].try_into().unwrap()))
 	}
 
 	fn drop_log(&self, id: u32) -> Result<()> {
