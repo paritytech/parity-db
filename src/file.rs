@@ -73,7 +73,6 @@ impl TableFile {
 		let mut capacity = 0u64;
 		let file = if std::fs::metadata(&filepath).is_ok() {
 			let file = try_io!(std::fs::OpenOptions::new()
-				.create(true)
 				.read(true)
 				.write(true)
 				.open(filepath.as_path()));
