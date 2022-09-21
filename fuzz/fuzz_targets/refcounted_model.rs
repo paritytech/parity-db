@@ -52,10 +52,7 @@ impl DbSimulator for Simulator {
 			Operation::Dereference(k) =>
 				if let Entry::Occupied(mut e) = model.entry(k) {
 					let counter = e.get_mut();
-					*counter -= 1;
-					if *counter == 0 {
-						e.remove_entry();
-					}
+					*counter = counter.saturating_sub(1);
 				},
 			Operation::Reference(k) =>
 				if let Entry::Occupied(mut e) = model.entry(k) {
@@ -72,7 +69,14 @@ impl DbSimulator for Simulator {
 		}
 	}
 
-	fn model_content(model: &BTreeMap<u8, u8>) -> Vec<(Vec<u8>, Vec<u8>)> {
+	fn model_required_content(model: &BTreeMap<u8, u8>) -> Vec<(Vec<u8>, Vec<u8>)> {
+		model
+			.iter()
+			.filter_map(|(k, v)| if *v > 0 { Some((vec![*k], vec![*k])) } else { None })
+			.collect::<Vec<_>>()
+	}
+
+	fn model_optional_content(model: &BTreeMap<u8, u8>) -> Vec<(Vec<u8>, Vec<u8>)> {
 		model.iter().map(|(k, _)| (vec![*k], vec![*k])).collect::<Vec<_>>()
 	}
 }

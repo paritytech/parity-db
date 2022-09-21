@@ -52,8 +52,12 @@ impl DbSimulator for Simulator {
 		}
 	}
 
-	fn model_content(model: &BTreeMap<u8, u8>) -> Vec<(Vec<u8>, Vec<u8>)> {
+	fn model_required_content(model: &BTreeMap<u8, u8>) -> Vec<(Vec<u8>, Vec<u8>)> {
 		model.iter().map(|(k, v)| (vec![*k], vec![*v])).collect::<Vec<_>>()
+	}
+
+	fn model_optional_content(model: &BTreeMap<u8, u8>) -> Vec<(Vec<u8>, Vec<u8>)> {
+		Self::model_required_content(model)
 	}
 }
 
