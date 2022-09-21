@@ -970,6 +970,15 @@ impl ValueTable {
 	}
 
 	pub fn init_with_entry(&self, entry: &[u8]) -> Result<()> {
+		if let Err(e) = self.do_init_with_entry(entry) {
+			log::error!(target: "parity-db", "Failure to initialize file {}", self.file.path.display());
+			let _ = self.file.remove(); // We ignore error here
+			return Err(e)
+		}
+		Ok(())
+	}
+
+	fn do_init_with_entry(&self, entry: &[u8]) -> Result<()> {
 		self.file.grow(self.entry_size)?;
 
 		let empty_overlays = parking_lot::RwLock::new(Default::default());

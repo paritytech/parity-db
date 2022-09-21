@@ -211,4 +211,13 @@ impl TableFile {
 		}
 		Ok(())
 	}
+
+	pub fn remove(&self) -> Result<()> {
+		let mut file = self.file.write();
+		if let Some(file) = file.take() {
+			drop(file);
+			try_io!(std::fs::remove_file(&self.path));
+		}
+		Ok(())
+	}
 }
