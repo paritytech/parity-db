@@ -56,7 +56,9 @@ impl DbSimulator for Simulator {
 				},
 			Operation::Reference(k) =>
 				if let Entry::Occupied(mut e) = model.entry(k) {
-					*e.get_mut() += 1;
+					if *e.get() > 0 {
+						*e.get_mut() += 1;
+					}
 				},
 		}
 	}
