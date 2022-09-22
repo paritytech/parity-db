@@ -79,6 +79,10 @@ impl DbSimulator for Simulator {
 	fn model_optional_content(model: &BTreeMap<u8, u8>) -> Vec<(Vec<u8>, Vec<u8>)> {
 		model.iter().map(|(k, _)| (vec![*k], vec![*k])).collect::<Vec<_>>()
 	}
+
+	fn model_removed_content(_model: &BTreeMap<u8, u8>) -> Vec<Vec<u8>> {
+		Vec::new()
+	}
 }
 
 fuzz_target!(|entry: (Config, Vec<Action<Operation>>)| {

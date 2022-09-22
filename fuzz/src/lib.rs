@@ -49,6 +49,8 @@ pub trait DbSimulator {
 
 	fn model_optional_content(model: &Self::Model) -> Vec<(Vec<u8>, Vec<u8>)>;
 
+	fn model_removed_content(model: &Self::Model) -> Vec<Vec<u8>>;
+
 	fn simulate(config: Config, actions: Vec<Action<Self::Operation>>) {
 		let dir = tempdir().unwrap();
 		let options = Self::build_options(&config, dir.path());
@@ -156,6 +158,11 @@ pub trait DbSimulator {
 		for (k, v) in Self::model_required_content(model) {
 			if db.get(0, &k)?.as_ref() != Some(&v) {
 				return Ok(Err(format!("The value {:?} for key {:?} is not in the database", k, v)))
+			}
+		}
+		for k in Self::model_removed_content(model) {
+			if db.get(0, &k)?.is_some() {
+				return Ok(Err(format!("The key {:?} should not be in the database anymore", k)))
 			}
 		}
 
