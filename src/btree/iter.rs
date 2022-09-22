@@ -21,11 +21,11 @@ pub enum SeekTo<'a> {
 }
 
 impl<'a> SeekTo<'a> {
-	pub fn key(&self) -> &'a [u8] {
+	pub fn key(&self) -> Option<&'a [u8]> {
 		match self {
-			SeekTo::Include(key) => key,
-			SeekTo::Exclude(key) => key,
-			SeekTo::Last => unreachable!(),
+			SeekTo::Include(key) => Some(key),
+			SeekTo::Exclude(key) => Some(key),
+			SeekTo::Last => None,
 		}
 	}
 }

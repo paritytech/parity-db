@@ -499,10 +499,10 @@ impl Node {
 	) -> Result<()> {
 		let mut from = self;
 		loop {
-			let (at, i) = if let SeekTo::Last = seek_to {
-				(false, from.last_separator_index().map(|i| i + 1).unwrap_or(0))
+			let (at, i) = if let Some(key) = seek_to.key() {
+				from.position(key)?
 			} else {
-				from.position(seek_to.key())?
+				(false, from.last_separator_index().map(|i| i + 1).unwrap_or(0))
 			};
 			if at {
 				stack.push(match seek_to {
