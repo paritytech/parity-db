@@ -2,7 +2,7 @@
 // This file is dual-licensed as Apache-2.0 or MIT.
 
 use arbitrary::Arbitrary;
-use std::{fmt::Debug, path::Path};
+use std::{cmp::Ordering, fmt::Debug, path::Path};
 use tempfile::tempdir;
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -45,7 +45,11 @@ pub trait DbSimulator {
 
 	fn map_operation(operation: &Self::Operation) -> parity_db::Operation<Vec<u8>, Vec<u8>>;
 
-	fn model_content(model: &Self::Model) -> Vec<(Vec<u8>, Vec<u8>)>;
+	fn model_required_content(model: &Self::Model) -> Vec<(Vec<u8>, Vec<u8>)>;
+
+	fn model_optional_content(model: &Self::Model) -> Vec<(Vec<u8>, Vec<u8>)>;
+
+	fn model_removed_content(model: &Self::Model) -> Vec<Vec<u8>>;
 
 	fn simulate(config: Config, actions: Vec<Action<Self::Operation>>) {
 		let dir = tempdir().unwrap();
@@ -79,11 +83,7 @@ pub trait DbSimulator {
 							Self::apply_operation_on_model(o, &mut model);
 						}
 						retry_operation(|| {
-							check_db_and_model_are_equals(
-								&db,
-								Self::model_content(&model),
-								config.btree_index,
-							)
+							Self::check_db_and_model_are_equals(&db, &model, config.btree_index)
 						})
 						.unwrap();
 					}
@@ -94,11 +94,8 @@ pub trait DbSimulator {
 						parity_db::Db::open_or_create(&options)
 					}
 					.and_then(|db| {
-						match check_db_and_model_are_equals(
-							&db,
-							Self::model_content(&model),
-							config.btree_index,
-						)? {
+						match Self::check_db_and_model_are_equals(&db, &model, config.btree_index)?
+						{
 							Ok(()) => Ok(db),
 							Err(_) =>
 								Err(parity_db::Error::Corruption("Instrumented failure".into())),
@@ -137,10 +134,7 @@ pub trait DbSimulator {
 		// We look for the matching model
 		let mut model = Self::Model::default();
 		for action in actions {
-			if check_db_and_model_are_equals(&db, Self::model_content(&model), is_db_b_tree)
-				.unwrap()
-				.is_ok()
-			{
+			if Self::check_db_and_model_are_equals(&db, &model, is_db_b_tree).unwrap().is_ok() {
 				return (db, model) //We found it!
 			}
 
@@ -150,12 +144,61 @@ pub trait DbSimulator {
 				}
 			}
 		}
-		if let Err(e) =
-			check_db_and_model_are_equals(&db, Self::model_content(&model), is_db_b_tree).unwrap()
-		{
+		if let Err(e) = Self::check_db_and_model_are_equals(&db, &model, is_db_b_tree).unwrap() {
 			panic!("Not able to recover to a proper state when coming back from an instrumented failure: {}", e)
 		}
 		(db, model)
+	}
+
+	fn check_db_and_model_are_equals(
+		db: &parity_db::Db,
+		model: &Self::Model,
+		is_db_b_tree: bool,
+	) -> parity_db::Result<Result<(), String>> {
+		for (k, v) in Self::model_required_content(model) {
+			if db.get(0, &k)?.as_ref() != Some(&v) {
+				return Ok(Err(format!("The value {:?} for key {:?} is not in the database", k, v)))
+			}
+		}
+		for k in Self::model_removed_content(model) {
+			if db.get(0, &k)?.is_some() {
+				return Ok(Err(format!("The key {:?} should not be in the database anymore", k)))
+			}
+		}
+
+		if is_db_b_tree {
+			let mut model_content = Self::model_optional_content(model);
+
+			// We check the BTree forward iterator
+			let mut db_iter = db.iter(0)?;
+			db_iter.seek_to_first()?;
+			let mut db_content = Vec::new();
+			while let Some(e) = db_iter.next()? {
+				db_content.push(e);
+			}
+			if !is_slice_included_in_sorted(&db_content, &model_content, |a, b| a.cmp(b)) {
+				return Ok(Err(format!(
+					"The forward iterator for the db gives {:?} and not {:?}",
+					db_content, model_content
+				)))
+			}
+
+			// We check the BTree backward iterator
+			model_content.reverse();
+			let mut db_iter = db.iter(0)?;
+			db_iter.seek_to_last()?;
+			let mut db_content = Vec::new();
+			while let Some(e) = db_iter.prev()? {
+				db_content.push(e);
+			}
+			if !is_slice_included_in_sorted(&db_content, &model_content, |a, b| b.cmp(a)) {
+				return Ok(Err(format!(
+					"The backward iterator for the db gives {:?} and not {:?}",
+					db_content, model_content
+				)))
+			}
+		}
+		Ok(Ok(()))
 	}
 }
 
@@ -167,46 +210,21 @@ fn retry_operation<'a, T>(op: impl Fn() -> parity_db::Result<T> + 'a) -> T {
 	})
 }
 
-fn check_db_and_model_are_equals(
-	db: &parity_db::Db,
-	mut model_content: Vec<(Vec<u8>, Vec<u8>)>,
-	is_db_b_tree: bool,
-) -> parity_db::Result<Result<(), String>> {
-	for (k, v) in &model_content {
-		if db.get(0, k)?.as_ref() != Some(v) {
-			return Ok(Err(format!("The value {:?} for key {:?} is not in the database", k, v)))
+fn is_slice_included_in_sorted<T>(
+	small: &[T],
+	large: &[T],
+	cmp: impl Fn(&T, &T) -> Ordering,
+) -> bool {
+	let mut large = large.iter();
+	for se in small {
+		loop {
+			let le = if let Some(le) = large.next() { le } else { return false };
+			match cmp(se, le) {
+				Ordering::Less => return false,
+				Ordering::Greater => continue,
+				Ordering::Equal => break,
+			}
 		}
 	}
-
-	if is_db_b_tree {
-		// We check the BTree forward iterator
-		let mut db_iter = db.iter(0)?;
-		db_iter.seek_to_first()?;
-		let mut db_content = Vec::new();
-		while let Some(e) = db_iter.next()? {
-			db_content.push(e);
-		}
-		if db_content != model_content {
-			return Ok(Err(format!(
-				"The forward iterator for the db gives {:?} and not {:?}",
-				db_content, model_content
-			)))
-		}
-
-		// We check the BTree backward iterator
-		model_content.reverse();
-		let mut db_iter = db.iter(0)?;
-		db_iter.seek_to_last()?;
-		let mut db_content = Vec::new();
-		while let Some(e) = db_iter.prev()? {
-			db_content.push(e);
-		}
-		if db_content != model_content {
-			return Ok(Err(format!(
-				"The backward iterator for the db gives {:?} and not {:?}",
-				db_content, model_content
-			)))
-		}
-	}
-	Ok(Ok(()))
+	true
 }
