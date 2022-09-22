@@ -52,7 +52,7 @@ pub fn run() -> Result<(), String> {
 			let db = parity_db::Db::open_read_only(&options)
 				.map_err(|e| format!("Invalid db: {:?}", e))?;
 			if stat.clear {
-				db.clear_stats(stat.column);
+				db.clear_stats(stat.column).unwrap();
 			} else {
 				let mut out = std::io::stdout();
 				db.write_stats_text(&mut out, stat.column).unwrap();
