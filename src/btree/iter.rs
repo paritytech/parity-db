@@ -371,10 +371,7 @@ impl BTreeIterState {
 					(IterDirection::Forward, LastIndex::At(sep)) |
 					(IterDirection::Forward, LastIndex::After(sep)) => LastIndex::Descend(*sep + 1),
 					(IterDirection::Forward, LastIndex::Seeked(sep)) |
-					(IterDirection::Forward, LastIndex::Before(sep)) => {
-						debug_assert!(*sep < ORDER);
-						LastIndex::At(*sep)
-					},
+					(IterDirection::Forward, LastIndex::Before(sep)) => LastIndex::At(*sep),
 					(IterDirection::Forward, LastIndex::End) => {
 						if self.exit(direction) {
 							break
