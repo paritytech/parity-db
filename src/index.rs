@@ -208,24 +208,27 @@ impl IndexTable {
 		IndexTable { id, path, map: RwLock::new(None) }
 	}
 
-	pub fn load_stats(&self) -> ColumnStats {
+	pub fn load_stats(&self) -> Result<ColumnStats> {
 		if let Some(map) = &*self.map.read() {
-			ColumnStats::from_slice(&map[HEADER_SIZE..HEADER_SIZE + stats::TOTAL_SIZE])
+			Ok(ColumnStats::from_slice(try_io!(Ok(
+				&map[HEADER_SIZE..HEADER_SIZE + stats::TOTAL_SIZE]
+			))))
 		} else {
-			ColumnStats::empty()
+			Ok(ColumnStats::empty())
 		}
 	}
 
-	pub fn write_stats(&self, stats: &ColumnStats) {
+	pub fn write_stats(&self, stats: &ColumnStats) -> Result<()> {
 		if let Some(map) = &mut *self.map.write() {
-			let slice = &mut map[HEADER_SIZE..HEADER_SIZE + stats::TOTAL_SIZE];
+			let slice = try_io!(Ok(&mut map[HEADER_SIZE..HEADER_SIZE + stats::TOTAL_SIZE]));
 			stats.to_slice(slice);
 		}
+		Ok(())
 	}
 
-	fn chunk_at(index: u64, map: &memmap2::MmapMut) -> &[u8] {
+	fn chunk_at(index: u64, map: &memmap2::MmapMut) -> Result<&[u8]> {
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
-		&map[offset..offset + CHUNK_LEN]
+		Ok(try_io!(Ok(&map[offset..offset + CHUNK_LEN])))
 	}
 
 	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
@@ -251,7 +254,7 @@ impl IndexTable {
 		key
 	}
 
-	pub fn get(&self, key: &Key, sub_index: usize, log: &impl LogQuery) -> (Entry, usize) {
+	pub fn get(&self, key: &Key, sub_index: usize, log: &impl LogQuery) -> Result<(Entry, usize)> {
 		log::trace!(target: "parity-db", "{}: Querying {}", self.id, hex(key));
 		let key = TableKey::index_from_partial(key);
 		let chunk_index = self.chunk_index(key);
@@ -260,30 +263,30 @@ impl IndexTable {
 			log::trace!(target: "parity-db", "{}: Querying overlay at {}", self.id, chunk_index);
 			self.find_entry(key, sub_index, chunk)
 		}) {
-			return entry
+			return Ok(entry)
 		}
 
 		if let Some(map) = &*self.map.read() {
 			log::trace!(target: "parity-db", "{}: Querying chunk at {}", self.id, chunk_index);
-			let chunk = Self::chunk_at(chunk_index, map);
-			return self.find_entry(key, sub_index, chunk)
+			let chunk = Self::chunk_at(chunk_index, map)?;
+			return Ok(self.find_entry(key, sub_index, chunk))
 		}
-		(Entry::empty(), 0)
+		Ok((Entry::empty(), 0))
 	}
 
-	pub fn entries(&self, chunk_index: u64, log: &impl LogQuery) -> [Entry; CHUNK_ENTRIES] {
+	pub fn entries(&self, chunk_index: u64, log: &impl LogQuery) -> Result<[Entry; CHUNK_ENTRIES]> {
 		let mut chunk = [0; CHUNK_LEN];
 		if let Some(entry) =
 			log.with_index(self.id, chunk_index, |chunk| Self::transmute_chunk(*chunk))
 		{
-			return entry
+			return Ok(entry)
 		}
 		if let Some(map) = &*self.map.read() {
-			let source = Self::chunk_at(chunk_index, map);
+			let source = Self::chunk_at(chunk_index, map)?;
 			chunk.copy_from_slice(source);
-			return Self::transmute_chunk(chunk)
+			return Ok(Self::transmute_chunk(chunk))
 		}
-		Self::transmute_chunk(EMPTY_CHUNK)
+		Ok(Self::transmute_chunk(EMPTY_CHUNK))
 	}
 
 	#[inline(always)]
@@ -370,7 +373,7 @@ impl IndexTable {
 		}
 
 		if let Some(map) = &*self.map.read() {
-			let chunk = Self::chunk_at(chunk_index, map);
+			let chunk = Self::chunk_at(chunk_index, map)?;
 			return self.plan_insert_chunk(key_prefix, address, chunk, sub_index, log)
 		}
 
@@ -418,7 +421,7 @@ impl IndexTable {
 		}
 
 		if let Some(map) = &*self.map.read() {
-			let chunk = Self::chunk_at(chunk_index, map);
+			let chunk = Self::chunk_at(chunk_index, map)?;
 			return self.plan_remove_chunk(key_prefix, chunk, sub_index, log)
 		}
 
@@ -458,7 +461,9 @@ impl IndexTable {
 		while mask != 0 {
 			let i = mask.trailing_zeros();
 			mask &= !(1 << i);
-			log.read(&mut chunk[i as usize * ENTRY_BYTES..(i as usize + 1) * ENTRY_BYTES])?;
+			log.read(try_io!(Ok(
+				&mut chunk[i as usize * ENTRY_BYTES..(i as usize + 1) * ENTRY_BYTES]
+			)))?;
 		}
 		log::trace!(target: "parity-db", "{}: Enacted chunk {}", self.id, index);
 		Ok(())

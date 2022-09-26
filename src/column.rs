@@ -191,7 +191,7 @@ impl HashColumn {
 		tables: TablesRef,
 		log: &impl LogQuery,
 	) -> Result<Option<(u8, Value)>> {
-		let (mut entry, mut sub_index) = index.get(key, 0, log);
+		let (mut entry, mut sub_index) = index.get(key, 0, log)?;
 		while !entry.is_empty() {
 			let address = entry.address(index.id.index_bits());
 			let value = Column::get_value(
@@ -203,7 +203,7 @@ impl HashColumn {
 			match value {
 				Some(result) => return Ok(Some(result)),
 				None => {
-					let (next_entry, next_index) = index.get(key, sub_index + 1, log);
+					let (next_entry, next_index) = index.get(key, sub_index + 1, log)?;
 					entry = next_entry;
 					sub_index = next_index;
 				},
@@ -358,7 +358,7 @@ impl HashColumn {
 			let id = IndexTableId::new(col, bits);
 			if let Some(table) = IndexTable::open_existing(path, id)? {
 				if top.is_none() {
-					stats = table.load_stats();
+					stats = table.load_stats()?;
 					top = Some(table);
 				} else {
 					reindexing.push_front(table);
@@ -435,7 +435,7 @@ impl HashColumn {
 		tables: &'a Tables,
 		log: &LogWriter,
 	) -> Result<Option<(&'a IndexTable, usize, Address)>> {
-		let (mut existing_entry, mut sub_index) = index.get(key, 0, log);
+		let (mut existing_entry, mut sub_index) = index.get(key, 0, log)?;
 		while !existing_entry.is_empty() {
 			let existing_address = existing_entry.address(index.id.index_bits());
 			let existing_tier = existing_address.size_tier();
@@ -448,7 +448,7 @@ impl HashColumn {
 				return Ok(Some((index, sub_index, existing_address)))
 			}
 
-			let (next_entry, next_index) = index.get(key, sub_index + 1, log);
+			let (next_entry, next_index) = index.get(key, sub_index + 1, log)?;
 			existing_entry = next_entry;
 			sub_index = next_index;
 		}
@@ -663,7 +663,7 @@ impl HashColumn {
 
 	pub fn write_stats_text(&self, writer: &mut impl std::io::Write) -> Result<()> {
 		let tables = self.tables.read();
-		tables.index.write_stats(&self.stats);
+		tables.index.write_stats(&self.stats)?;
 		self.stats.write_stats_text(writer, tables.index.id.col()).map_err(Error::Io)
 	}
 
@@ -671,10 +671,10 @@ impl HashColumn {
 		self.stats.summary()
 	}
 
-	fn clear_stats(&self) {
+	fn clear_stats(&self) -> Result<()> {
 		let tables = self.tables.read();
 		self.stats.clear();
-		tables.index.write_stats(&self.stats);
+		tables.index.write_stats(&self.stats)
 	}
 
 	pub fn iter_while(&self, log: &Log, mut f: impl FnMut(IterState) -> bool) -> Result<()> {
@@ -728,7 +728,7 @@ impl HashColumn {
 		}
 
 		for c in start_chunk..source.id.total_chunks() {
-			let entries = source.entries(c, log.overlays());
+			let entries = source.entries(c, log.overlays())?;
 			for entry in entries.iter() {
 				if entry.is_empty() {
 					continue
@@ -852,7 +852,7 @@ impl HashColumn {
 				log::debug!(target: "parity-db", "{}: Continue reindex at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				while source_index < source.id.total_chunks() && plan.len() < MAX_REINDEX_BATCH {
 					log::trace!(target: "parity-db", "{}: Reindexing {}", source.id, source_index);
-					let entries = source.entries(source_index, log.overlays());
+					let entries = source.entries(source_index, log.overlays())?;
 					for entry in entries.iter() {
 						if entry.is_empty() {
 							continue
@@ -1066,10 +1066,10 @@ impl Column {
 		}
 	}
 
-	pub fn clear_stats(&self) {
+	pub fn clear_stats(&self) -> Result<()> {
 		match self {
 			Column::Hash(column) => column.clear_stats(),
-			Column::Tree(_column) => (),
+			Column::Tree(_column) => Ok(()),
 		}
 	}
 

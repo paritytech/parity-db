@@ -759,13 +759,14 @@ impl DbInner {
 		}
 	}
 
-	fn clear_stats(&self, column: Option<u8>) {
+	fn clear_stats(&self, column: Option<u8>) -> Result<()> {
 		if let Some(col) = column {
-			self.columns[col as usize].clear_stats();
+			self.columns[col as usize].clear_stats()
 		} else {
 			for c in self.columns.iter() {
-				c.clear_stats();
+				c.clear_stats()?;
 			}
+			Ok(())
 		}
 	}
 
@@ -997,7 +998,7 @@ impl Db {
 		self.inner.write_stats_text(writer, column)
 	}
 
-	pub fn clear_stats(&self, column: Option<u8>) {
+	pub fn clear_stats(&self, column: Option<u8>) -> Result<()> {
 		self.inner.clear_stats(column)
 	}
 
