@@ -2256,7 +2256,6 @@ mod tests {
 			let iter_next = iter.next().unwrap();
 			assert_eq!(state_next, iter_next.as_ref().map(|(k, v)| (k, v)));
 		}
-
 		let mut iter_state_rev = end_state.iter().rev();
 		let mut iter = db.iter(col_nb).unwrap();
 		iter.seek_to_last().unwrap();

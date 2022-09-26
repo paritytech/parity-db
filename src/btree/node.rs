@@ -496,25 +496,24 @@ impl Node {
 		log: &impl LogQuery,
 		mut depth: u32,
 		stack: &mut Vec<(LastIndex, Self)>,
-		direction: IterDirection,
 	) -> Result<()> {
 		let mut from = self;
 		loop {
-			let (at, i) = from.position(seek_to.key())?;
+			let (at, i) = if let Some(key) = seek_to.key() {
+				from.position(key)?
+			} else {
+				(false, from.last_separator_index().map(|i| i + 1).unwrap_or(0))
+			};
 			if at {
-				stack.push(match (seek_to, direction) {
-					(SeekTo::Exclude(_), _) => (LastIndex::At(i), from),
-					(SeekTo::Include(_), IterDirection::Forward) => (LastIndex::Seeked(i), from),
-					(SeekTo::Include(_), IterDirection::Backward) => (LastIndex::Seeked(i), from),
+				stack.push(match seek_to {
+					SeekTo::Exclude(_) => (LastIndex::At(i), from),
+					SeekTo::Include(_) => (LastIndex::Seeked(i), from),
+					SeekTo::Last => unreachable!(),
 				});
 				return Ok(())
 			}
 			if depth == 0 {
-				if i == 0 {
-					stack.push((LastIndex::Start, from));
-				} else {
-					stack.push((LastIndex::Before(i), from));
-				}
+				stack.push((LastIndex::Before(i), from));
 				return Ok(())
 			}
 			if let Some(child) = from.fetch_child(i, values, log)? {

@@ -40,15 +40,6 @@ pub enum IterDirection {
 	Forward,
 }
 
-impl IterDirection {
-	fn starting(&self) -> LastIndex {
-		match self {
-			IterDirection::Forward => LastIndex::Start,
-			IterDirection::Backward => LastIndex::End,
-		}
-	}
-}
-
 #[derive(Clone, PartialEq, Eq)]
 pub struct BTreeHeader {
 	pub root: Address,
