@@ -1082,6 +1082,7 @@ pub mod key {
 #[cfg(test)]
 mod test {
 	const ENTRY_SIZE: u16 = 64;
+
 	use super::{TableId, Value, ValueTable};
 	use crate::{
 		log::{Log, LogAction, LogWriter},
@@ -1089,41 +1090,18 @@ mod test {
 		table::key::TableKey,
 		Key,
 	};
+	use std::sync::Arc;
+	use tempfile::{tempdir, TempDir};
 
-	struct TempDir(std::sync::Arc<std::path::PathBuf>);
-
-	impl TempDir {
-		fn new(name: &'static str) -> TempDir {
-			env_logger::try_init().ok();
-			let mut path = std::env::temp_dir();
-			path.push("parity-db-test");
-			path.push("value-table");
-			path.push(name);
-
-			if path.exists() {
-				std::fs::remove_dir_all(&path).unwrap();
-			}
-			std::fs::create_dir_all(&path).unwrap();
-			TempDir(std::sync::Arc::new(path))
-		}
-
-		fn table(&self, size: Option<u16>, options: &ColumnOptions) -> ValueTable {
-			let id = TableId::new(0, 0);
-			ValueTable::open(self.0.clone(), id, size, options, CURRENT_VERSION).unwrap()
-		}
-
-		fn log(&self) -> Log {
-			let options = Options::with_columns(&self.0, 1);
-			Log::open(&options).unwrap()
-		}
+	fn new_table(dir: &TempDir, size: Option<u16>, options: &ColumnOptions) -> ValueTable {
+		let id = TableId::new(0, 0);
+		ValueTable::open(Arc::new(dir.path().to_path_buf()), id, size, options, CURRENT_VERSION)
+			.unwrap()
 	}
 
-	impl Drop for TempDir {
-		fn drop(&mut self) {
-			if self.0.exists() {
-				std::fs::remove_dir_all(&*self.0).unwrap();
-			}
-		}
+	fn new_log(dir: &TempDir) -> Log {
+		let options = Options::with_columns(dir.path(), 1);
+		Log::open(&options).unwrap()
 	}
 
 	fn write_ops<F: FnOnce(&mut LogWriter)>(table: &ValueTable, log: &Log, f: F) {
@@ -1188,9 +1166,9 @@ mod test {
 		insert_simple_inner(&rc_options());
 	}
 	fn insert_simple_inner(options: &ColumnOptions) {
-		let dir = TempDir::new("insert_simple");
-		let table = dir.table(Some(ENTRY_SIZE), options);
-		let log = dir.log();
+		let dir = tempdir().unwrap();
+		let table = new_table(&dir, Some(ENTRY_SIZE), options);
+		let log = new_log(&dir);
 
 		let key = key(1);
 		let key = TableKey::Partial(key);
@@ -1210,8 +1188,8 @@ mod test {
 	#[test]
 	#[should_panic(expected = "assertion failed: entry_size <= MAX_ENTRY_SIZE as u16")]
 	fn oversized_into_fixed_panics() {
-		let dir = TempDir::new("oversized_into_fixed_panics");
-		let _table = dir.table(Some(65534), &Default::default());
+		let dir = tempdir().unwrap();
+		let _table = new_table(&dir, Some(65534), &Default::default());
 	}
 
 	#[test]
@@ -1220,9 +1198,9 @@ mod test {
 		remove_simple_inner(&rc_options());
 	}
 	fn remove_simple_inner(options: &ColumnOptions) {
-		let dir = TempDir::new("remove_simple");
-		let table = dir.table(Some(ENTRY_SIZE), options);
-		let log = dir.log();
+		let dir = tempdir().unwrap();
+		let table = new_table(&dir, Some(ENTRY_SIZE), options);
+		let log = new_log(&dir);
 
 		let key1 = key(1);
 		let key1 = &TableKey::Partial(key1);
@@ -1259,9 +1237,9 @@ mod test {
 		replace_simple_inner(&rc_options(), no_hash);
 	}
 	fn replace_simple_inner(options: &ColumnOptions, table_key: fn(Key) -> TableKey) {
-		let dir = TempDir::new("replace_simple");
-		let table = dir.table(Some(ENTRY_SIZE), options);
-		let log = dir.log();
+		let dir = tempdir().unwrap();
+		let table = new_table(&dir, Some(ENTRY_SIZE), options);
+		let log = new_log(&dir);
 
 		let key1 = key(1);
 		let key1 = &table_key(key1);
@@ -1291,9 +1269,9 @@ mod test {
 		replace_multipart_shorter_inner(&rc_options());
 	}
 	fn replace_multipart_shorter_inner(options: &ColumnOptions) {
-		let dir = TempDir::new("replace_multipart_shorter");
-		let table = dir.table(None, options);
-		let log = dir.log();
+		let dir = tempdir().unwrap();
+		let table = new_table(&dir, None, options);
+		let log = new_log(&dir);
 
 		let key1 = key(1);
 		let key1 = &TableKey::Partial(key1);
@@ -1331,9 +1309,9 @@ mod test {
 		replace_multipart_longer_inner(&rc_options());
 	}
 	fn replace_multipart_longer_inner(options: &ColumnOptions) {
-		let dir = TempDir::new("replace_multipart_longer");
-		let table = dir.table(None, options);
-		let log = dir.log();
+		let dir = tempdir().unwrap();
+		let table = new_table(&dir, None, options);
+		let log = new_log(&dir);
 
 		let key1 = key(1);
 		let key1 = &TableKey::Partial(key1);
@@ -1364,9 +1342,9 @@ mod test {
 	#[test]
 	fn ref_counting() {
 		for compressed in [false, true] {
-			let dir = TempDir::new("ref_counting");
-			let table = dir.table(None, &rc_options());
-			let log = dir.log();
+			let dir = tempdir().unwrap();
+			let table = new_table(&dir, None, &rc_options());
+			let log = new_log(&dir);
 
 			let key = key(1);
 			let key = &TableKey::Partial(key);
@@ -1390,9 +1368,9 @@ mod test {
 
 	#[test]
 	fn ref_underflow() {
-		let dir = TempDir::new("ref_underflow");
-		let table = dir.table(None, &rc_options());
-		let log = dir.log();
+		let dir = tempdir().unwrap();
+		let table = new_table(&dir, None, &rc_options());
+		let log = new_log(&dir);
 
 		let key = key(1);
 		let key = &TableKey::Partial(key);
@@ -1424,9 +1402,9 @@ mod test {
 		let mut entry = super::Entry::new(super::MULTIHEAD_COMPRESSED.to_vec());
 		let size = entry.read_size().0 as usize;
 		assert!(size > MAX_ENTRY_SIZE);
-		let dir = TempDir::new("multipart_collision");
-		let table = dir.table(Some(MAX_ENTRY_SIZE as u16), &rc_options());
-		let log = dir.log();
+		let dir = tempdir().unwrap();
+		let table = new_table(&dir, Some(MAX_ENTRY_SIZE as u16), &rc_options());
+		let log = new_log(&dir);
 
 		let key = key(1);
 		let key = &TableKey::Partial(key);
