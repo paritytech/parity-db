@@ -224,44 +224,13 @@ fn deplace_column(c: ColId, from: &Path, to: &Path, copy: bool) -> Result<()> {
 #[cfg(test)]
 mod test {
 	use crate::{migration, Db, Options};
-
-	struct TempDir(std::path::PathBuf);
-
-	impl TempDir {
-		fn new(name: &'static str) -> TempDir {
-			env_logger::try_init().ok();
-			let mut path = std::env::temp_dir();
-			path.push("parity-db-test");
-			path.push("migration");
-			path.push(name);
-
-			if path.exists() {
-				std::fs::remove_dir_all(&path).unwrap();
-			}
-			std::fs::create_dir_all(&path).unwrap();
-			TempDir(path)
-		}
-
-		fn path(&self, sub: &str) -> std::path::PathBuf {
-			let mut path = self.0.clone();
-			path.push(sub);
-			path
-		}
-	}
-
-	impl Drop for TempDir {
-		fn drop(&mut self) {
-			if self.0.exists() {
-				std::fs::remove_dir_all(&self.0).unwrap();
-			}
-		}
-	}
+	use tempfile::tempdir;
 
 	#[test]
 	fn migrate_simple() {
-		let dir = TempDir::new("migrate_simple");
-		let source_dir = dir.path("source");
-		let dest_dir = dir.path("dest");
+		let dir = tempdir().unwrap();
+		let source_dir = dir.path().join("source");
+		let dest_dir = dir.path().join("dest");
 		{
 			let source = Db::with_columns(&source_dir, 1).unwrap();
 			source.commit([(0, b"1".to_vec(), Some(b"value".to_vec()))]).unwrap();
@@ -275,9 +244,8 @@ mod test {
 
 	#[test]
 	fn clear_column() {
-		let dir = TempDir::new("clear_column");
-		let source_dir = dir.path("db");
-		let mut options = Options::with_columns(&source_dir, 3);
+		let source_dir = tempdir().unwrap();
+		let mut options = Options::with_columns(source_dir.path(), 3);
 		options.columns = vec![Default::default(); 3];
 		options.columns[1].btree_index = true;
 		{
@@ -291,7 +259,7 @@ mod test {
 			.unwrap();
 		}
 
-		migration::clear_column(&source_dir, 1).unwrap();
+		migration::clear_column(source_dir.path(), 1).unwrap();
 		let db = Db::open(&options).unwrap();
 		assert_eq!(db.get(0, b"0").unwrap(), Some("value0".as_bytes().to_vec()));
 		assert_eq!(db.get(1, b"1").unwrap(), None);
