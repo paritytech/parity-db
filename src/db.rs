@@ -1,6 +1,23 @@
 // Copyright 2021-2022 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or MIT.
 
+//! The database objects is split into `Db` and `DbInner`.
+//! `Db` creates shared `DbInner` instance and manages background
+//! worker threads that all use the inner object.
+//!
+//! There are 4 worker threads:
+//! log_worker: Processes commit queue and reindexing. For each commit
+//! in the queue, log worker creates a write-ahead record using `Log`.
+//! Additionally, if there are active reindexing, it creates log records
+//! for batches of relocated index entries.
+//! flush_worker: Flushes log records to disk by calling `fsync` on the
+//! log files.
+//! commit_worker: Reads flushed log records and applies operations to the
+//! index and value tables.
+//! cleanup_worker: Flush tables by calling `fsync`, and cleanup log.
+//! Each background worker is signalled with a conditional variable once
+//! there is some work to be done.
+
 use crate::{
 	btree::{commit_overlay::BTreeChangeSet, BTreeIterator, BTreeTable},
 	column::{hash_key, ColId, Column, IterState, ReindexBatch},
@@ -14,29 +31,13 @@ use crate::{
 };
 use fs2::FileExt;
 use parking_lot::{Condvar, Mutex, RwLock};
-/// The database objects is split into `Db` and `DbInner`.
-/// `Db` creates shared `DbInner` instance and manages background
-/// worker threads that all use the inner object.
-///
-/// There are 4 worker threads:
-/// log_worker: Processes commit queue and reindexing. For each commit
-/// in the queue, log worker creates a write-ahead record using `Log`.
-/// Additionally, if there are active reindexing, it creates log records
-/// for batches of relocated index entries.
-/// flush_worker: Flushes log records to disk by calling `fsync` on the
-/// log files.
-/// commit_worker: Reads flushed log records and applies operations to the
-/// index and value tables.
-/// cleanup_worker: Flush tables by calling `fsync`, and cleanup log.
-/// Each background worker is signalled with a conditional variable once
-/// there is some work to be done.
-use std::sync::{
-	atomic::{AtomicBool, AtomicU64, Ordering},
-	Arc,
-};
 use std::{
 	collections::{BTreeMap, HashMap, VecDeque},
 	ops::Bound,
+	sync::{
+		atomic::{AtomicBool, AtomicU64, Ordering},
+		Arc,
+	},
 };
 // Max size of commit queue. (Keys + Values). If the queue is
 // full `commit` will block.
