@@ -1,12 +1,13 @@
 // Copyright 2021-2022 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or MIT.
 
+//! Utilities for db file.
+
 use crate::{
 	error::{try_io, Result},
 	table::TableId,
 };
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
-/// Utilites for db file.
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[cfg(target_os = "linux")]

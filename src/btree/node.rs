@@ -795,7 +795,7 @@ impl Node {
 	}
 
 	// Return true if match and matched position.
-	// Return index of first element bigger than key otherwhise.
+	// Return index of first element bigger than key otherwise.
 	fn position(&self, key: &[u8]) -> Result<(bool, usize)> {
 		let mut i = 0;
 		while let Some(separator) = self.separators[i].separator.as_ref() {
