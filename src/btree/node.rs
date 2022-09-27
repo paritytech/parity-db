@@ -713,7 +713,7 @@ impl Node {
 		}
 		let mut offset = 0;
 		if has_child {
-			let skip_offset = if skip_left_child { 1 } else { 0 };
+			let skip_offset = usize::from(skip_left_child);
 			for i in right_start + skip_offset..ORDER_CHILD {
 				let child = self.remove_child(i);
 				if insert_right_child.as_ref().map(|ins| ins.0 + 1 == i).unwrap_or(false) {

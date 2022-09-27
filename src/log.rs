@@ -811,7 +811,7 @@ impl Log {
 		match reader.next() {
 			Ok(LogAction::BeginRecord) => Ok(Some(reader)),
 			Ok(_) => Err(Error::Corruption("Bad log record structure".into())),
-			Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+			Err(Error::Io(e)) if e.kind() == ErrorKind::UnexpectedEof => {
 				*reading_state = ReadingState::Idle;
 				self.done_reading_cv.notify_one();
 				log::debug!(target: "parity-db", "Read: End of log");
