@@ -132,14 +132,14 @@ impl<'a> BTreeIterator<'a> {
 			let log = self.log.read();
 			let record_id = log.last_record_id(self.col);
 			// No consistency over iteration, allows dropping lock to overlay.
-			std::mem::drop(commit_overlay);
+			drop(commit_overlay);
 			if record_id != self.iter.1.record_id {
 				self.pending_backend = None;
 			}
 			let next_from_pending = self
 				.pending_backend
 				.take()
-				.and_then(|pending| (pending.direction == direction).then(|| pending.next_item));
+				.and_then(|pending| (pending.direction == direction).then_some(pending.next_item));
 			let next_backend = if let Some(pending) = next_from_pending {
 				pending
 			} else {
