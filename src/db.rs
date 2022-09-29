@@ -818,36 +818,34 @@ pub struct Db {
 impl Db {
 	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Result<Db> {
 		let options = Options::with_columns(path, num_columns);
-		Self::open_inner(&options, OpeningMode::Create, EnableCommitPipelineStages::Standard)
+		Self::open_inner(&options, OpeningMode::Create)
 	}
 
 	/// Open the database with given options.
 	pub fn open(options: &Options) -> Result<Db> {
-		Self::open_inner(options, OpeningMode::Write, EnableCommitPipelineStages::Standard)
+		Self::open_inner(options, OpeningMode::Write)
 	}
 
 	/// Create the database using given options.
 	pub fn open_or_create(options: &Options) -> Result<Db> {
-		Self::open_inner(options, OpeningMode::Create, EnableCommitPipelineStages::Standard)
+		Self::open_inner(options, OpeningMode::Create)
 	}
 
 	pub fn open_read_only(options: &Options) -> Result<Db> {
-		Self::open_inner(options, OpeningMode::ReadOnly, EnableCommitPipelineStages::Standard)
+		Self::open_inner(options, OpeningMode::ReadOnly)
 	}
 
-	fn open_inner(
-		options: &Options,
-		opening_mode: OpeningMode,
-		commit_stages: EnableCommitPipelineStages,
-	) -> Result<Db> {
+	fn open_inner(options: &Options, opening_mode: OpeningMode) -> Result<Db> {
 		assert!(options.is_valid());
 		let mut db = DbInner::open(options, opening_mode)?;
 		// This needs to be call before log thread: so first reindexing
 		// will run in correct state.
 		db.replay_all_logs()?;
 		let db = Arc::new(db);
-		let start_threads = opening_mode != OpeningMode::ReadOnly &&
-			commit_stages == EnableCommitPipelineStages::Standard;
+		#[cfg(test)]
+		let start_threads = opening_mode != OpeningMode::ReadOnly && options.with_background_thread;
+		#[cfg(not(test))]
+		let start_threads = opening_mode != OpeningMode::ReadOnly;
 		let commit_thread = if start_threads {
 			let commit_worker_db = db.clone();
 			Some(std::thread::spawn(move || {
@@ -858,11 +856,10 @@ impl Db {
 		};
 		let flush_thread = if start_threads {
 			let flush_worker_db = db.clone();
-			let min_log_size = if commit_stages == EnableCommitPipelineStages::DbFile {
-				0
-			} else {
-				MIN_LOG_SIZE_BYTES
-			};
+			#[cfg(test)]
+			let min_log_size = if options.always_flush { 0 } else { MIN_LOG_SIZE_BYTES };
+			#[cfg(not(test))]
+			let min_log_size = MIN_LOG_SIZE_BYTES;
 			Some(std::thread::spawn(move || {
 				flush_worker_db.store_err(Self::flush_worker(flush_worker_db.clone(), min_log_size))
 			}))
@@ -891,7 +888,7 @@ impl Db {
 			flush_thread,
 			log_thread,
 			cleanup_thread,
-			join_on_shutdown: commit_stages.join_on_shutdown(),
+			join_on_shutdown: start_threads,
 		})
 	}
 
@@ -1343,83 +1340,97 @@ enum OpeningMode {
 	ReadOnly,
 }
 
-// This is used in tests to disable certain commit stages.
-#[derive(Eq, PartialEq, Debug, Clone, Copy)]
-enum EnableCommitPipelineStages {
-	// No threads started, data stays in commit overlay.
-	#[allow(dead_code)]
-	CommitOverlay,
-	// Log worker run, data processed up to the log overlay.
-	#[allow(dead_code)]
-	LogOverlay,
-	// Runing all.
-	#[allow(dead_code)]
-	DbFile,
-	// Default run mode.
-	Standard,
-}
-
-impl EnableCommitPipelineStages {
-	#[cfg(test)]
-	fn run_stages(&self, db: &Db) {
-		let db = &db.inner;
-		match self {
-			EnableCommitPipelineStages::DbFile | EnableCommitPipelineStages::LogOverlay => {
-				while db.process_commits().unwrap() {}
-				while db.process_reindex().unwrap() {}
-			},
-			_ => (),
-		}
-		if let EnableCommitPipelineStages::DbFile = self {
-			let _ = db.log.flush_one(0).unwrap();
-			let _ = db.log.flush_one(0).unwrap();
-			while db.enact_logs(false).unwrap() {}
-			let _ = db.log.flush_one(0).unwrap();
-			let _ = db.clean_logs().unwrap();
-		}
-	}
-
-	#[cfg(test)]
-	fn check_empty_overlay(&self, db: &DbInner, col: ColId) -> bool {
-		match self {
-			EnableCommitPipelineStages::DbFile | EnableCommitPipelineStages::LogOverlay => {
-				if let Some(overlay) = db.commit_overlay.read().get(col as usize) {
-					if !overlay.is_empty() {
-						let mut replayed = 5;
-						while !overlay.is_empty() {
-							if replayed > 0 {
-								replayed -= 1;
-								// the signal is triggered just before cleaning the overlay, so
-								// we wait a bit.
-								// Warning this is still rather flaky and should be ignored
-								// or removed.
-								std::thread::sleep(std::time::Duration::from_millis(100));
-							} else {
-								return false
-							}
-						}
-					}
-				}
-			},
-			_ => (),
-		}
-		true
-	}
-
-	fn join_on_shutdown(&self) -> bool {
-		*self == EnableCommitPipelineStages::Standard
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use crate::Value;
 
-	use super::{Db, EnableCommitPipelineStages, Options};
-	use crate::db::OpeningMode;
+	use super::{Db, Options};
+	use crate::{
+		column::ColId,
+		db::{DbInner, OpeningMode},
+	};
 	use rand::Rng;
-	use std::collections::{BTreeMap, HashSet};
+	use std::{
+		collections::{BTreeMap, HashMap, HashSet},
+		path::Path,
+	};
 	use tempfile::tempdir;
+
+	// This is used in tests to disable certain commit stages.
+	#[derive(Eq, PartialEq, Debug, Clone, Copy)]
+	enum EnableCommitPipelineStages {
+		// No threads started, data stays in commit overlay.
+		#[allow(dead_code)]
+		CommitOverlay,
+		// Log worker run, data processed up to the log overlay.
+		#[allow(dead_code)]
+		LogOverlay,
+		// Runing all.
+		#[allow(dead_code)]
+		DbFile,
+		// Default run mode.
+		Standard,
+	}
+
+	impl EnableCommitPipelineStages {
+		fn options(&self, path: &Path, num_columns: u8) -> Options {
+			Options {
+				path: path.into(),
+				sync_wal: true,
+				sync_data: true,
+				stats: true,
+				salt: None,
+				columns: (0..num_columns).map(|_| Default::default()).collect(),
+				compression_threshold: HashMap::new(),
+				with_background_thread: *self == Self::Standard,
+				always_flush: *self == Self::DbFile,
+			}
+		}
+
+		fn run_stages(&self, db: &Db) {
+			let db = &db.inner;
+			match self {
+				EnableCommitPipelineStages::DbFile | EnableCommitPipelineStages::LogOverlay => {
+					while db.process_commits().unwrap() {}
+					while db.process_reindex().unwrap() {}
+				},
+				_ => (),
+			}
+			if let EnableCommitPipelineStages::DbFile = self {
+				let _ = db.log.flush_one(0).unwrap();
+				let _ = db.log.flush_one(0).unwrap();
+				while db.enact_logs(false).unwrap() {}
+				let _ = db.log.flush_one(0).unwrap();
+				let _ = db.clean_logs().unwrap();
+			}
+		}
+
+		fn check_empty_overlay(&self, db: &DbInner, col: ColId) -> bool {
+			match self {
+				EnableCommitPipelineStages::DbFile | EnableCommitPipelineStages::LogOverlay => {
+					if let Some(overlay) = db.commit_overlay.read().get(col as usize) {
+						if !overlay.is_empty() {
+							let mut replayed = 5;
+							while !overlay.is_empty() {
+								if replayed > 0 {
+									replayed -= 1;
+									// the signal is triggered just before cleaning the overlay, so
+									// we wait a bit.
+									// Warning this is still rather flaky and should be ignored
+									// or removed.
+									std::thread::sleep(std::time::Duration::from_millis(100));
+								} else {
+									return false
+								}
+							}
+						}
+					}
+				},
+				_ => (),
+			}
+			true
+		}
+	}
 
 	#[test]
 	fn test_db_open_should_fail() {
@@ -1485,14 +1496,14 @@ mod tests {
 	}
 	fn test_indexed_keyvalues_inner(db_test: EnableCommitPipelineStages) {
 		let tmp = tempdir().unwrap();
-		let options = Options::with_columns(tmp.path(), 5);
+		let options = db_test.options(tmp.path(), 5);
 		let col_nb = 0;
 
 		let key1 = b"key1".to_vec();
 		let key2 = b"key2".to_vec();
 		let key3 = b"key3".to_vec();
 
-		let db = Db::open_inner(&options, OpeningMode::Create, db_test).unwrap();
+		let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
 		assert!(db.get(col_nb, key1.as_slice()).unwrap().is_none());
 
 		db.commit(vec![(col_nb, key1.clone(), Some(b"value1".to_vec()))]).unwrap();
@@ -1530,15 +1541,15 @@ mod tests {
 	#[test]
 	fn test_indexed_overlay_against_backend() {
 		let tmp = tempdir().unwrap();
-		let options = Options::with_columns(tmp.path(), 5);
+		let db_test = EnableCommitPipelineStages::DbFile;
+		let options = db_test.options(tmp.path(), 5);
 		let col_nb = 0;
 
 		let key1 = b"key1".to_vec();
 		let key2 = b"key2".to_vec();
 		let key3 = b"key3".to_vec();
 
-		let db_test = EnableCommitPipelineStages::DbFile;
-		let db = Db::open_inner(&options, OpeningMode::Create, db_test).unwrap();
+		let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
 
 		db.commit(vec![
 			(col_nb, key1.clone(), Some(b"value1".to_vec())),
@@ -1553,7 +1564,8 @@ mod tests {
 		std::thread::sleep(std::time::Duration::from_millis(100));
 
 		let db_test = EnableCommitPipelineStages::CommitOverlay;
-		let db = Db::open_inner(&options, OpeningMode::Write, db_test).unwrap();
+		let options = db_test.options(tmp.path(), 5);
+		let db = Db::open_inner(&options, OpeningMode::Write).unwrap();
 		assert_eq!(db.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
 		assert_eq!(db.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2".to_vec()));
 		assert_eq!(db.get(col_nb, key3.as_slice()).unwrap(), Some(b"value3".to_vec()));
@@ -1583,7 +1595,7 @@ mod tests {
 	fn test_indexed_btree_inner(db_test: EnableCommitPipelineStages, long_key: bool) {
 		let tmp = tempdir().unwrap();
 		let col_nb = 0u8;
-		let mut options = Options::with_columns(tmp.path(), 5);
+		let mut options = db_test.options(tmp.path(), 5);
 		options.columns[col_nb as usize].btree_index = true;
 
 		let (key1, key2, key3, key4) = if !long_key {
@@ -1595,7 +1607,7 @@ mod tests {
 			(vec![1; 953], key2, key3, vec![4; 79])
 		};
 
-		let db = Db::open_inner(&options, OpeningMode::Create, db_test).unwrap();
+		let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
 
 		let mut iter = db.iter(col_nb).unwrap();
@@ -1667,14 +1679,14 @@ mod tests {
 	fn test_indexed_btree_inner_2(db_test: EnableCommitPipelineStages) {
 		let tmp = tempdir().unwrap();
 		let col_nb = 0u8;
-		let mut options = Options::with_columns(tmp.path(), 5);
+		let mut options = db_test.options(tmp.path(), 5);
 		options.columns[col_nb as usize].btree_index = true;
 
 		let key1 = b"key1".to_vec();
 		let key2 = b"key2".to_vec();
 		let key3 = b"key3".to_vec();
 
-		let db = Db::open_inner(&options, OpeningMode::Create, db_test).unwrap();
+		let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
 		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
 		assert_eq!(iter.next().unwrap(), None);
@@ -1686,7 +1698,7 @@ mod tests {
 		// issue with some file reopening when no delay
 		std::thread::sleep(std::time::Duration::from_millis(100));
 
-		let db = Db::open_inner(&options, OpeningMode::Write, db_test).unwrap();
+		let db = Db::open_inner(&options, OpeningMode::Write).unwrap();
 
 		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
@@ -1733,10 +1745,10 @@ mod tests {
 
 		let tmp = tempdir().unwrap();
 		let col_nb = 0u8;
-		let mut options = Options::with_columns(tmp.path(), 5);
+		let mut options = db_test.options(tmp.path(), 5);
 		options.columns[col_nb as usize].btree_index = true;
 
-		let db = Db::open_inner(&options, OpeningMode::Create, db_test).unwrap();
+		let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
 
 		db.commit(
 			(0u64..1024)
@@ -1829,14 +1841,14 @@ mod tests {
 	) {
 		let tmp = tempdir().unwrap();
 		let col_nb = 1u8;
-		let mut options = Options::with_columns(tmp.path(), 2);
+		let db_test = EnableCommitPipelineStages::DbFile;
+		let mut options = db_test.options(tmp.path(), 2);
 		options.columns[col_nb as usize].btree_index = btree_index;
 		options.columns[col_nb as usize].ref_counted = ref_counted;
 		options.columns[col_nb as usize].preimage = ref_counted;
-		let db_test = EnableCommitPipelineStages::DbFile;
 		// ref counted and commit overlay currently don't support removal
 		assert!(!(ref_counted && db_test == EnableCommitPipelineStages::CommitOverlay));
-		let db = Db::open_inner(&options, OpeningMode::Create, db_test).unwrap();
+		let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
 
 		let iter = btree_index.then(|| db.iter(col_nb).unwrap());
 		assert_eq!(iter.and_then(|mut i| i.next().unwrap()), None);
@@ -2193,10 +2205,10 @@ mod tests {
 		commit_at: usize,
 	) {
 		let tmp = tempdir().unwrap();
-		let mut options = Options::with_columns(tmp.path(), 5);
+		let mut options = db_test.options(tmp.path(), 5);
 		let col_nb = 0;
 		options.columns[col_nb as usize].btree_index = true;
-		let db = Db::open_inner(&options, OpeningMode::Create, db_test).unwrap();
+		let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
 
 		db.commit(data_start.iter().cloned()).unwrap();
 		db_test.run_stages(&db);
