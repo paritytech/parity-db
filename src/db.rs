@@ -144,9 +144,7 @@ impl DbInner {
 			.read(true)
 			.write(true)
 			.open(lock_path.as_path()));
-		if !inner_options.skip_check_lock {
-			lock_file.try_lock_exclusive().map_err(Error::Locked)?;
-		}
+		lock_file.try_lock_exclusive().map_err(Error::Locked)?;
 
 		let metadata = options.load_and_validate_metadata(inner_options.create)?;
 		let mut columns = Vec::with_capacity(metadata.columns.len());
@@ -1341,7 +1339,6 @@ struct InternalOptions {
 	create: bool,
 	read_only: bool,
 	commit_stages: EnableCommitPipelineStages,
-	skip_check_lock: bool,
 }
 
 // This is used in tests to disable certain commit stages.
@@ -1563,12 +1560,8 @@ mod tests {
 		std::thread::sleep(std::time::Duration::from_millis(100));
 
 		let db_test = EnableCommitPipelineStages::CommitOverlay;
-		let inner_options = InternalOptions {
-			create: false,
-			commit_stages: db_test,
-			skip_check_lock: true,
-			..Default::default()
-		};
+		let inner_options =
+			InternalOptions { create: false, commit_stages: db_test, ..Default::default() };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 		assert_eq!(db.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
 		assert_eq!(db.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2".to_vec()));
@@ -1706,12 +1699,8 @@ mod tests {
 		// issue with some file reopening when no delay
 		std::thread::sleep(std::time::Duration::from_millis(100));
 
-		let inner_options = InternalOptions {
-			create: false,
-			commit_stages: db_test,
-			skip_check_lock: true,
-			..Default::default()
-		};
+		let inner_options =
+			InternalOptions { create: false, commit_stages: db_test, ..Default::default() };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		let mut iter = db.iter(col_nb).unwrap();
