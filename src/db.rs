@@ -39,6 +39,7 @@ use std::{
 		Arc,
 	},
 };
+
 // Max size of commit queue. (Keys + Values). If the queue is
 // full `commit` will block.
 // These are in memory, so we use usize
@@ -131,7 +132,7 @@ impl WaitCondvar<bool> {
 
 impl DbInner {
 	fn open(options: &Options, inner_options: &InternalOptions) -> Result<DbInner> {
-		if inner_options.create {
+		if inner_options.opening_mode == OpeningMode::Create {
 			try_io!(std::fs::create_dir_all(&options.path));
 		} else if !options.path.is_dir() {
 			return Err(Error::DatabaseNotFound)
@@ -146,7 +147,8 @@ impl DbInner {
 			.open(lock_path.as_path()));
 		lock_file.try_lock_exclusive().map_err(Error::Locked)?;
 
-		let metadata = options.load_and_validate_metadata(inner_options.create)?;
+		let metadata = options
+			.load_and_validate_metadata(inner_options.opening_mode == OpeningMode::Create)?;
 		let mut columns = Vec::with_capacity(metadata.columns.len());
 		let mut commit_overlay = Vec::with_capacity(metadata.columns.len());
 		let log = Log::open(options)?;
@@ -817,24 +819,36 @@ pub struct Db {
 impl Db {
 	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Result<Db> {
 		let options = Options::with_columns(path, num_columns);
-		let inner_options = InternalOptions { create: true, ..Default::default() };
+		let inner_options = InternalOptions {
+			opening_mode: OpeningMode::Create,
+			commit_stages: EnableCommitPipelineStages::Standard,
+		};
 		Self::open_inner(&options, &inner_options)
 	}
 
 	/// Open the database with given options.
 	pub fn open(options: &Options) -> Result<Db> {
-		let inner_options = InternalOptions::default();
+		let inner_options = InternalOptions {
+			opening_mode: OpeningMode::Write,
+			commit_stages: EnableCommitPipelineStages::Standard,
+		};
 		Self::open_inner(options, &inner_options)
 	}
 
 	/// Create the database using given options.
 	pub fn open_or_create(options: &Options) -> Result<Db> {
-		let inner_options = InternalOptions { create: true, ..Default::default() };
+		let inner_options = InternalOptions {
+			opening_mode: OpeningMode::Create,
+			commit_stages: EnableCommitPipelineStages::Standard,
+		};
 		Self::open_inner(options, &inner_options)
 	}
 
 	pub fn open_read_only(options: &Options) -> Result<Db> {
-		let inner_options = InternalOptions { read_only: true, ..Default::default() };
+		let inner_options = InternalOptions {
+			opening_mode: OpeningMode::ReadOnly,
+			commit_stages: EnableCommitPipelineStages::Standard,
+		};
 		Self::open_inner(options, &inner_options)
 	}
 
@@ -845,7 +859,7 @@ impl Db {
 		// will run in correct state.
 		db.replay_all_logs()?;
 		let db = Arc::new(db);
-		if inner_options.read_only {
+		if inner_options.opening_mode == OpeningMode::ReadOnly {
 			return Ok(Db {
 				inner: db,
 				commit_thread: None,
@@ -1346,11 +1360,16 @@ pub mod check {
 	}
 }
 
-#[derive(Default)]
 struct InternalOptions {
-	create: bool,
-	read_only: bool,
+	opening_mode: OpeningMode,
 	commit_stages: EnableCommitPipelineStages,
+}
+
+#[derive(Eq, PartialEq)]
+enum OpeningMode {
+	Create,
+	Write,
+	ReadOnly,
 }
 
 // This is used in tests to disable certain commit stages.
@@ -1367,12 +1386,6 @@ enum EnableCommitPipelineStages {
 	DbFile,
 	// Default run mode.
 	Standard,
-}
-
-impl Default for EnableCommitPipelineStages {
-	fn default() -> Self {
-		EnableCommitPipelineStages::Standard
-	}
 }
 
 impl EnableCommitPipelineStages {
@@ -1432,6 +1445,7 @@ mod tests {
 	use crate::Value;
 
 	use super::{Db, EnableCommitPipelineStages, InternalOptions, Options};
+	use crate::db::OpeningMode;
 	use rand::Rng;
 	use std::collections::{BTreeMap, HashSet};
 	use tempfile::tempdir;
@@ -1508,7 +1522,7 @@ mod tests {
 		let key3 = b"key3".to_vec();
 
 		let inner_options =
-			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
+			InternalOptions { opening_mode: OpeningMode::Create, commit_stages: db_test };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 		assert!(db.get(col_nb, key1.as_slice()).unwrap().is_none());
 
@@ -1556,7 +1570,7 @@ mod tests {
 
 		let db_test = EnableCommitPipelineStages::DbFile;
 		let inner_options =
-			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
+			InternalOptions { opening_mode: OpeningMode::Create, commit_stages: db_test };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		db.commit(vec![
@@ -1573,7 +1587,7 @@ mod tests {
 
 		let db_test = EnableCommitPipelineStages::CommitOverlay;
 		let inner_options =
-			InternalOptions { create: false, commit_stages: db_test, ..Default::default() };
+			InternalOptions { opening_mode: OpeningMode::Write, commit_stages: db_test };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 		assert_eq!(db.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
 		assert_eq!(db.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2".to_vec()));
@@ -1617,7 +1631,7 @@ mod tests {
 		};
 
 		let inner_options =
-			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
+			InternalOptions { opening_mode: OpeningMode::Create, commit_stages: db_test };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
 
@@ -1698,7 +1712,7 @@ mod tests {
 		let key3 = b"key3".to_vec();
 
 		let inner_options =
-			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
+			InternalOptions { opening_mode: OpeningMode::Create, commit_stages: db_test };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), None);
@@ -1712,7 +1726,7 @@ mod tests {
 		std::thread::sleep(std::time::Duration::from_millis(100));
 
 		let inner_options =
-			InternalOptions { create: false, commit_stages: db_test, ..Default::default() };
+			InternalOptions { opening_mode: OpeningMode::Write, commit_stages: db_test };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		let mut iter = db.iter(col_nb).unwrap();
@@ -1764,7 +1778,7 @@ mod tests {
 		options.columns[col_nb as usize].btree_index = true;
 
 		let inner_options =
-			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
+			InternalOptions { opening_mode: OpeningMode::Create, commit_stages: db_test };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		db.commit(
@@ -1866,7 +1880,7 @@ mod tests {
 		// ref counted and commit overlay currently don't support removal
 		assert!(!(ref_counted && matches!(db_test, EnableCommitPipelineStages::CommitOverlay)));
 		let inner_options =
-			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
+			InternalOptions { opening_mode: OpeningMode::Create, commit_stages: db_test };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		let iter = btree_index.then(|| db.iter(col_nb).unwrap());
@@ -2228,7 +2242,7 @@ mod tests {
 		let col_nb = 0;
 		options.columns[col_nb as usize].btree_index = true;
 		let inner_options =
-			InternalOptions { create: true, commit_stages: db_test, ..Default::default() };
+			InternalOptions { opening_mode: OpeningMode::Create, commit_stages: db_test };
 		let db = Db::open_inner(&options, &inner_options).unwrap();
 
 		db.commit(data_start.iter().cloned()).unwrap();
