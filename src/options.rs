@@ -37,10 +37,10 @@ pub struct Options {
 	///
 	/// Optional. A sensible default is used if nothing is set for a given column.
 	pub compression_threshold: HashMap<ColId, u32>,
-	#[cfg(test)]
+	#[cfg(any(test, feature = "instrumentation"))]
 	/// Always starts background threads.
 	pub with_background_thread: bool,
-	#[cfg(test)]
+	#[cfg(any(test, feature = "instrumentation"))]
 	/// Always flushes data from the log to the on-disk data structures.
 	pub always_flush: bool,
 }
@@ -143,9 +143,9 @@ impl Options {
 			salt: None,
 			columns: (0..num_columns).map(|_| Default::default()).collect(),
 			compression_threshold: HashMap::new(),
-			#[cfg(test)]
+			#[cfg(any(test, feature = "instrumentation"))]
 			with_background_thread: true,
-			#[cfg(test)]
+			#[cfg(any(test, feature = "instrumentation"))]
 			always_flush: false,
 		}
 	}

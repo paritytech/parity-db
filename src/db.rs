@@ -289,10 +289,16 @@ impl DbInner {
 
 	fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
 		let mut queue = self.commit_queue.lock();
-		if queue.bytes > MAX_COMMIT_QUEUE_BYTES {
+
+		#[cfg(any(test, feature = "instrumentation"))]
+		let might_wait_because_the_queue_is_full = self.options.with_background_thread;
+		#[cfg(not(any(test, feature = "instrumentation")))]
+		let might_wait_because_the_queue_is_full = true;
+		if might_wait_because_the_queue_is_full && queue.bytes > MAX_COMMIT_QUEUE_BYTES {
 			log::debug!(target: "parity-db", "Waiting, queue size={}", queue.bytes);
 			self.commit_queue_full_cv.wait(&mut queue);
 		}
+
 		{
 			let bg_err = self.bg_err.lock();
 			if let Some(err) = &*bg_err {
@@ -339,7 +345,11 @@ impl DbInner {
 	}
 
 	fn process_commits(&self) -> Result<bool> {
-		{
+		#[cfg(any(test, feature = "instrumentation"))]
+		let might_wait_because_the_queue_is_full = self.options.with_background_thread;
+		#[cfg(not(any(test, feature = "instrumentation")))]
+		let might_wait_because_the_queue_is_full = true;
+		if might_wait_because_the_queue_is_full {
 			// Wait if the queue is full.
 			let mut queue = self.log_queue_wait.work.lock();
 			if !self.shutdown.load(Ordering::Relaxed) && *queue > MAX_LOG_QUEUE_BYTES {
@@ -831,6 +841,7 @@ impl Db {
 		Self::open_inner(options, OpeningMode::Create)
 	}
 
+	/// Read the database using given options
 	pub fn open_read_only(options: &Options) -> Result<Db> {
 		Self::open_inner(options, OpeningMode::ReadOnly)
 	}
@@ -842,9 +853,9 @@ impl Db {
 		// will run in correct state.
 		db.replay_all_logs()?;
 		let db = Arc::new(db);
-		#[cfg(test)]
+		#[cfg(any(test, feature = "instrumentation"))]
 		let start_threads = opening_mode != OpeningMode::ReadOnly && options.with_background_thread;
-		#[cfg(not(test))]
+		#[cfg(not(any(test, feature = "instrumentation")))]
 		let start_threads = opening_mode != OpeningMode::ReadOnly;
 		let commit_thread = if start_threads {
 			let commit_worker_db = db.clone();
@@ -1013,6 +1024,36 @@ impl Db {
 
 	pub fn stats(&self) -> StatSummary {
 		self.inner.stats()
+	}
+
+	#[cfg(feature = "instrumentation")]
+	pub fn process_reindex(&self) -> Result<()> {
+		self.inner.process_reindex()?;
+		Ok(())
+	}
+
+	#[cfg(feature = "instrumentation")]
+	pub fn process_commits(&self) -> Result<()> {
+		self.inner.process_commits()?;
+		Ok(())
+	}
+
+	#[cfg(feature = "instrumentation")]
+	pub fn flush_logs(&self) -> Result<()> {
+		self.inner.flush_logs(0)?;
+		Ok(())
+	}
+
+	#[cfg(feature = "instrumentation")]
+	pub fn enact_logs(&self) -> Result<()> {
+		while self.inner.enact_logs(false)? {}
+		Ok(())
+	}
+
+	#[cfg(feature = "instrumentation")]
+	pub fn clean_logs(&self) -> Result<()> {
+		self.inner.clean_logs()?;
+		Ok(())
 	}
 }
 
@@ -1389,14 +1430,13 @@ mod tests {
 
 		fn run_stages(&self, db: &Db) {
 			let db = &db.inner;
-			match self {
-				EnableCommitPipelineStages::DbFile | EnableCommitPipelineStages::LogOverlay => {
-					while db.process_commits().unwrap() {}
-					while db.process_reindex().unwrap() {}
-				},
-				_ => (),
+			if *self == EnableCommitPipelineStages::DbFile ||
+				*self == EnableCommitPipelineStages::LogOverlay
+			{
+				while db.process_commits().unwrap() {}
+				while db.process_reindex().unwrap() {}
 			}
-			if let EnableCommitPipelineStages::DbFile = self {
+			if *self == EnableCommitPipelineStages::DbFile {
 				let _ = db.log.flush_one(0).unwrap();
 				let _ = db.log.flush_one(0).unwrap();
 				while db.enact_logs(false).unwrap() {}

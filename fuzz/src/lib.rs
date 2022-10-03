@@ -30,18 +30,33 @@ pub struct Config {
 }
 
 #[derive(Arbitrary, Debug)]
-pub enum Action<O> {
+pub enum Action<O: Debug> {
 	Transaction(Vec<O>),
+	ProcessReindex,
+	ProcessCommits,
+	FlushAndEnactLogs,
+	CleanLogs,
 	Restart,
 }
 
 pub trait DbSimulator {
-	type Operation;
-	type Model: Default;
+	type Operation: Debug;
+	type Model: Default + Debug;
 
 	fn build_options(config: &Config, path: &Path) -> parity_db::Options;
 
-	fn apply_operation_on_model(operation: &Self::Operation, model: &mut Self::Model);
+	fn apply_operations_on_model<'a>(
+		operations: impl IntoIterator<Item = &'a Self::Operation>,
+		model: &mut Self::Model,
+	) where
+		Self::Operation: 'a;
+
+	fn write_first_layer_to_disk(model: &mut Self::Model);
+
+	fn attempt_to_reset_model_to_disk_state(
+		model: &Self::Model,
+		state: &[(u8, u8)],
+	) -> Option<Self::Model>;
 
 	fn map_operation(operation: &Self::Operation) -> parity_db::Operation<Vec<u8>, Vec<u8>>;
 
@@ -64,90 +79,77 @@ pub trait DbSimulator {
 		);
 		for action in &actions {
 			// We apply the action on both the database and the model
+			log::debug!("Applying on the database: {:?}", action);
 			match action {
 				Action::Transaction(operations) => {
-					if let Err(e) =
-						db.commit_changes(operations.iter().map(|o| (0, Self::map_operation(o))))
-					{
-						drop(db);
-						let (d, m) = Self::fail_or_restart_after_db_error(
-							e,
-							&options,
-							&actions,
-							config.btree_index,
-						);
-						model = m;
-						db = d;
-					} else {
-						for o in operations {
-							Self::apply_operation_on_model(o, &mut model);
-						}
-						retry_operation(|| {
-							Self::check_db_and_model_are_equals(&db, &model, config.btree_index)
-						})
+					Self::apply_operations_on_model(operations, &mut model);
+					db.commit_changes(operations.iter().map(|o| (0, Self::map_operation(o))))
 						.unwrap();
-					}
 				},
+				Action::ProcessReindex =>
+					db = Self::try_or_restart(|db| db.process_reindex(), db, &mut model, &options),
+				Action::ProcessCommits => {
+					Self::write_first_layer_to_disk(&mut model);
+					db = Self::try_or_restart(|db| db.process_commits(), db, &mut model, &options)
+				},
+				Action::FlushAndEnactLogs => {
+					for _ in 0..2 {
+						db = Self::try_or_restart(|db| db.flush_logs(), db, &mut model, &options)
+					}
+					db = Self::try_or_restart(|db| db.enact_logs(), db, &mut model, &options)
+				},
+				Action::CleanLogs =>
+					db = Self::try_or_restart(|db| db.clean_logs(), db, &mut model, &options),
 				Action::Restart => {
 					db = {
 						drop(db);
-						parity_db::Db::open_or_create(&options)
-					}
-					.and_then(|db| {
-						match Self::check_db_and_model_are_equals(&db, &model, config.btree_index)?
-						{
-							Ok(()) => Ok(db),
-							Err(_) =>
-								Err(parity_db::Error::Corruption("Instrumented failure".into())),
-						}
-					})
-					.unwrap_or_else(|e| {
-						let (db, m) = Self::fail_or_restart_after_db_error(
-							e,
-							&options,
-							&actions,
-							config.btree_index,
-						);
-						model = m;
-						db
-					});
+						retry_operation(|| parity_db::Db::open(&options))
+					};
+					Self::reset_model_from_database(&db, &mut model);
 				},
 			}
+			retry_operation(|| {
+				Self::check_db_and_model_are_equals(&db, &model, config.btree_index)
+			})
+			.unwrap();
 		}
 	}
 
-	fn fail_or_restart_after_db_error(
-		error: parity_db::Error,
+	fn try_or_restart(
+		op: impl FnOnce(&parity_db::Db) -> parity_db::Result<()>,
+		mut db: parity_db::Db,
+		model: &mut Self::Model,
 		options: &parity_db::Options,
-		actions: &[Action<Self::Operation>],
-		is_db_b_tree: bool,
-	) -> (parity_db::Db, Self::Model) {
-		if !error.to_string().contains("Instrumented failure") {
-			panic!("{}", error);
+	) -> parity_db::Db {
+		match op(&db) {
+			Ok(()) => db,
+			Err(e) if e.to_string().contains("Instrumented failure") => {
+				log::debug!("Restarting after an instrumented failure");
+				drop(db);
+				parity_db::set_number_of_allowed_io_operations(usize::MAX);
+				db = parity_db::Db::open(options).unwrap();
+				Self::reset_model_from_database(&db, model);
+				db
+			},
+			Err(e) => panic!("database error: {}", e),
 		}
+	}
 
-		// Instrumented failure, we restart the database and check if it is back to a valid state
-
-		parity_db::set_number_of_allowed_io_operations(usize::MAX);
-		let db = parity_db::Db::open_or_create(options).unwrap();
-
-		// We look for the matching model
-		let mut model = Self::Model::default();
-		for action in actions {
-			if Self::check_db_and_model_are_equals(&db, &model, is_db_b_tree).unwrap().is_ok() {
-				return (db, model) //We found it!
-			}
-
-			if let Action::Transaction(operations) = action {
-				for o in operations {
-					Self::apply_operation_on_model(o, &mut model);
+	fn reset_model_from_database(db: &parity_db::Db, model: &mut Self::Model) {
+		*model = retry_operation(|| {
+			let mut disk_state = Vec::new();
+			for i in 0..=255 {
+				if let Some(v) = db.get(0, &[i])? {
+					disk_state.push((i, v[0]));
 				}
 			}
-		}
-		if let Err(e) = Self::check_db_and_model_are_equals(&db, &model, is_db_b_tree).unwrap() {
-			panic!("Not able to recover to a proper state when coming back from an instrumented failure: {}", e)
-		}
-		(db, model)
+
+			if let Some(model) = Self::attempt_to_reset_model_to_disk_state(model, &disk_state) {
+				Ok(model)
+			} else {
+				Err(parity_db::Error::Corruption(format!("Not able to recover the database to one of the valid state. The current database state is: {:?}", disk_state)))
+			}
+		})
 	}
 
 	fn check_db_and_model_are_equals(
@@ -157,12 +159,12 @@ pub trait DbSimulator {
 	) -> parity_db::Result<Result<(), String>> {
 		for (k, v) in Self::model_required_content(model) {
 			if db.get(0, &k)?.as_ref() != Some(&v) {
-				return Ok(Err(format!("The value {:?} for key {:?} is not in the database", k, v)))
+				return Ok(Err(format!("The value {:?} for key {:?} is not in the database", v, k)))
 			}
 		}
 		for k in Self::model_removed_content(model) {
 			if db.get(0, &k)?.is_some() {
-				return Ok(Err(format!("The key {:?} should not be in the database anymore", k)))
+				return Ok(Err(format!("The key {:?} should not be in the database", k)))
 			}
 		}
 
@@ -203,7 +205,9 @@ pub trait DbSimulator {
 }
 
 fn retry_operation<'a, T>(op: impl Fn() -> parity_db::Result<T> + 'a) -> T {
-	(op()).unwrap_or_else(|_| {
+	(op()).unwrap_or_else(|e| {
+		log::debug!("Database error: {}, restarting without I/O limitations.", e);
+
 		// We ignore the error and try to open the DB again
 		parity_db::set_number_of_allowed_io_operations(usize::MAX);
 		op().unwrap()
