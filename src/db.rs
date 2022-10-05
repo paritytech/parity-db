@@ -552,9 +552,15 @@ impl DbInner {
 							LogAction::EndRecord => break,
 							LogAction::InsertIndex(insertion) => {
 								let col = insertion.table.col() as usize;
-								if let Err(e) = self.columns[col]
-									.validate_plan(LogAction::InsertIndex(insertion), &mut reader)
-								{
+								if let Err(e) = self.columns.get(col).map_or_else(
+									|| Err(Error::Corruption(format!("Invalid column id {}", col))),
+									|col| {
+										col.validate_plan(
+											LogAction::InsertIndex(insertion),
+											&mut reader,
+										)
+									},
+								) {
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
 									drop(reader);
 									self.log.clear_replay_logs()?;
@@ -563,9 +569,15 @@ impl DbInner {
 							},
 							LogAction::InsertValue(insertion) => {
 								let col = insertion.table.col() as usize;
-								if let Err(e) = self.columns[col]
-									.validate_plan(LogAction::InsertValue(insertion), &mut reader)
-								{
+								if let Err(e) = self.columns.get(col).map_or_else(
+									|| Err(Error::Corruption(format!("Invalid column id {}", col))),
+									|col| {
+										col.validate_plan(
+											LogAction::InsertValue(insertion),
+											&mut reader,
+										)
+									},
+								) {
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
 									drop(reader);
 									self.log.clear_replay_logs()?;
