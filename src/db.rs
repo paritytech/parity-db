@@ -535,12 +535,13 @@ impl DbInner {
 					loop {
 						let next = match reader.next() {
 							Ok(next) => next,
-							Err(e) => {
-								log::debug!(target: "parity-db", "Error reading log: {:?}", e);
+							Err(Error::Corruption(e)) => {
+								log::debug!(target: "parity-db", "Bad log content: {}", e);
 								drop(reader);
 								self.log.clear_replay_logs()?;
 								return Ok(false)
 							},
+							Err(e) => return Err(e),
 						};
 						match next {
 							LogAction::BeginRecord => {
