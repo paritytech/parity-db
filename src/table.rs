@@ -463,6 +463,14 @@ impl ValueTable {
 					},
 				}
 			}
+
+			if buf.offset() > entry_end {
+				return Err(crate::error::Error::Corruption(format!(
+					"Unexpected entry size. Expected at least {} bytes",
+					buf.offset() - 2
+				)))
+			}
+
 			if !f(buf.remaining_to(entry_end)) {
 				break
 			};
@@ -1428,5 +1436,28 @@ mod test {
 			table.write_insert_plan(key, &val, writer, compressed).unwrap();
 		});
 		assert_eq!(table.get(key, 1, log.overlays()).unwrap(), Some((val, compressed)));
+	}
+
+	#[test]
+	fn bad_size_header() {
+		let dir = tempdir().unwrap();
+		let table = new_table(&dir, Some(36), &rc_options());
+		let log = new_log(&dir);
+
+		let key = &TableKey::Partial(key(1));
+		let val = value(4);
+
+		let compressed = false;
+		write_ops(&table, &log, |writer| {
+			table.write_insert_plan(key, &val, writer, compressed).unwrap();
+		});
+		// Corrupt entry 1
+		let zeroes = [0u8, 0u8];
+		table.file.write_at(&zeroes, table.entry_size as u64).unwrap();
+		let log = new_log(&dir);
+		assert!(matches!(
+			table.get(key, 1, log.overlays()),
+			Err(crate::error::Error::Corruption(_))
+		));
 	}
 }
