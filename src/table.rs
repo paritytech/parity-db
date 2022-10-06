@@ -467,7 +467,7 @@ impl ValueTable {
 			if buf.offset() > entry_end {
 				return Err(crate::error::Error::Corruption(format!(
 					"Unexpected entry size. Expected at least {} bytes",
-					entry_end
+					buf.offset() - 2
 				)))
 			}
 
