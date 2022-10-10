@@ -65,8 +65,12 @@ pub fn set_number_of_allowed_io_operations(val: usize) {
 macro_rules! try_io {
 	($e:expr) => {{
 		if crate::error::IO_COUNTER_BEFORE_ERROR
-			.fetch_sub(1, ::std::sync::atomic::Ordering::Relaxed) ==
-			0
+			.fetch_update(
+				::std::sync::atomic::Ordering::SeqCst,
+				::std::sync::atomic::Ordering::SeqCst,
+				|v| Some(v.saturating_sub(1)),
+			)
+			.unwrap() == 0
 		{
 			Err(crate::error::Error::Io(::std::io::Error::new(
 				::std::io::ErrorKind::Other,
