@@ -36,7 +36,8 @@ pub enum Action<O: Debug> {
 	Transaction(Vec<O>),
 	ProcessReindex,
 	ProcessCommits,
-	FlushAndEnactLogs,
+	FlushLog,
+	EnactLog,
 	CleanLogs,
 	Restart,
 }
@@ -143,26 +144,22 @@ pub trait DbSimulator {
 						&options,
 					)
 				},
-				Action::FlushAndEnactLogs => {
-					// We repeat flush and then call enact_log to avoid deadlocks due to
-					// Log::flush_one side effects
-					for _ in 0..2 {
-						db = Self::try_or_restart(
-							|db| db.flush_logs(),
-							db,
-							&mut layers,
-							&old_layers,
-							&options,
-						)
-					}
+				Action::FlushLog =>
+					db = Self::try_or_restart(
+						|db| db.flush_logs(),
+						db,
+						&mut layers,
+						&old_layers,
+						&options,
+					),
+				Action::EnactLog =>
 					db = Self::try_or_restart(
 						|db| db.enact_logs(),
 						db,
 						&mut layers,
 						&old_layers,
 						&options,
-					)
-				},
+					),
 				Action::CleanLogs =>
 					db = Self::try_or_restart(
 						|db| db.clean_logs(),
