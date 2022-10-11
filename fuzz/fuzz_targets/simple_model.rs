@@ -9,12 +9,13 @@ use libfuzzer_sys::fuzz_target;
 use parity_db_fuzz::*;
 use std::{collections::HashMap, path::Path};
 
-const NUMBER_OF_POSSIBLE_VALUES: usize = 256;
+const NUMBER_OF_POSSIBLE_KEYS: usize = 256;
 
 #[derive(Clone, Debug)]
 struct Layer {
-	values: [Option<Option<u8>>; NUMBER_OF_POSSIBLE_VALUES],
-	is_maybe_saved: bool,
+	values: [Option<Option<u8>>; NUMBER_OF_POSSIBLE_KEYS], /* For each key the value if it is
+	                                                        * inserted or None if it is removed */
+	written: bool,
 }
 
 type Model = Vec<Layer>;
@@ -47,17 +48,17 @@ impl DbSimulator for Simulator {
 		operations: impl IntoIterator<Item = &'a (u8, Option<u8>)>,
 		model: &mut Model,
 	) {
-		let mut values = [None; NUMBER_OF_POSSIBLE_VALUES];
+		let mut values = [None; NUMBER_OF_POSSIBLE_KEYS];
 		for (k, v) in operations {
 			values[usize::from(*k)] = Some(*v);
 		}
-		model.push(Layer { values, is_maybe_saved: false });
+		model.push(Layer { values, written: false });
 	}
 
 	fn write_first_layer_to_disk(model: &mut Model) {
 		for layer in model {
-			if !layer.is_maybe_saved {
-				layer.is_maybe_saved = true;
+			if !layer.written {
+				layer.written = true;
 				break
 			}
 		}
@@ -65,13 +66,16 @@ impl DbSimulator for Simulator {
 
 	fn attempt_to_reset_model_to_disk_state(model: &Model, state: &[(u8, u8)]) -> Option<Model> {
 		let mut model = model.clone();
-		let mut expected = [None; NUMBER_OF_POSSIBLE_VALUES];
-		for (k, v) in state {
-			expected[usize::from(*k)] = Some(*v);
-		}
+		let expected = {
+			let mut values = [None; NUMBER_OF_POSSIBLE_KEYS];
+			for (k, v) in state {
+				values[usize::from(*k)] = Some(*v);
+			}
+			values
+		};
 
 		while !model.is_empty() {
-			if !model.last().unwrap().is_maybe_saved {
+			if !model.last().unwrap().written {
 				model.pop();
 				continue
 			}
@@ -92,6 +96,7 @@ impl DbSimulator for Simulator {
 				// We found it!
 				return Some(model)
 			}
+			log::debug!("Reverting layer number {}", model.len() - 1);
 			model.pop();
 		}
 		Some(model)
@@ -111,10 +116,8 @@ impl DbSimulator for Simulator {
 		for k in u8::MIN..=u8::MAX {
 			for layer in model.iter().rev() {
 				if let Some(v) = layer.values[usize::from(k)] {
-					if !layer.is_maybe_saved {
-						if let Some(v) = v {
-							content.push((vec![k], vec![v]));
-						}
+					if let Some(v) = v {
+						content.push((vec![k], vec![v]));
 					}
 					break
 				}
@@ -143,7 +146,7 @@ impl DbSimulator for Simulator {
 		for k in u8::MIN..=u8::MAX {
 			for layer in model.iter().rev() {
 				if let Some(v) = layer.values[usize::from(k)] {
-					if v.is_none() && !layer.is_maybe_saved {
+					if v.is_none() && !layer.written {
 						keys.push(vec![k]);
 					}
 					break

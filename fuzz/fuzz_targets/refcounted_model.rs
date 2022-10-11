@@ -10,7 +10,7 @@ use libfuzzer_sys::fuzz_target;
 use parity_db_fuzz::*;
 use std::{collections::HashMap, path::Path};
 
-const NUMBER_OF_POSSIBLE_VALUES: usize = 256;
+const NUMBER_OF_POSSIBLE_KEYS: usize = 256;
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum Operation {
@@ -21,8 +21,9 @@ enum Operation {
 
 #[derive(Clone, Debug)]
 struct Layer {
-	counts: [Option<i64>; NUMBER_OF_POSSIBLE_VALUES],
-	is_maybe_saved: bool,
+	counts: [Option<i64>; NUMBER_OF_POSSIBLE_KEYS], /* The number of references per key (or None
+	                                                 * if the key never existed in the database) */
+	written: bool,
 }
 
 type Model = Vec<Layer>;
@@ -57,40 +58,28 @@ impl DbSimulator for Simulator {
 		operations: impl IntoIterator<Item = &'a Operation>,
 		model: &mut Model,
 	) {
-		let mut counts = [None; NUMBER_OF_POSSIBLE_VALUES];
+		let mut counts = model.last().map_or([None; NUMBER_OF_POSSIBLE_KEYS], |l| l.counts);
 		for operation in operations {
 			match *operation {
-				Operation::Set(k) => {
-					let count = count_for_key(k.into(), model).unwrap_or(0) +
-						counts[usize::from(k)].unwrap_or(0);
-					if count == 0 {
-						*counts[usize::from(k)].get_or_insert(0) += 1
-					}
-				},
-				Operation::Dereference(k) => {
-					let count = count_for_key(k.into(), model).unwrap_or(0) +
-						counts[usize::from(k)].unwrap_or(0);
-					if count > 0 {
+				Operation::Set(k) => *counts[usize::from(k)].get_or_insert(0) += 1,
+				Operation::Dereference(k) =>
+					if counts[usize::from(k)].unwrap_or(0) > 0 {
 						*counts[usize::from(k)].get_or_insert(0) -= 1;
-					}
-				},
-				Operation::Reference(k) => {
-					let count = count_for_key(k.into(), model).unwrap_or(0) +
-						counts[usize::from(k)].unwrap_or(0);
-					if count > 0 {
+					},
+				Operation::Reference(k) =>
+					if counts[usize::from(k)].unwrap_or(0) > 0 {
 						*counts[usize::from(k)].get_or_insert(0) += 1;
-					}
-				},
+					},
 			}
 		}
 
-		model.push(Layer { counts, is_maybe_saved: false });
+		model.push(Layer { counts, written: false });
 	}
 
 	fn write_first_layer_to_disk(model: &mut Model) {
 		for layer in model {
-			if !layer.is_maybe_saved {
-				layer.is_maybe_saved = true;
+			if !layer.written {
+				layer.written = true;
 				break
 			}
 		}
@@ -98,31 +87,33 @@ impl DbSimulator for Simulator {
 
 	fn attempt_to_reset_model_to_disk_state(model: &Model, state: &[(u8, u8)]) -> Option<Model> {
 		let mut model = model.clone();
-		let mut expected = [false; NUMBER_OF_POSSIBLE_VALUES];
-		for (k, _) in state {
-			expected[usize::from(*k)] = true;
-		}
+		let expected = {
+			let mut is_present = [false; NUMBER_OF_POSSIBLE_KEYS];
+			for (k, _) in state {
+				is_present[usize::from(*k)] = true;
+			}
+			is_present
+		};
 
-		while !model.is_empty() {
-			if !model.last().unwrap().is_maybe_saved {
-				model.pop();
+		while let Some(last) = model.pop() {
+			if !last.written {
 				continue
 			}
 
 			// Is it equal to current state?
 			let is_equal = expected.iter().enumerate().all(|(k, is_present)| {
-				let c = count_for_key(k, &model);
 				if *is_present {
-					c.is_some()
+					last.counts[k].is_some()
 				} else {
-					c.unwrap_or(0) == 0
+					last.counts[k].unwrap_or(0) == 0
 				}
 			});
 			if is_equal {
-				// We found it!
+				// We found the correct last layer!
+				model.push(last);
 				return Some(model)
 			}
-			model.pop();
+			log::debug!("Reverting layer number {}", model.len() - 1);
 		}
 		Some(model)
 	}
@@ -136,47 +127,44 @@ impl DbSimulator for Simulator {
 	}
 
 	fn model_required_content(model: &Model) -> Vec<(Vec<u8>, Vec<u8>)> {
-		(u8::MIN..=u8::MAX)
-			.filter_map(|k| {
-				let key = usize::from(k);
-				let mut min_count = 0;
-				for layer in model {
-					if let Some(c) = layer.counts[key] {
-						if !layer.is_maybe_saved && c < 0 {
-							min_count += c;
-						}
+		if let Some(last) = model.last() {
+			last.counts
+				.iter()
+				.enumerate()
+				.filter_map(|(k, count)| {
+					if count.unwrap_or(0) > 0 {
+						Some((vec![k as u8], vec![k as u8]))
+					} else {
+						None
 					}
-				}
-				(min_count > 0).then(|| (vec![k], vec![k]))
-			})
-			.collect()
+				})
+				.collect()
+		} else {
+			Vec::new()
+		}
 	}
 
 	fn model_optional_content(model: &Model) -> Vec<(Vec<u8>, Vec<u8>)> {
-		(u8::MIN..=u8::MAX)
-			.filter_map(|k| {
-				let key = usize::from(k);
-				model
-					.iter()
-					.any(|layer| layer.counts[key].is_some())
-					.then(|| (vec![k], vec![k]))
-			})
-			.collect()
+		if let Some(last) = model.last() {
+			last.counts
+				.iter()
+				.enumerate()
+				.filter_map(|(k, count)| {
+					if count.is_some() {
+						Some((vec![k as u8], vec![k as u8]))
+					} else {
+						None
+					}
+				})
+				.collect()
+		} else {
+			Vec::new()
+		}
 	}
 
 	fn model_removed_content(_model: &Model) -> Vec<Vec<u8>> {
 		Vec::new()
 	}
-}
-
-fn count_for_key(key: usize, layers: &[Layer]) -> Option<i64> {
-	let mut count = None;
-	for layer in layers {
-		if let Some(c) = layer.counts[key] {
-			*count.get_or_insert(0) += c;
-		}
-	}
-	count
 }
 
 fuzz_target!(|entry: (Config, Vec<Action<Operation>>)| {

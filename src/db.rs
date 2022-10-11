@@ -867,9 +867,9 @@ impl Db {
 		};
 		let flush_thread = if start_threads {
 			let flush_worker_db = db.clone();
-			#[cfg(test)]
+			#[cfg(any(test, feature = "instrumentation"))]
 			let min_log_size = if options.always_flush { 0 } else { MIN_LOG_SIZE_BYTES };
-			#[cfg(not(test))]
+			#[cfg(not(any(test, feature = "instrumentation")))]
 			let min_log_size = MIN_LOG_SIZE_BYTES;
 			Some(std::thread::spawn(move || {
 				flush_worker_db.store_err(Self::flush_worker(flush_worker_db.clone(), min_log_size))
