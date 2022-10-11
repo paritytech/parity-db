@@ -10,6 +10,8 @@ use libfuzzer_sys::fuzz_target;
 use parity_db_fuzz::*;
 use std::{collections::HashMap, path::Path};
 
+const NUMBER_OF_POSSIBLE_VALUES: usize = 256;
+
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum Operation {
 	Set(u8),
@@ -19,7 +21,7 @@ enum Operation {
 
 #[derive(Clone, Debug)]
 struct Layer {
-	counts: [Option<i64>; 256],
+	counts: [Option<i64>; NUMBER_OF_POSSIBLE_VALUES],
 	is_maybe_saved: bool,
 }
 
@@ -55,7 +57,7 @@ impl DbSimulator for Simulator {
 		operations: impl IntoIterator<Item = &'a Operation>,
 		model: &mut Model,
 	) {
-		let mut counts = [None; 256];
+		let mut counts = [None; NUMBER_OF_POSSIBLE_VALUES];
 		for operation in operations {
 			match *operation {
 				Operation::Set(k) => {
@@ -96,7 +98,7 @@ impl DbSimulator for Simulator {
 
 	fn attempt_to_reset_model_to_disk_state(model: &Model, state: &[(u8, u8)]) -> Option<Model> {
 		let mut model = model.clone();
-		let mut expected = [false; 256];
+		let mut expected = [false; NUMBER_OF_POSSIBLE_VALUES];
 		for (k, _) in state {
 			expected[usize::from(*k)] = true;
 		}
@@ -134,7 +136,7 @@ impl DbSimulator for Simulator {
 	}
 
 	fn model_required_content(model: &Model) -> Vec<(Vec<u8>, Vec<u8>)> {
-		(0..=255)
+		(u8::MIN..=u8::MAX)
 			.filter_map(|k| {
 				let key = usize::from(k);
 				let mut min_count = 0;
@@ -151,7 +153,7 @@ impl DbSimulator for Simulator {
 	}
 
 	fn model_optional_content(model: &Model) -> Vec<(Vec<u8>, Vec<u8>)> {
-		(0..=255)
+		(u8::MIN..=u8::MAX)
 			.filter_map(|k| {
 				let key = usize::from(k);
 				model

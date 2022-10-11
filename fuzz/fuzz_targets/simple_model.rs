@@ -9,9 +9,11 @@ use libfuzzer_sys::fuzz_target;
 use parity_db_fuzz::*;
 use std::{collections::HashMap, path::Path};
 
+const NUMBER_OF_POSSIBLE_VALUES: usize = 256;
+
 #[derive(Clone, Debug)]
 struct Layer {
-	values: [Option<Option<u8>>; 256],
+	values: [Option<Option<u8>>; NUMBER_OF_POSSIBLE_VALUES],
 	is_maybe_saved: bool,
 }
 
@@ -45,7 +47,7 @@ impl DbSimulator for Simulator {
 		operations: impl IntoIterator<Item = &'a (u8, Option<u8>)>,
 		model: &mut Model,
 	) {
-		let mut values = [None; 256];
+		let mut values = [None; NUMBER_OF_POSSIBLE_VALUES];
 		for (k, v) in operations {
 			values[usize::from(*k)] = Some(*v);
 		}
@@ -63,7 +65,7 @@ impl DbSimulator for Simulator {
 
 	fn attempt_to_reset_model_to_disk_state(model: &Model, state: &[(u8, u8)]) -> Option<Model> {
 		let mut model = model.clone();
-		let mut expected = [None; 256];
+		let mut expected = [None; NUMBER_OF_POSSIBLE_VALUES];
 		for (k, v) in state {
 			expected[usize::from(*k)] = Some(*v);
 		}
@@ -106,7 +108,7 @@ impl DbSimulator for Simulator {
 
 	fn model_required_content(model: &Model) -> Vec<(Vec<u8>, Vec<u8>)> {
 		let mut content = Vec::new();
-		for k in 0..=255 {
+		for k in u8::MIN..=u8::MAX {
 			for layer in model.iter().rev() {
 				if let Some(v) = layer.values[usize::from(k)] {
 					if !layer.is_maybe_saved {
@@ -123,7 +125,7 @@ impl DbSimulator for Simulator {
 
 	fn model_optional_content(model: &Model) -> Vec<(Vec<u8>, Vec<u8>)> {
 		let mut content = Vec::new();
-		for k in 0..=255 {
+		for k in u8::MIN..=u8::MAX {
 			for layer in model.iter().rev() {
 				if let Some(v) = layer.values[usize::from(k)] {
 					if let Some(v) = v {
@@ -138,7 +140,7 @@ impl DbSimulator for Simulator {
 
 	fn model_removed_content(model: &Model) -> Vec<Vec<u8>> {
 		let mut keys = Vec::new();
-		for k in 0..=255 {
+		for k in u8::MIN..=u8::MAX {
 			for layer in model.iter().rev() {
 				if let Some(v) = layer.values[usize::from(k)] {
 					if v.is_none() && !layer.is_maybe_saved {

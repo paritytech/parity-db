@@ -93,6 +93,8 @@ pub trait DbSimulator {
 					db = Self::try_or_restart(|db| db.process_commits(), db, &mut model, &options)
 				},
 				Action::FlushAndEnactLogs => {
+					// We repeat flush and then call enact_log to avoid deadlocks due to
+					// Log::flush_one side effects
 					for _ in 0..2 {
 						db = Self::try_or_restart(|db| db.flush_logs(), db, &mut model, &options)
 					}
@@ -138,7 +140,7 @@ pub trait DbSimulator {
 	fn reset_model_from_database(db: &parity_db::Db, model: &mut Self::Model) {
 		*model = retry_operation(|| {
 			let mut disk_state = Vec::new();
-			for i in 0..=255 {
+			for i in u8::MIN..=u8::MAX {
 				if let Some(v) = db.get(0, &[i])? {
 					disk_state.push((i, v[0]));
 				}
