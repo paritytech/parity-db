@@ -183,7 +183,14 @@ impl Options {
 
 		if let Some(meta) = meta {
 			if meta.columns.len() != self.columns.len() {
-				return Err(Error::InvalidConfiguration("Column config mismatch".into()))
+				return Err(Error::InvalidConfiguration(
+					format!(
+						"Column config mismatch. Expected {} columns, got {}",
+						self.columns.len(),
+						meta.columns.len()
+					)
+					.into(),
+				))
 			}
 
 			for c in 0..meta.columns.len() {
