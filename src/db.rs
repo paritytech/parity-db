@@ -1030,10 +1030,16 @@ impl Db {
 
 	/// Add a new column with options specified by `new_column_options`.
 	pub fn add_column(options: &mut Options, new_column_options: ColumnOptions) -> Result<()> {
+		// We open the DB before to check metadata validity and make sure there are no pending WAL
+		// logs.
+		let db = Db::open(&options)?;
+		let salt = db.inner.options.salt;
+		drop(db);
+
 		options.columns.push(new_column_options);
 		options.write_metadata_with_version(
 			&options.path,
-			&options.salt.expect("Salt is required to add column"),
+			&salt.expect("`salt` is always `Some` after opening the DB; qed"),
 			Some(CURRENT_VERSION),
 		)?;
 
