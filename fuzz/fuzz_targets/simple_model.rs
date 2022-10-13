@@ -99,7 +99,11 @@ impl DbSimulator for Simulator {
 			log::debug!("Reverting layer number {}", model.len() - 1);
 			model.pop();
 		}
-		Some(model)
+		if state.is_empty() {
+			Some(Vec::new()) // empty state
+		} else {
+			None
+		}
 	}
 
 	fn map_operation(operation: &(u8, Option<u8>)) -> parity_db::Operation<Vec<u8>, Vec<u8>> {

@@ -8,7 +8,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use parity_db_fuzz::*;
-use std::{collections::HashMap, path::Path};
+use std::{cmp::min, collections::HashMap, path::Path};
 
 const NUMBER_OF_POSSIBLE_KEYS: usize = 256;
 
@@ -21,8 +21,10 @@ enum Operation {
 
 #[derive(Clone, Debug)]
 struct Layer {
-	counts: [Option<i64>; NUMBER_OF_POSSIBLE_KEYS], /* The number of references per key (or None
-	                                                 * if the key never existed in the database) */
+	counts: [Option<usize>; NUMBER_OF_POSSIBLE_KEYS], /* The number of references per key (or
+	                                                   * None
+	                                                   * if the key never existed in the
+	                                                   * database) */
 	written: bool,
 }
 
@@ -86,7 +88,6 @@ impl DbSimulator for Simulator {
 	}
 
 	fn attempt_to_reset_model_to_disk_state(model: &Model, state: &[(u8, u8)]) -> Option<Model> {
-		let mut model = model.clone();
 		let expected = {
 			let mut is_present = [false; NUMBER_OF_POSSIBLE_KEYS];
 			for (k, _) in state {
@@ -95,27 +96,40 @@ impl DbSimulator for Simulator {
 			is_present
 		};
 
-		while let Some(last) = model.pop() {
-			if !last.written {
+		let mut candidates = Vec::new();
+		for layer in model.iter().rev() {
+			if !layer.written {
 				continue
 			}
 
 			// Is it equal to current state?
 			let is_equal = expected.iter().enumerate().all(|(k, is_present)| {
 				if *is_present {
-					last.counts[k].is_some()
+					layer.counts[k].is_some()
 				} else {
-					last.counts[k].unwrap_or(0) == 0
+					layer.counts[k].unwrap_or(0) == 0
 				}
 			});
 			if is_equal {
-				// We found the correct last layer!
-				model.push(last);
-				return Some(model)
+				// We found a correct last layer
+				candidates.push(layer);
 			}
-			log::debug!("Reverting layer number {}", model.len() - 1);
 		}
-		Some(model)
+		if candidates.is_empty() {
+			return if state.is_empty() { Some(Vec::new()) } else { None }
+		}
+
+		// if we are multiple candidates, we are unsure. We pick the lower count per candidate
+		let mut new_state_safe_counts = [None; NUMBER_OF_POSSIBLE_KEYS];
+		for layer in candidates {
+			for i in u8::MIN..=u8::MAX {
+				if let Some(c) = layer.counts[usize::from(i)] {
+					new_state_safe_counts[usize::from(i)] =
+						Some(min(c, new_state_safe_counts[usize::from(i)].unwrap_or(usize::MAX)));
+				}
+			}
+		}
+		Some(vec![Layer { counts: new_state_safe_counts, written: true }])
 	}
 
 	fn map_operation(operation: &Operation) -> parity_db::Operation<Vec<u8>, Vec<u8>> {
