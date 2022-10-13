@@ -25,9 +25,9 @@ use crate::{
 	hash::IdentityBuildHasher,
 	index::PlanOutcome,
 	log::{Log, LogAction},
-	options::Options,
+	options::{Options, CURRENT_VERSION},
 	stats::StatSummary,
-	Key,
+	ColumnOptions, Key,
 };
 use fs2::FileExt;
 use parking_lot::{Condvar, Mutex, RwLock};
@@ -1026,6 +1026,24 @@ impl Db {
 		self.inner.stats()
 	}
 
+	/// Add a new column with options specified by `new_column_options`.
+	pub fn add_column(options: &mut Options, new_column_options: ColumnOptions) -> Result<()> {
+		// We open the DB before to check metadata validity and make sure there are no pending WAL
+		// logs.
+		let db = Db::open(options)?;
+		let salt = db.inner.options.salt;
+		drop(db);
+
+		options.columns.push(new_column_options);
+		options.write_metadata_with_version(
+			&options.path,
+			&salt.expect("`salt` is always `Some` after opening the DB; qed"),
+			Some(CURRENT_VERSION),
+		)?;
+
+		Ok(())
+	}
+
 	#[cfg(feature = "instrumentation")]
 	pub fn process_reindex(&self) -> Result<()> {
 		self.inner.process_reindex()?;
@@ -1383,7 +1401,7 @@ enum OpeningMode {
 
 #[cfg(test)]
 mod tests {
-	use crate::Value;
+	use crate::{ColumnOptions, Value};
 
 	use super::{Db, Options};
 	use crate::{
@@ -1619,6 +1637,83 @@ mod tests {
 		assert_eq!(db.get(col_nb, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
 		assert_eq!(db.get(col_nb, key2.as_slice()).unwrap(), Some(b"value2b".to_vec()));
 		assert_eq!(db.get(col_nb, key3.as_slice()).unwrap(), None);
+	}
+
+	#[test]
+	fn test_add_column() {
+		let tmp = tempdir().unwrap();
+		let db_test = EnableCommitPipelineStages::DbFile;
+		let mut options = db_test.options(tmp.path(), 1);
+		options.salt = Some(options.salt.unwrap_or_default());
+
+		let old_col_id = 0;
+		let new_col_id = 1;
+		let new_col_indexed_id = 2;
+
+		let key1 = b"key1".to_vec();
+		let key2 = b"key2".to_vec();
+		let key3 = b"key3".to_vec();
+
+		let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
+
+		db.commit(vec![
+			(old_col_id, key1.clone(), Some(b"value1".to_vec())),
+			(old_col_id, key2.clone(), Some(b"value2".to_vec())),
+			(old_col_id, key3.clone(), Some(b"value3".to_vec())),
+		])
+		.unwrap();
+		db_test.run_stages(&db);
+
+		drop(db);
+
+		Db::add_column(&mut options, ColumnOptions { btree_index: false, ..Default::default() })
+			.unwrap();
+
+		Db::add_column(&mut options, ColumnOptions { btree_index: true, ..Default::default() })
+			.unwrap();
+
+		let mut options = db_test.options(tmp.path(), 3);
+		options.columns[new_col_indexed_id as usize].btree_index = true;
+
+		let db_test = EnableCommitPipelineStages::DbFile;
+		let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
+
+		// Expected number of columns
+		assert_eq!(db.num_columns(), 3);
+
+		let new_key1 = b"abcdef".to_vec();
+		let new_key2 = b"123456".to_vec();
+
+		// Write to new columns.
+		db.commit(vec![
+			(new_col_id, new_key1.clone(), Some(new_key1.to_vec())),
+			(new_col_id, new_key2.clone(), Some(new_key2.to_vec())),
+			(new_col_indexed_id, new_key1.clone(), Some(new_key1.to_vec())),
+			(new_col_indexed_id, new_key2.clone(), Some(new_key2.to_vec())),
+		])
+		.unwrap();
+		db_test.run_stages(&db);
+
+		drop(db);
+
+		// Reopen DB and fetch all keys we inserted.
+		let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
+
+		assert_eq!(db.get(old_col_id, key1.as_slice()).unwrap(), Some(b"value1".to_vec()));
+		assert_eq!(db.get(old_col_id, key2.as_slice()).unwrap(), Some(b"value2".to_vec()));
+		assert_eq!(db.get(old_col_id, key3.as_slice()).unwrap(), Some(b"value3".to_vec()));
+
+		// Fetch from new columns
+		assert_eq!(db.get(new_col_id, new_key1.as_slice()).unwrap(), Some(new_key1.to_vec()));
+		assert_eq!(db.get(new_col_id, new_key2.as_slice()).unwrap(), Some(new_key2.to_vec()));
+		assert_eq!(
+			db.get(new_col_indexed_id, new_key1.as_slice()).unwrap(),
+			Some(new_key1.to_vec())
+		);
+		assert_eq!(
+			db.get(new_col_indexed_id, new_key2.as_slice()).unwrap(),
+			Some(new_key2.to_vec())
+		);
 	}
 
 	#[test]
