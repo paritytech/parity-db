@@ -8,10 +8,9 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use parity_db_fuzz::*;
-use std::{
-	collections::{btree_map::Entry, BTreeMap, HashMap},
-	path::Path,
-};
+use std::{cmp::min, collections::HashMap, path::Path};
+
+const NUMBER_OF_POSSIBLE_KEYS: usize = 256;
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum Operation {
@@ -20,11 +19,20 @@ enum Operation {
 	Reference(u8),
 }
 
+#[derive(Clone, Debug)]
+struct Layer {
+	// The number of references per key (or None if the key never existed in the database)
+	counts: [Option<usize>; NUMBER_OF_POSSIBLE_KEYS],
+	written: bool,
+}
+
+type Model = Vec<Layer>;
+
 struct Simulator;
 
 impl DbSimulator for Simulator {
 	type Operation = Operation;
-	type Model = BTreeMap<u8, u8>;
+	type Model = Model;
 
 	fn build_options(config: &Config, path: &Path) -> parity_db::Options {
 		parity_db::Options {
@@ -41,26 +49,85 @@ impl DbSimulator for Simulator {
 			stats: false,
 			salt: None,
 			compression_threshold: HashMap::new(),
+			always_flush: true,
+			with_background_thread: false,
 		}
 	}
 
-	fn apply_operation_on_model(operation: &Operation, model: &mut Self::Model) {
-		match *operation {
-			Operation::Set(k) => {
-				*model.entry(k).or_default() += 1;
-			},
-			Operation::Dereference(k) =>
-				if let Entry::Occupied(mut e) = model.entry(k) {
-					let counter = e.get_mut();
-					*counter = counter.saturating_sub(1);
-				},
-			Operation::Reference(k) =>
-				if let Entry::Occupied(mut e) = model.entry(k) {
-					if *e.get() > 0 {
-						*e.get_mut() += 1;
-					}
-				},
+	fn apply_operations_on_model<'a>(
+		operations: impl IntoIterator<Item = &'a Operation>,
+		model: &mut Model,
+	) {
+		let mut counts = model.last().map_or([None; NUMBER_OF_POSSIBLE_KEYS], |l| l.counts);
+		for operation in operations {
+			match *operation {
+				Operation::Set(k) => *counts[usize::from(k)].get_or_insert(0) += 1,
+				Operation::Dereference(k) =>
+					if counts[usize::from(k)].unwrap_or(0) > 0 {
+						*counts[usize::from(k)].get_or_insert(0) -= 1;
+					},
+				Operation::Reference(k) =>
+					if counts[usize::from(k)].unwrap_or(0) > 0 {
+						*counts[usize::from(k)].get_or_insert(0) += 1;
+					},
+			}
 		}
+
+		model.push(Layer { counts, written: false });
+	}
+
+	fn write_first_layer_to_disk(model: &mut Model) {
+		for layer in model {
+			if !layer.written {
+				layer.written = true;
+				break
+			}
+		}
+	}
+
+	fn attempt_to_reset_model_to_disk_state(model: &Model, state: &[(u8, u8)]) -> Option<Model> {
+		let expected = {
+			let mut is_present = [false; NUMBER_OF_POSSIBLE_KEYS];
+			for (k, _) in state {
+				is_present[usize::from(*k)] = true;
+			}
+			is_present
+		};
+
+		let mut candidates = Vec::new();
+		for layer in model.iter().rev() {
+			if !layer.written {
+				continue
+			}
+
+			// Is it equal to current state?
+			let is_equal = expected.iter().enumerate().all(|(k, is_present)| {
+				if *is_present {
+					layer.counts[k].is_some()
+				} else {
+					layer.counts[k].unwrap_or(0) == 0
+				}
+			});
+			if is_equal {
+				// We found a correct last layer
+				candidates.push(layer);
+			}
+		}
+		if candidates.is_empty() {
+			return if state.is_empty() { Some(Vec::new()) } else { None }
+		}
+
+		// if we are multiple candidates, we are unsure. We pick the lower count per candidate
+		let mut new_state_safe_counts = [None; NUMBER_OF_POSSIBLE_KEYS];
+		for layer in candidates {
+			for i in u8::MIN..=u8::MAX {
+				if let Some(c) = layer.counts[usize::from(i)] {
+					new_state_safe_counts[usize::from(i)] =
+						Some(min(c, new_state_safe_counts[usize::from(i)].unwrap_or(usize::MAX)));
+				}
+			}
+		}
+		Some(vec![Layer { counts: new_state_safe_counts, written: true }])
 	}
 
 	fn map_operation(operation: &Operation) -> parity_db::Operation<Vec<u8>, Vec<u8>> {
@@ -71,18 +138,43 @@ impl DbSimulator for Simulator {
 		}
 	}
 
-	fn model_required_content(model: &BTreeMap<u8, u8>) -> Vec<(Vec<u8>, Vec<u8>)> {
-		model
-			.iter()
-			.filter_map(|(k, v)| if *v > 0 { Some((vec![*k], vec![*k])) } else { None })
-			.collect::<Vec<_>>()
+	fn model_required_content(model: &Model) -> Vec<(Vec<u8>, Vec<u8>)> {
+		if let Some(last) = model.last() {
+			last.counts
+				.iter()
+				.enumerate()
+				.filter_map(|(k, count)| {
+					if count.unwrap_or(0) > 0 {
+						Some((vec![k as u8], vec![k as u8]))
+					} else {
+						None
+					}
+				})
+				.collect()
+		} else {
+			Vec::new()
+		}
 	}
 
-	fn model_optional_content(model: &BTreeMap<u8, u8>) -> Vec<(Vec<u8>, Vec<u8>)> {
-		model.iter().map(|(k, _)| (vec![*k], vec![*k])).collect::<Vec<_>>()
+	fn model_optional_content(model: &Model) -> Vec<(Vec<u8>, Vec<u8>)> {
+		if let Some(last) = model.last() {
+			last.counts
+				.iter()
+				.enumerate()
+				.filter_map(|(k, count)| {
+					if count.is_some() {
+						Some((vec![k as u8], vec![k as u8]))
+					} else {
+						None
+					}
+				})
+				.collect()
+		} else {
+			Vec::new()
+		}
 	}
 
-	fn model_removed_content(_model: &BTreeMap<u8, u8>) -> Vec<Vec<u8>> {
+	fn model_removed_content(_model: &Model) -> Vec<Vec<u8>> {
 		Vec::new()
 	}
 }
