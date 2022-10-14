@@ -139,7 +139,7 @@ impl DbSimulator for Simulator {
 		for k in u8::MIN..=u8::MAX {
 			for layer in model.iter().rev() {
 				if let Some(v) = layer.values[usize::from(k)] {
-					if v.is_none() && !layer.written {
+					if v.is_none() {
 						keys.push(vec![k]);
 					}
 					break
