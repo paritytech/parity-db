@@ -21,10 +21,8 @@ enum Operation {
 
 #[derive(Clone, Debug)]
 struct Layer {
-	counts: [Option<usize>; NUMBER_OF_POSSIBLE_KEYS], /* The number of references per key (or
-	                                                   * None
-	                                                   * if the key never existed in the
-	                                                   * database) */
+	// The number of references per key (or None if the key never existed in the database)
+	counts: [Option<usize>; NUMBER_OF_POSSIBLE_KEYS],
 	written: bool,
 }
 

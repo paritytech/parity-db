@@ -13,8 +13,8 @@ const NUMBER_OF_POSSIBLE_KEYS: usize = 256;
 
 #[derive(Clone, Debug)]
 struct Layer {
-	values: [Option<Option<u8>>; NUMBER_OF_POSSIBLE_KEYS], /* For each key the value if it is
-	                                                        * inserted or None if it is removed */
+	// For each key the value if it is inserted or None if it is removed
+	values: [Option<Option<u8>>; NUMBER_OF_POSSIBLE_KEYS],
 	written: bool,
 }
 
@@ -131,18 +131,7 @@ impl DbSimulator for Simulator {
 	}
 
 	fn model_optional_content(model: &Model) -> Vec<(Vec<u8>, Vec<u8>)> {
-		let mut content = Vec::new();
-		for k in u8::MIN..=u8::MAX {
-			for layer in model.iter().rev() {
-				if let Some(v) = layer.values[usize::from(k)] {
-					if let Some(v) = v {
-						content.push((vec![k], vec![v]));
-					}
-					break
-				}
-			}
-		}
-		content
+		Self::model_required_content(model)
 	}
 
 	fn model_removed_content(model: &Model) -> Vec<Vec<u8>> {
