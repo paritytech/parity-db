@@ -723,6 +723,9 @@ impl DbInner {
 			c.refresh_metadata()?;
 		}
 		log::debug!(target: "parity-db", "Replay is complete.");
+		log::debug!(target: "parity-db", "Cleaning logs.");
+		self.clean_all_logs()?;
+		log::debug!(target: "parity-db", "Log cleanup completed.");
 		Ok(())
 	}
 
