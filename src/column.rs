@@ -259,13 +259,10 @@ impl Column {
 		let target_tier = tables
 			.iter()
 			.position(|t| t.value_size(key).map_or(false, |s| len <= s as usize));
-		let target_tier = match target_tier {
-			Some(tier) => tier as usize,
-			None => {
-				log::trace!(target: "parity-db", "Using blob {}", key);
-				tables.len() - 1
-			},
-		};
+		let target_tier = target_tier.unwrap_or_else(|| {
+			log::trace!(target: "parity-db", "Using blob {}", key);
+			tables.len() - 1
+		});
 
 		(result, target_tier)
 	}
