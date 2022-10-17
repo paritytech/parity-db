@@ -519,7 +519,7 @@ impl DbInner {
 				Ok(reader) => reader,
 				Err(Error::Corruption(_)) if validation_mode => {
 					log::debug!(target: "parity-db", "Bad log header");
-					self.log.clear_replay_logs()?;
+					self.log.clear_replay_logs();
 					return Ok(false)
 				},
 				Err(e) => return Err(e),
@@ -539,7 +539,7 @@ impl DbInner {
 							reader.record_id(),
 						);
 						drop(reader);
-						self.log.clear_replay_logs()?;
+						self.log.clear_replay_logs();
 						return Ok(false)
 					}
 					// Validate all records before applying anything
@@ -549,7 +549,7 @@ impl DbInner {
 							Err(e) => {
 								log::debug!(target: "parity-db", "Error reading log: {:?}", e);
 								drop(reader);
-								self.log.clear_replay_logs()?;
+								self.log.clear_replay_logs();
 								return Ok(false)
 							},
 						};
@@ -557,7 +557,7 @@ impl DbInner {
 							LogAction::BeginRecord => {
 								log::debug!(target: "parity-db", "Unexpected log header");
 								drop(reader);
-								self.log.clear_replay_logs()?;
+								self.log.clear_replay_logs();
 								return Ok(false)
 							},
 							LogAction::EndRecord => break,
@@ -574,7 +574,7 @@ impl DbInner {
 								) {
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
 									drop(reader);
-									self.log.clear_replay_logs()?;
+									self.log.clear_replay_logs();
 									return Ok(false)
 								}
 							},
@@ -591,7 +591,7 @@ impl DbInner {
 								) {
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
 									drop(reader);
-									self.log.clear_replay_logs()?;
+									self.log.clear_replay_logs();
 									return Ok(false)
 								}
 							},
@@ -741,7 +741,7 @@ impl DbInner {
 				// On error the log reader may be left in inconsistent state. So it is important
 				// to no attempt any further log enactment.
 				log::debug!(target: "parity-db", "Shutdown with error state {}", err);
-				return Ok(())
+				return self.log.kill_logs()
 			}
 		}
 		log::debug!(target: "parity-db", "Processing leftover commits");
@@ -1401,7 +1401,7 @@ enum OpeningMode {
 
 #[cfg(test)]
 mod tests {
-	use crate::{ColumnOptions, Value};
+	use crate::{ColumnOptions, Operation, Value};
 
 	use super::{Db, Options};
 	use crate::{

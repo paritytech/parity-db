@@ -580,21 +580,12 @@ impl Log {
 		Ok(())
 	}
 
-	pub fn clear_replay_logs(&self) -> Result<()> {
-		{
-			let mut reading = self.reading.write();
-			let id = reading.as_ref().map(|r| r.id);
-			*reading = None;
-			if let Some(id) = id {
-				self.drop_log(id)?;
-			}
+	pub fn clear_replay_logs(&self) {
+		if let Some(reading) = self.reading.write().take() {
+			self.cleanup_queue.write().push_back((reading.id, reading.file.into_inner()));
 		}
-		{
-			let replay_logs = std::mem::take(&mut *self.replay_queue.write());
-			for (id, _, file) in replay_logs {
-				drop(file);
-				self.drop_log(id)?;
-			}
+		for (id, _, file) in self.replay_queue.write().drain(0..) {
+			self.cleanup_queue.write().push_back((id, file));
 		}
 		let mut overlays = self.overlays.write();
 		overlays.index.clear();
@@ -602,7 +593,6 @@ impl Log {
 		overlays.last_record_id.clear();
 		*self.reading_state.lock() = ReadingState::Idle;
 		self.dirty.store(false, Ordering::Relaxed);
-		Ok(())
 	}
 
 	pub fn begin_record(&self) -> LogWriter<'_> {
