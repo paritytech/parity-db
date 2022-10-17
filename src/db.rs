@@ -851,7 +851,11 @@ impl Db {
 		let mut db = DbInner::open(options, opening_mode)?;
 		// This needs to be call before log thread: so first reindexing
 		// will run in correct state.
-		db.replay_all_logs()?;
+		if let Err(e) = db.replay_all_logs() {
+			log::debug!(target: "parity-db", "Error during log replay, doing log cleanup");
+			db.log.kill_logs()?; // We make sure to clean logs anyway
+			return Err(e)
+		}
 		let db = Arc::new(db);
 		#[cfg(any(test, feature = "instrumentation"))]
 		let start_threads = opening_mode != OpeningMode::ReadOnly && options.with_background_thread;
@@ -1401,7 +1405,7 @@ enum OpeningMode {
 
 #[cfg(test)]
 mod tests {
-	use crate::{ColumnOptions, Operation, Value};
+	use crate::{ColumnOptions, Value};
 
 	use super::{Db, Options};
 	use crate::{
