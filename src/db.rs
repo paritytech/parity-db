@@ -2385,4 +2385,38 @@ mod tests {
 			assert_eq!(iter_state_rev.next(), next.as_ref().map(|(k, v)| (k, v)));
 		}
 	}
+
+	#[cfg(feature = "instrumentation")]
+	#[test]
+	fn test_partial_log_recovery() {
+		let tmp = tempdir().unwrap();
+		let mut options = Options::with_columns(tmp.path(), 1);
+		options.columns[0].btree_index = true;
+		options.always_flush = true;
+		options.with_background_thread = false;
+
+		// We do 2 commits and we fail while writing the second one
+		{
+			let db = Db::open_or_create(&options).unwrap();
+			db.commit::<_, Vec<u8>>(vec![(0, vec![0], Some(vec![0]))]).unwrap();
+			db.process_commits().unwrap();
+			db.commit::<_, Vec<u8>>(vec![(0, vec![1], Some(vec![1]))]).unwrap();
+			crate::set_number_of_allowed_io_operations(4);
+			assert!(db.process_commits().is_err());
+			crate::set_number_of_allowed_io_operations(usize::MAX);
+			db.flush_logs().unwrap();
+		}
+
+		// We open a first time, the first value is there
+		{
+			let db = Db::open(&options).unwrap();
+			assert_eq!(db.get(0, &[0]).unwrap(), Some(vec![0]));
+		}
+
+		// We open a second time, the first value should be still there
+		{
+			let db = Db::open(&options).unwrap();
+			assert!(db.get(0, &[0]).unwrap().is_some());
+		}
+	}
 }
