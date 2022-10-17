@@ -741,6 +741,7 @@ impl DbInner {
 				// On error the log reader may be left in inconsistent state. So it is important
 				// to no attempt any further log enactment.
 				log::debug!(target: "parity-db", "Shutdown with error state {}", err);
+				self.log.clean_logs(self.log.num_dirty_logs())?;
 				return self.log.kill_logs()
 			}
 		}
@@ -853,7 +854,8 @@ impl Db {
 		// will run in correct state.
 		if let Err(e) = db.replay_all_logs() {
 			log::debug!(target: "parity-db", "Error during log replay, doing log cleanup");
-			db.log.kill_logs()?; // We make sure to clean logs anyway
+			db.log.clean_logs(db.log.num_dirty_logs())?;
+			db.log.kill_logs()?;
 			return Err(e)
 		}
 		let db = Arc::new(db);
