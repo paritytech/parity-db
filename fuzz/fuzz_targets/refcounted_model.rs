@@ -174,8 +174,16 @@ impl DbSimulator for Simulator {
 		}
 	}
 
-	fn model_removed_content(_model: &Model) -> Vec<Vec<u8>> {
-		Vec::new()
+	fn model_removed_content(model: &Model) -> Vec<Vec<u8>> {
+		if let Some(last) = model.last() {
+			last.counts
+				.iter()
+				.enumerate()
+				.filter_map(|(k, count)| if count.is_some() { None } else { Some(vec![k as u8]) })
+				.collect()
+		} else {
+			(u8::MIN..=u8::MAX).map(|k| vec![k]).collect()
+		}
 	}
 }
 
