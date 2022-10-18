@@ -252,8 +252,8 @@ pub fn run_internal(args: Args, db: Db) {
 		0
 	};
 
-	COMMITS.store(start_commit as usize, Ordering::SeqCst);
-	NEXT_COMMIT.store(start_commit as usize, Ordering::SeqCst);
+	COMMITS.store(start_commit, Ordering::SeqCst);
+	NEXT_COMMIT.store(start_commit, Ordering::SeqCst);
 
 	{
 		let commits = args.commits;
