@@ -99,6 +99,9 @@ pub trait DbSimulator {
 		parity_db::set_number_of_allowed_io_operations(usize::MAX);
 		let mut db = parity_db::Db::open_or_create(&options).unwrap();
 		let mut layers = Vec::new();
+		// In case of bad writes, when restarting the DB we might end up to with a state of the
+		// previous opening but with a state of a older one.
+		let mut old_layers = Vec::new();
 		parity_db::set_number_of_allowed_io_operations(
 			config.number_of_allowed_io_operations.into(),
 		);
@@ -118,7 +121,13 @@ pub trait DbSimulator {
 						.unwrap();
 				},
 				Action::ProcessReindex =>
-					db = Self::try_or_restart(|db| db.process_reindex(), db, &mut layers, &options),
+					db = Self::try_or_restart(
+						|db| db.process_reindex(),
+						db,
+						&mut layers,
+						&old_layers,
+						&options,
+					),
 				Action::ProcessCommits => {
 					for layer in &mut layers {
 						if !layer.written {
@@ -126,24 +135,49 @@ pub trait DbSimulator {
 							break
 						}
 					}
-					db = Self::try_or_restart(|db| db.process_commits(), db, &mut layers, &options)
+					db = Self::try_or_restart(
+						|db| db.process_commits(),
+						db,
+						&mut layers,
+						&old_layers,
+						&options,
+					)
 				},
 				Action::FlushAndEnactLogs => {
 					// We repeat flush and then call enact_log to avoid deadlocks due to
 					// Log::flush_one side effects
 					for _ in 0..2 {
-						db = Self::try_or_restart(|db| db.flush_logs(), db, &mut layers, &options)
+						db = Self::try_or_restart(
+							|db| db.flush_logs(),
+							db,
+							&mut layers,
+							&old_layers,
+							&options,
+						)
 					}
-					db = Self::try_or_restart(|db| db.enact_logs(), db, &mut layers, &options)
+					db = Self::try_or_restart(
+						|db| db.enact_logs(),
+						db,
+						&mut layers,
+						&old_layers,
+						&options,
+					)
 				},
 				Action::CleanLogs =>
-					db = Self::try_or_restart(|db| db.clean_logs(), db, &mut layers, &options),
+					db = Self::try_or_restart(
+						|db| db.clean_logs(),
+						db,
+						&mut layers,
+						&old_layers,
+						&options,
+					),
 				Action::Restart => {
+					old_layers.push(layers.clone());
 					db = {
 						drop(db);
 						retry_operation(|| parity_db::Db::open(&options))
 					};
-					Self::reset_model_from_database(&db, &mut layers);
+					Self::reset_model_from_database(&db, &mut layers, &old_layers);
 				},
 			}
 			retry_operation(|| {
@@ -157,6 +191,7 @@ pub trait DbSimulator {
 		op: impl FnOnce(&parity_db::Db) -> parity_db::Result<()>,
 		mut db: parity_db::Db,
 		layers: &mut Vec<Layer<Self::ValueType>>,
+		old_layers: &[Vec<Layer<Self::ValueType>>],
 		options: &parity_db::Options,
 	) -> parity_db::Db {
 		match op(&db) {
@@ -166,14 +201,18 @@ pub trait DbSimulator {
 				drop(db);
 				parity_db::set_number_of_allowed_io_operations(usize::MAX);
 				db = parity_db::Db::open(options).unwrap();
-				Self::reset_model_from_database(&db, layers);
+				Self::reset_model_from_database(&db, layers, old_layers);
 				db
 			},
 			Err(e) => panic!("database error: {}", e),
 		}
 	}
 
-	fn reset_model_from_database(db: &parity_db::Db, layers: &mut Vec<Layer<Self::ValueType>>) {
+	fn reset_model_from_database(
+		db: &parity_db::Db,
+		layers: &mut Vec<Layer<Self::ValueType>>,
+		old_layers: &[Vec<Layer<Self::ValueType>>],
+	) {
 		*layers = retry_operation(|| {
 			let mut disk_state = Vec::new();
 			for i in u8::MIN..=u8::MAX {
@@ -183,10 +222,16 @@ pub trait DbSimulator {
 			}
 
 			if let Some(layers) = Self::attempt_to_reset_model_to_disk_state(layers, &disk_state) {
-				Ok(layers)
-			} else {
-				Err(parity_db::Error::Corruption(format!("Not able to recover the database to one of the valid state. The current database state is: {:?}", disk_state)))
+				return Ok(layers)
 			}
+			for layers in old_layers {
+				if let Some(layers) =
+					Self::attempt_to_reset_model_to_disk_state(layers, &disk_state)
+				{
+					return Ok(layers)
+				}
+			}
+			Err(parity_db::Error::Corruption(format!("Not able to recover the database to one of the valid state. The current database state is: {:?}", disk_state)))
 		})
 	}
 
