@@ -5,6 +5,8 @@ use arbitrary::Arbitrary;
 use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
 use tempfile::tempdir;
 
+pub const NUMBER_OF_POSSIBLE_KEYS: usize = 256;
+
 #[derive(Arbitrary, Debug, Clone, Copy)]
 pub enum CompressionType {
 	NoCompression,
@@ -39,32 +41,37 @@ pub enum Action<O: Debug> {
 	Restart,
 }
 
+#[derive(Clone, Debug)]
+pub struct Layer<V> {
+	// The stored value per possible key (depends if we have ref counting or not)
+	pub values: [Option<V>; NUMBER_OF_POSSIBLE_KEYS],
+	pub written: bool,
+}
+
 pub trait DbSimulator {
+	type ValueType: Debug + Copy;
 	type Operation: Debug;
-	type Model: Default + Debug;
 
 	fn build_column_options(config: &Config) -> parity_db::ColumnOptions;
 
-	fn apply_operations_on_model<'a>(
+	fn apply_operations_on_values<'a>(
 		operations: impl IntoIterator<Item = &'a Self::Operation>,
-		model: &mut Self::Model,
+		values: &mut [Option<Self::ValueType>; NUMBER_OF_POSSIBLE_KEYS],
 	) where
 		Self::Operation: 'a;
 
-	fn write_first_layer_to_disk(model: &mut Self::Model);
-
 	fn attempt_to_reset_model_to_disk_state(
-		model: &Self::Model,
+		layers: &[Layer<Self::ValueType>],
 		state: &[(u8, u8)],
-	) -> Option<Self::Model>;
+	) -> Option<Vec<Layer<Self::ValueType>>>;
 
 	fn map_operation(operation: &Self::Operation) -> parity_db::Operation<Vec<u8>, Vec<u8>>;
 
-	fn model_required_content(model: &Self::Model) -> Vec<(Vec<u8>, Vec<u8>)>;
+	fn layer_required_content(values: &[Option<Self::ValueType>; NUMBER_OF_POSSIBLE_KEYS]) -> Vec<(Vec<u8>, Vec<u8>)>;
 
-	fn model_optional_content(model: &Self::Model) -> Vec<(Vec<u8>, Vec<u8>)>;
+	fn layer_optional_content(values: &[Option<Self::ValueType>; NUMBER_OF_POSSIBLE_KEYS]) -> Vec<(Vec<u8>, Vec<u8>)>;
 
-	fn model_removed_content(model: &Self::Model) -> Vec<Vec<u8>>;
+	fn layer_removed_content(values: &[Option<Self::ValueType>; NUMBER_OF_POSSIBLE_KEYS]) -> Vec<Vec<u8>>;
 
 	fn simulate(config: Config, actions: Vec<Action<Self::Operation>>) {
 		let dir = tempdir().unwrap();
@@ -83,7 +90,7 @@ pub trait DbSimulator {
 		// We don't check for now failures inside of initialization.
 		parity_db::set_number_of_allowed_io_operations(usize::MAX);
 		let mut db = parity_db::Db::open_or_create(&options).unwrap();
-		let mut model = Self::Model::default();
+		let mut layers = Vec::new();
 		parity_db::set_number_of_allowed_io_operations(
 			config.number_of_allowed_io_operations.into(),
 		);
@@ -92,36 +99,44 @@ pub trait DbSimulator {
 			log::debug!("Applying on the database: {:?}", action);
 			match action {
 				Action::Transaction(operations) => {
-					Self::apply_operations_on_model(operations, &mut model);
+					let mut values =
+						layers.last().map_or([None; NUMBER_OF_POSSIBLE_KEYS], |l: &Layer<Self::ValueType>| l.values);
+					Self::apply_operations_on_values(operations, &mut values);
+					layers.push(Layer { values, written: false });
 					db.commit_changes(operations.iter().map(|o| (0, Self::map_operation(o))))
 						.unwrap();
 				},
 				Action::ProcessReindex =>
-					db = Self::try_or_restart(|db| db.process_reindex(), db, &mut model, &options),
+					db = Self::try_or_restart(|db| db.process_reindex(), db, &mut layers, &options),
 				Action::ProcessCommits => {
-					Self::write_first_layer_to_disk(&mut model);
-					db = Self::try_or_restart(|db| db.process_commits(), db, &mut model, &options)
+					for layer in &mut layers {
+						if !layer.written {
+							layer.written = true;
+							break
+						}
+					}
+					db = Self::try_or_restart(|db| db.process_commits(), db, &mut layers, &options)
 				},
 				Action::FlushAndEnactLogs => {
 					// We repeat flush and then call enact_log to avoid deadlocks due to
 					// Log::flush_one side effects
 					for _ in 0..2 {
-						db = Self::try_or_restart(|db| db.flush_logs(), db, &mut model, &options)
+						db = Self::try_or_restart(|db| db.flush_logs(), db, &mut layers, &options)
 					}
-					db = Self::try_or_restart(|db| db.enact_logs(), db, &mut model, &options)
+					db = Self::try_or_restart(|db| db.enact_logs(), db, &mut layers, &options)
 				},
 				Action::CleanLogs =>
-					db = Self::try_or_restart(|db| db.clean_logs(), db, &mut model, &options),
+					db = Self::try_or_restart(|db| db.clean_logs(), db, &mut layers, &options),
 				Action::Restart => {
 					db = {
 						drop(db);
 						retry_operation(|| parity_db::Db::open(&options))
 					};
-					Self::reset_model_from_database(&db, &mut model);
+					Self::reset_model_from_database(&db, &mut layers);
 				},
 			}
 			retry_operation(|| {
-				Self::check_db_and_model_are_equals(&db, &model, config.btree_index)
+				Self::check_db_and_model_are_equals(&db, &layers, config.btree_index)
 			})
 			.unwrap();
 		}
@@ -130,7 +145,7 @@ pub trait DbSimulator {
 	fn try_or_restart(
 		op: impl FnOnce(&parity_db::Db) -> parity_db::Result<()>,
 		mut db: parity_db::Db,
-		model: &mut Self::Model,
+		layers: &mut Vec<Layer<Self::ValueType>>,
 		options: &parity_db::Options,
 	) -> parity_db::Db {
 		match op(&db) {
@@ -140,15 +155,15 @@ pub trait DbSimulator {
 				drop(db);
 				parity_db::set_number_of_allowed_io_operations(usize::MAX);
 				db = parity_db::Db::open(options).unwrap();
-				Self::reset_model_from_database(&db, model);
+				Self::reset_model_from_database(&db, layers);
 				db
 			},
 			Err(e) => panic!("database error: {}", e),
 		}
 	}
 
-	fn reset_model_from_database(db: &parity_db::Db, model: &mut Self::Model) {
-		*model = retry_operation(|| {
+	fn reset_model_from_database(db: &parity_db::Db, layers: &mut Vec<Layer<Self::ValueType>>) {
+		*layers = retry_operation(|| {
 			let mut disk_state = Vec::new();
 			for i in u8::MIN..=u8::MAX {
 				if let Some(v) = db.get(0, &[i])? {
@@ -156,8 +171,8 @@ pub trait DbSimulator {
 				}
 			}
 
-			if let Some(model) = Self::attempt_to_reset_model_to_disk_state(model, &disk_state) {
-				Ok(model)
+			if let Some(layers) = Self::attempt_to_reset_model_to_disk_state(layers, &disk_state) {
+				Ok(layers)
 			} else {
 				Err(parity_db::Error::Corruption(format!("Not able to recover the database to one of the valid state. The current database state is: {:?}", disk_state)))
 			}
@@ -166,22 +181,23 @@ pub trait DbSimulator {
 
 	fn check_db_and_model_are_equals(
 		db: &parity_db::Db,
-		model: &Self::Model,
+		layers: &[Layer<Self::ValueType>],
 		is_db_b_tree: bool,
 	) -> parity_db::Result<Result<(), String>> {
-		for (k, v) in Self::model_required_content(model) {
+		let values = layers.last().map_or([None; NUMBER_OF_POSSIBLE_KEYS], |l| l.values);
+		for (k, v) in Self::layer_required_content(&values) {
 			if db.get(0, &k)?.as_ref() != Some(&v) {
 				return Ok(Err(format!("The value {:?} for key {:?} is not in the database", v, k)))
 			}
 		}
-		for k in Self::model_removed_content(model) {
+		for k in Self::layer_removed_content(&values) {
 			if db.get(0, &k)?.is_some() {
 				return Ok(Err(format!("The key {:?} should not be in the database", k)))
 			}
 		}
 
 		if is_db_b_tree {
-			let mut model_content = Self::model_optional_content(model);
+			let mut model_content = Self::layer_optional_content(&values);
 
 			// We check the BTree forward iterator
 			let mut db_iter = db.iter(0)?;

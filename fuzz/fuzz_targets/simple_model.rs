@@ -7,23 +7,11 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use parity_db_fuzz::*;
-
-const NUMBER_OF_POSSIBLE_KEYS: usize = 256;
-
-#[derive(Clone, Debug)]
-struct Layer {
-	// For each key the value if it is inserted or None if it is removed
-	values: [Option<u8>; NUMBER_OF_POSSIBLE_KEYS],
-	written: bool,
-}
-
-type Model = Vec<Layer>;
-
 struct Simulator;
 
 impl DbSimulator for Simulator {
+	type ValueType = u8;
 	type Operation = (u8, Option<u8>);
-	type Model = Model;
 
 	fn build_column_options(config: &Config) -> parity_db::ColumnOptions {
 		parity_db::ColumnOptions {
@@ -33,27 +21,16 @@ impl DbSimulator for Simulator {
 		}
 	}
 
-	fn apply_operations_on_model<'a>(
-		operations: impl IntoIterator<Item = &'a (u8, Option<u8>)>,
-		model: &mut Model,
+	fn apply_operations_on_values<'a>(
+		operations: impl IntoIterator<Item = &'a Self::Operation>,
+		values: &mut [Option<u8>; NUMBER_OF_POSSIBLE_KEYS],
 	) {
-		let mut values = model.last().map_or([None; NUMBER_OF_POSSIBLE_KEYS], |l| l.values);
 		for (k, v) in operations {
 			values[usize::from(*k)] = *v;
 		}
-		model.push(Layer { values, written: false });
 	}
 
-	fn write_first_layer_to_disk(model: &mut Model) {
-		for layer in model {
-			if !layer.written {
-				layer.written = true;
-				break
-			}
-		}
-	}
-
-	fn attempt_to_reset_model_to_disk_state(model: &Model, state: &[(u8, u8)]) -> Option<Model> {
+	fn attempt_to_reset_model_to_disk_state(layers: &[Layer<u8>], state: &[(u8, u8)]) -> Option<Vec<Layer<u8>>> {
 		let expected = {
 			let mut values = [None; NUMBER_OF_POSSIBLE_KEYS];
 			for (k, v) in state {
@@ -62,7 +39,7 @@ impl DbSimulator for Simulator {
 			values
 		};
 
-		for layer in model.iter().rev() {
+		for layer in layers.iter().rev() {
 			if !layer.written {
 				continue
 			}
@@ -89,32 +66,24 @@ impl DbSimulator for Simulator {
 		}
 	}
 
-	fn model_required_content(model: &Model) -> Vec<(Vec<u8>, Vec<u8>)> {
-		if let Some(last) = model.last() {
-			last.values
-				.iter()
-				.enumerate()
-				.filter_map(|(i, v)| v.map(|v| (vec![i as u8], vec![v])))
-				.collect()
-		} else {
-			Vec::new()
-		}
+	fn layer_required_content(values: &[Option<u8>; NUMBER_OF_POSSIBLE_KEYS]) -> Vec<(Vec<u8>, Vec<u8>)> {
+		values
+			.iter()
+			.enumerate()
+			.filter_map(|(i, v)| v.map(|v| (vec![i as u8], vec![v])))
+			.collect()
 	}
 
-	fn model_optional_content(model: &Model) -> Vec<(Vec<u8>, Vec<u8>)> {
-		Self::model_required_content(model)
+	fn layer_optional_content(values: &[Option<u8>; NUMBER_OF_POSSIBLE_KEYS]) -> Vec<(Vec<u8>, Vec<u8>)> {
+		Self::layer_required_content(values)
 	}
 
-	fn model_removed_content(model: &Model) -> Vec<Vec<u8>> {
-		if let Some(last) = model.last() {
-			last.values
-				.iter()
-				.enumerate()
-				.filter_map(|(i, v)| if v.is_none() { Some(vec![i as u8]) } else { None })
-				.collect()
-		} else {
-			(u8::MIN..=u8::MAX).map(|k| vec![k]).collect()
-		}
+	fn layer_removed_content(values: &[Option<u8>; NUMBER_OF_POSSIBLE_KEYS]) -> Vec<Vec<u8>> {
+		values
+			.iter()
+			.enumerate()
+			.filter_map(|(i, v)| if v.is_none() { Some(vec![i as u8]) } else { None })
+			.collect()
 	}
 }
 
