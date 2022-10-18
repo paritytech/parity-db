@@ -2,7 +2,7 @@
 // This file is dual-licensed as Apache-2.0 or MIT.
 
 use arbitrary::Arbitrary;
-use std::{cmp::Ordering, fmt::Debug, path::Path};
+use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
 use tempfile::tempdir;
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -43,7 +43,7 @@ pub trait DbSimulator {
 	type Operation: Debug;
 	type Model: Default + Debug;
 
-	fn build_options(config: &Config, path: &Path) -> parity_db::Options;
+	fn build_column_options(config: &Config) -> parity_db::ColumnOptions;
 
 	fn apply_operations_on_model<'a>(
 		operations: impl IntoIterator<Item = &'a Self::Operation>,
@@ -68,7 +68,17 @@ pub trait DbSimulator {
 
 	fn simulate(config: Config, actions: Vec<Action<Self::Operation>>) {
 		let dir = tempdir().unwrap();
-		let options = Self::build_options(&config, dir.path());
+		let options = parity_db::Options {
+			path: dir.path().to_owned(),
+			columns: vec![Self::build_column_options(&config)],
+			sync_wal: true,
+			sync_data: true,
+			stats: false,
+			salt: Some([0; 32]),
+			compression_threshold: HashMap::new(),
+			always_flush: true,
+			with_background_thread: false,
+		};
 
 		// We don't check for now failures inside of initialization.
 		parity_db::set_number_of_allowed_io_operations(usize::MAX);

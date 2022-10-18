@@ -8,7 +8,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use parity_db_fuzz::*;
-use std::{cmp::min, collections::HashMap, path::Path};
+use std::cmp::min;
 
 const NUMBER_OF_POSSIBLE_KEYS: usize = 256;
 
@@ -34,23 +34,13 @@ impl DbSimulator for Simulator {
 	type Operation = Operation;
 	type Model = Model;
 
-	fn build_options(config: &Config, path: &Path) -> parity_db::Options {
-		parity_db::Options {
-			path: path.to_owned(),
-			columns: vec![parity_db::ColumnOptions {
-				ref_counted: true,
-				preimage: true,
-				compression: config.compression.into(),
-				btree_index: config.btree_index,
-				..parity_db::ColumnOptions::default()
-			}],
-			sync_wal: true,
-			sync_data: true,
-			stats: false,
-			salt: None,
-			compression_threshold: HashMap::new(),
-			always_flush: true,
-			with_background_thread: false,
+	fn build_column_options(config: &Config) -> parity_db::ColumnOptions {
+		parity_db::ColumnOptions {
+			ref_counted: true,
+			preimage: true,
+			compression: config.compression.into(),
+			btree_index: config.btree_index,
+			..parity_db::ColumnOptions::default()
 		}
 	}
 
