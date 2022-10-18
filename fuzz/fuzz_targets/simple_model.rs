@@ -14,7 +14,7 @@ const NUMBER_OF_POSSIBLE_KEYS: usize = 256;
 #[derive(Clone, Debug)]
 struct Layer {
 	// For each key the value if it is inserted or None if it is removed
-	values: [Option<Option<u8>>; NUMBER_OF_POSSIBLE_KEYS],
+	values: [Option<u8>; NUMBER_OF_POSSIBLE_KEYS],
 	written: bool,
 }
 
@@ -48,9 +48,9 @@ impl DbSimulator for Simulator {
 		operations: impl IntoIterator<Item = &'a (u8, Option<u8>)>,
 		model: &mut Model,
 	) {
-		let mut values = [None; NUMBER_OF_POSSIBLE_KEYS];
+		let mut values = model.last().map_or([None; NUMBER_OF_POSSIBLE_KEYS], |l| l.values);
 		for (k, v) in operations {
-			values[usize::from(*k)] = Some(*v);
+			values[usize::from(*k)] = *v;
 		}
 		model.push(Layer { values, written: false });
 	}
@@ -65,7 +65,6 @@ impl DbSimulator for Simulator {
 	}
 
 	fn attempt_to_reset_model_to_disk_state(model: &Model, state: &[(u8, u8)]) -> Option<Model> {
-		let mut model = model.clone();
 		let expected = {
 			let mut values = [None; NUMBER_OF_POSSIBLE_KEYS];
 			for (k, v) in state {
@@ -74,33 +73,19 @@ impl DbSimulator for Simulator {
 			values
 		};
 
-		while !model.is_empty() {
-			if !model.last().unwrap().written {
-				model.pop();
+		for layer in model.iter().rev() {
+			if !layer.written {
 				continue
 			}
 
 			// Is it equal to current state?
-			let mut is_equal = true;
-			for (k, expected_value) in expected.iter().enumerate() {
-				for layer in model.iter().rev() {
-					if let Some(v) = layer.values[k] {
-						if v != *expected_value {
-							is_equal = false;
-						}
-						break
-					}
-				}
+			if layer.values == expected {
+				// We found a correct last layer
+				return Some(vec![layer.clone()])
 			}
-			if is_equal {
-				// We found it!
-				return Some(model)
-			}
-			log::debug!("Reverting layer number {}", model.len() - 1);
-			model.pop();
 		}
 		if state.is_empty() {
-			Some(Vec::new()) // empty state
+			Some(Vec::new())
 		} else {
 			None
 		}
@@ -116,18 +101,15 @@ impl DbSimulator for Simulator {
 	}
 
 	fn model_required_content(model: &Model) -> Vec<(Vec<u8>, Vec<u8>)> {
-		let mut content = Vec::new();
-		for k in u8::MIN..=u8::MAX {
-			for layer in model.iter().rev() {
-				if let Some(v) = layer.values[usize::from(k)] {
-					if let Some(v) = v {
-						content.push((vec![k], vec![v]));
-					}
-					break
-				}
-			}
+		if let Some(last) = model.last() {
+			last.values
+				.iter()
+				.enumerate()
+				.filter_map(|(i, v)| v.map(|v| (vec![i as u8], vec![v])))
+				.collect()
+		} else {
+			Vec::new()
 		}
-		content
 	}
 
 	fn model_optional_content(model: &Model) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -135,18 +117,15 @@ impl DbSimulator for Simulator {
 	}
 
 	fn model_removed_content(model: &Model) -> Vec<Vec<u8>> {
-		let mut keys = Vec::new();
-		for k in u8::MIN..=u8::MAX {
-			for layer in model.iter().rev() {
-				if let Some(v) = layer.values[usize::from(k)] {
-					if v.is_none() {
-						keys.push(vec![k]);
-					}
-					break
-				}
-			}
+		if let Some(last) = model.last() {
+			last.values
+				.iter()
+				.enumerate()
+				.filter_map(|(i, v)| if v.is_none() { Some(vec![i as u8]) } else { None })
+				.collect()
+		} else {
+			(u8::MIN..=u8::MAX).map(|k| vec![k]).collect()
 		}
-		keys
 	}
 }
 
