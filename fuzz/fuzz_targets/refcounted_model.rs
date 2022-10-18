@@ -52,41 +52,27 @@ impl DbSimulator for Simulator {
 		}
 	}
 
-	fn attempt_to_reset_model_to_disk_state(layers: &[Layer<usize>], state: &[(u8, u8)]) -> Option<Vec<Layer<usize>>> {
-		let expected = {
-			let mut is_present = [false; NUMBER_OF_POSSIBLE_KEYS];
-			for (k, _) in state {
-				is_present[usize::from(*k)] = true;
-			}
-			is_present
-		};
-
-		let mut candidates = Vec::new();
-		for layer in layers.iter().rev() {
-			if !layer.written {
-				continue
-			}
-
-			// Is it equal to current state?
-			let is_equal = expected.iter().enumerate().all(|(k, is_present)| {
-				if *is_present {
-					layer.values[k].is_some()
-				} else {
-					layer.values[k].unwrap_or(0) == 0
-				}
-			});
-			if is_equal {
-				// We found a correct last layer
-				candidates.push(layer);
-			}
+	fn is_layer_state_compatible_with_disk_state(
+		layer_values: &[Option<usize>; NUMBER_OF_POSSIBLE_KEYS],
+		state: &[(u8, u8)],
+	) -> bool {
+		if !state.iter().all(|(k, v)| k == v) {
+			return false // keys and values should be equal
 		}
-		if candidates.is_empty() {
-			return if state.is_empty() { Some(Vec::new()) } else { None }
-		}
+		layer_values.iter().enumerate().all(|(i, c)| {
+			let key = i as u8;
+			match c {
+				None => state.iter().all(|(k, _)| *k != key),
+				Some(0) => true,
+				Some(_) => state.iter().any(|(k, _)| *k == key),
+			}
+		})
+	}
 
+	fn build_best_layer_for_recovery(layers: &[&Layer<usize>]) -> Layer<usize> {
 		// if we are multiple candidates, we are unsure. We pick the lower count per candidate
 		let mut new_state_safe_counts = [None; NUMBER_OF_POSSIBLE_KEYS];
-		for layer in candidates {
+		for layer in layers {
 			for i in u8::MIN..=u8::MAX {
 				if let Some(c) = layer.values[usize::from(i)] {
 					new_state_safe_counts[usize::from(i)] =
@@ -94,7 +80,7 @@ impl DbSimulator for Simulator {
 				}
 			}
 		}
-		Some(vec![Layer { values: new_state_safe_counts, written: true }])
+		Layer { values: new_state_safe_counts, written: true }
 	}
 
 	fn map_operation(operation: &Operation) -> parity_db::Operation<Vec<u8>, Vec<u8>> {
@@ -121,7 +107,9 @@ impl DbSimulator for Simulator {
 			.collect()
 	}
 
-	fn layer_optional_content(values: &[Option<usize>; NUMBER_OF_POSSIBLE_KEYS]) -> Vec<(Vec<u8>, Vec<u8>)> {
+	fn layer_optional_content(
+		values: &[Option<usize>; NUMBER_OF_POSSIBLE_KEYS],
+	) -> Vec<(Vec<u8>, Vec<u8>)> {
 		values
 			.iter()
 			.enumerate()

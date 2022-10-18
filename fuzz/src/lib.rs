@@ -60,18 +60,26 @@ pub trait DbSimulator {
 	) where
 		Self::Operation: 'a;
 
-	fn attempt_to_reset_model_to_disk_state(
-		layers: &[Layer<Self::ValueType>],
+	fn is_layer_state_compatible_with_disk_state(
+		layer_values: &[Option<Self::ValueType>; NUMBER_OF_POSSIBLE_KEYS],
 		state: &[(u8, u8)],
-	) -> Option<Vec<Layer<Self::ValueType>>>;
+	) -> bool;
+
+	fn build_best_layer_for_recovery(layers: &[&Layer<Self::ValueType>]) -> Layer<Self::ValueType>;
 
 	fn map_operation(operation: &Self::Operation) -> parity_db::Operation<Vec<u8>, Vec<u8>>;
 
-	fn layer_required_content(values: &[Option<Self::ValueType>; NUMBER_OF_POSSIBLE_KEYS]) -> Vec<(Vec<u8>, Vec<u8>)>;
+	fn layer_required_content(
+		values: &[Option<Self::ValueType>; NUMBER_OF_POSSIBLE_KEYS],
+	) -> Vec<(Vec<u8>, Vec<u8>)>;
 
-	fn layer_optional_content(values: &[Option<Self::ValueType>; NUMBER_OF_POSSIBLE_KEYS]) -> Vec<(Vec<u8>, Vec<u8>)>;
+	fn layer_optional_content(
+		values: &[Option<Self::ValueType>; NUMBER_OF_POSSIBLE_KEYS],
+	) -> Vec<(Vec<u8>, Vec<u8>)>;
 
-	fn layer_removed_content(values: &[Option<Self::ValueType>; NUMBER_OF_POSSIBLE_KEYS]) -> Vec<Vec<u8>>;
+	fn layer_removed_content(
+		values: &[Option<Self::ValueType>; NUMBER_OF_POSSIBLE_KEYS],
+	) -> Vec<Vec<u8>>;
 
 	fn simulate(config: Config, actions: Vec<Action<Self::Operation>>) {
 		let dir = tempdir().unwrap();
@@ -99,8 +107,11 @@ pub trait DbSimulator {
 			log::debug!("Applying on the database: {:?}", action);
 			match action {
 				Action::Transaction(operations) => {
-					let mut values =
-						layers.last().map_or([None; NUMBER_OF_POSSIBLE_KEYS], |l: &Layer<Self::ValueType>| l.values);
+					let mut values = layers
+						.last()
+						.map_or([None; NUMBER_OF_POSSIBLE_KEYS], |l: &Layer<Self::ValueType>| {
+							l.values
+						});
 					Self::apply_operations_on_values(operations, &mut values);
 					layers.push(Layer { values, written: false });
 					db.commit_changes(operations.iter().map(|o| (0, Self::map_operation(o))))
@@ -177,6 +188,32 @@ pub trait DbSimulator {
 				Err(parity_db::Error::Corruption(format!("Not able to recover the database to one of the valid state. The current database state is: {:?}", disk_state)))
 			}
 		})
+	}
+
+	fn attempt_to_reset_model_to_disk_state(
+		layers: &[Layer<Self::ValueType>],
+		state: &[(u8, u8)],
+	) -> Option<Vec<Layer<Self::ValueType>>> {
+		let mut candidates = Vec::new();
+		for layer in layers.iter().rev() {
+			if !layer.written {
+				continue
+			}
+
+			if Self::is_layer_state_compatible_with_disk_state(&layer.values, state) {
+				// We found a correct last layer
+				candidates.push(layer);
+			}
+		}
+		if candidates.is_empty() {
+			if state.is_empty() {
+				Some(Vec::new())
+			} else {
+				None
+			}
+		} else {
+			Some(vec![Self::build_best_layer_for_recovery(&candidates)])
+		}
 	}
 
 	fn check_db_and_model_are_equals(

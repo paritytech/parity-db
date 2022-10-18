@@ -30,31 +30,22 @@ impl DbSimulator for Simulator {
 		}
 	}
 
-	fn attempt_to_reset_model_to_disk_state(layers: &[Layer<u8>], state: &[(u8, u8)]) -> Option<Vec<Layer<u8>>> {
-		let expected = {
-			let mut values = [None; NUMBER_OF_POSSIBLE_KEYS];
-			for (k, v) in state {
-				values[usize::from(*k)] = Some(*v);
+	fn is_layer_state_compatible_with_disk_state(
+		layer_values: &[Option<u8>; NUMBER_OF_POSSIBLE_KEYS],
+		state: &[(u8, u8)],
+	) -> bool {
+		layer_values.iter().enumerate().all(|(i, value)| {
+			let key = i as u8;
+			if let Some(value) = value {
+				state.iter().any(|(k, v)| *k == key && v == value)
+			} else {
+				state.iter().all(|(k, _)| *k != key)
 			}
-			values
-		};
+		})
+	}
 
-		for layer in layers.iter().rev() {
-			if !layer.written {
-				continue
-			}
-
-			// Is it equal to current state?
-			if layer.values == expected {
-				// We found a correct last layer
-				return Some(vec![layer.clone()])
-			}
-		}
-		if state.is_empty() {
-			Some(Vec::new())
-		} else {
-			None
-		}
+	fn build_best_layer_for_recovery(layers: &[&Layer<u8>]) -> Layer<u8> {
+		layers[0].clone()
 	}
 
 	fn map_operation(operation: &(u8, Option<u8>)) -> parity_db::Operation<Vec<u8>, Vec<u8>> {
@@ -66,7 +57,9 @@ impl DbSimulator for Simulator {
 		}
 	}
 
-	fn layer_required_content(values: &[Option<u8>; NUMBER_OF_POSSIBLE_KEYS]) -> Vec<(Vec<u8>, Vec<u8>)> {
+	fn layer_required_content(
+		values: &[Option<u8>; NUMBER_OF_POSSIBLE_KEYS],
+	) -> Vec<(Vec<u8>, Vec<u8>)> {
 		values
 			.iter()
 			.enumerate()
@@ -74,7 +67,9 @@ impl DbSimulator for Simulator {
 			.collect()
 	}
 
-	fn layer_optional_content(values: &[Option<u8>; NUMBER_OF_POSSIBLE_KEYS]) -> Vec<(Vec<u8>, Vec<u8>)> {
+	fn layer_optional_content(
+		values: &[Option<u8>; NUMBER_OF_POSSIBLE_KEYS],
+	) -> Vec<(Vec<u8>, Vec<u8>)> {
 		Self::layer_required_content(values)
 	}
 
