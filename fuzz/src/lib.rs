@@ -2,7 +2,7 @@
 // This file is dual-licensed as Apache-2.0 or MIT.
 
 use arbitrary::Arbitrary;
-use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
+use std::{collections::HashMap, fmt::Debug};
 use tempfile::tempdir;
 
 pub const NUMBER_OF_POSSIBLE_KEYS: usize = 256;
@@ -40,6 +40,8 @@ pub enum Action<O: Debug> {
 	EnactLog,
 	CleanLogs,
 	Restart,
+	IterPrev,
+	IterNext,
 }
 
 #[derive(Clone, Debug)]
@@ -47,6 +49,33 @@ pub struct Layer<V> {
 	// The stored value per possible key (depends if we have ref counting or not)
 	pub values: [Option<V>; NUMBER_OF_POSSIBLE_KEYS],
 	pub written: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum IterPosition {
+	Start,
+	Value(u8),
+	End,
+}
+
+pub struct DbWithIter {
+	iter: Option<parity_db::BTreeIterator<'static>>,
+	iter_current_key: Option<IterPosition>,
+	db: parity_db::Db,
+}
+
+impl DbWithIter {
+	fn open(options: &parity_db::Options) -> parity_db::Result<Self> {
+		let db = parity_db::Db::open_or_create(options)?;
+		// Ok because we never move it outside of the current struct where the database is required
+		// to outlive the iterator
+		let iter = if options.columns[0].btree_index {
+			Some(unsafe { std::mem::transmute(db.iter(0)?) })
+		} else {
+			None
+		};
+		Ok(Self { db, iter, iter_current_key: None })
+	}
 }
 
 pub trait DbSimulator {
@@ -98,7 +127,7 @@ pub trait DbSimulator {
 
 		// We don't check for now failures inside of initialization.
 		parity_db::set_number_of_allowed_io_operations(usize::MAX);
-		let mut db = parity_db::Db::open_or_create(&options).unwrap();
+		let mut db = DbWithIter::open(&options).unwrap();
 		let mut layers = Vec::new();
 		// In case of bad writes, when restarting the DB we might end up to with a state of the
 		// previous opening but with a state of a older one.
@@ -111,14 +140,11 @@ pub trait DbSimulator {
 			log::debug!("Applying on the database: {:?}", action);
 			match action {
 				Action::Transaction(operations) => {
-					let mut values = layers
-						.last()
-						.map_or([None; NUMBER_OF_POSSIBLE_KEYS], |l: &Layer<Self::ValueType>| {
-							l.values
-						});
+					let mut values = model_values(&layers);
 					Self::apply_operations_on_values(operations, &mut values);
 					layers.push(Layer { values, written: false });
-					db.commit_changes(operations.iter().map(|o| (0, Self::map_operation(o))))
+					db.db
+						.commit_changes(operations.iter().map(|o| (0, Self::map_operation(o))))
 						.unwrap();
 				},
 				Action::ProcessReindex =>
@@ -172,33 +198,140 @@ pub trait DbSimulator {
 					old_layers.push(layers.clone());
 					db = {
 						drop(db);
-						retry_operation(|| parity_db::Db::open(&options))
+						retry_operation(|| DbWithIter::open(&options))
 					};
-					Self::reset_model_from_database(&db, &mut layers, &old_layers);
+					Self::reset_model_from_database(&db.db, &mut layers, &old_layers);
 				},
+				Action::IterPrev =>
+					if let Some(iter) = &mut db.iter {
+						let mut old_key = if let Some(old_key) = db.iter_current_key.take() {
+							old_key
+						} else {
+							retry_operation(|| iter.seek_to_last());
+							IterPosition::End
+						};
+						let new_key_value =
+							iter.prev().unwrap_or_else(|e| {
+								log::debug!("Database error: {}, restarting iter.prev without I/O limitations.", e);
+
+								// We ignore the error and reset the iterator
+								parity_db::set_number_of_allowed_io_operations(usize::MAX);
+								iter.seek_to_last().unwrap();
+								old_key = IterPosition::End;
+								iter.prev().unwrap()
+							});
+						let mut content = Self::layer_required_content(&model_values(&layers));
+						content.sort();
+						match old_key {
+							IterPosition::Start => {
+								log::info!(
+									"Prev lookup on iterator in start state, expecting None"
+								);
+								assert_eq!(new_key_value, None);
+								db.iter_current_key = Some(IterPosition::Start);
+							},
+							IterPosition::Value(old_key) => {
+								let expected = Self::valid_previous_values(&[old_key], &layers);
+								log::info!(
+									"Prev lookup on iterator on old key {}, expecting one of {:?}",
+									old_key,
+									expected
+								);
+								assert!(expected.contains(&new_key_value), "Prev lookup on iterator on old key {}, expecting one of {:?}, found {:?}",
+										old_key,
+										expected, new_key_value);
+								db.iter_current_key =
+									Some(new_key_value.map_or(IterPosition::Start, |(k, _)| {
+										IterPosition::Value(k[0])
+									}));
+							},
+							IterPosition::End => {
+								let expected =
+									Self::valid_previous_values(&[u8::MAX, u8::MAX], &layers);
+								log::info!(
+									"Prev lookup on iterator on end state, expecting one of {:?}",
+									expected
+								);
+								assert!(expected.contains(&new_key_value), "Prev lookup on iterator on end state, expecting one of {:?}, found {:?}",
+										expected, new_key_value);
+								db.iter_current_key =
+									Some(new_key_value.map_or(IterPosition::Start, |(k, _)| {
+										IterPosition::Value(k[0])
+									}));
+							},
+						}
+					},
+				Action::IterNext =>
+					if let Some(iter) = &mut db.iter {
+						let mut old_key = if let Some(old_key) = db.iter_current_key.take() {
+							old_key
+						} else {
+							retry_operation(|| iter.seek_to_first());
+							IterPosition::Start
+						};
+						let new_key_value =
+							iter.next().unwrap_or_else(|e| {
+								log::debug!("Database error: {}, restarting iter.next without I/O limitations.", e);
+
+								// We ignore the error and reset the iterator
+								parity_db::set_number_of_allowed_io_operations(usize::MAX);
+								iter.seek_to_first().unwrap();
+								old_key = IterPosition::Start;
+								iter.next().unwrap()
+							});
+						match old_key {
+							IterPosition::Start => {
+								let expected = Self::valid_next_values(&[], &layers);
+								log::info!(
+									"Next lookup on iterator on start state, expecting any of {:?}",
+									expected
+								);
+								assert!(expected.contains(&new_key_value), "Next lookup on iterator on start state, expecting any of {:?}, found {:?}", expected, new_key_value);
+								db.iter_current_key =
+									Some(new_key_value.map_or(IterPosition::End, |(k, _)| {
+										IterPosition::Value(k[0])
+									}));
+							},
+							IterPosition::Value(old_key) => {
+								let expected = Self::valid_next_values(&[old_key], &layers);
+								log::info!(
+									"Next lookup on iterator on old key {}, expecting one of {:?}",
+									old_key,
+									expected
+								);
+								assert!(expected.contains(&new_key_value), "Next lookup on iterator on old key {}, expecting one of {:?}, found {:?}", old_key, expected, new_key_value);
+								db.iter_current_key =
+									Some(new_key_value.map_or(IterPosition::End, |(k, _)| {
+										IterPosition::Value(k[0])
+									}));
+							},
+							IterPosition::End => {
+								log::info!("Next lookup on iterator in end state, expecting None");
+								assert_eq!(new_key_value, None);
+								db.iter_current_key = Some(IterPosition::End);
+							},
+						}
+					},
 			}
-			retry_operation(|| {
-				Self::check_db_and_model_are_equals(&db, &layers, config.btree_index)
-			})
-			.unwrap();
+			retry_operation(|| Self::check_db_and_model_are_equals(&db.db, &layers)).unwrap();
 		}
 	}
 
 	fn try_or_restart(
 		op: impl FnOnce(&parity_db::Db) -> parity_db::Result<()>,
-		mut db: parity_db::Db,
+		mut db: DbWithIter,
 		layers: &mut Vec<Layer<Self::ValueType>>,
 		old_layers: &[Vec<Layer<Self::ValueType>>],
 		options: &parity_db::Options,
-	) -> parity_db::Db {
-		match op(&db) {
+	) -> DbWithIter {
+		match op(&db.db) {
 			Ok(()) => db,
 			Err(e) if e.to_string().contains("Instrumented failure") => {
 				log::debug!("Restarting after an instrumented failure");
 				drop(db);
 				parity_db::set_number_of_allowed_io_operations(usize::MAX);
-				db = parity_db::Db::open(options).unwrap();
-				Self::reset_model_from_database(&db, layers, old_layers);
+				db = DbWithIter::open(options).unwrap();
+				Self::reset_model_from_database(&db.db, layers, old_layers);
 				db
 			},
 			Err(e) => panic!("database error: {}", e),
@@ -261,9 +394,8 @@ pub trait DbSimulator {
 	fn check_db_and_model_are_equals(
 		db: &parity_db::Db,
 		layers: &[Layer<Self::ValueType>],
-		is_db_b_tree: bool,
 	) -> parity_db::Result<Result<(), String>> {
-		let values = layers.last().map_or([None; NUMBER_OF_POSSIBLE_KEYS], |l| l.values);
+		let values = model_values(layers);
 		for (k, v) in Self::layer_required_content(&values) {
 			if db.get(0, &k)?.as_ref() != Some(&v) {
 				return Ok(Err(format!("The value {:?} for key {:?} is not in the database", v, k)))
@@ -274,68 +406,82 @@ pub trait DbSimulator {
 				return Ok(Err(format!("The key {:?} should not be in the database", k)))
 			}
 		}
-
-		if is_db_b_tree {
-			let mut model_content = Self::layer_optional_content(&values);
-
-			// We check the BTree forward iterator
-			let mut db_iter = db.iter(0)?;
-			db_iter.seek_to_first()?;
-			let mut db_content = Vec::new();
-			while let Some(e) = db_iter.next()? {
-				db_content.push(e);
-			}
-			if !is_slice_included_in_sorted(&db_content, &model_content, |a, b| a.cmp(b)) {
-				return Ok(Err(format!(
-					"The forward iterator for the db gives {:?} and not {:?}",
-					db_content, model_content
-				)))
-			}
-
-			// We check the BTree backward iterator
-			model_content.reverse();
-			let mut db_iter = db.iter(0)?;
-			db_iter.seek_to_last()?;
-			let mut db_content = Vec::new();
-			while let Some(e) = db_iter.prev()? {
-				db_content.push(e);
-			}
-			if !is_slice_included_in_sorted(&db_content, &model_content, |a, b| b.cmp(a)) {
-				return Ok(Err(format!(
-					"The backward iterator for the db gives {:?} and not {:?}",
-					db_content, model_content
-				)))
-			}
-		}
 		Ok(Ok(()))
+	}
+
+	fn valid_next_values(
+		current_key: &[u8],
+		layers: &[Layer<Self::ValueType>],
+	) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
+		let values = model_values(layers);
+
+		// We pick first the next required value
+		let mut required_content = Self::layer_required_content(&values);
+		required_content.sort();
+		let next_required_key = required_content
+			.iter()
+			.filter_map(|(k, _)| if current_key < k.as_slice() { Some(k) } else { None })
+			.next();
+
+		let mut possible_content = Self::layer_optional_content(&values);
+		possible_content.sort();
+		let mut result = possible_content
+			.into_iter()
+			.filter(|(k, _)| {
+				current_key < k.as_slice() &&
+					next_required_key.map_or(true, |next_required_key| k <= next_required_key)
+			})
+			.map(Some)
+			.collect::<Vec<_>>();
+		if next_required_key.is_none() {
+			result.push(None);
+		}
+		result
+	}
+
+	fn valid_previous_values(
+		current_key: &[u8],
+		layers: &[Layer<Self::ValueType>],
+	) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
+		let values = model_values(layers);
+
+		// We pick first the next required value
+		let mut required_content = Self::layer_required_content(&values);
+		required_content.sort();
+		let previous_required_key = required_content
+			.iter()
+			.rev()
+			.filter_map(|(k, _)| if k.as_slice() < current_key { Some(k) } else { None })
+			.next();
+
+		let mut possible_content = Self::layer_optional_content(&values);
+		possible_content.sort();
+		let mut result = possible_content
+			.into_iter()
+			.filter(|(k, _)| {
+				k.as_slice() < current_key &&
+					previous_required_key
+						.map_or(true, |previous_required_key| previous_required_key <= k)
+			})
+			.map(Some)
+			.collect::<Vec<_>>();
+		if previous_required_key.is_none() {
+			result.push(None);
+		}
+		result
 	}
 }
 
-fn retry_operation<'a, T>(op: impl Fn() -> parity_db::Result<T> + 'a) -> T {
-	(op()).unwrap_or_else(|e| {
-		log::debug!("Database error: {}, restarting without I/O limitations.", e);
+fn model_values<T: Copy>(layers: &[Layer<T>]) -> [Option<T>; NUMBER_OF_POSSIBLE_KEYS] {
+	layers.last().map_or([None; NUMBER_OF_POSSIBLE_KEYS], |l| l.values)
+}
 
-		// We ignore the error and try to open the DB again
+fn retry_operation<'a, T>(mut op: impl FnMut() -> parity_db::Result<T> + 'a) -> T {
+	(op()).unwrap_or_else(|e| {
+		log::debug!("Database error: {}, let's keep going without I/O limitations.", e);
+
+		// We ignore the error and try to redo it
 		parity_db::set_number_of_allowed_io_operations(usize::MAX);
 		op().unwrap()
 	})
-}
-
-fn is_slice_included_in_sorted<T>(
-	small: &[T],
-	large: &[T],
-	cmp: impl Fn(&T, &T) -> Ordering,
-) -> bool {
-	let mut large = large.iter();
-	for se in small {
-		loop {
-			let le = if let Some(le) = large.next() { le } else { return false };
-			match cmp(se, le) {
-				Ordering::Less => return false,
-				Ordering::Greater => continue,
-				Ordering::Equal => break,
-			}
-		}
-	}
-	true
 }
