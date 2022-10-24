@@ -1760,6 +1760,10 @@ mod tests {
 		iter.seek_to_first().unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
+		assert_eq!(iter.prev().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.prev().unwrap(), None);
+		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.next().unwrap(), None);
 
 		iter.seek_to_first().unwrap();
 		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));

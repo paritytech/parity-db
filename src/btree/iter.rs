@@ -277,7 +277,7 @@ impl BTreeIterState {
 
 	fn exit(&mut self, direction: IterDirection) -> bool {
 		loop {
-			if self.state.len() < 2 {
+			if self.state.is_empty() {
 				return true
 			}
 			self.state.pop();
