@@ -543,7 +543,7 @@ mod test {
 			let mut hasher = DefaultHasher::new();
 			i.hash(&mut hasher);
 			let hash = hasher.finish();
-			let entry = Entry::from_u64(hash as u64);
+			let entry = Entry::from_u64(hash);
 			IndexTable::write_entry(&entry, i, &mut chunk2);
 			*chunk = entry;
 		}

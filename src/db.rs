@@ -519,7 +519,7 @@ impl DbInner {
 				Ok(reader) => reader,
 				Err(Error::Corruption(_)) if validation_mode => {
 					log::debug!(target: "parity-db", "Bad log header");
-					self.log.clear_replay_logs()?;
+					self.log.clear_replay_logs();
 					return Ok(false)
 				},
 				Err(e) => return Err(e),
@@ -539,7 +539,7 @@ impl DbInner {
 							reader.record_id(),
 						);
 						drop(reader);
-						self.log.clear_replay_logs()?;
+						self.log.clear_replay_logs();
 						return Ok(false)
 					}
 					// Validate all records before applying anything
@@ -549,7 +549,7 @@ impl DbInner {
 							Err(e) => {
 								log::debug!(target: "parity-db", "Error reading log: {:?}", e);
 								drop(reader);
-								self.log.clear_replay_logs()?;
+								self.log.clear_replay_logs();
 								return Ok(false)
 							},
 						};
@@ -557,7 +557,7 @@ impl DbInner {
 							LogAction::BeginRecord => {
 								log::debug!(target: "parity-db", "Unexpected log header");
 								drop(reader);
-								self.log.clear_replay_logs()?;
+								self.log.clear_replay_logs();
 								return Ok(false)
 							},
 							LogAction::EndRecord => break,
@@ -574,7 +574,7 @@ impl DbInner {
 								) {
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
 									drop(reader);
-									self.log.clear_replay_logs()?;
+									self.log.clear_replay_logs();
 									return Ok(false)
 								}
 							},
@@ -591,7 +591,7 @@ impl DbInner {
 								) {
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
 									drop(reader);
-									self.log.clear_replay_logs()?;
+									self.log.clear_replay_logs();
 									return Ok(false)
 								}
 							},
@@ -679,14 +679,11 @@ impl DbInner {
 	}
 
 	fn flush_logs(&self, min_log_size: u64) -> Result<bool> {
-		let (flush_next, read_next, cleanup_next) = self.log.flush_one(min_log_size)?;
-		if read_next {
+		let has_flushed = self.log.flush_one(min_log_size)?;
+		if has_flushed {
 			self.commit_worker_wait.signal();
 		}
-		if cleanup_next {
-			self.cleanup_worker_wait.signal();
-		}
-		Ok(flush_next)
+		Ok(has_flushed)
 	}
 
 	fn clean_logs(&self) -> Result<bool> {
@@ -741,7 +738,8 @@ impl DbInner {
 				// On error the log reader may be left in inconsistent state. So it is important
 				// to no attempt any further log enactment.
 				log::debug!(target: "parity-db", "Shutdown with error state {}", err);
-				return Ok(())
+				self.log.clean_logs(self.log.num_dirty_logs())?;
+				return self.log.kill_logs()
 			}
 		}
 		log::debug!(target: "parity-db", "Processing leftover commits");
@@ -851,7 +849,12 @@ impl Db {
 		let mut db = DbInner::open(options, opening_mode)?;
 		// This needs to be call before log thread: so first reindexing
 		// will run in correct state.
-		db.replay_all_logs()?;
+		if let Err(e) = db.replay_all_logs() {
+			log::debug!(target: "parity-db", "Error during log replay, doing log cleanup");
+			db.log.clean_logs(db.log.num_dirty_logs())?;
+			db.log.kill_logs()?;
+			return Err(e)
+		}
 		let db = Arc::new(db);
 		#[cfg(any(test, feature = "instrumentation"))]
 		let start_threads = opening_mode != OpeningMode::ReadOnly && options.with_background_thread;
@@ -950,7 +953,10 @@ impl Db {
 		let mut more_work = false;
 		while !db.shutdown.load(Ordering::SeqCst) || more_work {
 			if !more_work {
-				db.commit_worker_wait.wait();
+				db.cleanup_worker_wait.signal();
+				if !db.log.has_still_log_files_to_read() {
+					db.commit_worker_wait.wait();
+				}
 			}
 
 			more_work = db.enact_logs(false)?;
@@ -1456,9 +1462,7 @@ mod tests {
 			}
 			if *self == EnableCommitPipelineStages::DbFile {
 				let _ = db.log.flush_one(0).unwrap();
-				let _ = db.log.flush_one(0).unwrap();
 				while db.enact_logs(false).unwrap() {}
-				let _ = db.log.flush_one(0).unwrap();
 				let _ = db.clean_logs().unwrap();
 			}
 		}
@@ -2379,6 +2383,40 @@ mod tests {
 		for _ in 0..100 {
 			let next = iter.prev().unwrap();
 			assert_eq!(iter_state_rev.next(), next.as_ref().map(|(k, v)| (k, v)));
+		}
+	}
+
+	#[cfg(feature = "instrumentation")]
+	#[test]
+	fn test_partial_log_recovery() {
+		let tmp = tempdir().unwrap();
+		let mut options = Options::with_columns(tmp.path(), 1);
+		options.columns[0].btree_index = true;
+		options.always_flush = true;
+		options.with_background_thread = false;
+
+		// We do 2 commits and we fail while writing the second one
+		{
+			let db = Db::open_or_create(&options).unwrap();
+			db.commit::<_, Vec<u8>>(vec![(0, vec![0], Some(vec![0]))]).unwrap();
+			db.process_commits().unwrap();
+			db.commit::<_, Vec<u8>>(vec![(0, vec![1], Some(vec![1]))]).unwrap();
+			crate::set_number_of_allowed_io_operations(4);
+			assert!(db.process_commits().is_err());
+			crate::set_number_of_allowed_io_operations(usize::MAX);
+			db.flush_logs().unwrap();
+		}
+
+		// We open a first time, the first value is there
+		{
+			let db = Db::open(&options).unwrap();
+			assert_eq!(db.get(0, &[0]).unwrap(), Some(vec![0]));
+		}
+
+		// We open a second time, the first value should be still there
+		{
+			let db = Db::open(&options).unwrap();
+			assert!(db.get(0, &[0]).unwrap().is_some());
 		}
 	}
 }

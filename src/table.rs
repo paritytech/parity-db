@@ -1117,9 +1117,6 @@ mod test {
 		let mut writer = log.begin_record();
 		f(&mut writer);
 		let bytes_written = log.end_record(writer.drain()).unwrap();
-		// Cycle through 2 log files
-		let _ = log.read_next(false);
-		log.flush_one(0).unwrap();
 		let _ = log.read_next(false);
 		log.flush_one(0).unwrap();
 		let mut reader = log.read_next(false).unwrap().unwrap();
