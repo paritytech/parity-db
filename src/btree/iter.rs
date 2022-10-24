@@ -276,10 +276,7 @@ impl BTreeIterState {
 	}
 
 	fn exit(&mut self, direction: IterDirection) -> bool {
-		loop {
-			if self.state.len() < 2 {
-				return true
-			}
+		while !self.state.is_empty() {
 			self.state.pop();
 			if let Some((ix, node)) = self.state.last_mut() {
 				debug_assert!(matches!(ix, LastIndex::Descend(_)));
@@ -291,14 +288,13 @@ impl BTreeIterState {
 							continue,
 						_ => LastIndex::Before(*child),
 					};
-					break
 				} else {
 					self.state.clear(); // should actually be unreachable
-					break
 				}
+				return false
 			}
 		}
-		false
+		true
 	}
 
 	pub fn next(
