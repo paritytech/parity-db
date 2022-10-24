@@ -679,14 +679,11 @@ impl DbInner {
 	}
 
 	fn flush_logs(&self, min_log_size: u64) -> Result<bool> {
-		let (flush_next, read_next, cleanup_next) = self.log.flush_one(min_log_size)?;
-		if read_next {
+		let has_flushed = self.log.flush_one(min_log_size)?;
+		if has_flushed {
 			self.commit_worker_wait.signal();
 		}
-		if cleanup_next {
-			self.cleanup_worker_wait.signal();
-		}
-		Ok(flush_next)
+		Ok(has_flushed)
 	}
 
 	fn clean_logs(&self) -> Result<bool> {
@@ -956,7 +953,10 @@ impl Db {
 		let mut more_work = false;
 		while !db.shutdown.load(Ordering::SeqCst) || more_work {
 			if !more_work {
-				db.commit_worker_wait.wait();
+				db.cleanup_worker_wait.signal();
+				if !db.log.has_log_files_to_read() {
+					db.commit_worker_wait.wait();
+				}
 			}
 
 			more_work = db.enact_logs(false)?;
@@ -1462,9 +1462,7 @@ mod tests {
 			}
 			if *self == EnableCommitPipelineStages::DbFile {
 				let _ = db.log.flush_one(0).unwrap();
-				let _ = db.log.flush_one(0).unwrap();
 				while db.enact_logs(false).unwrap() {}
-				let _ = db.log.flush_one(0).unwrap();
 				let _ = db.clean_logs().unwrap();
 			}
 		}
