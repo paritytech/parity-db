@@ -527,7 +527,7 @@ impl DbInner {
 			if let Some(mut reader) = reader {
 				log::debug!(
 					target: "parity-db",
-					"Enacting log {}",
+					"Enacting log record {}",
 					reader.record_id(),
 				);
 				if validation_mode {

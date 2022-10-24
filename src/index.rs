@@ -181,7 +181,7 @@ impl TableId {
 
 impl std::fmt::Display for TableId {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "{:02}-{:02}", self.col(), self.index_bits())
+		write!(f, "i{:02}-{:02}", self.col(), self.index_bits())
 	}
 }
 

@@ -118,7 +118,7 @@ impl TableId {
 
 impl std::fmt::Display for TableId {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "{:02}-{:02}", self.col(), hex(&[self.size_tier()]))
+		write!(f, "t{:02}-{:02}", self.col(), hex(&[self.size_tier()]))
 	}
 }
 
@@ -455,7 +455,7 @@ impl ValueTable {
 								self.id,
 								index,
 								k,
-								to_fetch,
+								to_fetch.as_ref().map(hex),
 								self.entry_size,
 							);
 							return Ok((0, false))
@@ -849,6 +849,7 @@ impl ValueTable {
 			let mut header = Header::default();
 			log.read(&mut header.0)?;
 			self.file.write_at(&header.0, 0)?;
+			log::trace!(target: "parity-db", "{}: Enacted header, {} filled", self.id, header.filled());
 			return Ok(())
 		}
 
