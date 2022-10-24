@@ -755,7 +755,7 @@ impl Log {
 		&self.overlays
 	}
 
-	pub fn has_still_log_files_to_read(&self) -> bool {
+	pub fn has_log_files_to_read(&self) -> bool {
 		self.read_queue.read().len() > 0
 	}
 

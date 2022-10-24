@@ -954,7 +954,7 @@ impl Db {
 		while !db.shutdown.load(Ordering::SeqCst) || more_work {
 			if !more_work {
 				db.cleanup_worker_wait.signal();
-				if !db.log.has_still_log_files_to_read() {
+				if !db.log.has_log_files_to_read() {
 					db.commit_worker_wait.wait();
 				}
 			}
