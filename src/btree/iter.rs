@@ -201,7 +201,7 @@ impl<'a> BTreeIterator<'a> {
 		}
 	}
 
-	pub fn next_backend(
+	fn next_backend(
 		&mut self,
 		record_id: u64,
 		col: &BTreeTable,
@@ -232,7 +232,7 @@ impl<'a> BTreeIterator<'a> {
 		iter.next(tree, col, log, direction)
 	}
 
-	pub fn seek_backend(
+	fn seek_backend(
 		&mut self,
 		seek_to: SeekTo,
 		record_id: u64,
@@ -248,7 +248,7 @@ impl<'a> BTreeIterator<'a> {
 		iter.seek(seek_to, tree, col, log)
 	}
 
-	pub fn seek_backend_to_last(
+	fn seek_backend_to_last(
 		&mut self,
 		record_id: u64,
 		col: &BTreeTable,
