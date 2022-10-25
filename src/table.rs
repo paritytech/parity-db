@@ -1030,13 +1030,6 @@ pub mod key {
 			u64::from_be_bytes((partial[0..8]).try_into().unwrap())
 		}
 
-		pub fn index(&self) -> Option<u64> {
-			match self {
-				TableKey::Partial(k) => Some(Self::index_from_partial(k)),
-				TableKey::NoHash => None,
-			}
-		}
-
 		pub fn compare(&self, fetch: &Option<[u8; PARTIAL_SIZE]>) -> bool {
 			match (self, fetch) {
 				(TableKey::Partial(k), Some(fetch)) => partial_key(k) == fetch,
