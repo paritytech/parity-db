@@ -2,7 +2,11 @@
 // This file is dual-licensed as Apache-2.0 or MIT.
 
 use arbitrary::Arbitrary;
-use std::{collections::HashMap, fmt::Debug};
+use std::{
+	cmp::{Ordering, PartialOrd},
+	collections::HashMap,
+	fmt::Debug,
+};
 use tempfile::tempdir;
 
 pub const NUMBER_OF_POSSIBLE_KEYS: usize = 256;
@@ -56,6 +60,26 @@ pub enum IterPosition {
 	Start,
 	Value(u8),
 	End,
+}
+
+impl PartialEq<[u8]> for IterPosition {
+	fn eq(&self, other: &[u8]) -> bool {
+		match self {
+			Self::Start => false,
+			Self::Value(v) => [*v] == other,
+			Self::End => false,
+		}
+	}
+}
+
+impl PartialOrd<[u8]> for IterPosition {
+	fn partial_cmp(&self, other: &[u8]) -> Option<Ordering> {
+		match self {
+			Self::Start => Some(Ordering::Less),
+			Self::Value(v) => [*v].as_slice().partial_cmp(other),
+			Self::End => Some(Ordering::Greater),
+		}
+	}
 }
 
 pub struct DbWithIter {
@@ -220,46 +244,19 @@ pub trait DbSimulator {
 								old_key = IterPosition::End;
 								iter.prev().unwrap()
 							});
-						let mut content = Self::layer_required_content(&model_values(&layers));
-						content.sort();
-						match old_key {
-							IterPosition::Start => {
-								log::info!(
-									"Prev lookup on iterator in start state, expecting None"
-								);
-								assert_eq!(new_key_value, None);
-								db.iter_current_key = Some(IterPosition::Start);
-							},
-							IterPosition::Value(old_key) => {
-								let expected = Self::valid_previous_values(&[old_key], &layers);
-								log::info!(
-									"Prev lookup on iterator on old key {}, expecting one of {:?}",
-									old_key,
-									expected
-								);
-								assert!(expected.contains(&new_key_value), "Prev lookup on iterator on old key {}, expecting one of {:?}, found {:?}",
-										old_key,
-										expected, new_key_value);
-								db.iter_current_key =
-									Some(new_key_value.map_or(IterPosition::Start, |(k, _)| {
-										IterPosition::Value(k[0])
-									}));
-							},
-							IterPosition::End => {
-								let expected =
-									Self::valid_previous_values(&[u8::MAX, u8::MAX], &layers);
-								log::info!(
-									"Prev lookup on iterator on end state, expecting one of {:?}",
-									expected
-								);
-								assert!(expected.contains(&new_key_value), "Prev lookup on iterator on end state, expecting one of {:?}, found {:?}",
-										expected, new_key_value);
-								db.iter_current_key =
-									Some(new_key_value.map_or(IterPosition::Start, |(k, _)| {
-										IterPosition::Value(k[0])
-									}));
-							},
-						}
+						let expected = Self::valid_iter_value(old_key, &layers, Ordering::Greater);
+						log::info!(
+							"Prev lookup on iterator with old position {:?}, expecting one of {:?}",
+							old_key,
+							expected
+						);
+						assert!(expected.contains(&new_key_value), "Prev lookup on iterator with old position {:?}, expecting one of {:?}, found {:?}",
+								old_key,
+								expected, new_key_value);
+						db.iter_current_key = Some(
+							new_key_value
+								.map_or(IterPosition::Start, |(k, _)| IterPosition::Value(k[0])),
+						);
 					},
 				Action::IterNext =>
 					if let Some(iter) = &mut db.iter {
@@ -279,38 +276,17 @@ pub trait DbSimulator {
 								old_key = IterPosition::Start;
 								iter.next().unwrap()
 							});
-						match old_key {
-							IterPosition::Start => {
-								let expected = Self::valid_next_values(&[], &layers);
-								log::info!(
-									"Next lookup on iterator on start state, expecting any of {:?}",
-									expected
-								);
-								assert!(expected.contains(&new_key_value), "Next lookup on iterator on start state, expecting any of {:?}, found {:?}", expected, new_key_value);
-								db.iter_current_key =
-									Some(new_key_value.map_or(IterPosition::End, |(k, _)| {
-										IterPosition::Value(k[0])
-									}));
-							},
-							IterPosition::Value(old_key) => {
-								let expected = Self::valid_next_values(&[old_key], &layers);
-								log::info!(
-									"Next lookup on iterator on old key {}, expecting one of {:?}",
-									old_key,
-									expected
-								);
-								assert!(expected.contains(&new_key_value), "Next lookup on iterator on old key {}, expecting one of {:?}, found {:?}", old_key, expected, new_key_value);
-								db.iter_current_key =
-									Some(new_key_value.map_or(IterPosition::End, |(k, _)| {
-										IterPosition::Value(k[0])
-									}));
-							},
-							IterPosition::End => {
-								log::info!("Next lookup on iterator in end state, expecting None");
-								assert_eq!(new_key_value, None);
-								db.iter_current_key = Some(IterPosition::End);
-							},
-						}
+						let expected = Self::valid_iter_value(old_key, &layers, Ordering::Less);
+						log::info!(
+							"Next lookup on iterator with old position {:?}, expecting one of {:?}",
+							old_key,
+							expected
+						);
+						assert!(expected.contains(&new_key_value), "Next lookup on iterator with old position {:?}, expecting one of {:?}, found {:?}", old_key, expected, new_key_value);
+						db.iter_current_key = Some(
+							new_key_value
+								.map_or(IterPosition::End, |(k, _)| IterPosition::Value(k[0])),
+						);
 					},
 			}
 			retry_operation(|| Self::check_db_and_model_are_equals(&db.db, &layers)).unwrap();
@@ -409,9 +385,10 @@ pub trait DbSimulator {
 		Ok(Ok(()))
 	}
 
-	fn valid_next_values(
-		current_key: &[u8],
+	fn valid_iter_value(
+		current_position: IterPosition,
 		layers: &[Layer<Self::ValueType>],
+		direction: Ordering,
 	) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
 		let values = model_values(layers);
 
@@ -420,7 +397,13 @@ pub trait DbSimulator {
 		required_content.sort();
 		let next_required_key = required_content
 			.iter()
-			.filter_map(|(k, _)| if current_key < k.as_slice() { Some(k) } else { None })
+			.filter_map(|(k, _)| {
+				if current_position.partial_cmp(k.as_slice()) == Some(direction) {
+					Some(k)
+				} else {
+					None
+				}
+			})
 			.next();
 
 		let mut possible_content = Self::layer_optional_content(&values);
@@ -428,44 +411,14 @@ pub trait DbSimulator {
 		let mut result = possible_content
 			.into_iter()
 			.filter(|(k, _)| {
-				current_key < k.as_slice() &&
-					next_required_key.map_or(true, |next_required_key| k <= next_required_key)
+				current_position.partial_cmp(k.as_slice()) == Some(direction) &&
+					next_required_key.map_or(true, |next_required_key| {
+						k == next_required_key || k.cmp(next_required_key) == direction
+					})
 			})
 			.map(Some)
 			.collect::<Vec<_>>();
 		if next_required_key.is_none() {
-			result.push(None);
-		}
-		result
-	}
-
-	fn valid_previous_values(
-		current_key: &[u8],
-		layers: &[Layer<Self::ValueType>],
-	) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
-		let values = model_values(layers);
-
-		// We pick first the next required value
-		let mut required_content = Self::layer_required_content(&values);
-		required_content.sort();
-		let previous_required_key = required_content
-			.iter()
-			.rev()
-			.filter_map(|(k, _)| if k.as_slice() < current_key { Some(k) } else { None })
-			.next();
-
-		let mut possible_content = Self::layer_optional_content(&values);
-		possible_content.sort();
-		let mut result = possible_content
-			.into_iter()
-			.filter(|(k, _)| {
-				k.as_slice() < current_key &&
-					previous_required_key
-						.map_or(true, |previous_required_key| previous_required_key <= k)
-			})
-			.map(Some)
-			.collect::<Vec<_>>();
-		if previous_required_key.is_none() {
 			result.push(None);
 		}
 		result
