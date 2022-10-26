@@ -10,6 +10,7 @@ use crate::{
 	index::{Address, IndexTable, PlanOutcome, TableId as IndexTableId},
 	log::{Log, LogAction, LogOverlays, LogQuery, LogReader, LogWriter},
 	options::{ColumnOptions, Metadata, Options, DEFAULT_COMPRESSION_THRESHOLD},
+	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 	stats::{ColumnStatSummary, ColumnStats},
 	table::{
 		key::{TableKey, TableKeyQuery},
@@ -17,10 +18,12 @@ use crate::{
 	},
 	Key,
 };
-use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use std::{
 	collections::VecDeque,
-	sync::atomic::{AtomicU64, Ordering},
+	sync::{
+		atomic::{AtomicU64, Ordering},
+		Arc,
+	},
 };
 
 const MIN_INDEX_BITS: u8 = 16;
@@ -269,7 +272,7 @@ impl Column {
 
 	pub fn open(col: ColId, options: &Options, metadata: &Metadata) -> Result<Column> {
 		let path = &options.path;
-		let arc_path = std::sync::Arc::new(path.clone());
+		let arc_path = Arc::new(path.clone());
 		let column_options = &metadata.columns[col as usize];
 		let db_version = metadata.version;
 		let value = (0..SIZE_TIERS)
@@ -284,7 +287,7 @@ impl Column {
 	}
 
 	fn open_table(
-		path: std::sync::Arc<std::path::PathBuf>,
+		path: Arc<std::path::PathBuf>,
 		col: ColId,
 		tier: u8,
 		options: &ColumnOptions,
@@ -388,8 +391,8 @@ impl HashColumn {
 		let old_table = std::mem::replace(&mut tables.index, new_table);
 		reindex.queue.push_back(old_table);
 		(
-			parking_lot::RwLockWriteGuard::downgrade_to_upgradable(tables),
-			parking_lot::RwLockWriteGuard::downgrade_to_upgradable(reindex),
+			RwLockWriteGuard::downgrade_to_upgradable(tables),
+			RwLockWriteGuard::downgrade_to_upgradable(reindex),
 		)
 	}
 

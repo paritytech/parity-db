@@ -9,6 +9,7 @@ use crate::{
 	index::Address,
 	log::{LogAction, LogQuery, LogReader, LogWriter},
 	options::{Metadata, Options, DEFAULT_COMPRESSION_THRESHOLD},
+	parking_lot::RwLock,
 	table::{
 		key::{TableKey, TableKeyQuery},
 		Entry as ValueTableEntry, Value, ValueTable,
@@ -17,7 +18,6 @@ use crate::{
 };
 pub use iter::{BTreeIterator, LastIndex, LastKey};
 use node::SeparatorInner;
-use parking_lot::RwLock;
 
 #[allow(clippy::module_inception)]
 mod btree;

@@ -50,6 +50,7 @@ use crate::{
 	error::{try_io, Result},
 	log::{LogQuery, LogReader, LogWriter},
 	options::ColumnOptions as Options,
+	parking_lot::RwLock,
 	table::key::{TableKey, TableKeyQuery, PARTIAL_SIZE},
 };
 use std::{
@@ -991,7 +992,7 @@ impl ValueTable {
 	fn do_init_with_entry(&self, entry: &[u8]) -> Result<()> {
 		self.file.grow(self.entry_size)?;
 
-		let empty_overlays = parking_lot::RwLock::new(Default::default());
+		let empty_overlays = RwLock::new(Default::default());
 		let mut log = LogWriter::new(&empty_overlays, 0);
 		let at = self.overwrite_chain(&TableKey::NoHash, entry, &mut log, None, false)?;
 		self.complete_plan(&mut log)?;
@@ -1093,7 +1094,7 @@ mod test {
 		table::key::TableKey,
 		Key,
 	};
-	use std::sync::Arc;
+	use std::sync::{atomic::Ordering, Arc};
 	use tempfile::{tempdir, TempDir};
 
 	fn new_table(dir: &TempDir, size: Option<u16>, options: &ColumnOptions) -> ValueTable {
@@ -1182,7 +1183,7 @@ mod test {
 		});
 
 		assert_eq!(table.get(key, 1, log.overlays()).unwrap(), Some((val, compressed)));
-		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 2);
+		assert_eq!(table.filled.load(Ordering::Relaxed), 2);
 	}
 
 	#[test]
@@ -1220,13 +1221,13 @@ mod test {
 		});
 
 		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), None);
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 1);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 1);
 
 		write_ops(&table, &log, |writer| {
 			table.write_insert_plan(key1, &val1, writer, compressed).unwrap();
 		});
 		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), Some((val1, compressed)));
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 0);
 	}
 
 	#[test]
@@ -1260,7 +1261,7 @@ mod test {
 		});
 
 		assert_eq!(table.get(key2, 1, log.overlays()).unwrap(), Some((val3, false)));
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 0);
 	}
 
 	#[test]
@@ -1288,14 +1289,14 @@ mod test {
 		});
 
 		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), Some((val1, compressed)));
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
-		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 7);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 0);
+		assert_eq!(table.filled.load(Ordering::Relaxed), 7);
 
 		write_ops(&table, &log, |writer| {
 			table.write_replace_plan(1, key1, &val1s, writer, compressed).unwrap();
 		});
 		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), Some((val1s, compressed)));
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 5);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 5);
 		write_ops(&table, &log, |writer| {
 			assert_eq!(table.read_next_free(5, writer).unwrap(), 4);
 			assert_eq!(table.read_next_free(4, writer).unwrap(), 3);
@@ -1328,15 +1329,15 @@ mod test {
 		});
 
 		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), Some((val1, compressed)));
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
-		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 4);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 0);
+		assert_eq!(table.filled.load(Ordering::Relaxed), 4);
 
 		write_ops(&table, &log, |writer| {
 			table.write_replace_plan(1, key1, &val1l, writer, compressed).unwrap();
 		});
 		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), Some((val1l, compressed)));
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
-		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 7);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 0);
+		assert_eq!(table.filled.load(Ordering::Relaxed), 7);
 	}
 
 	#[test]
@@ -1418,7 +1419,7 @@ mod test {
 		write_ops(&table, &log, |writer| {
 			table.write_dec_ref(1, writer).unwrap();
 		});
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 1);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 1);
 
 		// Check that max entry size values are OK.
 		let value_size = table.value_size(key).unwrap();

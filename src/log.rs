@@ -6,9 +6,9 @@ use crate::{
 	error::{try_io, Error, Result},
 	index::{Chunk as IndexChunk, TableId as IndexTableId, ENTRY_BYTES},
 	options::Options,
+	parking_lot::{RwLock, RwLockWriteGuard},
 	table::TableId as ValueTableId,
 };
-use parking_lot::{RwLock, RwLockWriteGuard};
 use std::{
 	cmp::min,
 	collections::{HashMap, VecDeque},

@@ -26,11 +26,11 @@ use crate::{
 	index::PlanOutcome,
 	log::{Log, LogAction},
 	options::{Options, CURRENT_VERSION},
+	parking_lot::{Condvar, Mutex, RwLock},
 	stats::StatSummary,
 	ColumnOptions, Key,
 };
 use fs2::FileExt;
-use parking_lot::{Condvar, Mutex, RwLock};
 use std::{
 	collections::{BTreeMap, HashMap, VecDeque},
 	ops::Bound,
@@ -38,6 +38,7 @@ use std::{
 		atomic::{AtomicBool, AtomicU64, Ordering},
 		Arc,
 	},
+	thread,
 };
 
 // Max size of commit queue. (Keys + Values). If the queue is
@@ -816,10 +817,10 @@ impl DbInner {
 
 pub struct Db {
 	inner: Arc<DbInner>,
-	commit_thread: Option<std::thread::JoinHandle<()>>,
-	flush_thread: Option<std::thread::JoinHandle<()>>,
-	log_thread: Option<std::thread::JoinHandle<()>>,
-	cleanup_thread: Option<std::thread::JoinHandle<()>>,
+	commit_thread: Option<thread::JoinHandle<()>>,
+	flush_thread: Option<thread::JoinHandle<()>>,
+	log_thread: Option<thread::JoinHandle<()>>,
+	cleanup_thread: Option<thread::JoinHandle<()>>,
 	join_on_shutdown: bool,
 }
 
@@ -862,7 +863,7 @@ impl Db {
 		let start_threads = opening_mode != OpeningMode::ReadOnly;
 		let commit_thread = if start_threads {
 			let commit_worker_db = db.clone();
-			Some(std::thread::spawn(move || {
+			Some(thread::spawn(move || {
 				commit_worker_db.store_err(Self::commit_worker(commit_worker_db.clone()))
 			}))
 		} else {
@@ -874,7 +875,7 @@ impl Db {
 			let min_log_size = if options.always_flush { 0 } else { MIN_LOG_SIZE_BYTES };
 			#[cfg(not(any(test, feature = "instrumentation")))]
 			let min_log_size = MIN_LOG_SIZE_BYTES;
-			Some(std::thread::spawn(move || {
+			Some(thread::spawn(move || {
 				flush_worker_db.store_err(Self::flush_worker(flush_worker_db.clone(), min_log_size))
 			}))
 		} else {
@@ -882,7 +883,7 @@ impl Db {
 		};
 		let log_thread = if start_threads {
 			let log_worker_db = db.clone();
-			Some(std::thread::spawn(move || {
+			Some(thread::spawn(move || {
 				log_worker_db.store_err(Self::log_worker(log_worker_db.clone()))
 			}))
 		} else {
@@ -890,7 +891,7 @@ impl Db {
 		};
 		let cleanup_thread = if start_threads {
 			let cleanup_worker_db = db.clone();
-			Some(std::thread::spawn(move || {
+			Some(thread::spawn(move || {
 				cleanup_worker_db.store_err(Self::cleanup_worker(cleanup_worker_db.clone()))
 			}))
 		} else {
