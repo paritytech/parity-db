@@ -5,9 +5,9 @@
 
 use crate::{
 	error::{try_io, Result},
+	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 	table::TableId,
 };
-use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[cfg(target_os = "linux")]
@@ -196,7 +196,7 @@ impl TableFile {
 		if file.is_none() {
 			let mut wfile = RwLockUpgradableReadGuard::upgrade(file);
 			*wfile = Some(self.create_file()?);
-			file = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wfile);
+			file = RwLockWriteGuard::downgrade_to_upgradable(wfile);
 		}
 		try_io!(file.as_ref().unwrap().set_len(capacity * entry_size as u64));
 		Ok(())

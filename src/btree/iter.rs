@@ -9,9 +9,9 @@
 /// latest accessed key.u
 use super::*;
 use crate::{
-	btree::BTreeTable, db::CommitOverlay, error::Result, log::LogQuery, table::key::TableKeyQuery,
+	btree::BTreeTable, db::CommitOverlay, error::Result, log::LogQuery, parking_lot::RwLock,
+	table::key::TableKeyQuery,
 };
-use parking_lot::RwLock;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum SeekTo<'a> {
