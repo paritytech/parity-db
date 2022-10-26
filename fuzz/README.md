@@ -15,3 +15,9 @@ To setup and run the simple model fuzzer run the root directory of Parity DB:
 cargo install cargo-fuzz
 cargo +nightly fuzz run simple_model
 ```
+
+It is also possible to run the fuzzers using honggfuzz:
+```shell
+cargo install honggfuzz
+HFUZZ_BUILD_ARGS="--no-default-features --features=honggfuzz" cargo +nightly hfuzz run simple_model
+```

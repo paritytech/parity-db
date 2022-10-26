@@ -4,9 +4,14 @@
 //! Model check without reference counting:
 //! Checks that a sequence of operations and restarts behaves the same as an in-memory collection.
 
-#![no_main]
+#![cfg_attr(feature = "libfuzzer-sys", no_main)]
+
+#[cfg(feature = "libfuzzer-sys")]
 use libfuzzer_sys::fuzz_target;
 use parity_db_fuzz::*;
+
+type Actions = Vec<Action<(u8, Option<u8>)>>;
+
 struct Simulator;
 
 impl DbSimulator for Simulator {
@@ -82,8 +87,20 @@ impl DbSimulator for Simulator {
 	}
 }
 
-type Actions = Vec<Action<(u8, Option<u8>)>>;
+#[cfg(feature = "libfuzzer-sys")]
 fuzz_target!(|entry: (Config, Actions)| {
 	let (config, actions) = entry;
 	Simulator::simulate(config, actions);
 });
+
+#[cfg(feature = "honggfuzz")]
+fn main() {
+	use honggfuzz::fuzz;
+
+	loop {
+		fuzz!(|entry: (Config, Actions)| {
+			let (config, actions) = entry;
+			Simulator::simulate(config, actions);
+		});
+	}
+}
