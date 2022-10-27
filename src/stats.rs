@@ -6,7 +6,7 @@ use crate::{column::ColId, table::SIZE_TIERS};
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::{
 	io::{Cursor, Read, Write},
-	mem::MaybeUninit,
+	iter,
 };
 
 // store up to value of size HISTOGRAM_BUCKETS * 2 ^ HISTOGRAM_BUCKET_BITS,
@@ -20,8 +20,8 @@ pub const TOTAL_SIZE: usize =
 // TODO: get rid of the struct and use index meta directly.
 #[derive(Debug)]
 pub struct ColumnStats {
-	value_histogram: [AtomicU32; HISTOGRAM_BUCKETS],
-	query_histogram: [AtomicU64; SIZE_TIERS], // Per size tier
+	value_histogram: Vec<AtomicU32>,
+	query_histogram: Vec<AtomicU64>, // Per size tier
 	oversized: AtomicU64,
 	oversized_bytes: AtomicU64,
 	total_values: AtomicU64,
@@ -35,7 +35,7 @@ pub struct ColumnStats {
 	removed_miss: AtomicU64,
 	queries_miss: AtomicU64,
 	uncompressed_bytes: AtomicU64,
-	compression_delta: [AtomicI64; HISTOGRAM_BUCKETS],
+	compression_delta: Vec<AtomicI64>,
 }
 
 /// Database statistics summary.
@@ -102,27 +102,14 @@ fn value_histogram_index(size: u32) -> Option<usize> {
 	}
 }
 
-#[inline(always)]
-fn read_array<T, const N: usize, F>(cursor: &mut Cursor<&[u8]>, reader: F) -> [T; N]
-where
-	F: Fn(&mut Cursor<&[u8]>) -> T,
-{
-	// SAFETY:
-	// https://doc.rust-lang.org/std/mem/union.MaybeUninit.html#initializing-an-array-element-by-element
-	let mut data: [MaybeUninit<T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
-	for item in &mut data[..] {
-		item.write(reader(cursor));
-	}
-	data.map(|x| unsafe { x.assume_init() })
-}
-
 impl ColumnStats {
 	pub fn from_slice(data: &[u8]) -> ColumnStats {
 		let mut cursor = Cursor::new(data);
 		let cursor = &mut cursor;
 
-		let value_histogram = read_array(cursor, read_u32);
-		let query_histogram = read_array(cursor, read_u64);
+		let value_histogram =
+			iter::repeat_with(|| read_u32(cursor)).take(HISTOGRAM_BUCKETS).collect();
+		let query_histogram = iter::repeat_with(|| read_u64(cursor)).take(SIZE_TIERS).collect();
 		let oversized = read_u64(cursor);
 		let oversized_bytes = read_u64(cursor);
 		let total_values = read_u64(cursor);
@@ -134,7 +121,8 @@ impl ColumnStats {
 		let removed_miss = read_u64(cursor);
 		let queries_miss = read_u64(cursor);
 		let uncompressed_bytes = read_u64(cursor);
-		let compression_delta = read_array(cursor, read_i64);
+		let compression_delta =
+			iter::repeat_with(|| read_i64(cursor)).take(HISTOGRAM_BUCKETS).collect();
 		let reference_increase_hit = read_u64(cursor);
 		let reference_increase_miss = read_u64(cursor);
 
@@ -159,13 +147,9 @@ impl ColumnStats {
 	}
 
 	pub fn empty() -> ColumnStats {
-		let value_histogram: [AtomicU32; HISTOGRAM_BUCKETS] =
-			unsafe { std::mem::transmute([0u32; HISTOGRAM_BUCKETS]) };
-		let query_histogram: [AtomicU64; SIZE_TIERS] =
-			unsafe { std::mem::transmute([0u64; SIZE_TIERS]) };
 		ColumnStats {
-			value_histogram,
-			query_histogram,
+			value_histogram: iter::repeat_with(Default::default).take(HISTOGRAM_BUCKETS).collect(),
+			query_histogram: iter::repeat_with(Default::default).take(SIZE_TIERS).collect(),
 			oversized: Default::default(),
 			oversized_bytes: Default::default(),
 			total_values: Default::default(),
@@ -179,7 +163,9 @@ impl ColumnStats {
 			removed_miss: Default::default(),
 			queries_miss: Default::default(),
 			uncompressed_bytes: Default::default(),
-			compression_delta: unsafe { std::mem::transmute([0i64; HISTOGRAM_BUCKETS]) },
+			compression_delta: iter::repeat_with(Default::default)
+				.take(HISTOGRAM_BUCKETS)
+				.collect(),
 		}
 	}
 
