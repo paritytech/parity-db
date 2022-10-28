@@ -7,8 +7,7 @@ pub use parking_lot::*;
 #[cfg(feature = "loom")]
 mod with_loom {
 	use std::{
-		fmt, mem,
-		mem::swap,
+		fmt,
 		ops::{Deref, DerefMut},
 	};
 
@@ -21,30 +20,30 @@ mod with_loom {
 		}
 
 		pub fn lock(&self) -> MutexGuard<'_, T> {
-			MutexGuard(self.0.lock().unwrap())
+			MutexGuard(Some(self.0.lock().unwrap()))
 		}
 	}
 
 	#[derive(Debug)]
-	pub struct MutexGuard<'a, T>(loom::sync::MutexGuard<'a, T>);
+	pub struct MutexGuard<'a, T>(Option<loom::sync::MutexGuard<'a, T>>);
 
 	impl<'a, T> Deref for MutexGuard<'a, T> {
 		type Target = T;
 
 		fn deref(&self) -> &T {
-			self.0.deref()
+			self.0.as_ref().unwrap().deref()
 		}
 	}
 
 	impl<'a, T> DerefMut for MutexGuard<'a, T> {
 		fn deref_mut(&mut self) -> &mut T {
-			self.0.deref_mut()
+			self.0.as_mut().unwrap().deref_mut()
 		}
 	}
 
 	impl<'a, T: fmt::Display> fmt::Display for MutexGuard<'a, T> {
 		fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-			self.0.fmt(f)
+			self.0.as_ref().unwrap().fmt(f)
 		}
 	}
 
@@ -65,13 +64,7 @@ mod with_loom {
 		}
 
 		pub fn wait<T>(&self, mutex_guard: &mut MutexGuard<'_, T>) {
-			// loom API takes mutex by value. We do a hack to get the value from the reference and
-			// copy back it at the end
-			#[allow(invalid_value)]
-			let mut owned_gard = unsafe { mem::zeroed() };
-			swap(&mut mutex_guard.0, &mut owned_gard);
-			owned_gard = self.0.wait(owned_gard).unwrap();
-			mutex_guard.0 = owned_gard;
+			mutex_guard.0 = Some(self.0.wait(mutex_guard.0.take().unwrap()).unwrap())
 		}
 	}
 
