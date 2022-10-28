@@ -100,6 +100,12 @@ mod with_loom {
 		}
 	}
 
+	/// We use here a write gard and not a read gard to avoid an other thread "stealing" the write
+	/// lock during upgrade.
+	///
+	/// Indeed, if we had used a read gard here, to get a write gard we would have to release the
+	/// read gard first, allowing an other thread to grab a write gard at this time and change the
+	/// protected value state.
 	#[derive(Debug)]
 	pub struct RwLockUpgradableReadGuard<'a, T>(loom::sync::RwLockWriteGuard<'a, T>);
 
