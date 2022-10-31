@@ -10,6 +10,7 @@ use crate::{
 };
 use parking_lot::{RwLock, RwLockWriteGuard};
 use std::{
+	cmp::min,
 	collections::{HashMap, VecDeque},
 	convert::TryInto,
 	io::{ErrorKind, Read, Seek, Write},
@@ -698,8 +699,12 @@ impl Log {
 		}
 	}
 
-	pub fn clean_logs(&self, count: usize) -> Result<bool> {
-		let mut cleaned: Vec<_> = { self.cleanup_queue.write().drain(0..count).collect() };
+	pub fn clean_logs(&self, max_count: usize) -> Result<bool> {
+		let mut cleaned: Vec<_> = {
+			let mut queue = self.cleanup_queue.write();
+			let count = min(max_count, queue.len());
+			queue.drain(0..count).collect()
+		};
 		for (id, ref mut file) in cleaned.iter_mut() {
 			log::debug!(target: "parity-db", "Cleaned: {}", id);
 			try_io!(file.seek(std::io::SeekFrom::Start(0)));
