@@ -6,12 +6,23 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 #[test]
-fn trivial_commit_concurrency() {
-	loom::model(|| {
+fn simple_commit_and_write_concurrency() {
+	exec_simple_commit_and_write_concurrency(false, false);
+	exec_simple_commit_and_write_concurrency(false, true);
+	exec_simple_commit_and_write_concurrency(true, false);
+	exec_simple_commit_and_write_concurrency(true, true);
+}
+
+fn exec_simple_commit_and_write_concurrency(is_btree: bool, is_ref_counted: bool) {
+	loom::model(move || {
 		let tmp = tempdir().unwrap();
 		let mut options = Options::with_columns(tmp.path(), 1);
 		options.always_flush = true;
 		options.with_background_thread = false;
+		options.salt = Some([0; 32]);
+		options.columns[0].btree_index = is_btree;
+		options.columns[0].ref_counted = is_ref_counted;
+		options.columns[0].preimage = is_ref_counted;
 
 		let global_db = Arc::new(Db::open_or_create(&options).unwrap());
 
@@ -19,16 +30,28 @@ fn trivial_commit_concurrency() {
 		let t1 = thread::spawn(move || {
 			db.commit::<_, Vec<u8>>(vec![(0, vec![0], Some(vec![1])), (0, vec![1], Some(vec![1]))])
 				.unwrap();
+			db.process_commits().unwrap();
+			db.clean_logs().unwrap();
 		});
 
 		let db = global_db.clone();
 		let t2 = thread::spawn(move || {
 			db.commit::<_, Vec<u8>>(vec![(0, vec![0], Some(vec![2])), (0, vec![1], Some(vec![2]))])
 				.unwrap();
+			db.flush_logs().unwrap();
+			db.process_reindex().unwrap();
+		});
+
+		let db = global_db.clone();
+		let t3 = thread::spawn(move || {
+			db.commit::<_, Vec<u8>>(vec![(0, vec![0], Some(vec![3])), (0, vec![1], Some(vec![3]))])
+				.unwrap();
+			db.enact_logs().unwrap();
 		});
 
 		t1.join().unwrap();
 		t2.join().unwrap();
+		t3.join().unwrap();
 
 		// Checks, that either T1 committed before T2 or reverse
 		assert_eq!(global_db.get(0, &[0]).unwrap(), global_db.get(0, &[1]).unwrap())
