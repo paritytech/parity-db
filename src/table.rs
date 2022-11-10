@@ -158,13 +158,15 @@ pub type FullEntry = Entry<[u8; MAX_ENTRY_BUF_SIZE]>;
 type PartialEntry = Entry<[u8; 10]>;
 type PartialKeyEntry = Entry<[u8; 40]>; // 2 + 4 + 26 + 8
 
-impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
+impl<const C: usize> Entry<[u8; C]> {
 	#[inline(always)]
 	#[allow(clippy::uninit_assumed_init)]
 	pub fn new_uninit() -> Self {
 		Entry(0, unsafe { MaybeUninit::uninit().assume_init() })
 	}
+}
 
+impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	#[inline(always)]
 	pub fn new(data: B) -> Self {
 		Entry(0, data)
