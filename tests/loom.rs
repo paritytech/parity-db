@@ -53,7 +53,7 @@ fn exec_simple_commit_and_write_concurrency(is_btree: bool, is_ref_counted: bool
 		t2.join().unwrap();
 		t3.join().unwrap();
 
-		// Checks, that either T1 committed before T2 or reverse
+		// Check state consistency
 		assert_eq!(global_db.get(0, &[0]).unwrap(), global_db.get(0, &[1]).unwrap())
 	})
 }
