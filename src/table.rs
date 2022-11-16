@@ -155,6 +155,9 @@ impl Header {
 }
 
 pub struct Entry<B: AsRef<[u8]> + AsMut<[u8]>>(usize, B);
+#[cfg(feature = "loom")]
+pub type FullEntry = Entry<Vec<u8>>;
+#[cfg(not(feature = "loom"))]
 pub type FullEntry = Entry<[u8; MAX_ENTRY_BUF_SIZE]>;
 type PartialEntry = Entry<[u8; 10]>;
 type PartialKeyEntry = Entry<[u8; 40]>; // 2 + 4 + 26 + 8
@@ -164,6 +167,20 @@ impl<const C: usize> Entry<[u8; C]> {
 	#[allow(clippy::uninit_assumed_init)]
 	pub fn new_uninit() -> Self {
 		Entry(0, unsafe { MaybeUninit::uninit().assume_init() })
+	}
+}
+
+#[cfg(feature = "loom")]
+impl Entry<Vec<u8>> {
+	pub fn new_uninit_full_entry() -> Self {
+		Entry(0, vec![0; MAX_ENTRY_BUF_SIZE])
+	}
+}
+
+#[cfg(not(feature = "loom"))]
+impl Entry<[u8; MAX_ENTRY_BUF_SIZE]> {
+	pub fn new_uninit_full_entry() -> Self {
+		Self::new_uninit()
 	}
 }
 
@@ -400,7 +417,7 @@ impl ValueTable {
 		log: &impl LogQuery,
 		mut f: impl FnMut(&[u8]) -> bool,
 	) -> Result<(u32, bool)> {
-		let mut buf = FullEntry::new_uninit();
+		let mut buf = FullEntry::new_uninit_full_entry();
 		let mut part = 0;
 		let mut compressed = false;
 		let mut rc = 1;
@@ -671,7 +688,7 @@ impl ValueTable {
 				index,
 				key,
 			);
-			let mut buf = FullEntry::new_uninit();
+			let mut buf = FullEntry::new_uninit_full_entry();
 			let free_space = self.entry_size as usize - SIZE_SIZE;
 			let value_len = if remainder > free_space {
 				if !follow {
@@ -800,7 +817,7 @@ impl ValueTable {
 	}
 
 	pub fn change_ref(&self, index: u64, delta: i32, log: &mut LogWriter) -> Result<bool> {
-		let mut buf = FullEntry::new_uninit();
+		let mut buf = FullEntry::new_uninit_full_entry();
 		let buf = if log.value(self.id, index, buf.as_mut()) {
 			&mut buf
 		} else {
@@ -855,7 +872,7 @@ impl ValueTable {
 			return Ok(())
 		}
 
-		let mut buf = FullEntry::new_uninit();
+		let mut buf = FullEntry::new_uninit_full_entry();
 		log.read(&mut buf[0..SIZE_SIZE])?;
 		if buf.is_tombstone() {
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
@@ -884,7 +901,7 @@ impl ValueTable {
 			// TODO: sanity check last_removed and filled
 			return Ok(())
 		}
-		let mut buf = FullEntry::new_uninit();
+		let mut buf = FullEntry::new_uninit_full_entry();
 		log.read(&mut buf[0..SIZE_SIZE])?;
 		if buf.is_tombstone() {
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
