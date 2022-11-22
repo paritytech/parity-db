@@ -2,7 +2,7 @@
 
 use loom::thread;
 use parity_db::{Db, Options};
-use std::sync::Arc;
+use std::{iter::from_fn, sync::Arc};
 use tempfile::tempdir;
 
 #[test]
@@ -95,9 +95,16 @@ fn btree_iteration_concurrency() {
 
 		let mut iter = global_db.iter(0).unwrap();
 		iter.seek_to_first().unwrap();
-		while iter.next().unwrap().is_some() {}
+		let increasing = from_fn(|| iter.next().unwrap()).collect::<Vec<_>>();
+		for i in 1..increasing.len() {
+			assert!(increasing[i - 1].0 < increasing[i].0);
+		}
+
 		iter.seek_to_last().unwrap();
-		while iter.prev().unwrap().is_some() {}
+		let decreasing = from_fn(|| iter.prev().unwrap()).collect::<Vec<_>>();
+		for i in 1..decreasing.len() {
+			assert!(decreasing[i - 1].0 > decreasing[i].0);
+		}
 
 		t1.join().unwrap();
 		t2.join().unwrap();
