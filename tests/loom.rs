@@ -28,7 +28,7 @@ fn exec_simple_commit_and_write_concurrency(is_btree: bool, is_ref_counted: bool
 
 		let db = global_db.clone();
 		let t1 = thread::spawn(move || {
-			db.commit::<_, Vec<u8>>(vec![(0, vec![0], Some(vec![1])), (0, vec![1], Some(vec![1]))])
+			db.commit::<_, Vec<u8>>((1..=20).map(|i| (0, vec![2 * i], Some(vec![2 * i]))))
 				.unwrap();
 			db.process_commits().unwrap();
 			db.clean_logs().unwrap();
@@ -36,7 +36,7 @@ fn exec_simple_commit_and_write_concurrency(is_btree: bool, is_ref_counted: bool
 
 		let db = global_db.clone();
 		let t2 = thread::spawn(move || {
-			db.commit::<_, Vec<u8>>(vec![(0, vec![0], Some(vec![2])), (0, vec![1], Some(vec![2]))])
+			db.commit::<_, Vec<u8>>((1..=20).map(|i| (0, vec![2 * i + 1], Some(vec![2 * i + 1]))))
 				.unwrap();
 			db.flush_logs().unwrap();
 			db.process_reindex().unwrap();
@@ -44,8 +44,7 @@ fn exec_simple_commit_and_write_concurrency(is_btree: bool, is_ref_counted: bool
 
 		let db = global_db.clone();
 		let t3 = thread::spawn(move || {
-			db.commit::<_, Vec<u8>>(vec![(0, vec![0], Some(vec![3])), (0, vec![1], Some(vec![3]))])
-				.unwrap();
+			db.commit::<_, Vec<u8>>((1..=20).map(|i| (0, vec![2 * i], None))).unwrap();
 			db.enact_logs().unwrap();
 		});
 
