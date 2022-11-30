@@ -2,7 +2,7 @@
 
 use loom::thread;
 use parity_db::{Db, Options};
-use std::sync::Arc;
+use std::{iter::from_fn, sync::Arc};
 use tempfile::tempdir;
 
 #[test]
@@ -28,7 +28,7 @@ fn exec_simple_commit_and_write_concurrency(is_btree: bool, is_ref_counted: bool
 
 		let db = global_db.clone();
 		let t1 = thread::spawn(move || {
-			db.commit::<_, Vec<u8>>(vec![(0, vec![0], Some(vec![1])), (0, vec![1], Some(vec![1]))])
+			db.commit::<_, Vec<u8>>((1..=20).map(|i| (0, vec![2 * i], Some(vec![2 * i]))))
 				.unwrap();
 			db.process_commits().unwrap();
 			db.clean_logs().unwrap();
@@ -36,7 +36,7 @@ fn exec_simple_commit_and_write_concurrency(is_btree: bool, is_ref_counted: bool
 
 		let db = global_db.clone();
 		let t2 = thread::spawn(move || {
-			db.commit::<_, Vec<u8>>(vec![(0, vec![0], Some(vec![2])), (0, vec![1], Some(vec![2]))])
+			db.commit::<_, Vec<u8>>((1..=20).map(|i| (0, vec![2 * i + 1], Some(vec![2 * i + 1]))))
 				.unwrap();
 			db.flush_logs().unwrap();
 			db.process_reindex().unwrap();
@@ -44,8 +44,7 @@ fn exec_simple_commit_and_write_concurrency(is_btree: bool, is_ref_counted: bool
 
 		let db = global_db.clone();
 		let t3 = thread::spawn(move || {
-			db.commit::<_, Vec<u8>>(vec![(0, vec![0], Some(vec![3])), (0, vec![1], Some(vec![3]))])
-				.unwrap();
+			db.commit::<_, Vec<u8>>((1..=20).map(|i| (0, vec![2 * i], None))).unwrap();
 			db.enact_logs().unwrap();
 		});
 
@@ -95,9 +94,16 @@ fn btree_iteration_concurrency() {
 
 		let mut iter = global_db.iter(0).unwrap();
 		iter.seek_to_first().unwrap();
-		while iter.next().unwrap().is_some() {}
+		let increasing = from_fn(|| iter.next().unwrap()).collect::<Vec<_>>();
+		for i in 1..increasing.len() {
+			assert!(increasing[i - 1].0 < increasing[i].0);
+		}
+
 		iter.seek_to_last().unwrap();
-		while iter.prev().unwrap().is_some() {}
+		let decreasing = from_fn(|| iter.prev().unwrap()).collect::<Vec<_>>();
+		for i in 1..decreasing.len() {
+			assert!(decreasing[i - 1].0 > decreasing[i].0);
+		}
 
 		t1.join().unwrap();
 		t2.join().unwrap();
