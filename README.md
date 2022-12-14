@@ -14,7 +14,7 @@ The database is a universal key-value storage that supports transactions. The AP
 Database supports multiple concurrent readers. All writes are serialized. Writes are performed in batches, also known as transactions. Transactions are applied atomically. Either all of the transaction data is written, or none. Queries can't retrieve partially committed data.
 
 ### No cache
-Database does implement any custom data caching. Instead, it relies on OS page cache. Performance of a large database therefore depends on how much system memory is available to be used in OS page cache.
+Database does not implement any custom data caching. Instead, it relies on OS page cache. Performance of a large database therefore depends on how much system memory is available to be used in OS page cache.
 
 ### Durability
 Database is restored to consistent state if IO is interrupted at any point.
