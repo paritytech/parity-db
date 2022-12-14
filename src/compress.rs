@@ -3,6 +3,8 @@
 
 //! Compression utility and types.
 
+use std::str::FromStr;
+
 use crate::error::Result;
 
 /// Different compression type
@@ -69,6 +71,19 @@ impl From<&Compress> for CompressionType {
 			Compressor::Snappy(_) => CompressionType::Snappy,
 			#[allow(unreachable_patterns)]
 			_ => unimplemented!("Missing compression implementation."),
+		}
+	}
+}
+
+impl FromStr for CompressionType {
+	type Err = crate::Error;
+
+	fn from_str(s: &str) -> Result<Self> {
+		match s.to_lowercase().as_str() {
+			"none" => Ok(CompressionType::NoCompression),
+			"lz4" => Ok(CompressionType::Lz4),
+			"snappy" => Ok(CompressionType::Snappy),
+			_ => Err(crate::Error::Compression),
 		}
 	}
 }
@@ -175,6 +190,26 @@ mod tests {
 			assert!(v.len() <= 100);
 			let round_tripped = compress.decompress(&v[..]).unwrap();
 			assert_eq!(original, round_tripped);
+		}
+	}
+
+	#[test]
+	fn test_compression_from_str() {
+		let correct_cases = [
+			("lz4", CompressionType::Lz4),
+			("snappy", CompressionType::Snappy),
+			("none", CompressionType::NoCompression),
+			("SNAPPy", CompressionType::Snappy),
+		];
+
+		for (input, expected_compression) in correct_cases {
+			assert_eq!(expected_compression, CompressionType::from_str(input).unwrap());
+		}
+
+		let invalid_cases = ["lz5", "", "cthulhu"];
+
+		for input in invalid_cases {
+			assert!(CompressionType::from_str(input).is_err());
 		}
 	}
 }
