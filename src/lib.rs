@@ -13,6 +13,7 @@ mod index;
 mod log;
 mod migration;
 mod options;
+mod parking_lot;
 mod stats;
 mod table;
 

@@ -6,11 +6,11 @@ use crate::{
 	display::hex,
 	error::{try_io, Error, Result},
 	log::{LogQuery, LogReader, LogWriter},
+	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 	stats::{self, ColumnStats},
 	table::{key::TableKey, SIZE_TIERS_BITS},
 	Key,
 };
-use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use std::convert::TryInto;
 
 // Index chunk consists of 8 64-bit entries.
@@ -443,7 +443,7 @@ impl IndexTable {
 			let mut mmap = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
 			self.madvise_random(&mut mmap);
 			*wmap = Some(mmap);
-			map = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(wmap);
+			map = RwLockWriteGuard::downgrade_to_upgradable(wmap);
 		}
 
 		let map = map.as_ref().unwrap();

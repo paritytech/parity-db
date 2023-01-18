@@ -82,7 +82,8 @@ impl DbSimulator for Simulator {
 	}
 }
 
-fuzz_target!(|entry: (Config, Vec<Action<(u8, Option<u8>)>>)| {
+type Actions = Vec<Action<(u8, Option<u8>)>>;
+fuzz_target!(|entry: (Config, Actions)| {
 	let (config, actions) = entry;
 	Simulator::simulate(config, actions);
 });

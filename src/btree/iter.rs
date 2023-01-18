@@ -9,9 +9,9 @@
 /// latest accessed key.u
 use super::*;
 use crate::{
-	btree::BTreeTable, db::CommitOverlay, error::Result, log::LogQuery, table::key::TableKeyQuery,
+	btree::BTreeTable, db::CommitOverlay, error::Result, log::LogQuery, parking_lot::RwLock,
+	table::key::TableKeyQuery,
 };
-use parking_lot::RwLock;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum SeekTo<'a> {
@@ -201,7 +201,7 @@ impl<'a> BTreeIterator<'a> {
 		}
 	}
 
-	pub fn next_backend(
+	fn next_backend(
 		&mut self,
 		record_id: u64,
 		col: &BTreeTable,
@@ -232,7 +232,7 @@ impl<'a> BTreeIterator<'a> {
 		iter.next(tree, col, log, direction)
 	}
 
-	pub fn seek_backend(
+	fn seek_backend(
 		&mut self,
 		seek_to: SeekTo,
 		record_id: u64,
@@ -248,7 +248,7 @@ impl<'a> BTreeIterator<'a> {
 		iter.seek(seek_to, tree, col, log)
 	}
 
-	pub fn seek_backend_to_last(
+	fn seek_backend_to_last(
 		&mut self,
 		record_id: u64,
 		col: &BTreeTable,
@@ -276,10 +276,7 @@ impl BTreeIterState {
 	}
 
 	fn exit(&mut self, direction: IterDirection) -> bool {
-		loop {
-			if self.state.len() < 2 {
-				return true
-			}
+		while !self.state.is_empty() {
 			self.state.pop();
 			if let Some((ix, node)) = self.state.last_mut() {
 				debug_assert!(matches!(ix, LastIndex::Descend(_)));
@@ -291,14 +288,13 @@ impl BTreeIterState {
 							continue,
 						_ => LastIndex::Before(*child),
 					};
-					break
 				} else {
 					self.state.clear(); // should actually be unreachable
-					break
 				}
+				return false
 			}
 		}
-		false
+		true
 	}
 
 	pub fn next(

@@ -50,6 +50,7 @@ use crate::{
 	error::{try_io, Result},
 	log::{LogQuery, LogReader, LogWriter},
 	options::ColumnOptions as Options,
+	parking_lot::RwLock,
 	table::key::{TableKey, TableKeyQuery, PARTIAL_SIZE},
 };
 use std::{
@@ -154,17 +155,36 @@ impl Header {
 }
 
 pub struct Entry<B: AsRef<[u8]> + AsMut<[u8]>>(usize, B);
+#[cfg(feature = "loom")]
+pub type FullEntry = Entry<Vec<u8>>;
+#[cfg(not(feature = "loom"))]
 pub type FullEntry = Entry<[u8; MAX_ENTRY_BUF_SIZE]>;
 type PartialEntry = Entry<[u8; 10]>;
 type PartialKeyEntry = Entry<[u8; 40]>; // 2 + 4 + 26 + 8
 
-impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
+impl<const C: usize> Entry<[u8; C]> {
 	#[inline(always)]
 	#[allow(clippy::uninit_assumed_init)]
 	pub fn new_uninit() -> Self {
 		Entry(0, unsafe { MaybeUninit::uninit().assume_init() })
 	}
+}
 
+#[cfg(feature = "loom")]
+impl Entry<Vec<u8>> {
+	pub fn new_uninit_full_entry() -> Self {
+		Entry(0, vec![0; MAX_ENTRY_BUF_SIZE])
+	}
+}
+
+#[cfg(not(feature = "loom"))]
+impl Entry<[u8; MAX_ENTRY_BUF_SIZE]> {
+	pub fn new_uninit_full_entry() -> Self {
+		Self::new_uninit()
+	}
+}
+
+impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	#[inline(always)]
 	pub fn new(data: B) -> Self {
 		Entry(0, data)
@@ -397,7 +417,7 @@ impl ValueTable {
 		log: &impl LogQuery,
 		mut f: impl FnMut(&[u8]) -> bool,
 	) -> Result<(u32, bool)> {
-		let mut buf = FullEntry::new_uninit();
+		let mut buf = FullEntry::new_uninit_full_entry();
 		let mut part = 0;
 		let mut compressed = false;
 		let mut rc = 1;
@@ -668,7 +688,7 @@ impl ValueTable {
 				index,
 				key,
 			);
-			let mut buf = FullEntry::new_uninit();
+			let mut buf = FullEntry::new_uninit_full_entry();
 			let free_space = self.entry_size as usize - SIZE_SIZE;
 			let value_len = if remainder > free_space {
 				if !follow {
@@ -797,7 +817,7 @@ impl ValueTable {
 	}
 
 	pub fn change_ref(&self, index: u64, delta: i32, log: &mut LogWriter) -> Result<bool> {
-		let mut buf = FullEntry::new_uninit();
+		let mut buf = FullEntry::new_uninit_full_entry();
 		let buf = if log.value(self.id, index, buf.as_mut()) {
 			&mut buf
 		} else {
@@ -853,7 +873,7 @@ impl ValueTable {
 			return Ok(())
 		}
 
-		let mut buf = FullEntry::new_uninit();
+		let mut buf = FullEntry::new_uninit_full_entry();
 		log.read(&mut buf[0..SIZE_SIZE])?;
 		if buf.is_tombstone() {
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
@@ -882,7 +902,7 @@ impl ValueTable {
 			// TODO: sanity check last_removed and filled
 			return Ok(())
 		}
-		let mut buf = FullEntry::new_uninit();
+		let mut buf = FullEntry::new_uninit_full_entry();
 		log.read(&mut buf[0..SIZE_SIZE])?;
 		if buf.is_tombstone() {
 			log.read(&mut buf[SIZE_SIZE..SIZE_SIZE + INDEX_SIZE])?;
@@ -990,7 +1010,7 @@ impl ValueTable {
 	fn do_init_with_entry(&self, entry: &[u8]) -> Result<()> {
 		self.file.grow(self.entry_size)?;
 
-		let empty_overlays = parking_lot::RwLock::new(Default::default());
+		let empty_overlays = RwLock::new(Default::default());
 		let mut log = LogWriter::new(&empty_overlays, 0);
 		let at = self.overwrite_chain(&TableKey::NoHash, entry, &mut log, None, false)?;
 		self.complete_plan(&mut log)?;
@@ -1029,13 +1049,6 @@ pub mod key {
 
 		pub fn index_from_partial(partial: &[u8]) -> u64 {
 			u64::from_be_bytes((partial[0..8]).try_into().unwrap())
-		}
-
-		pub fn index(&self) -> Option<u64> {
-			match self {
-				TableKey::Partial(k) => Some(Self::index_from_partial(k)),
-				TableKey::NoHash => None,
-			}
 		}
 
 		pub fn compare(&self, fetch: &Option<[u8; PARTIAL_SIZE]>) -> bool {
@@ -1099,7 +1112,7 @@ mod test {
 		table::key::TableKey,
 		Key,
 	};
-	use std::sync::Arc;
+	use std::sync::{atomic::Ordering, Arc};
 	use tempfile::{tempdir, TempDir};
 
 	fn new_table(dir: &TempDir, size: Option<u16>, options: &ColumnOptions) -> ValueTable {
@@ -1188,7 +1201,7 @@ mod test {
 		});
 
 		assert_eq!(table.get(key, 1, log.overlays()).unwrap(), Some((val, compressed)));
-		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 2);
+		assert_eq!(table.filled.load(Ordering::Relaxed), 2);
 	}
 
 	#[test]
@@ -1226,13 +1239,13 @@ mod test {
 		});
 
 		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), None);
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 1);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 1);
 
 		write_ops(&table, &log, |writer| {
 			table.write_insert_plan(key1, &val1, writer, compressed).unwrap();
 		});
 		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), Some((val1, compressed)));
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 0);
 	}
 
 	#[test]
@@ -1266,7 +1279,7 @@ mod test {
 		});
 
 		assert_eq!(table.get(key2, 1, log.overlays()).unwrap(), Some((val3, false)));
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 0);
 	}
 
 	#[test]
@@ -1294,14 +1307,14 @@ mod test {
 		});
 
 		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), Some((val1, compressed)));
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
-		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 7);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 0);
+		assert_eq!(table.filled.load(Ordering::Relaxed), 7);
 
 		write_ops(&table, &log, |writer| {
 			table.write_replace_plan(1, key1, &val1s, writer, compressed).unwrap();
 		});
 		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), Some((val1s, compressed)));
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 5);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 5);
 		write_ops(&table, &log, |writer| {
 			assert_eq!(table.read_next_free(5, writer).unwrap(), 4);
 			assert_eq!(table.read_next_free(4, writer).unwrap(), 3);
@@ -1334,15 +1347,15 @@ mod test {
 		});
 
 		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), Some((val1, compressed)));
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
-		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 4);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 0);
+		assert_eq!(table.filled.load(Ordering::Relaxed), 4);
 
 		write_ops(&table, &log, |writer| {
 			table.write_replace_plan(1, key1, &val1l, writer, compressed).unwrap();
 		});
 		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), Some((val1l, compressed)));
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 0);
-		assert_eq!(table.filled.load(std::sync::atomic::Ordering::Relaxed), 7);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 0);
+		assert_eq!(table.filled.load(Ordering::Relaxed), 7);
 	}
 
 	#[test]
@@ -1424,7 +1437,7 @@ mod test {
 		write_ops(&table, &log, |writer| {
 			table.write_dec_ref(1, writer).unwrap();
 		});
-		assert_eq!(table.last_removed.load(std::sync::atomic::Ordering::Relaxed), 1);
+		assert_eq!(table.last_removed.load(Ordering::Relaxed), 1);
 
 		// Check that max entry size values are OK.
 		let value_size = table.value_size(key).unwrap();
