@@ -54,23 +54,27 @@ impl std::error::Error for Error {
 }
 
 #[cfg(feature = "instrumentation")]
-pub static IO_COUNTER_BEFORE_ERROR: AtomicUsize = AtomicUsize::new(usize::MAX);
+thread_local! {
+	pub static IO_COUNTER_BEFORE_ERROR: AtomicUsize = AtomicUsize::new(usize::MAX);
+}
 
 #[cfg(feature = "instrumentation")]
 pub fn set_number_of_allowed_io_operations(val: usize) {
-	IO_COUNTER_BEFORE_ERROR.store(val, Ordering::Relaxed);
+	IO_COUNTER_BEFORE_ERROR.with(|v| v.store(val, Ordering::Relaxed));
 }
 
 #[cfg(feature = "instrumentation")]
 macro_rules! try_io {
 	($e:expr) => {{
-		if crate::error::IO_COUNTER_BEFORE_ERROR
-			.fetch_update(
-				::std::sync::atomic::Ordering::SeqCst,
-				::std::sync::atomic::Ordering::SeqCst,
-				|v| Some(v.saturating_sub(1)),
-			)
-			.unwrap() == 0
+		if crate::error::IO_COUNTER_BEFORE_ERROR.with(|value| {
+			value
+				.fetch_update(
+					::std::sync::atomic::Ordering::SeqCst,
+					::std::sync::atomic::Ordering::SeqCst,
+					|v| Some(v.saturating_sub(1)),
+				)
+				.unwrap()
+		}) == 0
 		{
 			Err(crate::error::Error::Io(::std::io::Error::new(
 				::std::io::ErrorKind::Other,

@@ -353,7 +353,7 @@ impl IndexTable {
 				return Ok(PlanOutcome::Written)
 			}
 		}
-		log::trace!(target: "parity-db", "{}: Full at {}", self.id, chunk_index);
+		log::trace!(target: "parity-db", "{}: Index chunk full at {}", self.id, chunk_index);
 		Ok(PlanOutcome::NeedReindex)
 	}
 

@@ -18,6 +18,7 @@ mod stats;
 mod table;
 
 pub use btree::BTreeIterator;
+pub use column::ColId;
 pub use compress::CompressionType;
 pub use db::{check::CheckOptions, Db, Operation, Value};
 #[cfg(feature = "instrumentation")]
