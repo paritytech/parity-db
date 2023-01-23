@@ -231,11 +231,12 @@ impl IndexTable {
 		Ok(try_io!(Ok(&map[offset..offset + CHUNK_LEN])))
 	}
 
+	#[inline(never)]
 	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
 		let partial_key = Entry::extract_key(key_prefix, self.id.index_bits());
 		for i in sub_index..CHUNK_ENTRIES {
 			let entry = Self::read_entry(chunk, i);
-			if !entry.is_empty() && entry.partial_key(self.id.index_bits()) == partial_key {
+			if entry.partial_key(self.id.index_bits()) == partial_key {
 				return (entry, i)
 			}
 		}

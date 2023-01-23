@@ -950,8 +950,10 @@ impl Db {
 		self.inner.columns.len() as u8
 	}
 
-	/// Iterate a column and call a function for each value. Iteration order is unspecified. Note
-	/// that for hash columns the key is the hash of the original key.
+	/// Iterate a column and call a function for each value. This is only supported for columns with
+	/// `btree_index` set to `false`. Iteration order is unspecified. Note that the
+	/// `key` field in the state is the hash of the original key.
+	/// Unlinke `get` the iteration may not include changes made in recent `commit` calls.
 	pub fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
 		self.inner.iter_column_while(c, f)
 	}
@@ -974,15 +976,16 @@ impl Db {
 
 	fn log_worker(db: Arc<DbInner>) -> Result<()> {
 		// Start with pending reindex.
-		let mut more_work = db.process_reindex()?;
-		while !db.shutdown.load(Ordering::SeqCst) || more_work {
-			if !more_work {
+		let mut more_reindex = db.process_reindex()?;
+		let mut more_commits = false;
+		// Process all commits but allow reindex to be interrupted.
+		while !db.shutdown.load(Ordering::SeqCst) || more_commits {
+			if !more_commits && !more_reindex {
 				db.log_worker_wait.wait();
 			}
 
-			let more_commits = db.process_commits()?;
-			let more_reindex = db.process_reindex()?;
-			more_work = more_commits || more_reindex;
+			more_commits = db.process_commits()?;
+			more_reindex = db.process_reindex()?;
 		}
 		log::debug!(target: "parity-db", "Log worker shutdown");
 		Ok(())
