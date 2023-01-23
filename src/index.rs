@@ -181,7 +181,7 @@ impl TableId {
 
 impl std::fmt::Display for TableId {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "{:02}-{:02}", self.col(), self.index_bits())
+		write!(f, "i{:02}-{:02}", self.col(), self.index_bits())
 	}
 }
 
@@ -231,11 +231,12 @@ impl IndexTable {
 		Ok(try_io!(Ok(&map[offset..offset + CHUNK_LEN])))
 	}
 
+	#[inline(never)]
 	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
 		let partial_key = Entry::extract_key(key_prefix, self.id.index_bits());
 		for i in sub_index..CHUNK_ENTRIES {
 			let entry = Self::read_entry(chunk, i);
-			if !entry.is_empty() && entry.partial_key(self.id.index_bits()) == partial_key {
+			if entry.partial_key(self.id.index_bits()) == partial_key {
 				return (entry, i)
 			}
 		}
@@ -353,7 +354,7 @@ impl IndexTable {
 				return Ok(PlanOutcome::Written)
 			}
 		}
-		log::trace!(target: "parity-db", "{}: Full at {}", self.id, chunk_index);
+		log::trace!(target: "parity-db", "{}: Index chunk full at {}", self.id, chunk_index);
 		Ok(PlanOutcome::NeedReindex)
 	}
 

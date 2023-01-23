@@ -461,6 +461,7 @@ impl DbInner {
 	}
 
 	fn start_reindex(&self, record_id: u64) {
+		log::trace!(target: "parity-db", "Scheduled reindex at record {}", record_id);
 		self.next_reindex.store(record_id, Ordering::SeqCst);
 	}
 
@@ -528,7 +529,7 @@ impl DbInner {
 			if let Some(mut reader) = reader {
 				log::debug!(
 					target: "parity-db",
-					"Enacting log {}",
+					"Enacting log record {}",
 					reader.record_id(),
 				);
 				if validation_mode {
@@ -907,18 +908,23 @@ impl Db {
 		})
 	}
 
+	/// Get a value in a specified column by key. Returns `None` if the key does not exist.
 	pub fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
 		self.inner.get(col, key)
 	}
 
+	/// Get value size by key. Returns `None` if the key does not exist.
 	pub fn get_size(&self, col: ColId, key: &[u8]) -> Result<Option<u32>> {
 		self.inner.get_size(col, key)
 	}
 
+	/// Iterate over all ordered key-value pairs. Only supported for columns configured with
+	/// `btree_indexed`.
 	pub fn iter(&self, col: ColId) -> Result<BTreeIterator> {
 		self.inner.btree_iter(col)
 	}
 
+	/// Commit a set of changes to the database.
 	pub fn commit<I, K>(&self, tx: I) -> Result<()>
 	where
 		I: IntoIterator<Item = (ColId, K, Option<Value>)>,
@@ -927,6 +933,7 @@ impl Db {
 		self.inner.commit(tx)
 	}
 
+	/// Commit a set of changes to the database.
 	pub fn commit_changes<I>(&self, tx: I) -> Result<()>
 	where
 		I: IntoIterator<Item = (ColId, Operation<Vec<u8>, Vec<u8>>)>,
@@ -938,15 +945,16 @@ impl Db {
 		self.inner.commit_raw(commit)
 	}
 
+	/// Returns the number of columns in the database.
 	pub fn num_columns(&self) -> u8 {
 		self.inner.columns.len() as u8
 	}
 
-	pub(crate) fn iter_column_while(
-		&self,
-		c: ColId,
-		f: impl FnMut(IterState) -> bool,
-	) -> Result<()> {
+	/// Iterate a column and call a function for each value. This is only supported for columns with
+	/// `btree_index` set to `false`. Iteration order is unspecified. Note that the
+	/// `key` field in the state is the hash of the original key.
+	/// Unlinke `get` the iteration may not include changes made in recent `commit` calls.
+	pub fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
 		self.inner.iter_column_while(c, f)
 	}
 
@@ -968,15 +976,16 @@ impl Db {
 
 	fn log_worker(db: Arc<DbInner>) -> Result<()> {
 		// Start with pending reindex.
-		let mut more_work = db.process_reindex()?;
-		while !db.shutdown.load(Ordering::SeqCst) || more_work {
-			if !more_work {
+		let mut more_reindex = db.process_reindex()?;
+		let mut more_commits = false;
+		// Process all commits but allow reindex to be interrupted.
+		while !db.shutdown.load(Ordering::SeqCst) || more_commits {
+			if !more_commits && !more_reindex {
 				db.log_worker_wait.wait();
 			}
 
-			let more_commits = db.process_commits()?;
-			let more_reindex = db.process_reindex()?;
-			more_work = more_commits || more_reindex;
+			more_commits = db.process_commits()?;
+			more_reindex = db.process_reindex()?;
 		}
 		log::debug!(target: "parity-db", "Log worker shutdown");
 		Ok(())
@@ -1018,6 +1027,7 @@ impl Db {
 		self.inner.clear_stats(column)
 	}
 
+	/// Print database contents in text form to stderr.
 	pub fn dump(&self, check_param: check::CheckOptions) -> Result<()> {
 		if let Some(col) = check_param.column {
 			self.inner.columns[col as usize].dump(&self.inner.log, &check_param, col)?;
@@ -1029,6 +1039,7 @@ impl Db {
 		Ok(())
 	}
 
+	/// Get database statistics.
 	pub fn stats(&self) -> StatSummary {
 		self.inner.stats()
 	}
@@ -2422,6 +2433,63 @@ mod tests {
 		{
 			let db = Db::open(&options).unwrap();
 			assert!(db.get(0, &[0]).unwrap().is_some());
+		}
+	}
+
+	#[cfg(feature = "instrumentation")]
+	#[test]
+	fn test_continue_reindex() {
+		let _ = env_logger::try_init();
+		let tmp = tempdir().unwrap();
+		let mut options = Options::with_columns(tmp.path(), 1);
+		options.columns[0].preimage = true;
+		options.columns[0].uniform = true;
+		options.always_flush = true;
+		options.with_background_thread = false;
+		options.salt = Some(Default::default());
+
+		{
+			// Force a reindex by committing more than 64 values with the same 16 bit prefix
+			let db = Db::open_or_create(&options).unwrap();
+			let commit: Vec<_> = (0..65u32)
+				.map(|index| {
+					let mut key = [0u8; 32];
+					key[2] = (index as u8) << 1;
+					(0, key.to_vec(), Some(vec![index as u8]))
+				})
+				.collect();
+			db.commit(commit).unwrap();
+
+			db.process_commits().unwrap();
+			db.flush_logs().unwrap();
+			db.enact_logs().unwrap();
+			// i16 now contains 64 values and i17 contains a single value that did not fit
+
+			// Simulate interrupted reindex by processing it first and then restoring the old index
+			// file. Make a copy of the index file first.
+			std::fs::copy(tmp.path().join("index_00_16"), tmp.path().join("index_00_16.bak"))
+				.unwrap();
+			db.process_reindex().unwrap();
+			db.flush_logs().unwrap();
+			db.enact_logs().unwrap();
+			db.clean_logs().unwrap();
+			std::fs::rename(tmp.path().join("index_00_16.bak"), tmp.path().join("index_00_16"))
+				.unwrap();
+		}
+
+		// Reopen the database which should load the reindex.
+		{
+			let db = Db::open(&options).unwrap();
+			db.process_reindex().unwrap();
+			let mut entries = 0;
+			db.iter_column_while(0, |_| {
+				entries += 1;
+				true
+			})
+			.unwrap();
+
+			assert_eq!(entries, 65);
+			assert_eq!(db.inner.columns[0].index_bits(), Some(17));
 		}
 	}
 }

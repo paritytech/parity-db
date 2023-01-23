@@ -359,8 +359,10 @@ impl HashColumn {
 			if let Some(table) = IndexTable::open_existing(path, id)? {
 				if top.is_none() {
 					stats = table.load_stats()?;
+					log::trace!(target: "parity-db", "Opened main index {}", table.id);
 					top = Some(table);
 				} else {
+					log::trace!(target: "parity-db", "Opened stale index {}", table.id);
 					reindexing.push_front(table);
 				}
 			}
@@ -409,24 +411,25 @@ impl HashColumn {
 
 	fn write_reindex_plan_locked<'a, 'b>(
 		&self,
-		tables: RwLockUpgradableReadGuard<'a, Tables>,
-		reindex: RwLockUpgradableReadGuard<'b, Reindex>,
+		mut tables: RwLockUpgradableReadGuard<'a, Tables>,
+		mut reindex: RwLockUpgradableReadGuard<'b, Reindex>,
 		key: &Key,
 		address: Address,
 		log: &mut LogWriter,
 	) -> Result<PlanOutcome> {
-		if Self::search_index(key, &tables.index, &tables, log)?.is_some() {
+		if Self::contains_partial_key_with_address(key, address, &tables.index, log)? {
+			log::trace!(target: "parity-db", "{}: Skipped reindex entry {} when reindexing", tables.index.id, hex(key));
 			return Ok(PlanOutcome::Skipped)
 		}
-		match tables.index.write_insert_plan(key, address, None, log)? {
-			PlanOutcome::NeedReindex => {
-				log::debug!(target: "parity-db", "{}: Index chunk full {} when reindexing", tables.index.id, hex(key));
-				let (tables, reindex) = Self::trigger_reindex(tables, reindex, self.path.as_path());
-				self.write_reindex_plan_locked(tables, reindex, key, address, log)?;
-				Ok(PlanOutcome::NeedReindex)
-			},
-			_ => Ok(PlanOutcome::Written),
+		let mut outcome = PlanOutcome::Written;
+		while let PlanOutcome::NeedReindex =
+			tables.index.write_insert_plan(key, address, None, log)?
+		{
+			log::info!(target: "parity-db", "{}: Index chunk full {} when reindexing", tables.index.id, hex(key));
+			(tables, reindex) = Self::trigger_reindex(tables, reindex, self.path.as_path());
+			outcome = PlanOutcome::NeedReindex;
 		}
+		Ok(outcome)
 	}
 
 	fn search_index<'a>(
@@ -453,6 +456,25 @@ impl HashColumn {
 			sub_index = next_index;
 		}
 		Ok(None)
+	}
+
+	fn contains_partial_key_with_address<'a>(
+		key: &Key,
+		address: Address,
+		index: &'a IndexTable,
+		log: &LogWriter,
+	) -> Result<bool> {
+		let (mut existing_entry, mut sub_index) = index.get(key, 0, log)?;
+		while !existing_entry.is_empty() {
+			let existing_address = existing_entry.address(index.id.index_bits());
+			if existing_address == address {
+				return Ok(true)
+			}
+			let (next_entry, next_index) = index.get(key, sub_index + 1, log)?;
+			existing_entry = next_entry;
+			sub_index = next_index;
+		}
+		Ok(false)
 	}
 
 	fn search_all_indexes<'a>(
@@ -548,8 +570,8 @@ impl HashColumn {
 
 	fn write_plan_new<'a, 'b>(
 		&self,
-		tables: RwLockUpgradableReadGuard<'a, Tables>,
-		reindex: RwLockUpgradableReadGuard<'b, Reindex>,
+		mut tables: RwLockUpgradableReadGuard<'a, Tables>,
+		mut reindex: RwLockUpgradableReadGuard<'b, Reindex>,
 		key: &Key,
 		value: &[u8],
 		log: &mut LogWriter,
@@ -567,15 +589,15 @@ impl HashColumn {
 			log,
 			stats,
 		)?;
-		match tables.index.write_insert_plan(key, address, None, log)? {
-			PlanOutcome::NeedReindex => {
-				log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
-				let (tables, reindex) = Self::trigger_reindex(tables, reindex, self.path.as_path());
-				let (_, t, r) = self.write_plan_new(tables, reindex, key, value, log)?;
-				Ok((PlanOutcome::NeedReindex, t, r))
-			},
-			_ => Ok((PlanOutcome::Written, tables, reindex)),
+		let mut outcome = PlanOutcome::Written;
+		while let PlanOutcome::NeedReindex =
+			tables.index.write_insert_plan(key, address, None, log)?
+		{
+			log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
+			(tables, reindex) = Self::trigger_reindex(tables, reindex, self.path.as_path());
+			outcome = PlanOutcome::NeedReindex;
 		}
+		Ok((outcome, tables, reindex))
 	}
 
 	pub fn enact_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
@@ -620,6 +642,11 @@ impl HashColumn {
 				} else if let Some(table) = reindex.queue.iter().find(|r| r.id == record.table) {
 					table.validate_plan(record.index, log)?;
 				} else {
+					if record.table.index_bits() < tables.index.id.index_bits() {
+						// Insertion into a previously dropped index.
+						log::warn!( target: "parity-db", "Index {} is too old. Current is {}", record.table, tables.index.id);
+						return Err(Error::Corruption("Unexpected log index id".to_string()))
+					}
 					// Re-launch previously started reindex
 					// TODO: add explicit log records for reindexing events.
 					log::warn!(
@@ -627,7 +654,8 @@ impl HashColumn {
 						"Missing table {}, starting reindex",
 						record.table,
 					);
-					let _lock = Self::trigger_reindex(tables, reindex, self.path.as_path());
+					let lock = Self::trigger_reindex(tables, reindex, self.path.as_path());
+					std::mem::drop(lock);
 					return self.validate_plan(LogAction::InsertIndex(record), log)
 				}
 			},
@@ -723,7 +751,7 @@ impl HashColumn {
 					});
 					f(state).unwrap_or(false)
 				})?;
-				log::debug!( target: "parity-db", "{}: Done Iterating table {}", source.id, table.id);
+				log::debug!( target: "parity-db", "{}: Done iterating table {}", source.id, table.id);
 			}
 		}
 
@@ -1084,6 +1112,14 @@ impl Column {
 		match self {
 			Column::Hash(column) => column.dump(log, check_param, col),
 			Column::Tree(_column) => Ok(()),
+		}
+	}
+
+	#[cfg(test)]
+	pub fn index_bits(&self) -> Option<u8> {
+		match self {
+			Column::Hash(column) => Some(column.tables.read().index.id.index_bits()),
+			Column::Tree(_column) => None,
 		}
 	}
 }
