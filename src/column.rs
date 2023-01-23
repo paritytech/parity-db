@@ -879,8 +879,7 @@ impl HashColumn {
 				}
 				log::debug!(target: "parity-db", "{}: Continue reindex at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 				while source_index < source.id.total_chunks() && plan.len() < MAX_REINDEX_BATCH {
-					//log::trace!(target: "parity-db", "{}: Reindexing {}", source.id,
-					// source_index);
+					log::trace!(target: "parity-db", "{}: Reindexing {}", source.id, source_index);
 					let entries = source.entries(source_index, log.overlays())?;
 					for entry in entries.iter() {
 						if entry.is_empty() {
