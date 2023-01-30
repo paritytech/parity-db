@@ -201,7 +201,7 @@ impl BTreeTable {
 		if let Some((_tier, value)) = Column::get_value(key_query, at, tables, log)? {
 			Ok(value)
 		} else {
-			Err(Error::Corruption(format!("Missing btree entry at {}", at)))
+			Err(Error::Corruption(format!("Missing btree entry at {at}")))
 		}
 	}
 

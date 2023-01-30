@@ -19,7 +19,7 @@ mod with_loom {
 			Self(loom::sync::Mutex::new(val))
 		}
 
-		pub fn lock(&self) -> MutexGuard<'_, T> {
+		pub fn lock(&self) -> MutexGuard<T> {
 			MutexGuard(Some(self.0.lock().unwrap()))
 		}
 	}
@@ -63,7 +63,7 @@ mod with_loom {
 			self.0.notify_all()
 		}
 
-		pub fn wait<T>(&self, mutex_guard: &mut MutexGuard<'_, T>) {
+		pub fn wait<T>(&self, mutex_guard: &mut MutexGuard<T>) {
 			mutex_guard.0 = Some(self.0.wait(mutex_guard.0.take().unwrap()).unwrap())
 		}
 	}
@@ -76,15 +76,15 @@ mod with_loom {
 			Self(loom::sync::RwLock::new(val))
 		}
 
-		pub fn read(&self) -> RwLockReadGuard<'_, T> {
+		pub fn read(&self) -> RwLockReadGuard<T> {
 			RwLockReadGuard(self.0.read().unwrap())
 		}
 
-		pub fn upgradable_read(&self) -> RwLockUpgradableReadGuard<'_, T> {
+		pub fn upgradable_read(&self) -> RwLockUpgradableReadGuard<T> {
 			RwLockUpgradableReadGuard(self.0.write().unwrap())
 		}
 
-		pub fn write(&self) -> RwLockWriteGuard<'_, T> {
+		pub fn write(&self) -> RwLockWriteGuard<T> {
 			RwLockWriteGuard(self.0.write().unwrap())
 		}
 	}

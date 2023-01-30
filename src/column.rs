@@ -409,10 +409,10 @@ impl HashColumn {
 		self.write_reindex_plan_locked(tables, reindex, key, address, log)
 	}
 
-	fn write_reindex_plan_locked<'a, 'b>(
+	fn write_reindex_plan_locked(
 		&self,
-		mut tables: RwLockUpgradableReadGuard<'a, Tables>,
-		mut reindex: RwLockUpgradableReadGuard<'b, Reindex>,
+		mut tables: RwLockUpgradableReadGuard<Tables>,
+		mut reindex: RwLockUpgradableReadGuard<Reindex>,
 		key: &Key,
 		address: Address,
 		log: &mut LogWriter,
@@ -458,10 +458,10 @@ impl HashColumn {
 		Ok(None)
 	}
 
-	fn contains_partial_key_with_address<'a>(
+	fn contains_partial_key_with_address(
 		key: &Key,
 		address: Address,
-		index: &'a IndexTable,
+		index: &IndexTable,
 		log: &LogWriter,
 	) -> Result<bool> {
 		let (mut existing_entry, mut sub_index) = index.get(key, 0, log)?;

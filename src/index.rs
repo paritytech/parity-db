@@ -163,7 +163,7 @@ impl TableId {
 	}
 
 	pub fn is_file_name(col: ColId, name: &str) -> bool {
-		name.starts_with(&format!("index_{:02}_", col))
+		name.starts_with(&format!("index_{col:02}_"))
 	}
 
 	pub fn as_u16(&self) -> u16 {

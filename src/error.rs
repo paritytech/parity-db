@@ -26,16 +26,16 @@ pub enum Error {
 impl fmt::Display for Error {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Error::Io(e) => write!(f, "IO Error: {}", e),
-			Error::Corruption(e) => write!(f, "Corruption: {}", e),
-			Error::InvalidConfiguration(e) => write!(f, "Invalid configuration: {}", e),
+			Error::Io(e) => write!(f, "IO Error: {e}"),
+			Error::Corruption(e) => write!(f, "Corruption: {e}"),
+			Error::InvalidConfiguration(e) => write!(f, "Invalid configuration: {e}"),
 			Error::IncompatibleColumnConfig { id, reason } =>
-				write!(f, "Invalid column {} configuration : {}", id, reason),
-			Error::InvalidInput(e) => write!(f, "Invalid input: {}", e),
+				write!(f, "Invalid column {id} configuration : {reason}"),
+			Error::InvalidInput(e) => write!(f, "Invalid input: {e}"),
 			Error::InvalidValueData => write!(f, "Invalid data in value table"),
-			Error::Background(e) => write!(f, "Background worker error: {}", e),
-			Error::Locked(e) => write!(f, "Database file is in use. ({})", e),
-			Error::Migration(e) => write!(f, "Migration error: {}", e),
+			Error::Background(e) => write!(f, "Background worker error: {e}"),
+			Error::Locked(e) => write!(f, "Database file is in use. ({e})"),
+			Error::Migration(e) => write!(f, "Migration error: {e}"),
 			Error::Compression => write!(f, "Compression error"),
 			Error::DatabaseNotFound => write!(f, "Database does not exist"),
 		}

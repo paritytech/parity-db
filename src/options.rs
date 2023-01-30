@@ -260,8 +260,7 @@ impl Options {
 		}
 		if version < LAST_SUPPORTED_VERSION {
 			return Err(Error::InvalidConfiguration(format!(
-				"Unsupported database version {}. Expected {}",
-				version, CURRENT_VERSION
+				"Unsupported database version {version}. Expected {CURRENT_VERSION}"
 			)))
 		}
 		let salt = salt.ok_or_else(|| Error::InvalidConfiguration("Missing salt value".into()))?;

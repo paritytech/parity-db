@@ -566,7 +566,7 @@ impl DbInner {
 							LogAction::InsertIndex(insertion) => {
 								let col = insertion.table.col() as usize;
 								if let Err(e) = self.columns.get(col).map_or_else(
-									|| Err(Error::Corruption(format!("Invalid column id {}", col))),
+									|| Err(Error::Corruption(format!("Invalid column id {col}"))),
 									|col| {
 										col.validate_plan(
 											LogAction::InsertIndex(insertion),
@@ -583,7 +583,7 @@ impl DbInner {
 							LogAction::InsertValue(insertion) => {
 								let col = insertion.table.col() as usize;
 								if let Err(e) = self.columns.get(col).map_or_else(
-									|| Err(Error::Corruption(format!("Invalid column id {}", col))),
+									|| Err(Error::Corruption(format!("Invalid column id {col}"))),
 									|col| {
 										col.validate_plan(
 											LogAction::InsertValue(insertion),
@@ -1531,25 +1531,22 @@ mod tests {
 
 		assert!(
 			!db_path_first.exists(),
-			"That directory should not have existed at this point (dir: {:?})",
-			db_path_first
+			"That directory should not have existed at this point (dir: {db_path_first:?})"
 		);
 
 		let options = Options::with_columns(&db_path_last, 5);
 		assert!(matches!(Db::open(&options), Err(crate::Error::DatabaseNotFound)));
 
-		assert!(!db_path_first.exists(), "That directory should remain non-existent. Did the `open(create: false)` nonetheless create a directory? (dir: {:?})", db_path_first);
+		assert!(!db_path_first.exists(), "That directory should remain non-existent. Did the `open(create: false)` nonetheless create a directory? (dir: {db_path_first:?})");
 		assert!(Db::open_or_create(&options).is_ok(), "New database should be created");
 
 		assert!(
 			db_path_first.is_dir(),
-			"A directory should have been been created (dir: {:?})",
-			db_path_first
+			"A directory should have been been created (dir: {db_path_first:?})"
 		);
 		assert!(
 			db_path_last.is_dir(),
-			"A directory should have been been created (dir: {:?})",
-			db_path_last
+			"A directory should have been been created (dir: {db_path_last:?})"
 		);
 	}
 

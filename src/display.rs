@@ -13,7 +13,7 @@ impl<'a> HexDisplay<'a> {
 impl<'a> std::fmt::Display for HexDisplay<'a> {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		for byte in self.0 {
-			write!(f, "{:02x}", byte)?;
+			write!(f, "{byte:02x}")?;
 		}
 		Ok(())
 	}
@@ -22,7 +22,7 @@ impl<'a> std::fmt::Display for HexDisplay<'a> {
 impl<'a> std::fmt::Debug for HexDisplay<'a> {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		for byte in self.0 {
-			write!(f, "{:02x}", byte)?;
+			write!(f, "{byte:02x}")?;
 		}
 		Ok(())
 	}
