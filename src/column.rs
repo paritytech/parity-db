@@ -411,8 +411,8 @@ impl HashColumn {
 
 	fn write_reindex_plan_locked(
 		&self,
-		mut tables: RwLockUpgradableReadGuard<'_, Tables>,
-		mut reindex: RwLockUpgradableReadGuard<'_, Reindex>,
+		mut tables: RwLockUpgradableReadGuard<Tables>,
+		mut reindex: RwLockUpgradableReadGuard<Reindex>,
 		key: &Key,
 		address: Address,
 		log: &mut LogWriter,
