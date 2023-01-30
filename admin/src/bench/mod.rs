@@ -270,7 +270,7 @@ pub fn run_internal(args: Args, db: Db) {
 
 		threads.push(
 			thread::Builder::new()
-				.name(format!("reader {}", i))
+				.name(format!("reader {i}"))
 				.spawn(move || reader(db, pool, offset, i as u64, shutdown))
 				.unwrap(),
 		);
@@ -282,7 +282,7 @@ pub fn run_internal(args: Args, db: Db) {
 
 		threads.push(
 			thread::Builder::new()
-				.name(format!("iter {}", i))
+				.name(format!("iter {i}"))
 				.spawn(move || iter(db, shutdown))
 				.unwrap(),
 		);
@@ -296,7 +296,7 @@ pub fn run_internal(args: Args, db: Db) {
 
 		threads.push(
 			thread::Builder::new()
-				.name(format!("writer {}", i))
+				.name(format!("writer {i}"))
 				.spawn(move || writer(db, args, pool, shutdown, start_commit))
 				.unwrap(),
 		);
@@ -341,7 +341,7 @@ pub fn run_internal(args: Args, db: Db) {
 	for nc in start_commit as u64..(start_commit + commits) as u64 {
 		let counter = nc - start_commit as u64;
 		if counter % 10000 == 0 {
-			println!("Query {}/{}", counter, commits);
+			println!("Query {counter}/{commits}");
 		}
 		let commits = (start_commit + commits) as u64;
 		let prune_window: u64 = COMMIT_PRUNE_WINDOW as u64;

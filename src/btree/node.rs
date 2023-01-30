@@ -521,7 +521,7 @@ impl Node {
 				from = child;
 				depth -= 1
 			} else {
-				return Err(Error::Corruption(format!("A btree node is missing a child at {:?}", i)))
+				return Err(Error::Corruption(format!("A btree node is missing a child at {i:?}")))
 			}
 		}
 	}

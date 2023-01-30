@@ -527,7 +527,7 @@ impl Log {
 
 	fn log_path(root: &std::path::Path, id: u32) -> std::path::PathBuf {
 		let mut path: std::path::PathBuf = root.into();
-		path.push(format!("log{}", id));
+		path.push(format!("log{id}"));
 		path
 	}
 
@@ -563,7 +563,7 @@ impl Log {
 	fn drop_log(&self, id: u32) -> Result<()> {
 		log::debug!(target: "parity-db", "Drop log {}", id);
 		let path = Self::log_path(&self.path, id);
-		try_io!(std::fs::remove_file(&path));
+		try_io!(std::fs::remove_file(path));
 		Ok(())
 	}
 

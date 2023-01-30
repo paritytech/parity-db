@@ -118,14 +118,14 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 			let remove_tmp_dir = || -> Result<()> {
 				if std::fs::metadata(&tmp_dir).is_ok() {
 					std::fs::remove_dir_all(&tmp_dir).map_err(|e| {
-						Error::Migration(format!("Error removing overwrite tmp dir: {:?}", e))
+						Error::Migration(format!("Error removing overwrite tmp dir: {e:?}"))
 					})?;
 				}
 				Ok(())
 			};
 			remove_tmp_dir()?;
 			std::fs::create_dir_all(&tmp_dir).map_err(|e| {
-				Error::Migration(format!("Error creating overwrite tmp dir: {:?}", e))
+				Error::Migration(format!("Error creating overwrite tmp dir: {e:?}"))
 			})?;
 
 			move_column(c, from, &tmp_dir)?;
@@ -135,9 +135,8 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 				.write_metadata(from, &to.salt.expect("Migrate requires salt"))
 				.map_err(|e| {
 					Error::Migration(format!(
-						"Error {:?}\nFail updating metadata of column {:?} \
-							in source, please restore manually before restarting.",
-						e, c
+						"Error {e:?}\nFail updating metadata of column {c:?} \
+							in source, please restore manually before restarting."
 					))
 				})?;
 			remove_tmp_dir()?;

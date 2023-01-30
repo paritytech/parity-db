@@ -337,7 +337,7 @@ pub trait DbSimulator {
 					return Ok(layers)
 				}
 			}
-			Err(parity_db::Error::Corruption(format!("Not able to recover the database to one of the valid state. The current database state is: {:?}", disk_state)))
+			Err(parity_db::Error::Corruption(format!("Not able to recover the database to one of the valid state. The current database state is: {disk_state:?}")))
 		})
 	}
 
@@ -374,12 +374,12 @@ pub trait DbSimulator {
 		let values = model_values(layers);
 		for (k, v) in Self::layer_required_content(&values) {
 			if db.get(0, &k)?.as_ref() != Some(&v) {
-				return Ok(Err(format!("The value {:?} for key {:?} is not in the database", v, k)))
+				return Ok(Err(format!("The value {v:?} for key {k:?} is not in the database")))
 			}
 		}
 		for k in Self::layer_removed_content(&values) {
 			if db.get(0, &k)?.is_some() {
-				return Ok(Err(format!("The key {:?} should not be in the database", k)))
+				return Ok(Err(format!("The key {k:?} should not be in the database")))
 			}
 		}
 		Ok(Ok(()))

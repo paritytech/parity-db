@@ -28,7 +28,7 @@ pub fn run() -> Result<(), String> {
 		.unwrap_or_else(|| std::env::current_dir().expect("Cannot resolve current dir"));
 	let nb_column = cli.shared().columns.unwrap_or(1);
 	let mut options = if let Some(metadata) = parity_db::Options::load_metadata(&db_path)
-		.map_err(|e| format!("Error resolving metadata: {:?}", e))?
+		.map_err(|e| format!("Error resolving metadata: {e:?}"))?
 	{
 		let mut options = parity_db::Options::with_columns(db_path.as_path(), 0);
 		options.columns = metadata.columns;
@@ -50,7 +50,7 @@ pub fn run() -> Result<(), String> {
 	match cli.subcommand {
 		SubCommand::Stats(stat) => {
 			let db = parity_db::Db::open_read_only(&options)
-				.map_err(|e| format!("Invalid db: {:?}", e))?;
+				.map_err(|e| format!("Invalid db: {e:?}"))?;
 			if stat.clear {
 				db.clear_stats(stat.column).unwrap();
 			} else {
@@ -61,17 +61,17 @@ pub fn run() -> Result<(), String> {
 		SubCommand::Migrate(args) => {
 			use parity_db::Options;
 			let dest_meta = Options::load_metadata_file(&args.dest_meta)
-				.map_err(|e| format!("Error loading dest metadata: {:?}", e))?
+				.map_err(|e| format!("Error loading dest metadata: {e:?}"))?
 				.ok_or_else(|| "Error opening dest metadata file".to_string())?;
 
 			let dest_columns = dest_meta.columns;
 
 			if args.clear_dest && std::fs::metadata(&args.dest_path).is_ok() {
 				std::fs::remove_dir_all(&args.dest_path)
-					.map_err(|e| format!("Error removing dest dir: {:?}", e))?;
+					.map_err(|e| format!("Error removing dest dir: {e:?}"))?;
 			}
 			std::fs::create_dir_all(&args.dest_path)
-				.map_err(|e| format!("Error creating dest dir: {:?}", e))?;
+				.map_err(|e| format!("Error creating dest dir: {e:?}"))?;
 
 			let mut dest_options = Options::with_columns(&args.dest_path, dest_columns.len() as u8);
 			dest_options.columns = dest_columns;
@@ -79,16 +79,16 @@ pub fn run() -> Result<(), String> {
 			dest_options.sync_data = false;
 
 			parity_db::migrate(&db_path, dest_options, args.overwrite, &args.force_columns)
-				.map_err(|e| format!("Migration error: {:?}", e))?;
+				.map_err(|e| format!("Migration error: {e:?}"))?;
 
 			if args.overwrite && std::fs::metadata(&args.dest_path).is_ok() {
 				std::fs::remove_dir_all(&args.dest_path)
-					.map_err(|e| format!("Error removing dest dir: {:?}", e))?;
+					.map_err(|e| format!("Error removing dest dir: {e:?}"))?;
 			}
 		},
 		SubCommand::Check(check) => {
 			let db = parity_db::Db::open_read_only(&options)
-				.map_err(|e| format!("Invalid db: {:?}", e))?;
+				.map_err(|e| format!("Invalid db: {e:?}"))?;
 			if !check.index_value {
 				// Note that we should use enum parameter instead.
 				return Err("Requires one of the following check flag: --index-value".to_string())
@@ -100,10 +100,10 @@ pub fn run() -> Result<(), String> {
 				check.display,
 				check.display_value_max,
 			);
-			db.dump(check_param).map_err(|e| format!("Check error: {:?}", e))?;
+			db.dump(check_param).map_err(|e| format!("Check error: {e:?}"))?;
 		},
 		SubCommand::Flush(_flush) => {
-			let _db = parity_db::Db::open(&options).map_err(|e| format!("Invalid db: {:?}", e))?;
+			let _db = parity_db::Db::open(&options).map_err(|e| format!("Invalid db: {e:?}"))?;
 		},
 		SubCommand::Stress(bench) => {
 			let args = bench.get_args();
@@ -111,7 +111,7 @@ pub fn run() -> Result<(), String> {
 			options.path.push("test_db_stress");
 			if options.path.exists() && !args.append {
 				std::fs::remove_dir_all(options.path.as_path())
-					.map_err(|e| format!("Error clearing stress db: {:?}", e))?;
+					.map_err(|e| format!("Error clearing stress db: {e:?}"))?;
 			}
 
 			let mut db_options = options.clone();

@@ -230,7 +230,7 @@ impl ColumnStats {
 	}
 
 	pub fn write_stats_text(&self, writer: &mut impl Write, col: ColId) -> std::io::Result<()> {
-		writeln!(writer, "Column {}", col)?;
+		writeln!(writer, "Column {col}")?;
 		writeln!(writer, "Total values: {}", self.total_values.load(Ordering::Relaxed))?;
 		writeln!(writer, "Total bytes: {}", self.total_bytes.load(Ordering::Relaxed))?;
 		writeln!(writer, "Total oversized values: {}", self.oversized.load(Ordering::Relaxed))?;
