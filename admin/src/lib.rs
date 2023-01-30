@@ -131,7 +131,7 @@ pub fn run() -> Result<(), String> {
 #[derive(Debug, clap::Parser)]
 pub struct Shared {
 	/// Specify db base path.
-	#[clap(long, short = 'd', value_name = "PATH", parse(from_os_str))]
+	#[clap(long, short = 'd', value_name = "PATH")]
 	pub base_path: Option<PathBuf>,
 
 	/// Do not sync file on each flush.
