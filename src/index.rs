@@ -11,6 +11,10 @@ use crate::{
 	table::{key::TableKey, SIZE_TIERS_BITS},
 	Key,
 };
+#[cfg(target_arch = "x86")]
+use std::arch::x86::*;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
 use std::convert::TryInto;
 
 // Index chunk consists of 8 64-bit entries.
@@ -231,8 +235,70 @@ impl IndexTable {
 		Ok(try_io!(Ok(&map[offset..offset + CHUNK_LEN])))
 	}
 
-	#[inline(never)]
 	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
+		#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+		if is_x86_feature_detected!("sse2") {
+			return self.find_entry_sse2(key_prefix, sub_index, chunk)
+		}
+		self.find_entry_regular(key_prefix, sub_index, chunk)
+	}
+
+	#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+	fn find_entry_sse2(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
+		assert!(chunk.len() >= CHUNK_ENTRIES * 8); // Bound checking (not done by SIMD instructions)
+		debug_assert!(
+			Entry::address_bits(self.id.index_bits()) <= 32,
+			"To be sure we can use all high 32 bits as key prefix"
+		);
+		debug_assert_eq!(
+			CHUNK_ENTRIES % 4,
+			0,
+			"We assume here we got buffer with a number of elements that is a multiple of 4"
+		);
+
+		unsafe {
+			let target = _mm_set1_epi32(((key_prefix << self.id.index_bits()) >> 32) as i32);
+			let mut i = (sub_index >> 2) << 2; // We keep an alignment of 4
+			while i + 4 <= CHUNK_ENTRIES {
+				// We load the value 2 by 2 and move the high bits into the low part of the register
+				let first_two = _mm_shuffle_epi32::<0b10001101>(_mm_loadu_si128(
+					chunk[i * 8..].as_ptr() as *const __m128i,
+				));
+				let last_two = _mm_shuffle_epi32::<0b10001101>(_mm_loadu_si128(
+					chunk[(i + 2) * 8..].as_ptr() as *const __m128i,
+				));
+				// We set into current the input low parts in the interleaved order
+				let current = _mm_unpacklo_epi32(first_two, last_two);
+				let cmp = _mm_movemask_epi8(_mm_cmpeq_epi32(current, target));
+				if cmp != 0 {
+					let position = i + if cmp & 0x000f != 0 {
+						0
+					} else if cmp & 0x00f0 != 0 {
+						2
+					} else if cmp & 0x0f00 != 0 {
+						1
+					} else if cmp & 0xf000 != 0 {
+						3
+					} else {
+						unreachable!()
+					};
+					if position >= sub_index {
+						// We need to check we are not reading again the same input
+						return (Self::read_entry(chunk, position), position)
+					}
+				}
+				i += 4;
+			}
+		}
+		(Entry::empty(), 0)
+	}
+
+	fn find_entry_regular(
+		&self,
+		key_prefix: u64,
+		sub_index: usize,
+		chunk: &[u8],
+	) -> (Entry, usize) {
 		assert!(chunk.len() >= CHUNK_ENTRIES * 8);
 		let partial_key = Entry::extract_key(key_prefix, self.id.index_bits());
 		for i in sub_index..CHUNK_ENTRIES {
