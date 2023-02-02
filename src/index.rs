@@ -267,21 +267,11 @@ impl IndexTable {
 				let last_two = _mm_shuffle_epi32::<0b10001101>(_mm_loadu_si128(
 					chunk[(i + 2) * 8..].as_ptr() as *const __m128i,
 				));
-				// We set into current the input low parts in the interleaved order
-				let current = _mm_unpacklo_epi32(first_two, last_two);
+				// We set into current the input low parts
+				let current = _mm_unpacklo_epi64(first_two, last_two);
 				let cmp = _mm_movemask_epi8(_mm_cmpeq_epi32(current, target));
 				if cmp != 0 {
-					let position = i + if cmp & 0x000f != 0 {
-						0
-					} else if cmp & 0x00f0 != 0 {
-						2
-					} else if cmp & 0x0f00 != 0 {
-						1
-					} else if cmp & 0xf000 != 0 {
-						3
-					} else {
-						unreachable!()
-					};
+					let position = i + (cmp.trailing_zeros() as usize) / 4;
 					if position >= sub_index {
 						// We need to check we are not reading again the same input
 						return (Self::read_entry(chunk, position), position)
