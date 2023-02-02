@@ -235,24 +235,15 @@ impl IndexTable {
 		Ok(try_io!(Ok(&map[offset..offset + CHUNK_LEN])))
 	}
 
+	#[cfg(target_feature = "sse2")]
 	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
-		#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-		if is_x86_feature_detected!("sse2") {
-			return self.find_entry_sse2(key_prefix, sub_index, chunk)
-		}
-		self.find_entry_regular(key_prefix, sub_index, chunk)
-	}
-
-	#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-	fn find_entry_sse2(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
 		assert!(chunk.len() >= CHUNK_ENTRIES * 8); // Bound checking (not done by SIMD instructions)
 		debug_assert!(
 			Entry::address_bits(self.id.index_bits()) <= 32,
 			"To be sure we can use all high 32 bits as key prefix"
 		);
-		debug_assert_eq!(
-			CHUNK_ENTRIES % 4,
-			0,
+		const _: () = assert!(
+			CHUNK_ENTRIES % 4 == 0,
 			"We assume here we got buffer with a number of elements that is a multiple of 4"
 		);
 
@@ -283,12 +274,8 @@ impl IndexTable {
 		(Entry::empty(), 0)
 	}
 
-	fn find_entry_regular(
-		&self,
-		key_prefix: u64,
-		sub_index: usize,
-		chunk: &[u8],
-	) -> (Entry, usize) {
+	#[cfg(not(target_feature = "sse2"))]
+	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
 		assert!(chunk.len() >= CHUNK_ENTRIES * 8);
 		let partial_key = Entry::extract_key(key_prefix, self.id.index_bits());
 		for i in sub_index..CHUNK_ENTRIES {
