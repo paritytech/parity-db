@@ -10,6 +10,7 @@ description = "Key-value database for the blockchain"
 
 [features]
 instrumentation = []
+bench = []
 
 [dependencies]
 blake2 = "0.10.4"
