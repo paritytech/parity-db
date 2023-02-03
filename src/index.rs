@@ -235,12 +235,14 @@ impl IndexTable {
 		Ok(try_io!(Ok(&map[offset..offset + CHUNK_LEN])))
 	}
 
+	#[cfg(target_feature = "sse2")]
 	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
-		if cfg!(target_feature = "sse2") {
-			self.find_entry_sse2(key_prefix, sub_index, chunk)
-		} else {
-			self.find_entry_base(key_prefix, sub_index, chunk)
-		}
+		self.find_entry_sse2(key_prefix, sub_index, chunk)
+	}
+
+	#[cfg(not(target_feature = "sse2"))]
+	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
+		self.find_entry_base(key_prefix, sub_index, chunk)
 	}
 
 	#[cfg(target_feature = "sse2")]
@@ -284,6 +286,7 @@ impl IndexTable {
 		(Entry::empty(), 0)
 	}
 
+	#[cfg(any(not(target_feature = "sse2"), test))]
 	fn find_entry_base(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
 		assert!(chunk.len() >= CHUNK_ENTRIES * 8);
 		let partial_key = Entry::extract_key(key_prefix, self.id.index_bits());
