@@ -61,43 +61,42 @@ impl Node {
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
 		loop {
-			if !btree.ref_counted
-				&& changes.len() > 1
-				&& !matches!(changes[1], Operation::Reference(..))
-				&& changes[0].key() == changes[1].key()
+			if !btree.ref_counted &&
+				changes.len() > 1 &&
+				!matches!(changes[1], Operation::Reference(..)) &&
+				changes[0].key() == changes[1].key()
 			{
 				*changes = &changes[1..];
-				continue;
+				continue
 			}
 			let r = match &changes[0] {
-				Operation::Set(key, value) => {
-					self.insert(depth, key.value(), value.value(), changes, btree, log)?
-				},
+				Operation::Set(key, value) =>
+					self.insert(depth, key.value(), value.value(), changes, btree, log)?,
 				_ => self.on_existing(depth, changes, btree, log)?,
 			};
 			if r.0.is_some() || r.1 {
-				return Ok(r);
+				return Ok(r)
 			}
 			if changes.len() == 1 {
-				break;
+				break
 			}
 			if let Some((parent, p)) = &parent {
 				let key = &changes[1].key();
 				let (at, i) = self.position(key.value())?; // TODO could start position from current
 				if at || i < self.number_separator() {
 					*changes = &changes[1..];
-					continue;
+					continue
 				}
 				let (at, i) = parent.position(key.value())?;
 				if !at && &i == p && i < parent.number_separator() {
 					*changes = &changes[1..];
-					continue;
+					continue
 				}
 				// Could check other parents for case i == parent.number_separator.
 				// Would mean unsafe Vec<*mut>, or other complex design: skipping
 				// this case.
 			}
-			break;
+			break
 		}
 		Ok((None, false))
 	}
@@ -133,7 +132,7 @@ impl Node {
 					}
 				} else {
 					(None, false)
-				});
+				})
 			}
 
 			if self.has_separator(ORDER - 1) {
@@ -168,7 +167,7 @@ impl Node {
 						let right = Self::write_split_child(right_ix, right, btree, log)?;
 						Ok((Some((sep, right)), false))
 					},
-				};
+				}
 			}
 
 			self.shift_from(i, has_child, false);
@@ -280,7 +279,7 @@ impl Node {
 			}
 		} else {
 			if !has_child {
-				return Ok((None, false));
+				return Ok((None, false))
 			}
 			return if let Some(mut child) = self.fetch_child(i, values, log)? {
 				let r = child.change(Some((self, i)), depth - 1, changes, values, log)?;
@@ -298,7 +297,7 @@ impl Node {
 				})
 			} else {
 				Ok((None, false))
-			};
+			}
 		}
 
 		Ok((None, self.need_rebalance()))
@@ -341,7 +340,7 @@ impl Node {
 			right.set_separator(0, separator);
 			self.write_child(at - 1, left, values, log)?;
 			self.write_child(at, right, values, log)?;
-			return Ok(());
+			return Ok(())
 		}
 
 		let number_child = self.number_separator() + 1;
@@ -374,7 +373,7 @@ impl Node {
 			}
 			self.write_child(at, left, values, log)?;
 			self.write_child(at + 1, right, values, log)?;
-			return Ok(());
+			return Ok(())
 		}
 
 		let (at, at_right) = if at + 1 == number_child {
@@ -437,7 +436,7 @@ impl Node {
 		if self.number_separator() == 0 && self.fetch_child(0, values, log)?.is_some() {
 			if let Some(node) = self.fetch_child(0, values, log)? {
 				let child = self.remove_child(0);
-				return Ok(Some((child.entry_index, node)));
+				return Ok(Some((child.entry_index, node)))
 			}
 		}
 		Ok(None)
@@ -452,7 +451,7 @@ impl Node {
 		let last = if let Some(last) = self.last_separator_index() {
 			last
 		} else {
-			return Ok((false, None));
+			return Ok((false, None))
 		};
 		let i = last;
 		if depth == 0 {
@@ -484,7 +483,7 @@ impl Node {
 			Ok(self.separator_address(i))
 		} else {
 			if let Some(child) = self.fetch_child(i, values, log)? {
-				return child.get(key, values, log);
+				return child.get(key, values, log)
 			}
 
 			Ok(None)
@@ -512,18 +511,18 @@ impl Node {
 					SeekTo::Include(_) => (LastIndex::Seeked(i), from),
 					SeekTo::Last => unreachable!(),
 				});
-				return Ok(());
+				return Ok(())
 			}
 			if depth == 0 {
 				stack.push((LastIndex::Before(i), from));
-				return Ok(());
+				return Ok(())
 			}
 			if let Some(child) = from.fetch_child(i, values, log)? {
 				stack.push((LastIndex::Descend(i), from));
 				from = child;
 				depth -= 1
 			} else {
-				return Err(Error::Corruption(format!("A btree node is missing a child at {i:?}")));
+				return Err(Error::Corruption(format!("A btree node is missing a child at {i:?}")))
 			}
 		}
 	}
@@ -537,7 +536,7 @@ impl Node {
 	) -> Result<bool> {
 		let size = self.number_separator();
 		if parent_size != 0 && size < ORDER / 2 {
-			return Ok(false);
+			return Ok(false)
 		}
 
 		let mut i = 0;
@@ -545,10 +544,10 @@ impl Node {
 			let child = self.fetch_child(i, tables, log)?;
 			i += 1;
 			if child.is_none() {
-				continue;
+				continue
 			}
 			if !child.unwrap().is_balanced(tables, log, size)? {
-				return Ok(false);
+				return Ok(false)
 			}
 		}
 
@@ -603,13 +602,13 @@ impl Node {
 			}
 			i_children += 1;
 			if i_children == ORDER_CHILD {
-				break;
+				break
 			}
 			if let Some(sep) = entry.read_separator() {
 				node.separators.as_mut()[i_separator].separator = Some(sep);
 				i_separator += 1
 			} else {
-				break;
+				break
 			}
 		}
 		node
@@ -744,7 +743,7 @@ impl Node {
 			current.modified = true;
 			i += 1;
 			if i == ORDER {
-				break;
+				break
 			}
 			current = std::mem::replace(&mut self.separators[i], current);
 		}
@@ -755,7 +754,7 @@ impl Node {
 				current.moved = true;
 				i += 1;
 				if i == ORDER_CHILD {
-					break;
+					break
 				}
 				current = std::mem::replace(&mut self.children[i], current);
 			}
@@ -769,7 +768,7 @@ impl Node {
 			self.separators.as_mut()[i] = self.remove_separator(i + 1);
 			self.separators.as_mut()[i].modified = true;
 			if self.separators.as_mut()[i].separator.is_none() {
-				break;
+				break
 			}
 			i += 1;
 		}
@@ -778,7 +777,7 @@ impl Node {
 			while i < ORDER_CHILD - 1 {
 				self.children.as_mut()[i] = self.remove_child(i + 1);
 				if self.children.as_mut()[i].entry_index.is_none() {
-					break;
+					break
 				}
 				i += 1;
 			}
@@ -790,7 +789,7 @@ impl Node {
 		while self.separators[i].separator.is_some() {
 			i += 1;
 			if i == ORDER {
-				break;
+				break
 			}
 		}
 		i
@@ -808,7 +807,7 @@ impl Node {
 			}
 			i += 1;
 			if i == ORDER {
-				break;
+				break
 			}
 		}
 		Ok((false, i))
@@ -822,7 +821,7 @@ impl Node {
 	) -> Result<Option<Self>> {
 		if let Some(ix) = self.children[i].entry_index {
 			let entry = BTreeTable::get_encoded_entry(ix, log, values)?;
-			return Ok(Some(Self::from_encoded(entry)));
+			return Ok(Some(Self::from_encoded(entry)))
 		}
 		Ok(None)
 	}

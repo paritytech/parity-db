@@ -61,7 +61,7 @@ impl Entry {
 
 	fn read_separator(&mut self) -> Option<SeparatorInner> {
 		if self.encoded.offset() == self.encoded.inner_mut().len() {
-			return None;
+			return None
 		}
 		let value = self.encoded.read_u64();
 		let head = self.encoded.read_slice(1);
@@ -69,7 +69,7 @@ impl Entry {
 		let size = if head == u8::MAX { self.encoded.read_u32() as usize } else { head as usize };
 		let key = self.encoded.read_slice(size).to_vec();
 		if value == 0 {
-			return None;
+			return None
 		}
 		let value = Address::from_u64(value);
 		Some(SeparatorInner { key, value })
@@ -188,7 +188,7 @@ impl BTreeTable {
 	pub fn get(key: &[u8], log: &impl LogQuery, values: TablesRef) -> Result<Option<Vec<u8>>> {
 		let btree_header = Self::btree_header(log, values)?;
 		if btree_header.root == NULL_ADDRESS {
-			return Ok(None);
+			return Ok(None)
 		}
 		let record_id = 0; // lifetime of Btree is the query, so no invalidate.
 				   // keeping log locked when parsing tree.
@@ -240,7 +240,7 @@ impl BTreeTable {
 			},
 			_ => {
 				log::error!(target: "parity-db", "Unexpected log action");
-				return Err(Error::Corruption("Unexpected log action".to_string()));
+				return Err(Error::Corruption("Unexpected log action".to_string()))
 			},
 		}
 		Ok(())
@@ -289,7 +289,7 @@ impl BTreeTable {
 			if child.moved {
 				node.changed = true;
 			} else if child.entry_index.is_none() {
-				break;
+				break
 			}
 		}
 
@@ -297,12 +297,12 @@ impl BTreeTable {
 			if separator.modified {
 				node.changed = true;
 			} else if separator.separator.is_none() {
-				break;
+				break
 			}
 		}
 
 		if !node.changed {
-			return Ok(None);
+			return Ok(None)
 		}
 
 		let mut entry = Entry::empty();
@@ -316,13 +316,13 @@ impl BTreeTable {
 			}
 			i_children += 1;
 			if i_children == ORDER_CHILD {
-				break;
+				break
 			}
 			if let Some(sep) = &node.separators.as_mut()[i_separator].separator {
 				entry.write_separator(&sep.key, sep.value);
 				i_separator += 1
 			} else {
-				break;
+				break
 			}
 		}
 
@@ -412,7 +412,7 @@ pub mod commit_overlay {
 							return Err(Error::InvalidInput(format!(
 								"No Rc for column {}",
 								self.col
-							)));
+							)))
 						}
 					},
 				}

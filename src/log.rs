@@ -203,7 +203,7 @@ impl<'a> LogReader<'a> {
 						expected,
 					);
 					if checksum != expected {
-						return Err(Error::Corruption("Log record CRC-32 mismatch".into()));
+						return Err(Error::Corruption("Log record CRC-32 mismatch".into()))
 					}
 				} else {
 					log::trace!(target: "parity-db", "Read end of record");
@@ -538,7 +538,7 @@ impl Log {
 	pub fn open_log_file(path: &std::path::Path) -> Result<(std::fs::File, Option<u64>)> {
 		let mut file = try_io!(std::fs::OpenOptions::new().read(true).write(true).open(path));
 		if try_io!(file.metadata()).len() == 0 {
-			return Ok((file, None));
+			return Ok((file, None))
 		}
 		match Self::read_first_record_id(&mut file) {
 			Err(Error::Io(e)) if e.kind() == ErrorKind::UnexpectedEof => {
@@ -676,7 +676,7 @@ impl Log {
 				}
 				self.read_queue.write().push_back((to_flush.id, file));
 			}
-			return Ok(true);
+			return Ok(true)
 		}
 		Ok(false)
 	}
@@ -737,7 +737,7 @@ impl Log {
 				*reading = Some(Reading { id, file: std::io::BufReader::new(file) });
 			} else {
 				log::trace!(target: "parity-db", "No active reader");
-				return Ok(None);
+				return Ok(None)
 			}
 		}
 		let mut reader = LogReader::new(reading, validate);

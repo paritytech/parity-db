@@ -56,7 +56,7 @@ impl BTree {
 					root.set_child(1, right);
 					root.set_separator(0, sep);
 				},
-				(_, true) => {
+				(_, true) =>
 					if let Some((node_index, node)) = root.need_remove_root(btree, log)? {
 						self.depth -= 1;
 						if let Some(index) = self.root_index.take() {
@@ -64,8 +64,7 @@ impl BTree {
 						}
 						self.root_index = node_index;
 						root = node;
-					}
-				},
+					},
 				_ => (),
 			}
 			*changes = &changes[1..];

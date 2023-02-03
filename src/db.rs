@@ -178,7 +178,7 @@ impl DbInner {
 		if opening_mode == OpeningMode::Create {
 			try_io!(std::fs::create_dir_all(&options.path));
 		} else if !options.path.is_dir() {
-			return Err(Error::DatabaseNotFound);
+			return Err(Error::DatabaseNotFound)
 		}
 
 		let mut lock_path: std::path::PathBuf = options.path.clone();
@@ -234,7 +234,7 @@ impl DbInner {
 				let overlay = self.commit_overlay.read();
 				// Check commit overlay first
 				if let Some(v) = overlay.get(col as usize).and_then(|o| o.get(&key)) {
-					return Ok(v.map(|i| i.value().clone()));
+					return Ok(v.map(|i| i.value().clone()))
 				}
 				// Go into tables and log overlay.
 				let log = self.log.overlays();
@@ -243,7 +243,7 @@ impl DbInner {
 			Column::Tree(column) => {
 				let overlay = self.commit_overlay.read();
 				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
-					return Ok(l.map(|i| i.value().clone()));
+					return Ok(l.map(|i| i.value().clone()))
 				}
 				// We lock log, if btree structure changed while reading that would be an issue.
 				let log = self.log.overlays().read();
@@ -259,7 +259,7 @@ impl DbInner {
 				let overlay = self.commit_overlay.read();
 				// Check commit overlay first
 				if let Some(l) = overlay.get(col as usize).and_then(|o| o.get_size(&key)) {
-					return Ok(l);
+					return Ok(l)
 				}
 				// Go into tables and log overlay.
 				let log = self.log.overlays();
@@ -268,7 +268,7 @@ impl DbInner {
 			Column::Tree(column) => {
 				let overlay = self.commit_overlay.read();
 				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
-					return Ok(l.map(|v| v.value().len() as u32));
+					return Ok(l.map(|v| v.value().len() as u32))
 				}
 				let log = self.log.overlays().read();
 				let l = column.with_locked(|btree| BTreeTable::get(key, &*log, btree))?;
@@ -279,9 +279,8 @@ impl DbInner {
 
 	fn btree_iter(&self, col: ColId) -> Result<BTreeIterator> {
 		match &self.columns[col as usize] {
-			Column::Hash(_column) => {
-				Err(Error::InvalidConfiguration("Not an indexed column.".to_string()))
-			},
+			Column::Hash(_column) =>
+				Err(Error::InvalidConfiguration("Not an indexed column.".to_string())),
 			Column::Tree(column) => {
 				let log = self.log.overlays();
 				BTreeIterator::new(column, col, log, &self.commit_overlay)
@@ -346,7 +345,7 @@ impl DbInner {
 		{
 			let bg_err = self.bg_err.lock();
 			if let Some(err) = &*bg_err {
-				return Err(Error::Background(err.clone()));
+				return Err(Error::Background(err.clone()))
 			}
 		}
 
@@ -411,8 +410,8 @@ impl DbInner {
 					commit.bytes,
 					queue.bytes,
 				);
-				if queue.bytes <= MAX_COMMIT_QUEUE_BYTES
-					&& (queue.bytes + commit.bytes) > MAX_COMMIT_QUEUE_BYTES
+				if queue.bytes <= MAX_COMMIT_QUEUE_BYTES &&
+					(queue.bytes + commit.bytes) > MAX_COMMIT_QUEUE_BYTES
 				{
 					// Past the waiting threshold.
 					log::debug!(
@@ -449,11 +448,10 @@ impl DbInner {
 
 			for (c, btree) in commit.changeset.btree_indexed.iter_mut() {
 				match &self.columns[*c as usize] {
-					Column::Hash(_column) => {
+					Column::Hash(_column) =>
 						return Err(Error::InvalidConfiguration(
 							"Not an indexed column.".to_string(),
-						))
-					},
+						)),
 					Column::Tree(column) => {
 						btree.write_plan(column, &mut writer, &mut ops)?;
 					},
@@ -512,7 +510,7 @@ impl DbInner {
 	fn process_reindex(&self) -> Result<bool> {
 		let next_reindex = self.next_reindex.load(Ordering::SeqCst);
 		if next_reindex == 0 || next_reindex > self.last_enacted.load(Ordering::SeqCst) {
-			return Ok(false);
+			return Ok(false)
 		}
 		// Process any pending reindexes
 		for column in self.columns.iter() {
@@ -552,7 +550,7 @@ impl DbInner {
 					self.start_reindex(record_id);
 				}
 				self.flush_worker_wait.signal();
-				return Ok(true);
+				return Ok(true)
 			}
 		}
 		self.next_reindex.store(0, Ordering::SeqCst);
@@ -566,7 +564,7 @@ impl DbInner {
 				Err(Error::Corruption(_)) if validation_mode => {
 					log::debug!(target: "parity-db", "Bad log header");
 					self.log.clear_replay_logs();
-					return Ok(false);
+					return Ok(false)
 				},
 				Err(e) => return Err(e),
 			};
@@ -586,7 +584,7 @@ impl DbInner {
 						);
 						drop(reader);
 						self.log.clear_replay_logs();
-						return Ok(false);
+						return Ok(false)
 					}
 					// Validate all records before applying anything
 					loop {
@@ -596,7 +594,7 @@ impl DbInner {
 								log::debug!(target: "parity-db", "Error reading log: {:?}", e);
 								drop(reader);
 								self.log.clear_replay_logs();
-								return Ok(false);
+								return Ok(false)
 							},
 						};
 						match next {
@@ -604,7 +602,7 @@ impl DbInner {
 								log::debug!(target: "parity-db", "Unexpected log header");
 								drop(reader);
 								self.log.clear_replay_logs();
-								return Ok(false);
+								return Ok(false)
 							},
 							LogAction::EndRecord => break,
 							LogAction::InsertIndex(insertion) => {
@@ -621,7 +619,7 @@ impl DbInner {
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
 									drop(reader);
 									self.log.clear_replay_logs();
-									return Ok(false);
+									return Ok(false)
 								}
 							},
 							LogAction::InsertValue(insertion) => {
@@ -638,7 +636,7 @@ impl DbInner {
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
 									drop(reader);
 									self.log.clear_replay_logs();
-									return Ok(false);
+									return Ok(false)
 								}
 							},
 							LogAction::DropTable(_) => continue,
@@ -649,9 +647,8 @@ impl DbInner {
 				}
 				loop {
 					match reader.next()? {
-						LogAction::BeginRecord => {
-							return Err(Error::Corruption("Bad log record".into()))
-						},
+						LogAction::BeginRecord =>
+							return Err(Error::Corruption("Bad log record".into())),
 						LogAction::EndRecord => break,
 						LogAction::InsertIndex(insertion) => {
 							self.columns[insertion.table.col() as usize]
@@ -711,8 +708,8 @@ impl DbInner {
 						);
 					}
 					*queue -= bytes as i64;
-					if *queue <= MAX_LOG_QUEUE_BYTES
-						&& (*queue + bytes as i64) > MAX_LOG_QUEUE_BYTES
+					if *queue <= MAX_LOG_QUEUE_BYTES &&
+						(*queue + bytes as i64) > MAX_LOG_QUEUE_BYTES
 					{
 						self.log_queue_wait.cv.notify_one();
 					}
@@ -786,7 +783,7 @@ impl DbInner {
 				// to no attempt any further log enactment.
 				log::debug!(target: "parity-db", "Shutdown with error state {}", err);
 				self.log.clean_logs(self.log.num_dirty_logs())?;
-				return self.log.kill_logs();
+				return self.log.kill_logs()
 			}
 		}
 		log::debug!(target: "parity-db", "Processing leftover commits");
@@ -900,7 +897,7 @@ impl Db {
 			log::debug!(target: "parity-db", "Error during log replay, doing log cleanup");
 			db.log.clean_logs(db.log.num_dirty_logs())?;
 			db.log.kill_logs()?;
-			return Err(e);
+			return Err(e)
 		}
 		let db = Arc::new(db);
 		#[cfg(any(test, feature = "instrumentation"))]
@@ -1377,7 +1374,7 @@ impl IndexedChangeSet {
 					// Don't add (we allow remove value in overlay when using rc: some
 					// indexing on top of it is expected).
 					if !ref_counted {
-						return Err(Error::InvalidInput(format!("No Rc for column {}", self.col)));
+						return Err(Error::InvalidInput(format!("No Rc for column {}", self.col)))
 					}
 				},
 			}
@@ -1396,7 +1393,7 @@ impl IndexedChangeSet {
 			Column::Hash(column) => column,
 			Column::Tree(_) => {
 				log::warn!(target: "parity-db", "Skipping unindex commit in indexed column");
-				return Ok(());
+				return Ok(())
 			},
 		};
 		for change in self.changes.iter() {
@@ -1518,8 +1515,8 @@ mod tests {
 
 		fn run_stages(&self, db: &Db) {
 			let db = &db.inner;
-			if *self == EnableCommitPipelineStages::DbFile
-				|| *self == EnableCommitPipelineStages::LogOverlay
+			if *self == EnableCommitPipelineStages::DbFile ||
+				*self == EnableCommitPipelineStages::LogOverlay
 			{
 				while db.process_commits().unwrap() {}
 				while db.process_reindex().unwrap() {}
@@ -1546,7 +1543,7 @@ mod tests {
 									// or removed.
 									std::thread::sleep(std::time::Duration::from_millis(100));
 								} else {
-									return false;
+									return false
 								}
 							}
 						}
@@ -2078,20 +2075,18 @@ mod tests {
 				let mut remove = false;
 				let mut insert = false;
 				match state.get_mut(k) {
-					Some(Some((_, counter))) => {
+					Some(Some((_, counter))) =>
 						if v.is_some() {
 							*counter += 1;
 						} else if *counter == 1 {
 							remove = true;
 						} else {
 							*counter -= 1;
-						}
-					},
-					Some(None) | None => {
+						},
+					Some(None) | None =>
 						if v.is_some() {
 							insert = true;
-						}
-					},
+						},
 				}
 				if insert {
 					state.insert(k.clone(), v.clone().map(|v| (v, 1)));

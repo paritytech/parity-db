@@ -226,7 +226,7 @@ pub trait DbSimulator {
 					};
 					Self::reset_model_from_database(&db.db, &mut layers, &old_layers);
 				},
-				Action::IterPrev =>
+				Action::IterPrev => {
 					if let Some(iter) = &mut db.iter {
 						let mut old_key = if let Some(old_key) = db.iter_current_key.take() {
 							old_key
@@ -234,8 +234,9 @@ pub trait DbSimulator {
 							retry_operation(|| iter.seek_to_last());
 							IterPosition::End
 						};
-						let new_key_value =
-							iter.prev().unwrap_or_else(|e| {
+						let new_key_value = iter
+							.prev()
+							.unwrap_or_else(|e| {
 								log::debug!("Database error: {}, restarting iter.prev without I/O limitations.", e);
 
 								// We ignore the error and reset the iterator
@@ -243,22 +244,22 @@ pub trait DbSimulator {
 								iter.seek_to_last().unwrap();
 								old_key = IterPosition::End;
 								iter.prev().unwrap()
-							});
+							})
+							.map(|(k, v)| (k.value().clone(), v.value().clone()));
 						let expected = Self::valid_iter_value(old_key, &layers, Ordering::Greater);
 						log::info!(
 							"Prev lookup on iterator with old position {:?}, expecting one of {:?}",
 							old_key,
 							expected
 						);
-						assert!(expected.contains(&new_key_value), "Prev lookup on iterator with old position {:?}, expecting one of {:?}, found {:?}",
-								old_key,
-								expected, new_key_value);
+						assert!(expected.contains(&new_key_value), "{}", "Prev lookup on iterator with old position {old_key:?}, expecting one of {expected:?}, found {new_key_value:?}");
 						db.iter_current_key = Some(
 							new_key_value
 								.map_or(IterPosition::Start, |(k, _)| IterPosition::Value(k[0])),
 						);
-					},
-				Action::IterNext =>
+					}
+				},
+				Action::IterNext => {
 					if let Some(iter) = &mut db.iter {
 						let mut old_key = if let Some(old_key) = db.iter_current_key.take() {
 							old_key
@@ -266,8 +267,9 @@ pub trait DbSimulator {
 							retry_operation(|| iter.seek_to_first());
 							IterPosition::Start
 						};
-						let new_key_value =
-							iter.next().unwrap_or_else(|e| {
+						let new_key_value = iter
+							.next()
+							.unwrap_or_else(|e| {
 								log::debug!("Database error: {}, restarting iter.next without I/O limitations.", e);
 
 								// We ignore the error and reset the iterator
@@ -275,19 +277,21 @@ pub trait DbSimulator {
 								iter.seek_to_first().unwrap();
 								old_key = IterPosition::Start;
 								iter.next().unwrap()
-							});
+							})
+							.map(|(k, v)| (k.value().clone(), v.value().clone()));
 						let expected = Self::valid_iter_value(old_key, &layers, Ordering::Less);
 						log::info!(
 							"Next lookup on iterator with old position {:?}, expecting one of {:?}",
 							old_key,
 							expected
 						);
-						assert!(expected.contains(&new_key_value), "Next lookup on iterator with old position {:?}, expecting one of {:?}, found {:?}", old_key, expected, new_key_value);
+						assert!(expected.contains(&new_key_value), "{}", "Next lookup on iterator with old position {old_key:?}, expecting one of {expected:?}, found {new_key_value:?}");
 						db.iter_current_key = Some(
 							new_key_value
 								.map_or(IterPosition::End, |(k, _)| IterPosition::Value(k[0])),
 						);
-					},
+					}
+				},
 			}
 			retry_operation(|| Self::check_db_and_model_are_equals(&db.db, &layers)).unwrap();
 		}

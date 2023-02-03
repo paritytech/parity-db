@@ -31,14 +31,14 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 		to_migrate.insert(*force);
 	}
 	if source_meta.columns.len() != to.columns.len() {
-		return Err(Error::Migration("Source and dest columns mismatch".into()));
+		return Err(Error::Migration("Source and dest columns mismatch".into()))
 	}
 
 	// Make sure we are using the same salt value.
 	to.salt = Some(source_meta.salt);
 
 	if (to.salt.is_none()) && overwrite {
-		return Err(Error::Migration("Changing salt need to update metadata at once.".into()));
+		return Err(Error::Migration("Changing salt need to update metadata at once.".into()))
 	}
 
 	let mut source_options = Options::with_columns(from, source_meta.columns.len() as u8);
@@ -62,7 +62,7 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 		if source_options.columns[*c as usize].btree_index || to.columns[*c as usize].btree_index {
 			return Err(Error::Migration(
 				"Migrate only implemented for hash indexed column to hash indexed column".into(),
-			));
+			))
 		}
 	}
 
@@ -73,7 +73,7 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 				copy_column(c, from, &to.path)?;
 				dest = Db::open_or_create(&to)?;
 			}
-			continue;
+			continue
 		}
 		log::info!("Migrating col {}", c);
 		source.iter_column_while(c, |IterState { chunk_index: index, key, rc, mut value }| {
@@ -91,7 +91,7 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 					ncommits += 1;
 					if let Err(e) = dest.commit_raw(std::mem::take(&mut commit)) {
 						log::warn!("Migration error: {:?}", e);
-						return false;
+						return false
 					}
 					nb_commit = 0;
 
@@ -157,7 +157,7 @@ pub fn clear_column(path: &Path, column: ColId) -> Result<()> {
 		.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;
 
 	if (column as usize) >= meta.columns.len() {
-		return Err(Error::Migration("Invalid column index".into()));
+		return Err(Error::Migration("Invalid column index".into()))
 	}
 
 	// Validate the database by opening. This also makes sure all the logs are enacted,
@@ -174,8 +174,8 @@ pub fn clear_column(path: &Path, column: ColId) -> Result<()> {
 	for entry in try_io!(std::fs::read_dir(path)) {
 		let entry = try_io!(entry);
 		if let Some(file) = entry.path().file_name().and_then(|f| f.to_str()) {
-			if crate::index::TableId::is_file_name(column, file)
-				|| crate::table::TableId::is_file_name(column, file)
+			if crate::index::TableId::is_file_name(column, file) ||
+				crate::table::TableId::is_file_name(column, file)
 			{
 				to_delete.push(PathBuf::from(file));
 			}
@@ -202,8 +202,8 @@ fn deplace_column(c: ColId, from: &Path, to: &Path, copy: bool) -> Result<()> {
 	for entry in try_io!(std::fs::read_dir(from)) {
 		let entry = try_io!(entry);
 		if let Some(file) = entry.path().file_name().and_then(|f| f.to_str()) {
-			if crate::index::TableId::is_file_name(c, file)
-				|| crate::table::TableId::is_file_name(c, file)
+			if crate::index::TableId::is_file_name(c, file) ||
+				crate::table::TableId::is_file_name(c, file)
 			{
 				let mut from = from.to_path_buf();
 				from.push(file);
