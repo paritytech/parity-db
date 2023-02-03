@@ -32,6 +32,7 @@ use crate::{
 };
 use fs2::FileExt;
 use std::{
+	borrow::Borrow,
 	collections::{BTreeMap, HashMap, VecDeque},
 	ops::Bound,
 	sync::{
@@ -56,12 +57,12 @@ const KEEP_LOGS: usize = 16;
 /// Value is just a vector of bytes. Value sizes up to 4Gb are allowed.
 pub type Value = Vec<u8>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ValuePtr(Arc<Value>);
 
 impl ValuePtr {
 	pub fn value(&self) -> &Value {
-		&*self.0
+		&self.0
 	}
 }
 
@@ -71,9 +72,29 @@ impl AsRef<[u8]> for ValuePtr {
 	}
 }
 
+impl Borrow<[u8]> for ValuePtr {
+	fn borrow(&self) -> &[u8] {
+		self.value().borrow()
+	}
+}
+
+impl Borrow<Vec<u8>> for ValuePtr {
+	fn borrow(&self) -> &Vec<u8> {
+		self.value().borrow()
+	}
+}
+
 impl From<Value> for ValuePtr {
 	fn from(value: Value) -> Self {
 		Self(value.into())
+	}
+}
+
+impl<const N: usize> TryFrom<ValuePtr> for [u8; N] {
+	type Error = <[u8; N] as TryFrom<Vec<u8>>>::Error;
+
+	fn try_from(value: ValuePtr) -> std::result::Result<Self, Self::Error> {
+		value.value().clone().try_into()
 	}
 }
 
@@ -222,7 +243,7 @@ impl DbInner {
 			Column::Tree(column) => {
 				let overlay = self.commit_overlay.read();
 				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
-					return Ok(l.cloned());
+					return Ok(l.map(|i| i.value().clone()));
 				}
 				// We lock log, if btree structure changed while reading that would be an issue.
 				let log = self.log.overlays().read();
@@ -247,7 +268,7 @@ impl DbInner {
 			Column::Tree(column) => {
 				let overlay = self.commit_overlay.read();
 				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
-					return Ok(l.map(|v| v.len() as u32));
+					return Ok(l.map(|v| v.value().len() as u32));
 				}
 				let log = self.log.overlays().read();
 				let l = column.with_locked(|btree| BTreeTable::get(key, &*log, btree))?;
@@ -1149,7 +1170,7 @@ impl Drop for Db {
 }
 
 pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<ValuePtr>), IdentityBuildHasher>;
-pub type BTreeCommitOverlay = BTreeMap<Vec<u8>, (u64, Option<Value>)>;
+pub type BTreeCommitOverlay = BTreeMap<ValuePtr, (u64, Option<ValuePtr>)>;
 
 #[derive(Debug)]
 pub struct CommitOverlay {
@@ -1181,33 +1202,39 @@ impl CommitOverlay {
 		self.get_ref(key).map(|res| res.as_ref().map(|b| b.value().len() as u32))
 	}
 
-	fn btree_get(&self, key: &[u8]) -> Option<Option<&Value>> {
+	fn btree_get(&self, key: &[u8]) -> Option<Option<&ValuePtr>> {
 		self.btree_indexed.get(key).map(|(_, v)| v.as_ref())
 	}
 
-	pub fn btree_next(&self, last_key: &crate::btree::LastKey) -> Option<(Value, Option<Value>)> {
+	pub fn btree_next(
+		&self,
+		last_key: &crate::btree::LastKey,
+	) -> Option<(ValuePtr, Option<ValuePtr>)> {
 		use crate::btree::LastKey;
 		match &last_key {
 			LastKey::Start => self
 				.btree_indexed
-				.range::<Vec<u8>, _>(..)
+				.range::<ValuePtr, _>(..)
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::End => None,
 			LastKey::At(key) => self
 				.btree_indexed
-				.range::<Vec<u8>, _>((Bound::Excluded(key), Bound::Unbounded))
+				.range::<ValuePtr, _>((Bound::Excluded(key), Bound::Unbounded))
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Seeked(key) => self
 				.btree_indexed
-				.range::<Vec<u8>, _>(key..)
+				.range::<ValuePtr, _>(key..)
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 		}
 	}
 
-	pub fn btree_prev(&self, last_key: &crate::btree::LastKey) -> Option<(Value, Option<Value>)> {
+	pub fn btree_prev(
+		&self,
+		last_key: &crate::btree::LastKey,
+	) -> Option<(ValuePtr, Option<ValuePtr>)> {
 		use crate::btree::LastKey;
 		match &last_key {
 			LastKey::End => self
@@ -1219,13 +1246,13 @@ impl CommitOverlay {
 			LastKey::Start => None,
 			LastKey::At(key) => self
 				.btree_indexed
-				.range::<Vec<u8>, _>(..key)
+				.range::<ValuePtr, _>(..key)
 				.rev()
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Seeked(key) => self
 				.btree_indexed
-				.range::<Vec<u8>, _>(..=key)
+				.range::<ValuePtr, _>(..=key)
 				.rev()
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
@@ -1446,7 +1473,7 @@ enum OpeningMode {
 mod tests {
 	use crate::{ColumnOptions, Value};
 
-	use super::{Db, Options};
+	use super::{Db, Options, ValuePtr};
 	use crate::{
 		column::ColId,
 		db::{DbInner, OpeningMode},
@@ -1792,19 +1819,19 @@ mod tests {
 
 		assert_eq!(db.get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
 		iter.seek_to_first().unwrap();
-		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.next().unwrap(), Some((key1.clone().into(), b"value1".to_vec().into())));
 		assert_eq!(iter.next().unwrap(), None);
-		assert_eq!(iter.prev().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.prev().unwrap(), Some((key1.clone().into(), b"value1".to_vec().into())));
 		assert_eq!(iter.prev().unwrap(), None);
-		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.next().unwrap(), Some((key1.clone().into(), b"value1".to_vec().into())));
 		assert_eq!(iter.next().unwrap(), None);
 
 		iter.seek_to_first().unwrap();
-		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.next().unwrap(), Some((key1.clone().into(), b"value1".to_vec().into())));
 		assert_eq!(iter.prev().unwrap(), None);
 
 		iter.seek(&[0xff]).unwrap();
-		assert_eq!(iter.prev().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.prev().unwrap(), Some((key1.clone().into(), b"value1".to_vec().into())));
 		assert_eq!(iter.prev().unwrap(), None);
 
 		db.commit(vec![
@@ -1820,13 +1847,13 @@ mod tests {
 		assert_eq!(db.get(col_nb, &key3).unwrap(), Some(b"value3".to_vec()));
 
 		iter.seek(key2.as_slice()).unwrap();
-		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
-		assert_eq!(iter.next().unwrap(), Some((key3.clone(), b"value3".to_vec())));
+		assert_eq!(iter.next().unwrap(), Some((key2.clone().into(), b"value2".to_vec().into())));
+		assert_eq!(iter.next().unwrap(), Some((key3.clone().into(), b"value3".to_vec().into())));
 		assert_eq!(iter.next().unwrap(), None);
 
 		iter.seek(key3.as_slice()).unwrap();
-		assert_eq!(iter.prev().unwrap(), Some((key3.clone(), b"value3".to_vec())));
-		assert_eq!(iter.prev().unwrap(), Some((key2.clone(), b"value2".to_vec())));
+		assert_eq!(iter.prev().unwrap(), Some((key3.clone().into(), b"value3".to_vec().into())));
+		assert_eq!(iter.prev().unwrap(), Some((key2.clone().into(), b"value2".to_vec().into())));
 		assert_eq!(iter.prev().unwrap(), None);
 
 		db.commit(vec![
@@ -1844,7 +1871,7 @@ mod tests {
 		let mut key22 = key2.clone();
 		key22.push(2);
 		iter.seek(key22.as_slice()).unwrap();
-		assert_eq!(iter.next().unwrap(), Some((key4, b"value4".to_vec())));
+		assert_eq!(iter.next().unwrap(), Some((key4.into(), b"value4".to_vec().into())));
 		assert_eq!(iter.next().unwrap(), None);
 	}
 
@@ -1880,7 +1907,7 @@ mod tests {
 		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
 		iter.seek_to_first().unwrap();
-		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
+		assert_eq!(iter.next().unwrap(), Some((key1.clone().into(), b"value1".to_vec().into())));
 		assert_eq!(iter.next().unwrap(), None);
 
 		db.commit(vec![
@@ -1895,13 +1922,13 @@ mod tests {
 		assert_eq!(db.get(col_nb, &key2).unwrap(), Some(b"value2".to_vec()));
 		assert_eq!(db.get(col_nb, &key3).unwrap(), Some(b"value3".to_vec()));
 		iter.seek(key2.as_slice()).unwrap();
-		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
-		assert_eq!(iter.next().unwrap(), Some((key3.clone(), b"value3".to_vec())));
+		assert_eq!(iter.next().unwrap(), Some((key2.clone().into(), b"value2".to_vec().into())));
+		assert_eq!(iter.next().unwrap(), Some((key3.clone().into(), b"value3".to_vec().into())));
 		assert_eq!(iter.next().unwrap(), None);
 
 		iter.seek_to_last().unwrap();
-		assert_eq!(iter.prev().unwrap(), Some((key3, b"value3".to_vec())));
-		assert_eq!(iter.prev().unwrap(), Some((key2.clone(), b"value2".to_vec())));
+		assert_eq!(iter.prev().unwrap(), Some((key3.into(), b"value3".to_vec().into())));
+		assert_eq!(iter.prev().unwrap(), Some((key2.clone().into(), b"value2".to_vec().into())));
 		assert_eq!(iter.prev().unwrap(), None);
 	}
 
@@ -2330,12 +2357,15 @@ mod tests {
 			}
 		}
 
-		let start_state: BTreeMap<Vec<u8>, Vec<u8>> =
-			data_start.iter().cloned().map(|(_c, k, v)| (k, v.unwrap())).collect();
-		let mut end_state: BTreeMap<Vec<u8>, Vec<u8>> = start_state.clone();
+		let start_state: BTreeMap<ValuePtr, ValuePtr> = data_start
+			.iter()
+			.cloned()
+			.map(|(_c, k, v)| (k.into(), v.unwrap().into()))
+			.collect();
+		let mut end_state: BTreeMap<ValuePtr, ValuePtr> = start_state.clone();
 		for (_c, k, v) in data_change.iter() {
 			if let Some(v) = v {
-				end_state.insert(k.clone(), v.clone());
+				end_state.insert(k.clone().into(), v.clone().into());
 			} else {
 				end_state.remove(k);
 			}
@@ -2362,12 +2392,15 @@ mod tests {
 				(0, b"key3".to_vec(), Some(b"val3".to_vec())),
 			];
 			let data_change = vec![(0, b"key2".to_vec(), Some(b"val2".to_vec()))];
-			let start_state: BTreeMap<Vec<u8>, Vec<u8>> =
-				data_start.iter().cloned().map(|(_c, k, v)| (k, v.unwrap())).collect();
-			let mut end_state: BTreeMap<Vec<u8>, Vec<u8>> = start_state.clone();
+			let start_state: BTreeMap<ValuePtr, ValuePtr> = data_start
+				.iter()
+				.cloned()
+				.map(|(_c, k, v)| (k.into(), v.unwrap().into()))
+				.collect();
+			let mut end_state: BTreeMap<ValuePtr, ValuePtr> = start_state.clone();
 			for (_c, k, v) in data_change.iter() {
 				if let Some(v) = v {
-					end_state.insert(k.clone(), v.clone());
+					end_state.insert(k.clone().into(), v.clone().into());
 				} else {
 					end_state.remove(k);
 				}
@@ -2379,8 +2412,8 @@ mod tests {
 		db_test: EnableCommitPipelineStages,
 		data_start: &[(u8, Vec<u8>, Option<Value>)],
 		data_change: &[(u8, Vec<u8>, Option<Value>)],
-		start_state: &BTreeMap<Vec<u8>, Vec<u8>>,
-		end_state: &BTreeMap<Vec<u8>, Vec<u8>>,
+		start_state: &BTreeMap<ValuePtr, ValuePtr>,
+		end_state: &BTreeMap<ValuePtr, ValuePtr>,
 		commit_at: usize,
 	) {
 		let tmp = tempdir().unwrap();
@@ -2394,7 +2427,7 @@ mod tests {
 
 		let mut iter = db.iter(col_nb).unwrap();
 		let mut iter_state = start_state.iter();
-		let mut last_key = Vec::new();
+		let mut last_key = Value::new().into();
 		for _ in 0..commit_at {
 			let next = iter.next().unwrap();
 			if let Some((k, _)) = next.as_ref() {

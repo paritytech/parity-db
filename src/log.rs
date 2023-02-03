@@ -203,7 +203,7 @@ impl<'a> LogReader<'a> {
 						expected,
 					);
 					if checksum != expected {
-						return Err(Error::Corruption("Log record CRC-32 mismatch".into()))
+						return Err(Error::Corruption("Log record CRC-32 mismatch".into()));
 					}
 				} else {
 					log::trace!(target: "parity-db", "Read end of record");
@@ -538,7 +538,7 @@ impl Log {
 	pub fn open_log_file(path: &std::path::Path) -> Result<(std::fs::File, Option<u64>)> {
 		let mut file = try_io!(std::fs::OpenOptions::new().read(true).write(true).open(path));
 		if try_io!(file.metadata()).len() == 0 {
-			return Ok((file, None))
+			return Ok((file, None));
 		}
 		match Self::read_first_record_id(&mut file) {
 			Err(Error::Io(e)) if e.kind() == ErrorKind::UnexpectedEof => {
@@ -547,7 +547,7 @@ impl Log {
 			},
 			Err(e) => Err(e),
 			Ok(id) => {
-				try_io!(file.seek(std::io::SeekFrom::Start(0)));
+				try_io!(file.rewind());
 				log::debug!(target: "parity-db", "Opened existing log {}, first record_id = {}", path.display(), id);
 				Ok((file, Some(id)))
 			},
@@ -676,7 +676,7 @@ impl Log {
 				}
 				self.read_queue.write().push_back((to_flush.id, file));
 			}
-			return Ok(true)
+			return Ok(true);
 		}
 		Ok(false)
 	}
@@ -707,7 +707,7 @@ impl Log {
 		};
 		for (id, ref mut file) in cleaned.iter_mut() {
 			log::debug!(target: "parity-db", "Cleaned: {}", id);
-			try_io!(file.seek(std::io::SeekFrom::Start(0)));
+			try_io!(file.rewind());
 			try_io!(file.set_len(0));
 		}
 		// Move cleaned logs back to the pool
@@ -733,11 +733,11 @@ impl Log {
 		let mut reading = self.reading.write();
 		if reading.is_none() {
 			if let Some((id, mut file)) = self.read_queue.write().pop_front() {
-				try_io!(file.seek(std::io::SeekFrom::Start(0)));
+				try_io!(file.rewind());
 				*reading = Some(Reading { id, file: std::io::BufReader::new(file) });
 			} else {
 				log::trace!(target: "parity-db", "No active reader");
-				return Ok(None)
+				return Ok(None);
 			}
 		}
 		let mut reader = LogReader::new(reading, validate);

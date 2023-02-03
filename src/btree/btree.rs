@@ -7,6 +7,7 @@ use super::*;
 use crate::{
 	btree::BTreeTable,
 	column::Column,
+	db::ValuePtr,
 	error::Result,
 	log::{LogQuery, LogWriter},
 	table::key::TableKeyQuery,
@@ -35,7 +36,7 @@ impl BTree {
 
 	pub fn write_sorted_changes(
 		&mut self,
-		mut changes: &[Operation<Vec<u8>, Vec<u8>>],
+		mut changes: &[Operation<ValuePtr, ValuePtr>],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<()> {
@@ -55,7 +56,7 @@ impl BTree {
 					root.set_child(1, right);
 					root.set_separator(0, sep);
 				},
-				(_, true) =>
+				(_, true) => {
 					if let Some((node_index, node)) = root.need_remove_root(btree, log)? {
 						self.depth -= 1;
 						if let Some(index) = self.root_index.take() {
@@ -63,7 +64,8 @@ impl BTree {
 						}
 						self.root_index = node_index;
 						root = node;
-					},
+					}
+				},
 				_ => (),
 			}
 			*changes = &changes[1..];
