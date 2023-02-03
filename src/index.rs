@@ -230,9 +230,10 @@ impl IndexTable {
 		Ok(())
 	}
 
-	fn chunk_at(index: u64, map: &memmap2::MmapMut) -> Result<&[u8]> {
+	fn chunk_at(index: u64, map: &memmap2::MmapMut) -> Result<&[u8; CHUNK_LEN]> {
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
-		Ok(try_io!(Ok(&map[offset..offset + CHUNK_LEN])))
+		let ptr: &[u8; CHUNK_LEN] = unsafe { std::mem::transmute(map[offset..offset + CHUNK_LEN].as_ptr()) };
+		Ok(try_io!(Ok(ptr)))
 	}
 
 	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
@@ -360,7 +361,7 @@ impl IndexTable {
 	}
 
 	#[inline(always)]
-	fn read_entry(chunk: &[u8], at: usize) -> Entry {
+	fn read_entry(chunk: &[u8; CHUNK_LEN], at: usize) -> Entry {
 		Entry::from_u64(u64::from_le_bytes(chunk[at * 8..at * 8 + 8].try_into().unwrap()))
 	}
 
