@@ -15,7 +15,7 @@ use crate::{
 use std::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
-use std::{cmp::max, convert::TryInto};
+use std::convert::TryInto;
 
 // Index chunk consists of 8 64-bit entries.
 const CHUNK_LEN: usize = CHUNK_ENTRIES * ENTRY_BYTES; // 512 bytes
@@ -237,12 +237,14 @@ impl IndexTable {
 	}
 
 	#[inline(always)]
-	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
-		if cfg!(target_feature = "sse2") {
-			self.find_entry_sse2(key_prefix, sub_index, chunk)
-		} else {
-			self.find_entry_base(key_prefix, sub_index, chunk)
-		}
+	#[cfg(target_feature = "sse2")]
+	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8; CHUNK_LEN]) -> (Entry, usize) {
+		self.find_entry_sse2(key_prefix, sub_index, chunk)
+	}
+
+	#[cfg(not(target_feature = "sse2"))]
+	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8; CHUNK_LEN]) -> (Entry, usize) {
+		self.find_entry_base(key_prefix, sub_index, chunk)
 	}
 
 	#[cfg(target_feature = "sse2")]
@@ -253,7 +255,7 @@ impl IndexTable {
 			"We assume here we got buffer with a number of elements that is a multiple of 4"
 		);
 
-		let shift = max(32, Entry::address_bits(self.id.index_bits()));
+		let shift = std::cmp::max(32, Entry::address_bits(self.id.index_bits()));
 		unsafe {
 			let target = _mm_set1_epi32(((key_prefix << self.id.index_bits()) >> shift) as i32);
 			let shift_mask = _mm_set_epi64x(0, shift.into());
@@ -286,7 +288,8 @@ impl IndexTable {
 		(Entry::empty(), 0)
 	}
 
-	fn find_entry_base(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
+	#[cfg(any(not(target_feature = "sse2"), test))]
+	fn find_entry_base(&self, key_prefix: u64, sub_index: usize, chunk: &[u8; CHUNK_LEN]) -> (Entry, usize) {
 		assert!(chunk.len() >= CHUNK_ENTRIES * 8);
 		let partial_key = Entry::extract_key(key_prefix, self.id.index_bits());
 		for i in sub_index..CHUNK_ENTRIES {
@@ -634,6 +637,7 @@ mod test {
 
 			for partial_key in &partial_keys {
 				let key_prefix = *partial_key << (CHUNK_ENTRIES_BITS + SIZE_TIERS_BITS);
+				#[cfg(target_feature = "sse2")]
 				assert_eq!(
 					index_table.find_entry_sse2(key_prefix, 0, &chunk).0.partial_key(index_bits),
 					*partial_key
@@ -675,6 +679,7 @@ mod test {
 	}
 
 	#[cfg(feature = "bench")]
+	#[cfg(target_feature = "sse2")]
 	#[bench]
 	fn bench_find_entry_sse(b: &mut Bencher) {
 		let table = IndexTable {
