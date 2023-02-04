@@ -92,6 +92,7 @@ impl From<Value> for RcValue {
 	}
 }
 
+#[cfg(test)]
 impl<const N: usize> TryFrom<RcValue> for [u8; N] {
 	type Error = <[u8; N] as TryFrom<Vec<u8>>>::Error;
 
