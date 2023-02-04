@@ -58,42 +58,44 @@ const KEEP_LOGS: usize = 16;
 pub type Value = Vec<u8>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ValuePtr(Arc<Value>);
+pub struct RcValue(Arc<Value>);
 
-impl ValuePtr {
+pub type RcKey = RcValue;
+
+impl RcValue {
 	pub fn value(&self) -> &Value {
 		&self.0
 	}
 }
 
-impl AsRef<[u8]> for ValuePtr {
+impl AsRef<[u8]> for RcValue {
 	fn as_ref(&self) -> &[u8] {
 		self.0.as_ref()
 	}
 }
 
-impl Borrow<[u8]> for ValuePtr {
+impl Borrow<[u8]> for RcValue {
 	fn borrow(&self) -> &[u8] {
 		self.value().borrow()
 	}
 }
 
-impl Borrow<Vec<u8>> for ValuePtr {
+impl Borrow<Vec<u8>> for RcValue {
 	fn borrow(&self) -> &Vec<u8> {
 		self.value().borrow()
 	}
 }
 
-impl From<Value> for ValuePtr {
+impl From<Value> for RcValue {
 	fn from(value: Value) -> Self {
 		Self(value.into())
 	}
 }
 
-impl<const N: usize> TryFrom<ValuePtr> for [u8; N] {
+impl<const N: usize> TryFrom<RcValue> for [u8; N] {
 	type Error = <[u8; N] as TryFrom<Vec<u8>>>::Error;
 
-	fn try_from(value: ValuePtr) -> std::result::Result<Self, Self::Error> {
+	fn try_from(value: RcValue) -> std::result::Result<Self, Self::Error> {
 		value.value().clone().try_into()
 	}
 }
@@ -1166,8 +1168,8 @@ impl Drop for Db {
 	}
 }
 
-pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<ValuePtr>), IdentityBuildHasher>;
-pub type BTreeCommitOverlay = BTreeMap<ValuePtr, (u64, Option<ValuePtr>)>;
+pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<RcValue>), IdentityBuildHasher>;
+pub type BTreeCommitOverlay = BTreeMap<RcValue, (u64, Option<RcValue>)>;
 
 #[derive(Debug)]
 pub struct CommitOverlay {
@@ -1187,11 +1189,11 @@ impl CommitOverlay {
 }
 
 impl CommitOverlay {
-	fn get_ref(&self, key: &[u8]) -> Option<Option<&ValuePtr>> {
+	fn get_ref(&self, key: &[u8]) -> Option<Option<&RcValue>> {
 		self.indexed.get(key).map(|(_, v)| v.as_ref())
 	}
 
-	fn get(&self, key: &[u8]) -> Option<Option<ValuePtr>> {
+	fn get(&self, key: &[u8]) -> Option<Option<RcValue>> {
 		self.get_ref(key).map(|v| v.cloned())
 	}
 
@@ -1199,30 +1201,30 @@ impl CommitOverlay {
 		self.get_ref(key).map(|res| res.as_ref().map(|b| b.value().len() as u32))
 	}
 
-	fn btree_get(&self, key: &[u8]) -> Option<Option<&ValuePtr>> {
+	fn btree_get(&self, key: &[u8]) -> Option<Option<&RcValue>> {
 		self.btree_indexed.get(key).map(|(_, v)| v.as_ref())
 	}
 
 	pub fn btree_next(
 		&self,
 		last_key: &crate::btree::LastKey,
-	) -> Option<(ValuePtr, Option<ValuePtr>)> {
+	) -> Option<(RcValue, Option<RcValue>)> {
 		use crate::btree::LastKey;
 		match &last_key {
 			LastKey::Start => self
 				.btree_indexed
-				.range::<ValuePtr, _>(..)
+				.range::<RcValue, _>(..)
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::End => None,
 			LastKey::At(key) => self
 				.btree_indexed
-				.range::<ValuePtr, _>((Bound::Excluded(key), Bound::Unbounded))
+				.range::<RcValue, _>((Bound::Excluded(key), Bound::Unbounded))
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Seeked(key) => self
 				.btree_indexed
-				.range::<ValuePtr, _>(key..)
+				.range::<RcValue, _>(key..)
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 		}
@@ -1231,7 +1233,7 @@ impl CommitOverlay {
 	pub fn btree_prev(
 		&self,
 		last_key: &crate::btree::LastKey,
-	) -> Option<(ValuePtr, Option<ValuePtr>)> {
+	) -> Option<(RcValue, Option<RcValue>)> {
 		use crate::btree::LastKey;
 		match &last_key {
 			LastKey::End => self
@@ -1243,13 +1245,13 @@ impl CommitOverlay {
 			LastKey::Start => None,
 			LastKey::At(key) => self
 				.btree_indexed
-				.range::<ValuePtr, _>(..key)
+				.range::<RcValue, _>(..key)
 				.rev()
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Seeked(key) => self
 				.btree_indexed
-				.range::<ValuePtr, _>(..=key)
+				.range::<RcValue, _>(..=key)
 				.rev()
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
@@ -1319,7 +1321,7 @@ pub struct CommitChangeSet {
 #[derive(Debug)]
 pub struct IndexedChangeSet {
 	pub col: ColId,
-	pub changes: Vec<Operation<Key, ValuePtr>>,
+	pub changes: Vec<Operation<Key, RcValue>>,
 }
 
 impl IndexedChangeSet {
@@ -1345,7 +1347,7 @@ impl IndexedChangeSet {
 		})
 	}
 
-	fn push_change_hashed(&mut self, change: Operation<Key, ValuePtr>) {
+	fn push_change_hashed(&mut self, change: Operation<Key, RcValue>) {
 		self.changes.push(change);
 	}
 
@@ -1470,7 +1472,7 @@ enum OpeningMode {
 mod tests {
 	use crate::{ColumnOptions, Value};
 
-	use super::{Db, Options, ValuePtr};
+	use super::{Db, Options, RcKey, RcValue};
 	use crate::{
 		column::ColId,
 		db::{DbInner, OpeningMode},
@@ -2352,12 +2354,12 @@ mod tests {
 			}
 		}
 
-		let start_state: BTreeMap<ValuePtr, ValuePtr> = data_start
+		let start_state: BTreeMap<RcKey, RcValue> = data_start
 			.iter()
 			.cloned()
 			.map(|(_c, k, v)| (k.into(), v.unwrap().into()))
 			.collect();
-		let mut end_state: BTreeMap<ValuePtr, ValuePtr> = start_state.clone();
+		let mut end_state: BTreeMap<RcKey, RcValue> = start_state.clone();
 		for (_c, k, v) in data_change.iter() {
 			if let Some(v) = v {
 				end_state.insert(k.clone().into(), v.clone().into());
@@ -2387,12 +2389,12 @@ mod tests {
 				(0, b"key3".to_vec(), Some(b"val3".to_vec())),
 			];
 			let data_change = vec![(0, b"key2".to_vec(), Some(b"val2".to_vec()))];
-			let start_state: BTreeMap<ValuePtr, ValuePtr> = data_start
+			let start_state: BTreeMap<RcKey, RcValue> = data_start
 				.iter()
 				.cloned()
 				.map(|(_c, k, v)| (k.into(), v.unwrap().into()))
 				.collect();
-			let mut end_state: BTreeMap<ValuePtr, ValuePtr> = start_state.clone();
+			let mut end_state: BTreeMap<RcKey, RcValue> = start_state.clone();
 			for (_c, k, v) in data_change.iter() {
 				if let Some(v) = v {
 					end_state.insert(k.clone().into(), v.clone().into());
@@ -2407,8 +2409,8 @@ mod tests {
 		db_test: EnableCommitPipelineStages,
 		data_start: &[(u8, Vec<u8>, Option<Value>)],
 		data_change: &[(u8, Vec<u8>, Option<Value>)],
-		start_state: &BTreeMap<ValuePtr, ValuePtr>,
-		end_state: &BTreeMap<ValuePtr, ValuePtr>,
+		start_state: &BTreeMap<RcKey, RcValue>,
+		end_state: &BTreeMap<RcKey, RcValue>,
 		commit_at: usize,
 	) {
 		let tmp = tempdir().unwrap();

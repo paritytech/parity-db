@@ -7,7 +7,7 @@ use super::*;
 use crate::{
 	btree::BTreeTable,
 	column::Column,
-	db::ValuePtr,
+	db::{RcKey, RcValue},
 	error::Result,
 	log::{LogQuery, LogWriter},
 	table::key::TableKeyQuery,
@@ -36,7 +36,7 @@ impl BTree {
 
 	pub fn write_sorted_changes(
 		&mut self,
-		mut changes: &[Operation<ValuePtr, ValuePtr>],
+		mut changes: &[Operation<RcKey, RcValue>],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<()> {

@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
 	column::Column,
-	db::ValuePtr,
+	db::{RcKey, RcValue},
 	error::Result,
 	index::Address,
 	log::{LogQuery, LogWriter},
@@ -56,7 +56,7 @@ impl Node {
 		&mut self,
 		parent: Option<(&mut Self, usize)>,
 		depth: u32,
-		changes: &mut &[Operation<ValuePtr, ValuePtr>],
+		changes: &mut &[Operation<RcKey, RcValue>],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
@@ -106,7 +106,7 @@ impl Node {
 		depth: u32,
 		key: &[u8],
 		value: &[u8],
-		changes: &mut &[Operation<ValuePtr, ValuePtr>],
+		changes: &mut &[Operation<RcKey, RcValue>],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
@@ -236,7 +236,7 @@ impl Node {
 	fn on_existing(
 		&mut self,
 		depth: u32,
-		changes: &mut &[Operation<ValuePtr, ValuePtr>],
+		changes: &mut &[Operation<RcKey, RcValue>],
 		values: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
@@ -247,7 +247,7 @@ impl Node {
 		if at {
 			let existing = self.separator_address(i);
 			if let Some(existing) = existing {
-				if Column::write_existing_value_plan::<_, ValuePtr>(
+				if Column::write_existing_value_plan::<_, RcValue>(
 					&TableKey::NoHash,
 					values,
 					existing,

@@ -10,7 +10,7 @@
 use super::*;
 use crate::{
 	btree::BTreeTable,
-	db::{CommitOverlay, ValuePtr},
+	db::{CommitOverlay, RcKey, RcValue},
 	error::Result,
 	log::LogQuery,
 	parking_lot::RwLock,
@@ -45,7 +45,7 @@ pub struct BTreeIterator<'a> {
 	last_key: LastKey,
 }
 
-type IterResult = Result<Option<(ValuePtr, ValuePtr)>>;
+type IterResult = Result<Option<(RcKey, RcValue)>>;
 
 #[derive(Debug)]
 struct PendingBackend {
@@ -57,8 +57,8 @@ struct PendingBackend {
 pub enum LastKey {
 	Start,
 	End,
-	At(ValuePtr),
-	Seeked(ValuePtr),
+	At(RcValue),
+	Seeked(RcValue),
 }
 
 #[derive(Debug)]

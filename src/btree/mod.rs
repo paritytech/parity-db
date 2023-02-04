@@ -357,14 +357,14 @@ pub mod commit_overlay {
 	use super::*;
 	use crate::{
 		column::{ColId, Column},
-		db::{BTreeCommitOverlay, Operation, ValuePtr},
+		db::{BTreeCommitOverlay, Operation, RcKey, RcValue},
 		error::Result,
 	};
 
 	#[derive(Debug)]
 	pub struct BTreeChangeSet {
 		pub col: ColId,
-		pub changes: Vec<Operation<ValuePtr, ValuePtr>>,
+		pub changes: Vec<Operation<RcKey, RcValue>>,
 	}
 
 	impl BTreeChangeSet {
