@@ -57,8 +57,8 @@ struct PendingBackend {
 pub enum LastKey {
 	Start,
 	End,
-	At(RcValue),
-	Seeked(RcValue),
+	At(Vec<u8>),
+	Seeked(Vec<u8>),
 }
 
 #[derive(Debug)]
@@ -161,7 +161,7 @@ impl<'a> BTreeIterator<'a> {
 							if let Some(value) = commit_value {
 								Some((commit_key, value))
 							} else {
-								self.last_key = LastKey::At(commit_key);
+								self.last_key = LastKey::At(commit_key.value().clone());
 								continue
 							}
 						},
@@ -172,7 +172,7 @@ impl<'a> BTreeIterator<'a> {
 							if let Some(value) = commit_value {
 								Some((backend_key.into(), value))
 							} else {
-								self.last_key = LastKey::At(commit_key);
+								self.last_key = LastKey::At(commit_key.value().clone());
 								continue
 							},
 					}
@@ -183,7 +183,7 @@ impl<'a> BTreeIterator<'a> {
 				},
 				(Some((k, None)), None) => {
 					self.pending_backend = Some(PendingBackend { next_item: None, direction });
-					self.last_key = LastKey::At(k);
+					self.last_key = LastKey::At(k.value().clone());
 					continue
 				},
 				(None, Some((backend_key, backend_value))) =>
@@ -196,7 +196,7 @@ impl<'a> BTreeIterator<'a> {
 
 			match result.as_ref() {
 				Some((key, _)) => {
-					self.last_key = LastKey::At(key.clone());
+					self.last_key = LastKey::At(key.value().clone());
 				},
 				None =>
 					self.last_key = match direction {
@@ -221,10 +221,10 @@ impl<'a> BTreeIterator<'a> {
 			*tree = new_tree;
 			match &self.last_key {
 				LastKey::At(last_key) => {
-					iter.seek(SeekTo::Exclude(last_key.value().as_slice()), tree, col, log)?;
+					iter.seek(SeekTo::Exclude(last_key.as_slice()), tree, col, log)?;
 				},
 				LastKey::Seeked(last_key) => {
-					iter.seek(SeekTo::Include(last_key.value().as_slice()), tree, col, log)?;
+					iter.seek(SeekTo::Include(last_key.as_slice()), tree, col, log)?;
 				},
 				LastKey::Start => {
 					iter.seek(SeekTo::Include(&[]), tree, col, log)?;

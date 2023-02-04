@@ -1214,18 +1214,18 @@ impl CommitOverlay {
 		match &last_key {
 			LastKey::Start => self
 				.btree_indexed
-				.range::<RcValue, _>(..)
+				.range::<Vec<u8>, _>(..)
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::End => None,
 			LastKey::At(key) => self
 				.btree_indexed
-				.range::<RcValue, _>((Bound::Excluded(key), Bound::Unbounded))
+				.range::<Vec<u8>, _>((Bound::Excluded(key), Bound::Unbounded))
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Seeked(key) => self
 				.btree_indexed
-				.range::<RcValue, _>(key..)
+				.range::<Value, _>(key..)
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 		}
@@ -1246,13 +1246,13 @@ impl CommitOverlay {
 			LastKey::Start => None,
 			LastKey::At(key) => self
 				.btree_indexed
-				.range::<RcValue, _>(..key)
+				.range::<Vec<u8>, _>(..key)
 				.rev()
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Seeked(key) => self
 				.btree_indexed
-				.range::<RcValue, _>(..=key)
+				.range::<Vec<u8>, _>(..=key)
 				.rev()
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
