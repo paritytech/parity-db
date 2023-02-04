@@ -11,10 +11,6 @@ use crate::{
 	table::{key::TableKey, SIZE_TIERS_BITS},
 	Key,
 };
-#[cfg(target_arch = "x86")]
-use std::arch::x86::*;
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
 use std::{cmp::max, convert::TryInto};
 
 // Index chunk consists of 8 64-bit entries.
@@ -235,18 +231,24 @@ impl IndexTable {
 		Ok(try_io!(Ok(&map[offset..offset + CHUNK_LEN])))
 	}
 
-	#[cfg(target_feature = "sse2")]
 	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
-		self.find_entry_sse2(key_prefix, sub_index, chunk)
+		cfg_if::cfg_if! {
+			if #[cfg(nightly)] {
+				self.find_entry_base_simd(key_prefix, sub_index, chunk)
+			} else if #[cfg(target_feature = "sse2")] {
+				self.find_entry_sse2(key_prefix, sub_index, chunk)
+			} else {
+				self.find_entry_base(key_prefix, sub_index, chunk)
+			}
+		}
 	}
 
-	#[cfg(not(target_feature = "sse2"))]
-	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
-		self.find_entry_base(key_prefix, sub_index, chunk)
-	}
-
-	#[cfg(target_feature = "sse2")]
 	fn find_entry_sse2(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
+		#[cfg(target_arch = "x86")]
+		use std::arch::x86::*;
+		#[cfg(target_arch = "x86_64")]
+		use std::arch::x86_64::*;
+
 		assert!(chunk.len() >= CHUNK_ENTRIES * 8); // Bound checking (not done by SIMD instructions)
 		const _: () = assert!(
 			CHUNK_ENTRIES % 4 == 0,
@@ -286,14 +288,70 @@ impl IndexTable {
 		(Entry::empty(), 0)
 	}
 
-	#[cfg(any(not(target_feature = "sse2"), test))]
 	fn find_entry_base(&self, key_prefix: u64, sub_index: usize, chunk: &[u8]) -> (Entry, usize) {
 		assert!(chunk.len() >= CHUNK_ENTRIES * 8);
-		let partial_key = Entry::extract_key(key_prefix, self.id.index_bits());
+		let id_index_bits = self.id.index_bits();
+		let partial_key = Entry::extract_key(key_prefix, id_index_bits);
 		for i in sub_index..CHUNK_ENTRIES {
 			let entry = Self::read_entry(chunk, i);
-			if entry.partial_key(self.id.index_bits()) == partial_key {
+			if entry.partial_key(id_index_bits) == partial_key {
 				return (entry, i)
+			}
+		}
+		(Entry::empty(), 0)
+	}
+
+	#[cfg(nightly)]
+	fn find_entry_base_simd(
+		&self,
+		key_prefix: u64,
+		sub_index: usize,
+		chunk: &[u8],
+	) -> (Entry, usize) {
+		use std::{
+			ops::ShrAssign,
+			simd::{Simd, SimdPartialEq},
+		};
+
+		cfg_if::cfg_if! {
+			if #[cfg(any(target_feature = "avx", target_feature = "avx2"))] {
+				const LANES: usize = 4;
+			} else {
+				const LANES: usize = 2;
+			}
+		};
+
+		type Vector = Simd<u64, LANES>;
+
+		assert!(chunk.len() >= CHUNK_ENTRIES * 8);
+
+		if sub_index < CHUNK_ENTRIES {
+			let id_index_bits = self.id.index_bits();
+			let id_address_bits = id_index_bits + CHUNK_ENTRIES_BITS + SIZE_TIERS_BITS;
+			let id_address_bits_vector = Vector::splat(id_address_bits as _);
+			let partial_key = Entry::extract_key(key_prefix, id_index_bits);
+			let partial_key_vector = Vector::splat(partial_key);
+
+			let mut index = sub_index;
+			for subchunk in chunk[(sub_index * 8)..(CHUNK_ENTRIES * 8)].chunks(8 * LANES) {
+				if subchunk.len() < 8 * LANES {
+					return self.find_entry_base(key_prefix, index, chunk)
+				}
+				let array: [u64; LANES] = {
+					let array: [u8; 8 * LANES] = subchunk.try_into().unwrap();
+					unsafe { std::mem::transmute(array) }
+				};
+				let mut vector = Vector::from_array(array);
+				vector.shr_assign(id_address_bits_vector);
+				let mask = vector.simd_eq(partial_key_vector);
+				if mask.any() {
+					for lane in 0..LANES {
+						if mask.test(lane) {
+							return (Entry::from_u64(array[lane]), index + lane)
+						}
+					}
+				}
+				index += LANES;
 			}
 		}
 		(Entry::empty(), 0)
@@ -638,6 +696,68 @@ mod test {
 					index_table.find_entry_base(key_prefix, 0, &chunk).0.partial_key(index_bits),
 					*partial_key
 				);
+				#[cfg(nightly)]
+				assert_eq!(
+					index_table
+						.find_entry_base_simd(key_prefix, 0, &chunk)
+						.0
+						.partial_key(index_bits),
+					*partial_key
+				);
+			}
+		}
+	}
+
+	#[cfg(nightly)]
+	mod bench {
+		extern crate test;
+
+		use super::*;
+		use test::Bencher;
+
+		#[bench]
+		fn bench_find_entry_base(b: &mut Bencher) {
+			b.iter(|| find_entries(IndexTable::find_entry_base));
+		}
+
+		#[bench]
+		fn bench_find_entry_sse2(b: &mut Bencher) {
+			b.iter(|| find_entries(IndexTable::find_entry_sse2));
+		}
+
+		#[bench]
+		fn bench_find_entry_base_simd(b: &mut Bencher) {
+			b.iter(|| find_entries(IndexTable::find_entry_base_simd));
+		}
+
+		fn find_entries<F>(find_entry: F)
+		where
+			F: Fn(&IndexTable, u64, usize, &[u8]) -> (Entry, usize),
+		{
+			let partial_keys = [1, 1 << 10, 1 << 20];
+			for index_bits in [16, 18, 20, 22] {
+				let index_table = IndexTable {
+					id: TableId(index_bits.into()),
+					map: RwLock::new(None),
+					path: PathBuf::new(),
+				};
+
+				let data_address = Address::from_u64((1 << index_bits) - 1);
+
+				let mut chunk = [0; CHUNK_ENTRIES * 8];
+				for (i, partial_key) in partial_keys.iter().enumerate() {
+					chunk[i * 8..(i + 1) * 8].copy_from_slice(
+						&Entry::new(data_address, *partial_key, index_bits).as_u64().to_le_bytes(),
+					);
+				}
+
+				for partial_key in &partial_keys {
+					let key_prefix = *partial_key << (CHUNK_ENTRIES_BITS + SIZE_TIERS_BITS);
+					assert_eq!(
+						find_entry(&index_table, key_prefix, 0, &chunk).0.partial_key(index_bits),
+						*partial_key
+					);
+				}
 			}
 		}
 	}

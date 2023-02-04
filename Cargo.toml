@@ -13,6 +13,7 @@ instrumentation = []
 
 [dependencies]
 blake2 = "0.10.4"
+cfg-if = "1"
 crc32fast = "1.2.0"
 fs2 = "0.4.3"
 hex = "0.4.2"
@@ -30,6 +31,9 @@ env_logger = "0.9.0"
 fdlimit = "0.2.1"
 rand = { version = "0.8.2", features = ["small_rng"] }
 tempfile = "3.2"
+
+[build-dependencies]
+rustc_version = "0.4"
 
 [profile.release]
 panic = "abort"
