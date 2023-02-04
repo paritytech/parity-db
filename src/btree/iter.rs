@@ -9,11 +9,7 @@
 /// latest accessed key.u
 use super::*;
 use crate::{
-	btree::BTreeTable,
-	db::{CommitOverlay, RcKey, RcValue},
-	error::Result,
-	log::LogQuery,
-	parking_lot::RwLock,
+	btree::BTreeTable, db::CommitOverlay, error::Result, log::LogQuery, parking_lot::RwLock,
 	table::key::TableKeyQuery,
 };
 
@@ -45,7 +41,7 @@ pub struct BTreeIterator<'a> {
 	last_key: LastKey,
 }
 
-type IterResult = Result<Option<(RcKey, RcValue)>>;
+type IterResult = Result<Option<(Vec<u8>, Vec<u8>)>>;
 
 #[derive(Debug)]
 struct PendingBackend {
@@ -97,7 +93,7 @@ impl<'a> BTreeIterator<'a> {
 		// seek require log do not change
 		let log = self.log.read();
 		let record_id = log.last_record_id(self.col);
-		self.last_key = LastKey::Seeked(key.to_vec().into());
+		self.last_key = LastKey::Seeked(key.to_vec());
 		self.pending_backend = None;
 		self.seek_backend(SeekTo::Include(key), record_id, self.table, &*log)
 	}
@@ -159,18 +155,17 @@ impl<'a> BTreeIterator<'a> {
 								direction,
 							});
 							if let Some(value) = commit_value {
-								Some((commit_key, value))
+								Some((commit_key.value().clone(), value.value().clone()))
 							} else {
 								self.last_key = LastKey::At(commit_key.value().clone());
 								continue
 							}
 						},
 						(IterDirection::Backward, std::cmp::Ordering::Less) |
-						(IterDirection::Forward, std::cmp::Ordering::Greater) =>
-							Some((backend_key.into(), backend_value.into())),
+						(IterDirection::Forward, std::cmp::Ordering::Greater) => Some((backend_key, backend_value)),
 						(_, std::cmp::Ordering::Equal) =>
 							if let Some(value) = commit_value {
-								Some((backend_key.into(), value))
+								Some((backend_key, value.value().clone()))
 							} else {
 								self.last_key = LastKey::At(commit_key.value().clone());
 								continue
@@ -179,15 +174,14 @@ impl<'a> BTreeIterator<'a> {
 				},
 				(Some((commit_key, Some(commit_value))), None) => {
 					self.pending_backend = Some(PendingBackend { next_item: None, direction });
-					Some((commit_key, commit_value))
+					Some((commit_key.value().clone(), commit_value.value().clone()))
 				},
 				(Some((k, None)), None) => {
 					self.pending_backend = Some(PendingBackend { next_item: None, direction });
 					self.last_key = LastKey::At(k.value().clone());
 					continue
 				},
-				(None, Some((backend_key, backend_value))) =>
-					Some((backend_key.into(), backend_value.into())),
+				(None, Some((backend_key, backend_value))) => Some((backend_key, backend_value)),
 				(None, None) => {
 					self.pending_backend = Some(PendingBackend { next_item: None, direction });
 					None
@@ -196,7 +190,7 @@ impl<'a> BTreeIterator<'a> {
 
 			match result.as_ref() {
 				Some((key, _)) => {
-					self.last_key = LastKey::At(key.value().clone());
+					self.last_key = LastKey::At(key.clone());
 				},
 				None =>
 					self.last_key = match direction {

@@ -1471,12 +1471,11 @@ enum OpeningMode {
 
 #[cfg(test)]
 mod tests {
-	use crate::{ColumnOptions, Value};
-
-	use super::{Db, Options, RcKey, RcValue};
+	use super::{Db, Options};
 	use crate::{
 		column::ColId,
 		db::{DbInner, OpeningMode},
+		ColumnOptions, Value,
 	};
 	use rand::Rng;
 	use std::{
@@ -1819,19 +1818,19 @@ mod tests {
 
 		assert_eq!(db.get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
 		iter.seek_to_first().unwrap();
-		assert_eq!(iter.next().unwrap(), Some((key1.clone().into(), b"value1".to_vec().into())));
+		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
-		assert_eq!(iter.prev().unwrap(), Some((key1.clone().into(), b"value1".to_vec().into())));
+		assert_eq!(iter.prev().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.prev().unwrap(), None);
-		assert_eq!(iter.next().unwrap(), Some((key1.clone().into(), b"value1".to_vec().into())));
+		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
 
 		iter.seek_to_first().unwrap();
-		assert_eq!(iter.next().unwrap(), Some((key1.clone().into(), b"value1".to_vec().into())));
+		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.prev().unwrap(), None);
 
 		iter.seek(&[0xff]).unwrap();
-		assert_eq!(iter.prev().unwrap(), Some((key1.clone().into(), b"value1".to_vec().into())));
+		assert_eq!(iter.prev().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.prev().unwrap(), None);
 
 		db.commit(vec![
@@ -1847,13 +1846,13 @@ mod tests {
 		assert_eq!(db.get(col_nb, &key3).unwrap(), Some(b"value3".to_vec()));
 
 		iter.seek(key2.as_slice()).unwrap();
-		assert_eq!(iter.next().unwrap(), Some((key2.clone().into(), b"value2".to_vec().into())));
-		assert_eq!(iter.next().unwrap(), Some((key3.clone().into(), b"value3".to_vec().into())));
+		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
+		assert_eq!(iter.next().unwrap(), Some((key3.clone(), b"value3".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
 
 		iter.seek(key3.as_slice()).unwrap();
-		assert_eq!(iter.prev().unwrap(), Some((key3.clone().into(), b"value3".to_vec().into())));
-		assert_eq!(iter.prev().unwrap(), Some((key2.clone().into(), b"value2".to_vec().into())));
+		assert_eq!(iter.prev().unwrap(), Some((key3.clone(), b"value3".to_vec())));
+		assert_eq!(iter.prev().unwrap(), Some((key2.clone(), b"value2".to_vec())));
 		assert_eq!(iter.prev().unwrap(), None);
 
 		db.commit(vec![
@@ -1871,7 +1870,7 @@ mod tests {
 		let mut key22 = key2.clone();
 		key22.push(2);
 		iter.seek(key22.as_slice()).unwrap();
-		assert_eq!(iter.next().unwrap(), Some((key4.into(), b"value4".to_vec().into())));
+		assert_eq!(iter.next().unwrap(), Some((key4, b"value4".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
 	}
 
@@ -1907,7 +1906,7 @@ mod tests {
 		let mut iter = db.iter(col_nb).unwrap();
 		assert_eq!(db.get(col_nb, &key1).unwrap(), Some(b"value1".to_vec()));
 		iter.seek_to_first().unwrap();
-		assert_eq!(iter.next().unwrap(), Some((key1.clone().into(), b"value1".to_vec().into())));
+		assert_eq!(iter.next().unwrap(), Some((key1.clone(), b"value1".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
 
 		db.commit(vec![
@@ -1922,13 +1921,13 @@ mod tests {
 		assert_eq!(db.get(col_nb, &key2).unwrap(), Some(b"value2".to_vec()));
 		assert_eq!(db.get(col_nb, &key3).unwrap(), Some(b"value3".to_vec()));
 		iter.seek(key2.as_slice()).unwrap();
-		assert_eq!(iter.next().unwrap(), Some((key2.clone().into(), b"value2".to_vec().into())));
-		assert_eq!(iter.next().unwrap(), Some((key3.clone().into(), b"value3".to_vec().into())));
+		assert_eq!(iter.next().unwrap(), Some((key2.clone(), b"value2".to_vec())));
+		assert_eq!(iter.next().unwrap(), Some((key3.clone(), b"value3".to_vec())));
 		assert_eq!(iter.next().unwrap(), None);
 
 		iter.seek_to_last().unwrap();
-		assert_eq!(iter.prev().unwrap(), Some((key3.into(), b"value3".to_vec().into())));
-		assert_eq!(iter.prev().unwrap(), Some((key2.clone().into(), b"value2".to_vec().into())));
+		assert_eq!(iter.prev().unwrap(), Some((key3, b"value3".to_vec())));
+		assert_eq!(iter.prev().unwrap(), Some((key2.clone(), b"value2".to_vec())));
 		assert_eq!(iter.prev().unwrap(), None);
 	}
 
@@ -2355,15 +2354,12 @@ mod tests {
 			}
 		}
 
-		let start_state: BTreeMap<RcKey, RcValue> = data_start
-			.iter()
-			.cloned()
-			.map(|(_c, k, v)| (k.into(), v.unwrap().into()))
-			.collect();
-		let mut end_state: BTreeMap<RcKey, RcValue> = start_state.clone();
+		let start_state: BTreeMap<Vec<u8>, Vec<u8>> =
+			data_start.iter().cloned().map(|(_c, k, v)| (k, v.unwrap())).collect();
+		let mut end_state = start_state.clone();
 		for (_c, k, v) in data_change.iter() {
 			if let Some(v) = v {
-				end_state.insert(k.clone().into(), v.clone().into());
+				end_state.insert(k.clone(), v.clone());
 			} else {
 				end_state.remove(k);
 			}
@@ -2390,15 +2386,12 @@ mod tests {
 				(0, b"key3".to_vec(), Some(b"val3".to_vec())),
 			];
 			let data_change = vec![(0, b"key2".to_vec(), Some(b"val2".to_vec()))];
-			let start_state: BTreeMap<RcKey, RcValue> = data_start
-				.iter()
-				.cloned()
-				.map(|(_c, k, v)| (k.into(), v.unwrap().into()))
-				.collect();
-			let mut end_state: BTreeMap<RcKey, RcValue> = start_state.clone();
+			let start_state: BTreeMap<Vec<u8>, Vec<u8>> =
+				data_start.iter().cloned().map(|(_c, k, v)| (k, v.unwrap())).collect();
+			let mut end_state = start_state.clone();
 			for (_c, k, v) in data_change.iter() {
 				if let Some(v) = v {
-					end_state.insert(k.clone().into(), v.clone().into());
+					end_state.insert(k.clone(), v.clone());
 				} else {
 					end_state.remove(k);
 				}
@@ -2410,8 +2403,8 @@ mod tests {
 		db_test: EnableCommitPipelineStages,
 		data_start: &[(u8, Vec<u8>, Option<Value>)],
 		data_change: &[(u8, Vec<u8>, Option<Value>)],
-		start_state: &BTreeMap<RcKey, RcValue>,
-		end_state: &BTreeMap<RcKey, RcValue>,
+		start_state: &BTreeMap<Vec<u8>, Vec<u8>>,
+		end_state: &BTreeMap<Vec<u8>, Vec<u8>>,
 		commit_at: usize,
 	) {
 		let tmp = tempdir().unwrap();
@@ -2425,7 +2418,7 @@ mod tests {
 
 		let mut iter = db.iter(col_nb).unwrap();
 		let mut iter_state = start_state.iter();
-		let mut last_key = Value::new().into();
+		let mut last_key = Value::new();
 		for _ in 0..commit_at {
 			let next = iter.next().unwrap();
 			if let Some((k, _)) = next.as_ref() {

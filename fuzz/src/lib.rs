@@ -234,9 +234,8 @@ pub trait DbSimulator {
 							retry_operation(|| iter.seek_to_last());
 							IterPosition::End
 						};
-						let new_key_value = iter
-							.prev()
-							.unwrap_or_else(|e| {
+						let new_key_value =
+							iter.prev().unwrap_or_else(|e| {
 								log::debug!("Database error: {}, restarting iter.prev without I/O limitations.", e);
 
 								// We ignore the error and reset the iterator
@@ -244,8 +243,7 @@ pub trait DbSimulator {
 								iter.seek_to_last().unwrap();
 								old_key = IterPosition::End;
 								iter.prev().unwrap()
-							})
-							.map(|(k, v)| (k.value().clone(), v.value().clone()));
+							});
 						let expected = Self::valid_iter_value(old_key, &layers, Ordering::Greater);
 						log::info!(
 							"Prev lookup on iterator with old position {:?}, expecting one of {:?}",
@@ -267,9 +265,8 @@ pub trait DbSimulator {
 							retry_operation(|| iter.seek_to_first());
 							IterPosition::Start
 						};
-						let new_key_value = iter
-							.next()
-							.unwrap_or_else(|e| {
+						let new_key_value =
+							iter.next().unwrap_or_else(|e| {
 								log::debug!("Database error: {}, restarting iter.next without I/O limitations.", e);
 
 								// We ignore the error and reset the iterator
@@ -277,8 +274,7 @@ pub trait DbSimulator {
 								iter.seek_to_first().unwrap();
 								old_key = IterPosition::Start;
 								iter.next().unwrap()
-							})
-							.map(|(k, v)| (k.value().clone(), v.value().clone()));
+							});
 						let expected = Self::valid_iter_value(old_key, &layers, Ordering::Less);
 						log::info!(
 							"Next lookup on iterator with old position {:?}, expecting one of {:?}",
