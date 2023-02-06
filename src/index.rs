@@ -667,8 +667,12 @@ mod test {
 	}
 
 	#[cfg(feature = "bench")]
-	#[bench]
-	fn bench_find_entry(b: &mut Bencher) {
+	fn bench_find_entry_internal<
+		F: Fn(&IndexTable, u64, usize, &[u8; CHUNK_LEN]) -> (Entry, usize),
+	>(
+		b: &mut Bencher,
+		f: F,
+	) {
 		let table =
 			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
 		let mut chunk = [0u8; 512];
@@ -685,35 +689,22 @@ mod test {
 
 		b.iter(|| {
 			let i = index % 64;
-			let x = table.find_entry_base(keys[i], 0, &chunk).1;
+			let x = f(&table, keys[i], 0, &chunk).1;
 			assert_eq!(x, i);
 			index += 1;
 		});
 	}
 
 	#[cfg(feature = "bench")]
+	#[bench]
+	fn bench_find_entry(b: &mut Bencher) {
+		bench_find_entry_internal(b, IndexTable::find_entry_base)
+	}
+
+	#[cfg(feature = "bench")]
 	#[cfg(target_feature = "sse2")]
 	#[bench]
 	fn bench_find_entry_sse(b: &mut Bencher) {
-		let table =
-			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
-		let mut chunk = [0u8; 512];
-		let mut keys = [0u64; 64];
-		let mut rng = rand::thread_rng();
-		for i in 0..64 {
-			keys[i] = rng.gen();
-			let partial_key = Entry::extract_key(keys[i], 18);
-			let e = Entry::new(Address::new(0, 0), partial_key, 18);
-			IndexTable::write_entry(&e, i, &mut chunk);
-		}
-
-		let mut index = 0;
-
-		b.iter(|| {
-			let i = index % 64;
-			let x = table.find_entry_sse2(keys[i], 0, &chunk).1;
-			assert_eq!(x, i);
-			index += 1;
-		});
+		bench_find_entry_internal(b, IndexTable::find_entry_sse2)
 	}
 }
