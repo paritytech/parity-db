@@ -237,7 +237,6 @@ impl IndexTable {
 		Ok(try_io!(Ok(ptr)))
 	}
 
-	#[inline(always)]
 	#[cfg(target_feature = "sse2")]
 	fn find_entry(
 		&self,
