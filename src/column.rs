@@ -4,7 +4,7 @@
 use crate::{
 	btree::BTreeTable,
 	compress::Compress,
-	db::{check::CheckDisplay, Operation},
+	db::{check::CheckDisplay, Operation, RcValue},
 	display::hex,
 	error::{Error, Result},
 	index::{Address, IndexTable, PlanOutcome, TableId as IndexTableId},
@@ -498,7 +498,7 @@ impl HashColumn {
 
 	pub fn write_plan(
 		&self,
-		change: &Operation<Key, Vec<u8>>,
+		change: &Operation<Key, RcValue>,
 		log: &mut LogWriter,
 	) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
@@ -509,7 +509,8 @@ impl HashColumn {
 		} else {
 			match change {
 				Operation::Set(key, value) => {
-					let (r, _, _) = self.write_plan_new(tables, reindex, key, value, log)?;
+					let (r, _, _) =
+						self.write_plan_new(tables, reindex, key, value.as_ref(), log)?;
 					Ok(r)
 				},
 				Operation::Dereference(key) => {
@@ -534,7 +535,7 @@ impl HashColumn {
 	fn write_plan_existing(
 		&self,
 		tables: &Tables,
-		change: &Operation<Key, Vec<u8>>,
+		change: &Operation<Key, RcValue>,
 		log: &mut LogWriter,
 		index: &IndexTable,
 		sub_index: usize,

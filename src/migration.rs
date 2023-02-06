@@ -85,7 +85,7 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 					.entry(c)
 					.or_insert_with(|| IndexedChangeSet::new(c))
 					.changes
-					.push(Operation::Set(key, value));
+					.push(Operation::Set(key, value.into()));
 				nb_commit += 1;
 				if nb_commit == COMMIT_SIZE {
 					ncommits += 1;

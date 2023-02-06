@@ -29,8 +29,9 @@ impl fmt::Display for Error {
 			Error::Io(e) => write!(f, "IO Error: {e}"),
 			Error::Corruption(e) => write!(f, "Corruption: {e}"),
 			Error::InvalidConfiguration(e) => write!(f, "Invalid configuration: {e}"),
-			Error::IncompatibleColumnConfig { id, reason } =>
-				write!(f, "Invalid column {id} configuration : {reason}"),
+			Error::IncompatibleColumnConfig { id, reason } => {
+				write!(f, "Invalid column {id} configuration : {reason}")
+			},
 			Error::InvalidInput(e) => write!(f, "Invalid input: {e}"),
 			Error::InvalidValueData => write!(f, "Invalid data in value table"),
 			Error::Background(e) => write!(f, "Background worker error: {e}"),

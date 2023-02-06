@@ -547,7 +547,7 @@ impl Log {
 			},
 			Err(e) => Err(e),
 			Ok(id) => {
-				try_io!(file.seek(std::io::SeekFrom::Start(0)));
+				try_io!(file.rewind());
 				log::debug!(target: "parity-db", "Opened existing log {}, first record_id = {}", path.display(), id);
 				Ok((file, Some(id)))
 			},
@@ -707,7 +707,7 @@ impl Log {
 		};
 		for (id, ref mut file) in cleaned.iter_mut() {
 			log::debug!(target: "parity-db", "Cleaned: {}", id);
-			try_io!(file.seek(std::io::SeekFrom::Start(0)));
+			try_io!(file.rewind());
 			try_io!(file.set_len(0));
 		}
 		// Move cleaned logs back to the pool
@@ -733,7 +733,7 @@ impl Log {
 		let mut reading = self.reading.write();
 		if reading.is_none() {
 			if let Some((id, mut file)) = self.read_queue.write().pop_front() {
-				try_io!(file.seek(std::io::SeekFrom::Start(0)));
+				try_io!(file.rewind());
 				*reading = Some(Reading { id, file: std::io::BufReader::new(file) });
 			} else {
 				log::trace!(target: "parity-db", "No active reader");
