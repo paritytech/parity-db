@@ -226,7 +226,7 @@ pub trait DbSimulator {
 					};
 					Self::reset_model_from_database(&db.db, &mut layers, &old_layers);
 				},
-				Action::IterPrev =>
+				Action::IterPrev => {
 					if let Some(iter) = &mut db.iter {
 						let mut old_key = if let Some(old_key) = db.iter_current_key.take() {
 							old_key
@@ -250,15 +250,14 @@ pub trait DbSimulator {
 							old_key,
 							expected
 						);
-						assert!(expected.contains(&new_key_value), "Prev lookup on iterator with old position {:?}, expecting one of {:?}, found {:?}",
-								old_key,
-								expected, new_key_value);
+						assert!(expected.contains(&new_key_value), "{}", "Prev lookup on iterator with old position {old_key:?}, expecting one of {expected:?}, found {new_key_value:?}");
 						db.iter_current_key = Some(
 							new_key_value
 								.map_or(IterPosition::Start, |(k, _)| IterPosition::Value(k[0])),
 						);
-					},
-				Action::IterNext =>
+					}
+				},
+				Action::IterNext => {
 					if let Some(iter) = &mut db.iter {
 						let mut old_key = if let Some(old_key) = db.iter_current_key.take() {
 							old_key
@@ -282,12 +281,13 @@ pub trait DbSimulator {
 							old_key,
 							expected
 						);
-						assert!(expected.contains(&new_key_value), "Next lookup on iterator with old position {:?}, expecting one of {:?}, found {:?}", old_key, expected, new_key_value);
+						assert!(expected.contains(&new_key_value), "{}", "Next lookup on iterator with old position {old_key:?}, expecting one of {expected:?}, found {new_key_value:?}");
 						db.iter_current_key = Some(
 							new_key_value
 								.map_or(IterPosition::End, |(k, _)| IterPosition::Value(k[0])),
 						);
-					},
+					}
+				},
 			}
 			retry_operation(|| Self::check_db_and_model_are_equals(&db.db, &layers)).unwrap();
 		}

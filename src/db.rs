@@ -32,6 +32,7 @@ use crate::{
 };
 use fs2::FileExt;
 use std::{
+	borrow::Borrow,
 	collections::{BTreeMap, HashMap, VecDeque},
 	ops::Bound,
 	sync::{
@@ -55,6 +56,50 @@ const KEEP_LOGS: usize = 16;
 
 /// Value is just a vector of bytes. Value sizes up to 4Gb are allowed.
 pub type Value = Vec<u8>;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RcValue(Arc<Value>);
+
+pub type RcKey = RcValue;
+
+impl RcValue {
+	pub fn value(&self) -> &Value {
+		&self.0
+	}
+}
+
+impl AsRef<[u8]> for RcValue {
+	fn as_ref(&self) -> &[u8] {
+		self.0.as_ref()
+	}
+}
+
+impl Borrow<[u8]> for RcValue {
+	fn borrow(&self) -> &[u8] {
+		self.value().borrow()
+	}
+}
+
+impl Borrow<Vec<u8>> for RcValue {
+	fn borrow(&self) -> &Vec<u8> {
+		self.value().borrow()
+	}
+}
+
+impl From<Value> for RcValue {
+	fn from(value: Value) -> Self {
+		Self(value.into())
+	}
+}
+
+#[cfg(test)]
+impl<const N: usize> TryFrom<RcValue> for [u8; N] {
+	type Error = <[u8; N] as TryFrom<Vec<u8>>>::Error;
+
+	fn try_from(value: RcValue) -> std::result::Result<Self, Self::Error> {
+		value.value().clone().try_into()
+	}
+}
 
 // Commit data passed to `commit`
 #[derive(Debug, Default)]
@@ -192,7 +237,7 @@ impl DbInner {
 				let overlay = self.commit_overlay.read();
 				// Check commit overlay first
 				if let Some(v) = overlay.get(col as usize).and_then(|o| o.get(&key)) {
-					return Ok(v)
+					return Ok(v.map(|i| i.value().clone()))
 				}
 				// Go into tables and log overlay.
 				let log = self.log.overlays();
@@ -201,7 +246,7 @@ impl DbInner {
 			Column::Tree(column) => {
 				let overlay = self.commit_overlay.read();
 				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
-					return Ok(l.cloned())
+					return Ok(l.map(|i| i.value().clone()))
 				}
 				// We lock log, if btree structure changed while reading that would be an issue.
 				let log = self.log.overlays().read();
@@ -226,7 +271,7 @@ impl DbInner {
 			Column::Tree(column) => {
 				let overlay = self.commit_overlay.read();
 				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
-					return Ok(l.map(|v| v.len() as u32))
+					return Ok(l.map(|v| v.value().len() as u32))
 				}
 				let log = self.log.overlays().read();
 				let l = column.with_locked(|btree| BTreeTable::get(key, &*log, btree))?;
@@ -1124,8 +1169,8 @@ impl Drop for Db {
 	}
 }
 
-pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<Value>), IdentityBuildHasher>;
-pub type BTreeCommitOverlay = BTreeMap<Vec<u8>, (u64, Option<Value>)>;
+pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<RcValue>), IdentityBuildHasher>;
+pub type BTreeCommitOverlay = BTreeMap<RcValue, (u64, Option<RcValue>)>;
 
 #[derive(Debug)]
 pub struct CommitOverlay {
@@ -1145,23 +1190,26 @@ impl CommitOverlay {
 }
 
 impl CommitOverlay {
-	fn get_ref(&self, key: &[u8]) -> Option<Option<&Value>> {
+	fn get_ref(&self, key: &[u8]) -> Option<Option<&RcValue>> {
 		self.indexed.get(key).map(|(_, v)| v.as_ref())
 	}
 
-	fn get(&self, key: &[u8]) -> Option<Option<Value>> {
+	fn get(&self, key: &[u8]) -> Option<Option<RcValue>> {
 		self.get_ref(key).map(|v| v.cloned())
 	}
 
 	fn get_size(&self, key: &[u8]) -> Option<Option<u32>> {
-		self.get_ref(key).map(|res| res.as_ref().map(|b| b.len() as u32))
+		self.get_ref(key).map(|res| res.as_ref().map(|b| b.value().len() as u32))
 	}
 
-	fn btree_get(&self, key: &[u8]) -> Option<Option<&Value>> {
+	fn btree_get(&self, key: &[u8]) -> Option<Option<&RcValue>> {
 		self.btree_indexed.get(key).map(|(_, v)| v.as_ref())
 	}
 
-	pub fn btree_next(&self, last_key: &crate::btree::LastKey) -> Option<(Value, Option<Value>)> {
+	pub fn btree_next(
+		&self,
+		last_key: &crate::btree::LastKey,
+	) -> Option<(RcValue, Option<RcValue>)> {
 		use crate::btree::LastKey;
 		match &last_key {
 			LastKey::Start => self
@@ -1177,13 +1225,16 @@ impl CommitOverlay {
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Seeked(key) => self
 				.btree_indexed
-				.range::<Vec<u8>, _>(key..)
+				.range::<Value, _>(key..)
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 		}
 	}
 
-	pub fn btree_prev(&self, last_key: &crate::btree::LastKey) -> Option<(Value, Option<Value>)> {
+	pub fn btree_prev(
+		&self,
+		last_key: &crate::btree::LastKey,
+	) -> Option<(RcValue, Option<RcValue>)> {
 		use crate::btree::LastKey;
 		match &last_key {
 			LastKey::End => self
@@ -1271,7 +1322,7 @@ pub struct CommitChangeSet {
 #[derive(Debug)]
 pub struct IndexedChangeSet {
 	pub col: ColId,
-	pub changes: Vec<Operation<Key, Vec<u8>>>,
+	pub changes: Vec<Operation<Key, RcValue>>,
 }
 
 impl IndexedChangeSet {
@@ -1291,13 +1342,13 @@ impl IndexedChangeSet {
 		};
 
 		self.push_change_hashed(match change {
-			Operation::Set(k, v) => Operation::Set(hash_key(k.as_ref()), v),
+			Operation::Set(k, v) => Operation::Set(hash_key(k.as_ref()), v.into()),
 			Operation::Dereference(k) => Operation::Dereference(hash_key(k.as_ref())),
 			Operation::Reference(k) => Operation::Reference(hash_key(k.as_ref())),
 		})
 	}
 
-	fn push_change_hashed(&mut self, change: Operation<Key, Vec<u8>>) {
+	fn push_change_hashed(&mut self, change: Operation<Key, RcValue>) {
 		self.changes.push(change);
 	}
 
@@ -1313,7 +1364,7 @@ impl IndexedChangeSet {
 			match &change {
 				Operation::Set(k, v) => {
 					*bytes += k.len();
-					*bytes += v.len();
+					*bytes += v.value().len();
 					overlay.indexed.insert(*k, (record_id, Some(v.clone())));
 				},
 				Operation::Dereference(k) => {
@@ -1362,12 +1413,13 @@ impl IndexedChangeSet {
 		use std::collections::hash_map::Entry;
 		for change in self.changes.iter() {
 			match change {
-				Operation::Set(k, _) | Operation::Dereference(k) =>
+				Operation::Set(k, _) | Operation::Dereference(k) => {
 					if let Entry::Occupied(e) = overlay.indexed.entry(*k) {
 						if e.get().0 == record_id {
 							e.remove_entry();
 						}
-					},
+					}
+				},
 				Operation::Reference(..) => (),
 			}
 		}
@@ -1419,12 +1471,11 @@ enum OpeningMode {
 
 #[cfg(test)]
 mod tests {
-	use crate::{ColumnOptions, Value};
-
 	use super::{Db, Options};
 	use crate::{
 		column::ColId,
 		db::{DbInner, OpeningMode},
+		ColumnOptions, Value,
 	};
 	use rand::Rng;
 	use std::{
@@ -2305,7 +2356,7 @@ mod tests {
 
 		let start_state: BTreeMap<Vec<u8>, Vec<u8>> =
 			data_start.iter().cloned().map(|(_c, k, v)| (k, v.unwrap())).collect();
-		let mut end_state: BTreeMap<Vec<u8>, Vec<u8>> = start_state.clone();
+		let mut end_state = start_state.clone();
 		for (_c, k, v) in data_change.iter() {
 			if let Some(v) = v {
 				end_state.insert(k.clone(), v.clone());
@@ -2337,7 +2388,7 @@ mod tests {
 			let data_change = vec![(0, b"key2".to_vec(), Some(b"val2".to_vec()))];
 			let start_state: BTreeMap<Vec<u8>, Vec<u8>> =
 				data_start.iter().cloned().map(|(_c, k, v)| (k, v.unwrap())).collect();
-			let mut end_state: BTreeMap<Vec<u8>, Vec<u8>> = start_state.clone();
+			let mut end_state = start_state.clone();
 			for (_c, k, v) in data_change.iter() {
 				if let Some(v) = v {
 					end_state.insert(k.clone(), v.clone());
@@ -2367,7 +2418,7 @@ mod tests {
 
 		let mut iter = db.iter(col_nb).unwrap();
 		let mut iter_state = start_state.iter();
-		let mut last_key = Vec::new();
+		let mut last_key = Value::new();
 		for _ in 0..commit_at {
 			let next = iter.next().unwrap();
 			if let Some((k, _)) = next.as_ref() {

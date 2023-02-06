@@ -357,14 +357,14 @@ pub mod commit_overlay {
 	use super::*;
 	use crate::{
 		column::{ColId, Column},
-		db::{BTreeCommitOverlay, Operation},
+		db::{BTreeCommitOverlay, Operation, RcKey, RcValue},
 		error::Result,
 	};
 
 	#[derive(Debug)]
 	pub struct BTreeChangeSet {
 		pub col: ColId,
-		pub changes: Vec<Operation<Vec<u8>, Vec<u8>>>,
+		pub changes: Vec<Operation<RcKey, RcValue>>,
 	}
 
 	impl BTreeChangeSet {
@@ -372,9 +372,13 @@ pub mod commit_overlay {
 			BTreeChangeSet { col, changes: Default::default() }
 		}
 
-		pub fn push(&mut self, change: Operation<Vec<u8>, Vec<u8>>) {
+		pub fn push(&mut self, change: Operation<Value, Value>) {
 			// No key hashing
-			self.changes.push(change);
+			self.changes.push(match change {
+				Operation::Set(k, v) => Operation::Set(k.into(), v.into()),
+				Operation::Dereference(k) => Operation::Dereference(k.into()),
+				Operation::Reference(k) => Operation::Reference(k.into()),
+			});
 		}
 
 		pub fn copy_to_overlay(
@@ -388,8 +392,8 @@ pub mod commit_overlay {
 			for change in self.changes.iter() {
 				match change {
 					Operation::Set(key, value) => {
-						*bytes += key.len();
-						*bytes += value.len();
+						*bytes += key.value().len();
+						*bytes += value.value().len();
 						overlay.insert(key.clone(), (record_id, Some(value.clone())));
 					},
 					Operation::Dereference(key) => {
@@ -397,7 +401,7 @@ pub mod commit_overlay {
 						// (current ref_counted implementation does not
 						// make much sense for btree indexed content).
 						if !ref_counted {
-							*bytes += key.len();
+							*bytes += key.value().len();
 							overlay.insert(key.clone(), (record_id, None));
 						}
 					},

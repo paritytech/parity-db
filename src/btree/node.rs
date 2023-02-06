@@ -9,6 +9,7 @@ use super::{
 };
 use crate::{
 	column::Column,
+	db::{RcKey, RcValue},
 	error::Result,
 	index::Address,
 	log::{LogQuery, LogWriter},
@@ -55,7 +56,7 @@ impl Node {
 		&mut self,
 		parent: Option<(&mut Self, usize)>,
 		depth: u32,
-		changes: &mut &[Operation<Vec<u8>, Vec<u8>>],
+		changes: &mut &[Operation<RcKey, RcValue>],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
@@ -70,7 +71,7 @@ impl Node {
 			}
 			let r = match &changes[0] {
 				Operation::Set(key, value) =>
-					self.insert(depth, key, value, changes, btree, log)?,
+					self.insert(depth, key.value(), value.value(), changes, btree, log)?,
 				_ => self.on_existing(depth, changes, btree, log)?,
 			};
 			if r.0.is_some() || r.1 {
@@ -81,12 +82,12 @@ impl Node {
 			}
 			if let Some((parent, p)) = &parent {
 				let key = &changes[1].key();
-				let (at, i) = self.position(key)?; // TODO could start position from current
+				let (at, i) = self.position(key.value())?; // TODO could start position from current
 				if at || i < self.number_separator() {
 					*changes = &changes[1..];
 					continue
 				}
-				let (at, i) = parent.position(key)?;
+				let (at, i) = parent.position(key.value())?;
 				if !at && &i == p && i < parent.number_separator() {
 					*changes = &changes[1..];
 					continue
@@ -105,7 +106,7 @@ impl Node {
 		depth: u32,
 		key: &[u8],
 		value: &[u8],
-		changes: &mut &[Operation<Vec<u8>, Vec<u8>>],
+		changes: &mut &[Operation<RcKey, RcValue>],
 		btree: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
@@ -235,18 +236,18 @@ impl Node {
 	fn on_existing(
 		&mut self,
 		depth: u32,
-		changes: &mut &[Operation<Vec<u8>, Vec<u8>>],
+		changes: &mut &[Operation<RcKey, RcValue>],
 		values: TablesRef,
 		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
 		let change = &changes[0];
 		let key = change.key();
 		let has_child = depth != 0;
-		let (at, i) = self.position(key)?;
+		let (at, i) = self.position(key.value())?;
 		if at {
 			let existing = self.separator_address(i);
 			if let Some(existing) = existing {
-				if Column::write_existing_value_plan::<_, Vec<u8>>(
+				if Column::write_existing_value_plan::<_, RcValue>(
 					&TableKey::NoHash,
 					values,
 					existing,

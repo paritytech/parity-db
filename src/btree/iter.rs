@@ -146,8 +146,8 @@ impl<'a> BTreeIterator<'a> {
 				self.next_backend(record_id, self.table, &*log, direction)?
 			};
 			let result = match (next_commit_overlay, next_backend) {
-				(Some((commit_key, commit_value)), Some((backend_key, backend_value))) =>
-					match (direction, commit_key.cmp(&backend_key)) {
+				(Some((commit_key, commit_value)), Some((backend_key, backend_value))) => {
+					match (direction, commit_key.value().cmp(&backend_key)) {
 						(IterDirection::Backward, std::cmp::Ordering::Greater) |
 						(IterDirection::Forward, std::cmp::Ordering::Less) => {
 							self.pending_backend = Some(PendingBackend {
@@ -155,9 +155,9 @@ impl<'a> BTreeIterator<'a> {
 								direction,
 							});
 							if let Some(value) = commit_value {
-								Some((commit_key, value))
+								Some((commit_key.value().clone(), value.value().clone()))
 							} else {
-								self.last_key = LastKey::At(commit_key);
+								self.last_key = LastKey::At(commit_key.value().clone());
 								continue
 							}
 						},
@@ -165,19 +165,20 @@ impl<'a> BTreeIterator<'a> {
 						(IterDirection::Forward, std::cmp::Ordering::Greater) => Some((backend_key, backend_value)),
 						(_, std::cmp::Ordering::Equal) =>
 							if let Some(value) = commit_value {
-								Some((backend_key, value))
+								Some((backend_key, value.value().clone()))
 							} else {
-								self.last_key = LastKey::At(commit_key);
+								self.last_key = LastKey::At(commit_key.value().clone());
 								continue
 							},
-					},
+					}
+				},
 				(Some((commit_key, Some(commit_value))), None) => {
 					self.pending_backend = Some(PendingBackend { next_item: None, direction });
-					Some((commit_key, commit_value))
+					Some((commit_key.value().clone(), commit_value.value().clone()))
 				},
 				(Some((k, None)), None) => {
 					self.pending_backend = Some(PendingBackend { next_item: None, direction });
-					self.last_key = LastKey::At(k);
+					self.last_key = LastKey::At(k.value().clone());
 					continue
 				},
 				(None, Some((backend_key, backend_value))) => Some((backend_key, backend_value)),
@@ -328,29 +329,32 @@ impl BTreeIterState {
 					(IterDirection::Forward, LastIndex::At(sep)) if is_leaf =>
 						LastIndex::At(*sep + 1),
 					(IterDirection::Forward, LastIndex::At(sep)) => LastIndex::Descend(*sep + 1),
-					(IterDirection::Forward, LastIndex::Before(sep)) if *sep == ORDER =>
+					(IterDirection::Forward, LastIndex::Before(sep)) if *sep == ORDER => {
 						if self.exit(direction) {
 							break
 						} else {
 							continue
-						},
+						}
+					},
 					(IterDirection::Forward, LastIndex::Before(sep)) => LastIndex::At(*sep),
 
-					(IterDirection::Backward, LastIndex::At(sep)) if is_leaf && *sep == 0 =>
+					(IterDirection::Backward, LastIndex::At(sep)) if is_leaf && *sep == 0 => {
 						if self.exit(direction) {
 							break
 						} else {
 							continue
-						},
+						}
+					},
 					(IterDirection::Backward, LastIndex::At(sep)) if is_leaf =>
 						LastIndex::At(*sep - 1),
 					(IterDirection::Backward, LastIndex::At(sep)) => LastIndex::Descend(*sep),
-					(IterDirection::Backward, LastIndex::Before(sep)) if *sep == 0 =>
+					(IterDirection::Backward, LastIndex::Before(sep)) if *sep == 0 => {
 						if self.exit(direction) {
 							break
 						} else {
 							continue
-						},
+						}
+					},
 					(IterDirection::Backward, LastIndex::Before(sep)) => LastIndex::At(*sep - 1),
 				};
 				match next {
