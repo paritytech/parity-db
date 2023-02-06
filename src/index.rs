@@ -630,6 +630,7 @@ mod test {
 
 			for partial_key in &partial_keys {
 				let key_prefix = *partial_key << (CHUNK_ENTRIES_BITS + SIZE_TIERS_BITS);
+				#[cfg(target_feature = "sse2")]
 				assert_eq!(
 					index_table.find_entry_sse2(key_prefix, 0, &chunk).0.partial_key(index_bits),
 					*partial_key

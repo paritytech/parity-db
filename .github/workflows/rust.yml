@@ -91,3 +91,12 @@ jobs:
           args: --test loom --features=loom,instrumentation --release --verbose
         env:
           LOOM_MAX_PREEMPTIONS: 3
+
+  test_aarch64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: docker/setup-qemu-action@v2
+        with:
+          platforms: linux/arm64
+      - run: docker run -v "$(pwd)":/workdir --platform linux/arm64 -w /workdir rust:1-bookworm cargo test --features instrumentation --verbose
