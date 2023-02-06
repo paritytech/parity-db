@@ -215,7 +215,7 @@ impl IndexTable {
 	pub fn load_stats(&self) -> Result<ColumnStats> {
 		if let Some(map) = &*self.map.read() {
 			Ok(ColumnStats::from_slice(try_io!(Ok(
-							&map[HEADER_SIZE..HEADER_SIZE + stats::TOTAL_SIZE]
+				&map[HEADER_SIZE..HEADER_SIZE + stats::TOTAL_SIZE]
 			))))
 		} else {
 			Ok(ColumnStats::empty())
@@ -232,18 +232,29 @@ impl IndexTable {
 
 	fn chunk_at(index: u64, map: &memmap2::MmapMut) -> Result<&[u8; CHUNK_LEN]> {
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
-		let ptr: &[u8; CHUNK_LEN] = unsafe { std::mem::transmute(map[offset..offset + CHUNK_LEN].as_ptr()) };
+		let ptr: &[u8; CHUNK_LEN] =
+			unsafe { std::mem::transmute(map[offset..offset + CHUNK_LEN].as_ptr()) };
 		Ok(try_io!(Ok(ptr)))
 	}
 
 	#[inline(always)]
 	#[cfg(target_feature = "sse2")]
-	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8; CHUNK_LEN]) -> (Entry, usize) {
+	fn find_entry(
+		&self,
+		key_prefix: u64,
+		sub_index: usize,
+		chunk: &[u8; CHUNK_LEN],
+	) -> (Entry, usize) {
 		self.find_entry_sse2(key_prefix, sub_index, chunk)
 	}
 
 	#[cfg(not(target_feature = "sse2"))]
-	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &[u8; CHUNK_LEN]) -> (Entry, usize) {
+	fn find_entry(
+		&self,
+		key_prefix: u64,
+		sub_index: usize,
+		chunk: &[u8; CHUNK_LEN],
+	) -> (Entry, usize) {
 		self.find_entry_base(key_prefix, sub_index, chunk)
 	}
 
@@ -265,12 +276,12 @@ impl IndexTable {
 				// Then we remove the address by shifting such that the partial key is in the low
 				// part
 				let first_two = _mm_shuffle_epi32::<0b11011000>(_mm_srl_epi64(
-						_mm_loadu_si128(chunk[i * 8..].as_ptr() as *const __m128i),
-						shift_mask,
+					_mm_loadu_si128(chunk[i * 8..].as_ptr() as *const __m128i),
+					shift_mask,
 				));
 				let last_two = _mm_shuffle_epi32::<0b11011000>(_mm_srl_epi64(
-						_mm_loadu_si128(chunk[(i + 2) * 8..].as_ptr() as *const __m128i),
-						shift_mask,
+					_mm_loadu_si128(chunk[(i + 2) * 8..].as_ptr() as *const __m128i),
+					shift_mask,
 				));
 				// We set into current the input low parts
 				let current = _mm_unpacklo_epi64(first_two, last_two);
@@ -289,7 +300,12 @@ impl IndexTable {
 	}
 
 	#[cfg(any(not(target_feature = "sse2"), test))]
-	fn find_entry_base(&self, key_prefix: u64, sub_index: usize, chunk: &[u8; CHUNK_LEN]) -> (Entry, usize) {
+	fn find_entry_base(
+		&self,
+		key_prefix: u64,
+		sub_index: usize,
+		chunk: &[u8; CHUNK_LEN],
+	) -> (Entry, usize) {
 		assert!(chunk.len() >= CHUNK_ENTRIES * 8);
 		let partial_key = Entry::extract_key(key_prefix, self.id.index_bits());
 		for i in sub_index..CHUNK_ENTRIES {
@@ -496,13 +512,13 @@ impl IndexTable {
 				.read(true)
 				.create_new(true)
 				.open(self.path.as_path()));
-				log::debug!(target: "parity-db", "Created new index {}", self.id);
-				//TODO: check for potential overflows on 32-bit platforms
-				try_io!(file.set_len(file_size(self.id.index_bits())));
-				let mut mmap = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
-				self.madvise_random(&mut mmap);
-				*wmap = Some(mmap);
-				map = RwLockWriteGuard::downgrade_to_upgradable(wmap);
+			log::debug!(target: "parity-db", "Created new index {}", self.id);
+			//TODO: check for potential overflows on 32-bit platforms
+			try_io!(file.set_len(file_size(self.id.index_bits())));
+			let mut mmap = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
+			self.madvise_random(&mut mmap);
+			*wmap = Some(mmap);
+			map = RwLockWriteGuard::downgrade_to_upgradable(wmap);
 		}
 
 		let map = map.as_ref().unwrap();
@@ -521,7 +537,7 @@ impl IndexTable {
 			let i = mask.trailing_zeros();
 			mask &= !(1 << i);
 			log.read(try_io!(Ok(
-						&mut chunk[i as usize * ENTRY_BYTES..(i as usize + 1) * ENTRY_BYTES]
+				&mut chunk[i as usize * ENTRY_BYTES..(i as usize + 1) * ENTRY_BYTES]
 			)))?;
 		}
 		log::trace!(target: "parity-db", "{}: Enacted chunk {}", self.id, index);
@@ -653,15 +669,12 @@ mod test {
 	#[cfg(feature = "bench")]
 	#[bench]
 	fn bench_find_entry(b: &mut Bencher) {
-		let table = IndexTable {
-			id: TableId(18),
-			map: RwLock::new(None),
-			path: Default::default(),
-		};
+		let table =
+			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
 		let mut chunk = [0u8; 512];
 		let mut keys = [0u64; 64];
 		let mut rng = rand::thread_rng();
-		for i in 0 .. 64 {
+		for i in 0..64 {
 			keys[i] = rng.gen();
 			let partial_key = Entry::extract_key(keys[i], 18);
 			let e = Entry::new(Address::new(0, 0), partial_key, 18);
@@ -682,15 +695,12 @@ mod test {
 	#[cfg(target_feature = "sse2")]
 	#[bench]
 	fn bench_find_entry_sse(b: &mut Bencher) {
-		let table = IndexTable {
-			id: TableId(18),
-			map: RwLock::new(None),
-			path: Default::default(),
-		};
+		let table =
+			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
 		let mut chunk = [0u8; 512];
 		let mut keys = [0u64; 64];
 		let mut rng = rand::thread_rng();
-		for i in 0 .. 64 {
+		for i in 0..64 {
 			keys[i] = rng.gen();
 			let partial_key = Entry::extract_key(keys[i], 18);
 			let e = Entry::new(Address::new(0, 0), partial_key, 18);
