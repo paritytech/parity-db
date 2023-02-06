@@ -310,7 +310,6 @@ impl IndexTable {
 		sub_index: usize,
 		chunk: &[u8; CHUNK_LEN],
 	) -> (Entry, usize) {
-		assert!(chunk.len() >= CHUNK_ENTRIES * 8);
 		let partial_key = Entry::extract_key(key_prefix, self.id.index_bits());
 		for i in sub_index..CHUNK_ENTRIES {
 			let entry = Self::read_entry(chunk, i);
@@ -612,7 +611,10 @@ mod test {
 	use std::path::PathBuf;
 
 	#[cfg(feature = "bench")]
-	use {rand::Rng, test::Bencher};
+	use {
+		rand::{Rng, SeedableRng},
+		test::Bencher,
+	};
 	#[cfg(feature = "bench")]
 	extern crate test;
 
@@ -681,7 +683,7 @@ mod test {
 			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
 		let mut chunk = [0u8; 512];
 		let mut keys = [0u64; 64];
-		let mut rng = rand::thread_rng();
+		let mut rng = rand::prelude::SmallRng::from_seed(Default::default());
 		for i in 0..64 {
 			keys[i] = rng.gen();
 			let partial_key = Entry::extract_key(keys[i], 18);
@@ -690,12 +692,10 @@ mod test {
 		}
 
 		let mut index = 0;
-
 		b.iter(|| {
-			let i = index % 64;
-			let x = f(&table, keys[i], 0, &chunk).1;
-			assert_eq!(x, i);
-			index += 1;
+			let x = f(&table, keys[index], 0, &chunk).1;
+			assert_eq!(x, index);
+			index = (index + 1) % 64;
 		});
 	}
 
