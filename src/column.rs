@@ -1117,6 +1117,7 @@ impl Column {
 	}
 
 	#[cfg(test)]
+	#[cfg(feature = "instrumentation")]
 	pub fn index_bits(&self) -> Option<u8> {
 		match self {
 			Column::Hash(column) => Some(column.tables.read().index.id.index_bits()),

@@ -1,6 +1,8 @@
 // Copyright 2021-2022 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or MIT.
 
+#![cfg_attr(feature = "bench", feature(test))]
+
 mod btree;
 mod column;
 mod compress;
