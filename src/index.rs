@@ -259,7 +259,12 @@ impl IndexTable {
 	}
 
 	#[cfg(target_feature = "sse2")]
-	fn find_entry_sse2(&self, key_prefix: u64, sub_index: usize, chunk: &[u8; CHUNK_LEN]) -> (Entry, usize) {
+	fn find_entry_sse2(
+		&self,
+		key_prefix: u64,
+		sub_index: usize,
+		chunk: &[u8; CHUNK_LEN],
+	) -> (Entry, usize) {
 		assert!(chunk.len() >= CHUNK_ENTRIES * 8); // Bound checking (not done by SIMD instructions)
 		const _: () = assert!(
 			CHUNK_ENTRIES % 4 == 0,
