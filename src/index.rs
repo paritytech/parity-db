@@ -236,7 +236,7 @@ impl IndexTable {
 		Ok(try_io!(Ok(ptr)))
 	}
 
-	#[cfg(target_feature = "sse2")]
+	#[cfg(target_arch = "x86_64")]
 	fn find_entry(
 		&self,
 		key_prefix: u64,
@@ -246,7 +246,7 @@ impl IndexTable {
 		self.find_entry_sse2(key_prefix, sub_index, chunk)
 	}
 
-	#[cfg(not(target_feature = "sse2"))]
+	#[cfg(not(target_arch = "x86_64"))]
 	fn find_entry(
 		&self,
 		key_prefix: u64,
@@ -256,7 +256,7 @@ impl IndexTable {
 		self.find_entry_base(key_prefix, sub_index, chunk)
 	}
 
-	#[cfg(target_feature = "sse2")]
+	#[cfg(target_arch = "x86_64")]
 	fn find_entry_sse2(
 		&self,
 		key_prefix: u64,
@@ -302,7 +302,7 @@ impl IndexTable {
 		(Entry::empty(), 0)
 	}
 
-	#[cfg(any(not(target_feature = "sse2"), test))]
+	#[cfg(any(not(target_arch = "x86_64"), test))]
 	fn find_entry_base(
 		&self,
 		key_prefix: u64,
@@ -658,7 +658,7 @@ mod test {
 
 			for partial_key in &partial_keys {
 				let key_prefix = *partial_key << (CHUNK_ENTRIES_BITS + SIZE_TIERS_BITS);
-				#[cfg(target_feature = "sse2")]
+				#[cfg(target_arch = "x86_64")]
 				assert_eq!(
 					index_table.find_entry_sse2(key_prefix, 0, &chunk).0.partial_key(index_bits),
 					*partial_key
@@ -705,7 +705,7 @@ mod test {
 	}
 
 	#[cfg(feature = "bench")]
-	#[cfg(target_feature = "sse2")]
+	#[cfg(target_arch = "x86_64")]
 	#[bench]
 	fn bench_find_entry_sse(b: &mut Bencher) {
 		bench_find_entry_internal(b, IndexTable::find_entry_sse2)

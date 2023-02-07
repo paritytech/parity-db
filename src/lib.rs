@@ -32,3 +32,6 @@ pub use stats::{ColumnStatSummary, StatSummary};
 
 pub const KEY_SIZE: usize = 32;
 pub type Key = [u8; KEY_SIZE];
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("parity-db only supports x86_64 and aarch64");
