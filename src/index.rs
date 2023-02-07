@@ -232,8 +232,7 @@ impl IndexTable {
 
 	fn chunk_at(index: u64, map: &memmap2::MmapMut) -> Result<&[u8; CHUNK_LEN]> {
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
-		let ptr: &[u8; CHUNK_LEN] =
-			unsafe { std::mem::transmute(map[offset..offset + CHUNK_LEN].as_ptr()) };
+		let ptr = unsafe { &*(map[offset..offset + CHUNK_LEN].as_ptr() as *const [u8; CHUNK_LEN]) };
 		Ok(try_io!(Ok(ptr)))
 	}
 
