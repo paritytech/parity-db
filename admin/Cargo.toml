@@ -12,6 +12,7 @@ fdlimit = "0.2.1"
 log = "0.4.8"
 parity-db = { path = ".." }
 rand = { version = "0.8.5", features = ["small_rng"] }
+blake2 = "0.10.4"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 jemallocator = "0.5.0"

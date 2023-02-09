@@ -76,6 +76,10 @@ pub struct Stress {
 	/// Use btree index.
 	#[clap(long)]
 	pub ordered: bool,
+
+	/// Use uniform keys.
+	#[clap(long)]
+	pub uniform: bool,
 }
 
 #[derive(Clone)]
@@ -90,6 +94,7 @@ pub struct Args {
 	pub no_check: bool,
 	pub compress: bool,
 	pub ordered: bool,
+	pub uniform: bool,
 }
 
 impl Stress {
@@ -105,6 +110,7 @@ impl Stress {
 			no_check: self.no_check,
 			compress: self.compress,
 			ordered: self.ordered,
+			uniform: self.uniform,
 		}
 	}
 }
@@ -112,17 +118,29 @@ impl Stress {
 struct SizePool {
 	distribution: std::collections::BTreeMap<u32, u32>,
 	total: u32,
+	uniform: bool,
+	cache_start: u64,
+	cached_keys: Vec<Key>,
 }
 
 impl SizePool {
-	fn from_histogram(h: &[(u32, u32)]) -> SizePool {
+	fn from_histogram(h: &[(u32, u32)], uniform: bool) -> SizePool {
 		let mut distribution = std::collections::BTreeMap::default();
 		let mut total = 0;
 		for (size, count) in h {
 			total += count;
 			distribution.insert(total, *size);
 		}
-		SizePool { distribution, total }
+		SizePool { distribution, total, uniform, cache_start: 0, cached_keys: Vec::new() }
+	}
+
+	fn cache_keys(&mut self, start: u64, num_keys: u64) {
+		self.cache_start = start;
+		self.cached_keys.clear();
+		for index in self.cache_start..self.cache_start + num_keys {
+			let key_to_cache = self.key(index);
+			self.cached_keys.push(key_to_cache);
+		}
 	}
 
 	fn value(&self, seed: u64, compressable: bool) -> Vec<u8> {
@@ -140,9 +158,34 @@ impl SizePool {
 	}
 
 	fn key(&self, seed: u64) -> Key {
+		use blake2::{
+			digest::{typenum::U32, FixedOutput, Update},
+			Blake2bMac,
+		};
+
+		if seed >= self.cache_start {
+			let key_index = seed - self.cache_start;
+			if key_index < self.cached_keys.len() as u64 {
+				return self.cached_keys[key_index as usize]
+			}
+		}
+
 		let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
 		let mut key = Key::default();
 		rng.fill_bytes(&mut key);
+
+		if self.uniform {
+			// Just using this to generate uniform keys. Actual salting will still happen inside the
+			// database, even for uniform keys.
+			let salt = [0; 32];
+
+			let mut ctx = Blake2bMac::<U32>::new_with_salt_and_personal(&salt, &[], &[])
+				.expect("Salt length (32) is a valid key length (<= 64)");
+			ctx.update(key.as_ref());
+			let hash = ctx.finalize_fixed();
+			key.copy_from_slice(&hash);
+		}
+
 		key
 	}
 }
@@ -238,9 +281,7 @@ fn iter(db: Arc<Db>, shutdown: Arc<AtomicBool>) {
 pub fn run_internal(args: Args, db: Db) {
 	let args = Arc::new(args);
 	let shutdown = Arc::new(AtomicBool::new(false));
-	let pool = Arc::new(SizePool::from_histogram(sizes::KUSAMA_STATE_DISTRIBUTION));
 	let db = Arc::new(db);
-	let start = std::time::Instant::now();
 
 	let mut threads = Vec::new();
 
@@ -251,6 +292,19 @@ pub fn run_internal(args: Args, db: Db) {
 	} else {
 		0
 	};
+
+	let mut pool = SizePool::from_histogram(sizes::KUSAMA_STATE_DISTRIBUTION, args.uniform);
+	if args.uniform {
+		println!("Generating uniform keys.");
+
+		let offset = args.seed.unwrap_or(0);
+		let start_index = start_commit as u64 * COMMIT_SIZE as u64 + offset;
+		let num_keys = args.commits as u64 * COMMIT_SIZE as u64;
+		pool.cache_keys(start_index, num_keys);
+	}
+	let pool = Arc::new(pool);
+
+	let start = std::time::Instant::now();
 
 	COMMITS.store(start_commit, Ordering::SeqCst);
 	NEXT_COMMIT.store(start_commit, Ordering::SeqCst);
