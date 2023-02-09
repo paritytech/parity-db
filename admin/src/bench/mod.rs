@@ -120,7 +120,7 @@ struct SizePool {
 	total: u32,
 	uniform: bool,
 	cache_start: u64,
-	cached_keys: Vec<Key>
+	cached_keys: Vec<Key>,
 }
 
 impl SizePool {
@@ -131,13 +131,7 @@ impl SizePool {
 			total += count;
 			distribution.insert(total, *size);
 		}
-		SizePool {
-			distribution,
-			total,
-			uniform,
-			cache_start: 0,
-			cached_keys: Vec::new()
-		}
+		SizePool { distribution, total, uniform, cache_start: 0, cached_keys: Vec::new() }
 	}
 
 	fn cache_keys(&mut self, start: u64, num_keys: u64) {
@@ -173,16 +167,17 @@ impl SizePool {
 		if seed >= self.cache_start {
 			let key_index = seed - self.cache_start;
 			if key_index < self.cached_keys.len() as u64 {
-				return self.cached_keys[key_index as usize]
+				return self.cached_keys[key_index as usize];
 			}
 		}
-		
+
 		let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
 		let mut key = Key::default();
 		rng.fill_bytes(&mut key);
 
 		if self.uniform {
-			// Just using this to generate uniform keys. Actual salting will still happen inside the database, even for uniform keys.
+			// Just using this to generate uniform keys. Actual salting will still happen inside the
+			// database, even for uniform keys.
 			let salt = [0; 32];
 
 			let mut ctx = Blake2bMac::<U32>::new_with_salt_and_personal(&salt, &[], &[])

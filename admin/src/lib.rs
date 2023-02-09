@@ -123,7 +123,7 @@ pub fn run() -> Result<(), String> {
 			if args.uniform {
 				for mut c in &mut db_options.columns {
 					c.uniform = true;
-				}				
+				}
 			}
 
 			let db = parity_db::Db::open_or_create(&db_options).unwrap();
