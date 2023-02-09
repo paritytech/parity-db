@@ -120,6 +120,12 @@ pub fn run() -> Result<(), String> {
 					c.compression = parity_db::CompressionType::Lz4;
 				}
 			}
+			if args.uniform {
+				for mut c in &mut db_options.columns {
+					c.uniform = true;
+				}				
+			}
+
 			let db = parity_db::Db::open_or_create(&db_options).unwrap();
 			bench::run_internal(args, db);
 		},
