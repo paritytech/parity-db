@@ -167,7 +167,7 @@ impl SizePool {
 		if seed >= self.cache_start {
 			let key_index = seed - self.cache_start;
 			if key_index < self.cached_keys.len() as u64 {
-				return self.cached_keys[key_index as usize];
+				return self.cached_keys[key_index as usize]
 			}
 		}
 
