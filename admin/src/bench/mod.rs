@@ -137,8 +137,7 @@ impl SizePool {
 	fn cache_keys(&mut self, start: u64, num_keys: u64) {
 		self.cache_start = start;
 		self.cached_keys.clear();
-		for k in 0..num_keys {
-			let index = self.cache_start + k;
+		for index in self.cache_start..self.cache_start + num_keys {
 			let key_to_cache = self.key(index);
 			self.cached_keys.push(key_to_cache);
 		}
