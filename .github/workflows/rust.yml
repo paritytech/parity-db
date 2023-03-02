@@ -99,4 +99,4 @@ jobs:
       - uses: docker/setup-qemu-action@v2
         with:
           platforms: linux/arm64
-      - run: docker run -v "$(pwd)":/workdir --platform linux/arm64 -w /workdir rust:1-bookworm cargo test --features instrumentation --verbose
+      - run: docker run -v "$(pwd)":/workdir --platform linux/arm64 -w /workdir --env CARGO_NET_GIT_FETCH_WITH_CLI=true rust:1-bookworm cargo test --features instrumentation --verbose
