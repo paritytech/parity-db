@@ -147,7 +147,8 @@ pub fn hash_key(key: &[u8], salt: &Salt, uniform: bool, db_version: u32) -> Key 
 			// siphash 1-3 first 128 bits of the key
 			use siphasher::sip128::Hasher128;
 			use std::hash::Hasher;
-			let mut hasher = siphasher::sip128::SipHasher13::new_with_key(salt[..16].try_into().unwrap());
+			let mut hasher =
+				siphasher::sip128::SipHasher13::new_with_key(salt[..16].try_into().unwrap());
 			hasher.write(&key);
 			let hash = hasher.finish128();
 			k[0..8].copy_from_slice(&hash.h1.to_le_bytes());
@@ -772,15 +773,9 @@ impl HashColumn {
 				if entry.is_empty() {
 					continue
 				}
-				let (size_tier, offset) = if self.db_version >= 4 {
+				let (size_tier, offset) = {
 					let address = entry.address(source.id.index_bits());
 					(address.size_tier(), address.offset())
-				} else {
-					let addr_bits = source.id.index_bits() + 10;
-					let address = Address::from_u64(entry.as_u64() & ((1u64 << addr_bits) - 1));
-					let size_tier = (address.as_u64() & 0x0f) as u8;
-					let offset = address.as_u64() >> 4;
-					(size_tier, offset)
 				};
 
 				if skip_preimage_indexes &&
