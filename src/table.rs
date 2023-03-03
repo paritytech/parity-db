@@ -365,9 +365,7 @@ impl ValueTable {
 			None => (true, 4096),
 		};
 		assert!(entry_size >= MIN_ENTRY_SIZE as u16);
-		if db_version >= 4 {
-			assert!(entry_size <= MAX_ENTRY_SIZE as u16);
-		}
+		assert!(entry_size <= MAX_ENTRY_SIZE as u16);
 
 		let mut filepath: std::path::PathBuf = std::path::PathBuf::clone(&*path);
 		filepath.push(id.file_name());
