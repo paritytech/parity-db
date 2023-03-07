@@ -91,6 +91,7 @@ jobs:
           args: --test loom --features=loom,instrumentation --release --verbose
         env:
           LOOM_MAX_PREEMPTIONS: 3
+          LOOM_MAX_BRANCHES: 2000
 
   test_aarch64:
     runs-on: ubuntu-latest
