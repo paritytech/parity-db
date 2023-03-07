@@ -443,7 +443,7 @@ impl HashColumn {
 		while let PlanOutcome::NeedReindex =
 			tables.index.write_insert_plan(key, address, None, log)?
 		{
-			log::info!(target: "parity-db", "{}: Index chunk full {} when reindexing", tables.index.id, hex(key));
+			log::debug!(target: "parity-db", "{}: Index chunk full {} when reindexing", tables.index.id, hex(key));
 			(tables, reindex) = Self::trigger_reindex(tables, reindex, self.path.as_path());
 			outcome = PlanOutcome::NeedReindex;
 		}

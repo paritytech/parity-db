@@ -786,7 +786,7 @@ impl DbInner {
 				// to no attempt any further log enactment.
 				log::debug!(target: "parity-db", "Shutdown with error state {}", err);
 				self.log.clean_logs(self.log.num_dirty_logs())?;
-				return self.log.kill_logs()
+				return Ok(())
 			}
 		}
 		log::debug!(target: "parity-db", "Processing leftover commits");
@@ -867,7 +867,6 @@ pub struct Db {
 	flush_thread: Option<thread::JoinHandle<()>>,
 	log_thread: Option<thread::JoinHandle<()>>,
 	cleanup_thread: Option<thread::JoinHandle<()>>,
-	join_on_shutdown: bool,
 }
 
 impl Db {
@@ -943,14 +942,7 @@ impl Db {
 		} else {
 			None
 		};
-		Ok(Db {
-			inner: db,
-			commit_thread,
-			flush_thread,
-			log_thread,
-			cleanup_thread,
-			join_on_shutdown: start_threads,
-		})
+		Ok(Db { inner: db, commit_thread, flush_thread, log_thread, cleanup_thread })
 	}
 
 	/// Get a value in a specified column by key. Returns `None` if the key does not exist.
@@ -1140,31 +1132,29 @@ impl Db {
 
 impl Drop for Db {
 	fn drop(&mut self) {
-		if self.join_on_shutdown {
-			self.inner.shutdown();
-			if let Some(t) = self.log_thread.take() {
-				if let Err(e) = t.join() {
-					log::warn!(target: "parity-db", "Log thread shutdown error: {:?}", e);
-				}
+		self.inner.shutdown();
+		if let Some(t) = self.log_thread.take() {
+			if let Err(e) = t.join() {
+				log::warn!(target: "parity-db", "Log thread shutdown error: {:?}", e);
 			}
-			if let Some(t) = self.flush_thread.take() {
-				if let Err(e) = t.join() {
-					log::warn!(target: "parity-db", "Flush thread shutdown error: {:?}", e);
-				}
+		}
+		if let Some(t) = self.flush_thread.take() {
+			if let Err(e) = t.join() {
+				log::warn!(target: "parity-db", "Flush thread shutdown error: {:?}", e);
 			}
-			if let Some(t) = self.commit_thread.take() {
-				if let Err(e) = t.join() {
-					log::warn!(target: "parity-db", "Commit thread shutdown error: {:?}", e);
-				}
+		}
+		if let Some(t) = self.commit_thread.take() {
+			if let Err(e) = t.join() {
+				log::warn!(target: "parity-db", "Commit thread shutdown error: {:?}", e);
 			}
-			if let Some(t) = self.cleanup_thread.take() {
-				if let Err(e) = t.join() {
-					log::warn!(target: "parity-db", "Cleanup thread shutdown error: {:?}", e);
-				}
+		}
+		if let Some(t) = self.cleanup_thread.take() {
+			if let Err(e) = t.join() {
+				log::warn!(target: "parity-db", "Cleanup thread shutdown error: {:?}", e);
 			}
-			if let Err(e) = self.inner.kill_logs() {
-				log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
-			}
+		}
+		if let Err(e) = self.inner.kill_logs() {
+			log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
 		}
 	}
 }
@@ -2447,6 +2437,41 @@ mod tests {
 		for _ in 0..100 {
 			let next = iter.prev().unwrap();
 			assert_eq!(iter_state_rev.next(), next.as_ref().map(|(k, v)| (k, v)));
+		}
+	}
+
+	#[cfg(feature = "instrumentation")]
+	#[test]
+	fn test_recover_from_log_on_error() {
+		let tmp = tempdir().unwrap();
+		let mut options = Options::with_columns(tmp.path(), 1);
+		options.always_flush = true;
+		options.with_background_thread = false;
+
+		// We do 2 commits and we fail while enacting the second one
+		{
+			let db = Db::open_or_create(&options).unwrap();
+			db.commit::<_, Vec<u8>>(vec![(0, vec![0], Some(vec![0]))]).unwrap();
+			db.process_commits().unwrap();
+			db.flush_logs().unwrap();
+			db.enact_logs().unwrap();
+			db.commit::<_, Vec<u8>>(vec![(0, vec![1], Some(vec![1]))]).unwrap();
+			db.process_commits().unwrap();
+			db.flush_logs().unwrap();
+			crate::set_number_of_allowed_io_operations(4);
+
+			// Set the background error explicitly as background threads are disabled in tests.
+			let err = db.enact_logs();
+			assert!(err.is_err());
+			db.inner.store_err(err);
+			crate::set_number_of_allowed_io_operations(usize::MAX);
+		}
+
+		// Open the databases and check that both values are there.
+		{
+			let db = Db::open(&options).unwrap();
+			assert_eq!(db.get(0, &[0]).unwrap(), Some(vec![0]));
+			assert_eq!(db.get(0, &[1]).unwrap(), Some(vec![1]));
 		}
 	}
 
