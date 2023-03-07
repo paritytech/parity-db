@@ -786,7 +786,7 @@ impl DbInner {
 				// to no attempt any further log enactment.
 				log::debug!(target: "parity-db", "Shutdown with error state {}", err);
 				self.log.clean_logs(self.log.num_dirty_logs())?;
-				return Ok(());
+				return Ok(())
 			}
 		}
 		log::debug!(target: "parity-db", "Processing leftover commits");
@@ -942,13 +942,7 @@ impl Db {
 		} else {
 			None
 		};
-		Ok(Db {
-			inner: db,
-			commit_thread,
-			flush_thread,
-			log_thread,
-			cleanup_thread,
-		})
+		Ok(Db { inner: db, commit_thread, flush_thread, log_thread, cleanup_thread })
 	}
 
 	/// Get a value in a specified column by key. Returns `None` if the key does not exist.
