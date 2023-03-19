@@ -82,6 +82,8 @@ const MULTIHEAD_COMPRESSED: &[u8] = &[0xfd, 0x7f];
 // When a rc reach locked ref, it is locked in db.
 const LOCKED_REF: u32 = u32::MAX;
 
+const MULTIPART_ENTRY_SIZE: u16 = 4096;
+
 pub type Value = Vec<u8>;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -362,7 +364,7 @@ impl ValueTable {
 	) -> Result<ValueTable> {
 		let (multipart, entry_size) = match entry_size {
 			Some(s) => (false, s),
-			None => (true, 4096),
+			None => (true, MULTIPART_ENTRY_SIZE),
 		};
 		assert!(entry_size >= MIN_ENTRY_SIZE as u16);
 		assert!(entry_size <= MAX_ENTRY_SIZE as u16);
@@ -437,6 +439,11 @@ impl ValueTable {
 			buf.set_offset(0);
 
 			if buf.is_tombstone() {
+				return Ok((0, false))
+			}
+
+			if self.multipart && part == 0 && !buf.is_multihead() {
+				// This may only happen during value iteration.
 				return Ok((0, false))
 			}
 
@@ -515,6 +522,13 @@ impl ValueTable {
 		} else {
 			Ok(None)
 		}
+	}
+
+	pub fn dump_entry(&self, index: u64) -> Result<Vec<u8>> {
+		let entry_size = self.entry_size as usize;
+		let mut buf = FullEntry::new_uninit_full_entry();
+		self.file.read_at(&mut buf[0..entry_size], index * self.entry_size as u64)?;
+		Ok(buf[0..entry_size].to_vec())
 	}
 
 	pub fn query(
@@ -710,7 +724,7 @@ impl ValueTable {
 			let init_offset = buf.offset();
 			if offset == 0 {
 				if self.ref_counted {
-					// first rc.
+					// First reference.
 					buf.write_rc(1u32);
 				}
 				key.write(&mut buf);
@@ -1384,9 +1398,62 @@ mod test {
 	}
 
 	#[test]
+	fn iteration() {
+		for multipart in [false, true] {
+			for compressed in [false, true] {
+				let (entry_size, size_mul) = if multipart { (None, 100) } else { (Some(2000), 1) };
+
+				let dir = tempdir().unwrap();
+				let table = new_table(&dir, entry_size, &rc_options());
+				let log = new_log(&dir);
+
+				let (v1, v2, v3) =
+					(value(300 * size_mul), value(900 * size_mul), value(1500 * size_mul));
+				let entries = [
+					(TableKey::Partial(key(1)), &v1),
+					(TableKey::Partial(key(2)), &v2),
+					(TableKey::Partial(key(3)), &v3),
+				];
+
+				write_ops(&table, &log, |writer| {
+					for (k, v) in &entries {
+						table.write_insert_plan(k, &v, writer, compressed).unwrap();
+					}
+				});
+
+				let mut res = Vec::new();
+				table
+					.iter_while(log.overlays(), |_index, _rc, v, cmpr| {
+						res.push((v.len(), cmpr));
+						true
+					})
+					.unwrap();
+				assert_eq!(
+					res,
+					vec![(v1.len(), compressed), (v2.len(), compressed), (v3.len(), compressed)]
+				);
+
+				let v2_index = 2 + v1.len() as u64 / super::MULTIPART_ENTRY_SIZE as u64;
+				write_ops(&table, &log, |writer| {
+					table.write_remove_plan(v2_index, writer).unwrap();
+				});
+
+				let mut res = Vec::new();
+				table
+					.iter_while(log.overlays(), |_index, _rc, v, cmpr| {
+						res.push((v.len(), cmpr));
+						true
+					})
+					.unwrap();
+				assert_eq!(res, vec![(v1.len(), compressed), (v3.len(), compressed)]);
+			}
+		}
+	}
+
+	#[test]
 	fn ref_underflow() {
 		let dir = tempdir().unwrap();
-		let table = new_table(&dir, None, &rc_options());
+		let table = new_table(&dir, Some(ENTRY_SIZE), &rc_options());
 		let log = new_log(&dir);
 
 		let key = key(1);

@@ -4,7 +4,7 @@
 //! Utilities for db file.
 
 use crate::{
-	error::{try_io, Result},
+	error::{try_io, Error, Result},
 	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 	table::TableId,
 };
@@ -113,7 +113,12 @@ impl TableFile {
 	#[cfg(unix)]
 	pub fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
 		use std::os::unix::fs::FileExt;
-		try_io!(self.file.read().as_ref().unwrap().read_exact_at(buf, offset));
+		try_io!(self
+			.file
+			.read()
+			.as_ref()
+			.ok_or_else(|| Error::Corruption("File does not exist.".into()))?
+			.read_exact_at(buf, offset));
 		Ok(())
 	}
 
@@ -131,7 +136,7 @@ impl TableFile {
 		use std::{io, os::windows::fs::FileExt};
 
 		let file = self.file.read();
-		let file = file.as_ref().unwrap();
+		let file = file.as_ref().ok_or_else(|| Error::Corruption("File does not exist.".into()))?;
 
 		while !buf.is_empty() {
 			match file.seek_read(buf, offset) {

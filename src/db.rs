@@ -20,7 +20,7 @@
 
 use crate::{
 	btree::{commit_overlay::BTreeChangeSet, BTreeIterator, BTreeTable},
-	column::{hash_key, ColId, Column, IterState, ReindexBatch},
+	column::{hash_key, ColId, Column, IterState, ReindexBatch, ValueIterState},
 	error::{try_io, Error, Result},
 	hash::IdentityBuildHasher,
 	index::PlanOutcome,
@@ -853,9 +853,16 @@ impl DbInner {
 		}
 	}
 
-	fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
+	fn iter_column_while(&self, c: ColId, f: impl FnMut(ValueIterState) -> bool) -> Result<()> {
 		match &self.columns[c as usize] {
-			Column::Hash(column) => column.iter_while(&self.log, f),
+			Column::Hash(column) => column.iter_values(&self.log, f),
+			Column::Tree(_) => unimplemented!(),
+		}
+	}
+
+	fn iter_column_index_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
+		match &self.columns[c as usize] {
+			Column::Hash(column) => column.iter_index(&self.log, f),
 			Column::Tree(_) => unimplemented!(),
 		}
 	}
@@ -988,11 +995,22 @@ impl Db {
 	}
 
 	/// Iterate a column and call a function for each value. This is only supported for columns with
+	/// `btree_index` set to `false`. Iteration order is unspecified.
+	/// Unlike `get` the iteration may not include changes made in recent `commit` calls.
+	pub fn iter_column_while(&self, c: ColId, f: impl FnMut(ValueIterState) -> bool) -> Result<()> {
+		self.inner.iter_column_while(c, f)
+	}
+
+	/// Iterate a column and call a function for each value. This is only supported for columns with
 	/// `btree_index` set to `false`. Iteration order is unspecified. Note that the
 	/// `key` field in the state is the hash of the original key.
-	/// Unlinke `get` the iteration may not include changes made in recent `commit` calls.
-	pub fn iter_column_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
-		self.inner.iter_column_while(c, f)
+	/// Unlike `get` the iteration may not include changes made in recent `commit` calls.
+	pub fn iter_column_index_while(
+		&self,
+		c: ColId,
+		f: impl FnMut(IterState) -> bool,
+	) -> Result<()> {
+		self.inner.iter_column_index_while(c, f)
 	}
 
 	fn commit_worker(db: Arc<DbInner>) -> Result<()> {
