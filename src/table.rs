@@ -1117,7 +1117,7 @@ pub mod key {
 mod test {
 	const ENTRY_SIZE: u16 = 64;
 
-	use super::{TableId, Value, ValueTable};
+	use super::{TableId, Value, ValueTable, MULTIPART_ENTRY_SIZE};
 	use crate::{
 		log::{Log, LogAction, LogWriter},
 		options::{ColumnOptions, Options, CURRENT_VERSION},
@@ -1401,14 +1401,18 @@ mod test {
 	fn iteration() {
 		for multipart in [false, true] {
 			for compressed in [false, true] {
-				let (entry_size, size_mul) = if multipart { (None, 100) } else { (Some(2000), 1) };
+				let (entry_size, size_mul) =
+					if multipart { (None, 100) } else { (Some(MULTIPART_ENTRY_SIZE / 2), 1) };
 
 				let dir = tempdir().unwrap();
 				let table = new_table(&dir, entry_size, &rc_options());
 				let log = new_log(&dir);
 
-				let (v1, v2, v3) =
-					(value(300 * size_mul), value(900 * size_mul), value(1500 * size_mul));
+				let (v1, v2, v3) = (
+					value(MULTIPART_ENTRY_SIZE as usize / 8 * size_mul),
+					value(MULTIPART_ENTRY_SIZE as usize / 4 * size_mul),
+					value(MULTIPART_ENTRY_SIZE as usize * 3 / 8 * size_mul),
+				);
 				let entries = [
 					(TableKey::Partial(key(1)), &v1),
 					(TableKey::Partial(key(2)), &v2),
