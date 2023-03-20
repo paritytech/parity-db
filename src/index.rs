@@ -23,8 +23,8 @@ const CHUNK_ENTRIES: usize = 1 << CHUNK_ENTRIES_BITS;
 const CHUNK_ENTRIES_BITS: u8 = 6;
 const HEADER_SIZE: usize = 512;
 const META_SIZE: usize = 16 * 1024; // Contains header and column stats
-const ENTRY_LEN: u8 = 64;
-pub const ENTRY_BYTES: usize = ENTRY_LEN as usize / 8;
+const ENTRY_BITS: u8 = 64;
+pub const ENTRY_BYTES: usize = ENTRY_BITS as usize / 8;
 
 const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
 
@@ -274,6 +274,7 @@ impl IndexTable {
 			let target = _mm_set1_epi32(((key_prefix << self.id.index_bits()) >> shift) as i32);
 			let shift_mask = _mm_set_epi64x(0, shift.into());
 			let mut i = (sub_index >> 2) << 2; // We keep an alignment of 4
+			let mut skip = (sub_index - i) as i32;
 			while i + 4 <= CHUNK_ENTRIES {
 				// We load the value 2 by 2
 				// Then we remove the address by shifting such that the partial key is in the low
@@ -288,15 +289,13 @@ impl IndexTable {
 				));
 				// We set into current the input low parts
 				let current = _mm_unpacklo_epi64(first_two, last_two);
-				let cmp = _mm_movemask_epi8(_mm_cmpeq_epi32(current, target));
+				let cmp = _mm_movemask_epi8(_mm_cmpeq_epi32(current, target)) >> (skip * 4);
 				if cmp != 0 {
-					let position = i + (cmp.trailing_zeros() as usize) / 4;
-					if position >= sub_index {
-						// We need to check we are not reading again the same input
-						return (Self::read_entry(chunk, position), position)
-					}
+					let position = i + skip as usize + (cmp.trailing_zeros() as usize) / 4;
+					return (Self::read_entry(chunk, position), position)
 				}
 				i += 4;
+				skip = 0;
 			}
 		}
 		(Entry::empty(), 0)
@@ -389,7 +388,7 @@ impl IndexTable {
 
 	#[inline(always)]
 	fn chunk_index(&self, key_prefix: u64) -> u64 {
-		key_prefix >> (ENTRY_LEN - self.id.index_bits())
+		key_prefix >> (ENTRY_BITS - self.id.index_bits())
 	}
 
 	fn plan_insert_chunk(
@@ -607,13 +606,11 @@ impl IndexTable {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use rand::{Rng, SeedableRng};
 	use std::path::PathBuf;
 
 	#[cfg(feature = "bench")]
-	use {
-		rand::{Rng, SeedableRng},
-		test::Bencher,
-	};
+	use test::Bencher;
 	#[cfg(feature = "bench")]
 	extern crate test;
 
@@ -671,6 +668,66 @@ mod test {
 		}
 	}
 
+	#[test]
+	fn test_find_any_entry() {
+		let table =
+			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
+		let mut chunk = [0u8; CHUNK_LEN];
+		let mut entries = [Entry::empty(); CHUNK_ENTRIES];
+		let mut keys = [0u64; CHUNK_ENTRIES];
+		let mut rng = rand::prelude::SmallRng::from_seed(Default::default());
+		for i in 0..CHUNK_ENTRIES {
+			keys[i] = rng.gen();
+			let partial_key = Entry::extract_key(keys[i], 18);
+			let e = Entry::new(Address::new(0, 0), partial_key, 18);
+			entries[i] = e;
+			IndexTable::write_entry(&e, i, &mut chunk);
+		}
+
+		for target in 0..CHUNK_ENTRIES {
+			for start_pos in 0..CHUNK_ENTRIES {
+				let (e, i) = table.find_entry_base(keys[target], start_pos, &chunk);
+				if start_pos <= target {
+					assert_eq!((e.as_u64(), i), (entries[target].as_u64(), target));
+				} else {
+					assert_eq!((e.as_u64(), i), (Entry::empty().as_u64(), 0));
+				}
+				#[cfg(target_arch = "x86_64")]
+				{
+					let (e, i) = table.find_entry_sse2(keys[target], start_pos, &chunk);
+					if start_pos <= target {
+						assert_eq!((e.as_u64(), i), (entries[target].as_u64(), target));
+					} else {
+						assert_eq!((e.as_u64(), i), (Entry::empty().as_u64(), 0));
+					}
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn test_find_entry_same_value() {
+		let table =
+			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
+		let mut chunk = [0u8; CHUNK_LEN];
+		let key = 0x4242424242424242;
+		let partial_key = Entry::extract_key(key, 18);
+		let entry = Entry::new(Address::new(0, 0), partial_key, 18);
+		for i in 0..CHUNK_ENTRIES {
+			IndexTable::write_entry(&entry, i, &mut chunk);
+		}
+
+		for start_pos in 0..CHUNK_ENTRIES {
+			let (_, i) = table.find_entry_base(key, start_pos, &chunk);
+			assert_eq!(i, start_pos);
+			#[cfg(target_arch = "x86_64")]
+			{
+				let (_, i) = table.find_entry_sse2(key, start_pos, &chunk);
+				assert_eq!(i, start_pos);
+			}
+		}
+	}
+
 	#[cfg(feature = "bench")]
 	fn bench_find_entry_internal<
 		F: Fn(&IndexTable, u64, usize, &[u8; CHUNK_LEN]) -> (Entry, usize),
@@ -680,10 +737,10 @@ mod test {
 	) {
 		let table =
 			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
-		let mut chunk = [0u8; 512];
-		let mut keys = [0u64; 64];
+		let mut chunk = [0u8; CHUNK_LEN];
+		let mut keys = [0u64; CHUNK_ENTRIES];
 		let mut rng = rand::prelude::SmallRng::from_seed(Default::default());
-		for i in 0..64 {
+		for i in 0..CHUNK_ENTRIES {
 			keys[i] = rng.gen();
 			let partial_key = Entry::extract_key(keys[i], 18);
 			let e = Entry::new(Address::new(0, 0), partial_key, 18);
@@ -694,7 +751,7 @@ mod test {
 		b.iter(|| {
 			let x = f(&table, keys[index], 0, &chunk).1;
 			assert_eq!(x, index);
-			index = (index + 1) % 64;
+			index = (index + 1) % CHUNK_ENTRIES;
 		});
 	}
 
