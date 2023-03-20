@@ -274,6 +274,7 @@ impl IndexTable {
 			let target = _mm_set1_epi32(((key_prefix << self.id.index_bits()) >> shift) as i32);
 			let shift_mask = _mm_set_epi64x(0, shift.into());
 			let mut i = (sub_index >> 2) << 2; // We keep an alignment of 4
+			let mut skip = (sub_index - i) as i32;
 			while i + 4 <= CHUNK_ENTRIES {
 				// We load the value 2 by 2
 				// Then we remove the address by shifting such that the partial key is in the low
@@ -288,15 +289,13 @@ impl IndexTable {
 				));
 				// We set into current the input low parts
 				let current = _mm_unpacklo_epi64(first_two, last_two);
-				let cmp = _mm_movemask_epi8(_mm_cmpeq_epi32(current, target));
+				let cmp = _mm_movemask_epi8(_mm_cmpeq_epi32(current, target)) >> (skip * 4);
 				if cmp != 0 {
-					let position = i + (cmp.trailing_zeros() as usize) / 4;
-					if position >= sub_index {
-						// We need to check we are not reading again the same input
-						return (Self::read_entry(chunk, position), position)
-					}
+					let position = i + skip as usize + (cmp.trailing_zeros() as usize) / 4;
+					return (Self::read_entry(chunk, position), position)
 				}
 				i += 4;
+				skip = 0;
 			}
 		}
 		(Entry::empty(), 0)
