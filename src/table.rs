@@ -186,6 +186,18 @@ impl Entry<[u8; MAX_ENTRY_BUF_SIZE]> {
 
 impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 	#[inline(always)]
+	pub fn check_remaining_len(
+		&self,
+		len: usize,
+		error: impl Fn() -> crate::error::Error,
+	) -> Result<()> {
+		if self.0 + len > self.1.as_ref().len() {
+			return Err(error())
+		}
+		Ok(())
+	}
+
+	#[inline(always)]
 	pub fn new(data: B) -> Self {
 		Entry(0, data)
 	}
