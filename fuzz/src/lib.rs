@@ -52,7 +52,6 @@ pub enum Action<O: Debug> {
 pub struct Layer<V> {
 	// The stored value per possible key (depends if we have ref counting or not)
 	pub values: [Option<V>; NUMBER_OF_POSSIBLE_KEYS],
-	pub written: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -166,7 +165,7 @@ pub trait DbSimulator {
 				Action::Transaction(operations) => {
 					let mut values = model_values(&layers);
 					Self::apply_operations_on_values(operations, &mut values);
-					layers.push(Layer { values, written: false });
+					layers.push(Layer { values });
 					db.db
 						.commit_changes(operations.iter().map(|o| (0, Self::map_operation(o))))
 						.unwrap();
@@ -179,21 +178,14 @@ pub trait DbSimulator {
 						&old_layers,
 						&options,
 					),
-				Action::ProcessCommits => {
-					for layer in &mut layers {
-						if !layer.written {
-							layer.written = true;
-							break
-						}
-					}
+				Action::ProcessCommits =>
 					db = Self::try_or_restart(
 						|db| db.process_commits(),
 						db,
 						&mut layers,
 						&old_layers,
 						&options,
-					)
-				},
+					),
 				Action::FlushLog =>
 					db = Self::try_or_restart(
 						|db| db.flush_logs(),
@@ -347,10 +339,6 @@ pub trait DbSimulator {
 	) -> Option<Vec<Layer<Self::ValueType>>> {
 		let mut candidates = Vec::new();
 		for layer in layers.iter().rev() {
-			if !layer.written {
-				continue
-			}
-
 			if Self::is_layer_state_compatible_with_disk_state(&layer.values, state) {
 				// We found a correct last layer
 				candidates.push(layer);
