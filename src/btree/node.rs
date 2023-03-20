@@ -590,28 +590,28 @@ pub struct Child {
 }
 
 impl Node {
-	pub fn from_encoded(enc: Vec<u8>) -> Self {
+	pub fn from_encoded(enc: Vec<u8>) -> Result<Self> {
 		let mut entry = Entry::from_encoded(enc);
 		let mut node =
 			Node { separators: Default::default(), children: Default::default(), changed: false };
 		let mut i_children = 0;
 		let mut i_separator = 0;
 		loop {
-			if let Some(child_index) = entry.read_child_index() {
+			if let Some(child_index) = entry.read_child_index()? {
 				node.children.as_mut()[i_children].entry_index = Some(child_index);
 			}
 			i_children += 1;
 			if i_children == ORDER_CHILD {
 				break
 			}
-			if let Some(sep) = entry.read_separator() {
+			if let Some(sep) = entry.read_separator()? {
 				node.separators.as_mut()[i_separator].separator = Some(sep);
 				i_separator += 1
 			} else {
 				break
 			}
 		}
-		node
+		Ok(node)
 	}
 
 	pub fn remove_separator(&mut self, at: usize) -> Separator {
@@ -821,7 +821,7 @@ impl Node {
 	) -> Result<Option<Self>> {
 		if let Some(ix) = self.children[i].entry_index {
 			let entry = BTreeTable::get_encoded_entry(ix, log, values)?;
-			return Ok(Some(Self::from_encoded(entry)))
+			return Ok(Some(Self::from_encoded(entry)?))
 		}
 		Ok(None)
 	}

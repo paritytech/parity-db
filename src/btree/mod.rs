@@ -32,7 +32,8 @@ const HEADER_ADDRESS: Address = {
 	debug_assert!(HEADER_SIZE < crate::table::MIN_ENTRY_SIZE as u64);
 	Address::new(1, 0)
 };
-const ENTRY_CAPACITY: usize = ORDER * 33 + ORDER * 8 + ORDER_CHILD * 8;
+const MAX_KEYSIZE_ENCODED_SIZE: usize = 33;
+const ENTRY_CAPACITY: usize = ORDER * MAX_KEYSIZE_ENCODED_SIZE + ORDER * 8 + ORDER_CHILD * 8;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum IterDirection {
@@ -59,20 +60,31 @@ impl Entry {
 		Entry { encoded: ValueTableEntry::new(enc) }
 	}
 
-	fn read_separator(&mut self) -> Option<SeparatorInner> {
+	fn read_separator(&mut self) -> Result<Option<SeparatorInner>> {
 		if self.encoded.offset() == self.encoded.inner_mut().len() {
-			return None
+			return Ok(None)
 		}
+		self.encoded
+			.check_remaining_len(8 + 1, || Error::Corruption("Unaligned separator".into()))?;
 		let value = self.encoded.read_u64();
 		let head = self.encoded.read_slice(1);
 		let head = head[0];
-		let size = if head == u8::MAX { self.encoded.read_u32() as usize } else { head as usize };
+		let size = if head == u8::MAX {
+			self.encoded
+				.check_remaining_len(4, || Error::Corruption("Cannot read size of key".into()))?;
+			self.encoded.read_u32() as usize
+		} else {
+			head as usize
+		};
+		self.encoded.check_remaining_len(size, || {
+			Error::Corruption(format!("Entry too small for key of len {}", size))
+		})?;
 		let key = self.encoded.read_slice(size).to_vec();
 		if value == 0 {
-			return None
+			return Ok(None)
 		}
 		let value = Address::from_u64(value);
-		Some(SeparatorInner { key, value })
+		Ok(Some(SeparatorInner { key, value }))
 	}
 
 	fn write_separator(&mut self, key: &[u8], value: Address) {
@@ -93,13 +105,11 @@ impl Entry {
 		self.encoded.write_slice(key);
 	}
 
-	fn read_child_index(&mut self) -> Option<Address> {
+	fn read_child_index(&mut self) -> Result<Option<Address>> {
+		self.encoded
+			.check_remaining_len(8, || Error::Corruption("Entry too small for Index".into()))?;
 		let index = self.encoded.read_u64();
-		if index == 0 {
-			None
-		} else {
-			Some(Address::from_u64(index))
-		}
+		Ok(if index == 0 { None } else { Some(Address::from_u64(index)) })
 	}
 
 	fn write_child_index(&mut self, index: Address) {
@@ -160,6 +170,7 @@ impl BTreeTable {
 		let key_query = TableKeyQuery::Fetch(None);
 		if let Some(encoded) = Column::get_value(key_query, HEADER_ADDRESS, values, log)? {
 			let mut buf: ValueTableEntry<Vec<u8>> = ValueTableEntry::new(encoded.1);
+			buf.check_remaining_len(8 + 4, || Error::Corruption("Invalid header length.".into()))?;
 			root = Address::from_u64(buf.read_u64());
 			depth = buf.read_u32();
 		}

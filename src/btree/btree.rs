@@ -103,11 +103,11 @@ impl BTree {
 	}
 
 	pub fn fetch_root(root: Address, tables: TablesRef, log: &impl LogQuery) -> Result<Node> {
-		Ok(if root == NULL_ADDRESS {
-			Node::default()
+		if root == NULL_ADDRESS {
+			Ok(Node::default())
 		} else {
 			let root = BTreeTable::get_encoded_entry(root, log, tables)?;
 			Node::from_encoded(root)
-		})
+		}
 	}
 }
