@@ -706,7 +706,7 @@ mod test {
 	}
 
 	#[test]
-	fn test_find_any_entry_same_value() {
+	fn test_find_entry_same_value() {
 		let table =
 			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
 		let mut chunk = [0u8; CHUNK_LEN];
