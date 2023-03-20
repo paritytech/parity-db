@@ -219,6 +219,12 @@ pub trait DbSimulator {
 						&options,
 					),
 				Action::Restart => {
+					// drop processes commits
+					for layer in &mut layers {
+						if !layer.written {
+							layer.written = true;
+						}
+					}
 					old_layers.push(layers.clone());
 					db = {
 						drop(db);
