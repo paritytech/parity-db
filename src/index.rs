@@ -36,6 +36,41 @@ const _: () = assert!(META_SIZE >= HEADER_SIZE + stats::TOTAL_SIZE);
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct Entry(u64);
 
+
+#[derive(PartialEq, Eq, Debug)]
+pub struct IndexLock {
+	ptr: *const u8,
+}
+
+unsafe impl Sync for IndexLock {}
+unsafe impl Send for IndexLock {}
+
+impl IndexLock {
+	fn new(ptr: *const u8) -> IndexLock {
+		let r = unsafe { libc::mlock(ptr as *const libc::c_void, CHUNK_LEN) };
+		if r != 0 {
+			panic!("Mlock error {}", r);
+		}
+		IndexLock { ptr }
+	}
+
+	pub fn entry(&self, sub: usize) -> &[u8] {
+		unsafe {
+			let ptr = self.ptr.add(ENTRY_BYTES * sub);
+			std::slice::from_raw_parts(ptr, ENTRY_BYTES)
+		}
+	}
+}
+
+impl Drop for IndexLock {
+	fn drop(&mut self) {
+		let r = unsafe { libc::munlock(self.ptr as *const libc::c_void, CHUNK_LEN) };
+		if r != 0 {
+			panic!("Mlock error {}", r);
+		}
+	}
+}
+
 impl Entry {
 	#[inline]
 	fn new(address: Address, partial_key: u64, index_bits: u8) -> Entry {
@@ -330,17 +365,10 @@ impl IndexTable {
 		key
 	}
 
-	pub fn get(&self, key: &Key, sub_index: usize, log: &impl LogQuery) -> Result<(Entry, usize)> {
+	pub fn get(&self, key: &Key, sub_index: usize, _log: &impl LogQuery) -> Result<(Entry, usize)> {
 		log::trace!(target: "parity-db", "{}: Querying {}", self.id, hex(key));
 		let key = TableKey::index_from_partial(key);
 		let chunk_index = self.chunk_index(key);
-
-		if let Some(entry) = log.with_index(self.id, chunk_index, |chunk| {
-			log::trace!(target: "parity-db", "{}: Querying overlay at {}", self.id, chunk_index);
-			self.find_entry(key, sub_index, chunk)
-		}) {
-			return Ok(entry)
-		}
 
 		if let Some(map) = &*self.map.read() {
 			log::trace!(target: "parity-db", "{}: Querying chunk at {}", self.id, chunk_index);
@@ -350,13 +378,8 @@ impl IndexTable {
 		Ok((Entry::empty(), 0))
 	}
 
-	pub fn entries(&self, chunk_index: u64, log: &impl LogQuery) -> Result<[Entry; CHUNK_ENTRIES]> {
+	pub fn entries(&self, chunk_index: u64, _log: &impl LogQuery) -> Result<[Entry; CHUNK_ENTRIES]> {
 		let mut chunk = [0; CHUNK_LEN];
-		if let Some(entry) =
-			log.with_index(self.id, chunk_index, |chunk| Self::transmute_chunk(*chunk))
-		{
-			return Ok(entry)
-		}
 		if let Some(map) = &*self.map.read() {
 			let source = Self::chunk_at(chunk_index, map)?;
 			chunk.copy_from_slice(source);
@@ -416,16 +439,18 @@ impl IndexTable {
 				new_entry.partial_key(self.id.index_bits())
 			);
 			Self::write_entry(&new_entry, i, &mut chunk);
+			let lock = self.lock_and_write(chunk_index, &chunk)?;
 			log::trace!(target: "parity-db", "{}: Replaced at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
-			log.insert_index(self.id, chunk_index, i as u8, &chunk);
+			log.insert_index(self.id, chunk_index, i as u8, lock);
 			return Ok(PlanOutcome::Written)
 		}
 		for i in 0..CHUNK_ENTRIES {
 			let entry = Self::read_entry(&chunk, i);
 			if entry.is_empty() {
 				Self::write_entry(&new_entry, i, &mut chunk);
+				let lock = self.lock_and_write(chunk_index, &chunk)?;
 				log::trace!(target: "parity-db", "{}: Inserted at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
-				log.insert_index(self.id, chunk_index, i as u8, &chunk);
+				log.insert_index(self.id, chunk_index, i as u8, lock);
 				return Ok(PlanOutcome::Written)
 			}
 		}
@@ -443,10 +468,6 @@ impl IndexTable {
 		log::trace!(target: "parity-db", "{}: Inserting {} -> {}", self.id, hex(key), address);
 		let key_prefix = TableKey::index_from_partial(key);
 		let chunk_index = self.chunk_index(key_prefix);
-
-		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| *chunk) {
-			return self.plan_insert_chunk(key_prefix, address, &chunk, sub_index, log)
-		}
 
 		if let Some(map) = &*self.map.read() {
 			let chunk = Self::chunk_at(chunk_index, map)?;
@@ -474,11 +495,44 @@ impl IndexTable {
 		if !entry.is_empty() && entry.partial_key(self.id.index_bits()) == partial_key {
 			let new_entry = Entry::empty();
 			Self::write_entry(&new_entry, i, &mut chunk);
-			log.insert_index(self.id, chunk_index, i as u8, &chunk);
+			let lock = self.lock_and_write(chunk_index, &chunk)?;
+			log.insert_index(self.id, chunk_index, i as u8, lock);
 			log::trace!(target: "parity-db", "{}: Removed at {}.{}", self.id, chunk_index, i);
 			return Ok(PlanOutcome::Written)
 		}
 		Ok(PlanOutcome::Skipped)
+	}
+
+	fn lock_and_write(&self, index: u64, chunk: &[u8]) -> Result<IndexLock> {
+		let mut map = self.map.upgradable_read();
+		if map.is_none() {
+			let mut wmap = RwLockUpgradableReadGuard::upgrade(map);
+			let file = try_io!(std::fs::OpenOptions::new()
+				.write(true)
+				.read(true)
+				.create_new(true)
+				.open(self.path.as_path()));
+				log::debug!(target: "parity-db", "Created new index {}", self.id);
+				//TODO: check for potential overflows on 32-bit platforms
+				try_io!(file.set_len(file_size(self.id.index_bits())));
+				let mut mmap = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
+				self.madvise_random(&mut mmap);
+				*wmap = Some(mmap);
+				map = RwLockWriteGuard::downgrade_to_upgradable(wmap);
+		}
+
+		let map = map.as_ref().unwrap();
+		let offset = META_SIZE + index as usize * CHUNK_LEN;
+		// Nasty mutable pointer cast. We do ensure that all chunks that are being written are
+		// accessed through the overlay in other threads.
+		let ptr: *mut u8 = map.as_ptr() as *mut u8;
+		let ptr = unsafe { ptr.add(offset) };
+		let lock = IndexLock::new(ptr);
+		let index_chunk: &mut [u8] = unsafe {
+			std::slice::from_raw_parts_mut(ptr, CHUNK_LEN)
+		};
+		index_chunk.copy_from_slice(&chunk);
+		Ok(lock)
 	}
 
 	pub fn write_remove_plan(
@@ -491,10 +545,6 @@ impl IndexTable {
 		let key_prefix = TableKey::index_from_partial(key);
 
 		let chunk_index = self.chunk_index(key_prefix);
-
-		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| *chunk) {
-			return self.plan_remove_chunk(key_prefix, &chunk, sub_index, log)
-		}
 
 		if let Some(map) = &*self.map.read() {
 			let chunk = Self::chunk_at(chunk_index, map)?;

@@ -4,7 +4,7 @@
 use crate::{
 	column::ColId,
 	error::{try_io, Error, Result},
-	index::{Chunk as IndexChunk, TableId as IndexTableId, ENTRY_BYTES},
+	index::{TableId as IndexTableId, IndexLock},
 	options::Options,
 	parking_lot::{RwLock, RwLockWriteGuard},
 	table::TableId as ValueTableId,
@@ -46,12 +46,6 @@ pub enum LogAction {
 }
 
 pub trait LogQuery {
-	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
-		&self,
-		table: IndexTableId,
-		index: u64,
-		f: F,
-	) -> Option<R>;
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool;
 }
 
@@ -69,32 +63,12 @@ impl LogOverlays {
 }
 
 impl LogQuery for RwLock<LogOverlays> {
-	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
-		&self,
-		table: IndexTableId,
-		index: u64,
-		f: F,
-	) -> Option<R> {
-		self.read().with_index(table, index, f)
-	}
-
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool {
 		self.read().value(table, index, dest)
 	}
 }
 
 impl LogQuery for LogOverlays {
-	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
-		&self,
-		table: IndexTableId,
-		index: u64,
-		f: F,
-	) -> Option<R> {
-		self.index
-			.get(&table)
-			.and_then(|o| o.map.get(&index).map(|(_id, _mask, data)| f(data)))
-	}
-
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool {
 		let s = self;
 		if let Some(d) = s.value.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data))
@@ -284,7 +258,7 @@ impl LogChange {
 				while mask != 0 {
 					let i = mask.trailing_zeros();
 					mask &= !(1 << i);
-					write(&chunk[i as usize * ENTRY_BYTES..(i as usize + 1) * ENTRY_BYTES])?;
+					write(chunk.entry(i as usize))?
 				}
 			}
 		}
@@ -332,13 +306,13 @@ impl<'a> LogWriter<'a> {
 		self.log.record_id
 	}
 
-	pub fn insert_index(&mut self, table: IndexTableId, index: u64, sub: u8, data: &IndexChunk) {
+	pub fn insert_index(&mut self, table: IndexTableId, index: u64, sub: u8, lock: IndexLock) {
 		match self.log.local_index.entry(table).or_default().map.entry(index) {
 			std::collections::hash_map::Entry::Occupied(mut entry) => {
-				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), *data);
+				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), lock);
 			},
 			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert((self.log.record_id, 1 << sub, *data));
+				entry.insert((self.log.record_id, 1 << sub, lock));
 			},
 		}
 	}
@@ -362,23 +336,6 @@ impl<'a> LogWriter<'a> {
 }
 
 impl<'a> LogQuery for LogWriter<'a> {
-	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
-		&self,
-		table: IndexTableId,
-		index: u64,
-		f: F,
-	) -> Option<R> {
-		match self
-			.log
-			.local_index
-			.get(&table)
-			.and_then(|o| o.map.get(&index).map(|(_id, _mask, data)| data))
-		{
-			Some(data) => Some(f(data)),
-			None => self.overlays.with_index(table, index, f),
-		}
-	}
-
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool {
 		if let Some(d) = self
 			.log
@@ -441,7 +398,7 @@ impl std::hash::Hasher for IdentityHash {
 
 #[derive(Debug, Default)]
 pub struct IndexLogOverlay {
-	pub map: HashMap<u64, (u64, u64, IndexChunk)>, // index -> (record_id, modified_mask, entry)
+	pub map: HashMap<u64, (u64, u64, IndexLock)>, // index -> (record_id, modified_mask, entry)
 }
 
 // We use identity hash for value overlay/log records so that writes to value tables are in order.
