@@ -114,9 +114,11 @@ pub struct TablesRef<'a> {
 	pub ref_counted: bool,
 }
 
-// Used for value iteration
+/// Value iteration state
 pub struct ValueIterState {
+	/// Reference counter.
 	pub rc: u32,
+	/// Value.
 	pub value: Vec<u8>,
 }
 

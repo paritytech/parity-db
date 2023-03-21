@@ -868,6 +868,7 @@ impl DbInner {
 	}
 }
 
+/// Database instance.
 pub struct Db {
 	inner: Arc<DbInner>,
 	commit_thread: Option<thread::JoinHandle<()>>,
@@ -877,22 +878,19 @@ pub struct Db {
 }
 
 impl Db {
-	pub fn with_columns(path: &std::path::Path, num_columns: u8) -> Result<Db> {
-		let options = Options::with_columns(path, num_columns);
-		Self::open_inner(&options, OpeningMode::Create)
-	}
-
-	/// Open the database with given options.
+	/// Open the database with given options. An error will be returned if the database does not
+	/// exist.
 	pub fn open(options: &Options) -> Result<Db> {
 		Self::open_inner(options, OpeningMode::Write)
 	}
 
-	/// Create the database using given options.
+	/// Open the database using given options. If the database does not exist it will be created
+	/// empty.
 	pub fn open_or_create(options: &Options) -> Result<Db> {
 		Self::open_inner(options, OpeningMode::Create)
 	}
 
-	/// Read the database using given options
+	/// Open an existing database in read-only mode.
 	pub fn open_read_only(options: &Options) -> Result<Db> {
 		Self::open_inner(options, OpeningMode::ReadOnly)
 	}
@@ -1005,7 +1003,7 @@ impl Db {
 	/// `btree_index` set to `false`. Iteration order is unspecified. Note that the
 	/// `key` field in the state is the hash of the original key.
 	/// Unlike `get` the iteration may not include changes made in recent `commit` calls.
-	pub fn iter_column_index_while(
+	pub(crate) fn iter_column_index_while(
 		&self,
 		c: ColId,
 		f: impl FnMut(IterState) -> bool,
@@ -1070,6 +1068,7 @@ impl Db {
 		Ok(())
 	}
 
+	/// Dump full database stats to the text output.
 	pub fn write_stats_text(
 		&self,
 		writer: &mut impl std::io::Write,
@@ -1078,6 +1077,7 @@ impl Db {
 		self.inner.write_stats_text(writer, column)
 	}
 
+	/// Reset internal database statistics for the database or specified column.
 	pub fn clear_stats(&self, column: Option<u8>) -> Result<()> {
 		self.inner.clear_stats(column)
 	}
@@ -1436,20 +1436,30 @@ impl IndexedChangeSet {
 
 /// Verification operation utilities.
 pub mod check {
+	/// Database dump verbosity.
 	pub enum CheckDisplay {
+		/// Don't output any data.
 		None,
+		/// Output full data.
 		Full,
+		/// Limit value output to the specified size.
 		Short(u64),
 	}
 
+	/// Options for producing a database dump.
 	pub struct CheckOptions {
+		/// Only process this column. If this is `None` all columns will be processed.
 		pub column: Option<u8>,
+		/// Start with this index.
 		pub from: Option<u64>,
+		/// End with this index.
 		pub bound: Option<u64>,
+		/// Verbosity.
 		pub display: CheckDisplay,
 	}
 
 	impl CheckOptions {
+		/// Create a new instance.
 		pub fn new(
 			column: Option<u8>,
 			from: Option<u64>,

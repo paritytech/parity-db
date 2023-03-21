@@ -29,6 +29,7 @@ pub use error::{Error, Result};
 pub use migration::{clear_column, migrate};
 pub use options::{ColumnOptions, Options};
 pub use stats::{ColumnStatSummary, StatSummary};
+pub use column::{ValueIterState};
 
 pub const KEY_SIZE: usize = 32;
 pub type Key = [u8; KEY_SIZE];
