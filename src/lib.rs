@@ -20,7 +20,7 @@ mod stats;
 mod table;
 
 pub use btree::BTreeIterator;
-pub use column::ColId;
+pub use column::{ColId, ValueIterState};
 pub use compress::CompressionType;
 pub use db::{check::CheckOptions, Db, Operation, Value};
 #[cfg(feature = "instrumentation")]
@@ -29,7 +29,6 @@ pub use error::{Error, Result};
 pub use migration::{clear_column, migrate};
 pub use options::{ColumnOptions, Options};
 pub use stats::{ColumnStatSummary, StatSummary};
-pub use column::{ValueIterState};
 
 pub const KEY_SIZE: usize = 32;
 pub type Key = [u8; KEY_SIZE];

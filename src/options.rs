@@ -62,8 +62,8 @@ pub struct ColumnOptions {
 	pub ref_counted: bool,
 	/// Compression to use for this column.
 	pub compression: CompressionType,
-	/// Column is configured to use Btree storage. Btree columns allow for ordered key iteration and key
-	/// retrieval, but are significantly less performant and require more disk space.
+	/// Column is configured to use Btree storage. Btree columns allow for ordered key iteration
+	/// and key retrieval, but are significantly less performant and require more disk space.
 	pub btree_index: bool,
 }
 
