@@ -745,7 +745,7 @@ impl HashColumn {
 
 	pub fn iter_values(&self, log: &Log, mut f: impl FnMut(ValueIterState) -> bool) -> Result<()> {
 		let tables = self.tables.read();
-		for table in &tables.value[..tables.value.len()] {
+		for table in &tables.value {
 			log::debug!( target: "parity-db", "{}: Iterating table {}", tables.index.id, table.id);
 			table.iter_while(log.overlays(), |_, rc, value, compressed| {
 				let value = if compressed {
