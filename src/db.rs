@@ -878,6 +878,12 @@ pub struct Db {
 }
 
 impl Db {
+	#[cfg(test)]
+	pub(crate) fn with_columns(path: &std::path::Path, num_columns: u8) -> Result<Db> {
+		let options = Options::with_columns(path, num_columns);
+		Self::open_inner(&options, OpeningMode::Create)
+	}
+
 	/// Open the database with given options. An error will be returned if the database does not
 	/// exist.
 	pub fn open(options: &Options) -> Result<Db> {
