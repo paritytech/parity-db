@@ -89,10 +89,6 @@ pub fn run() -> Result<(), String> {
 		SubCommand::Check(check) => {
 			let db = parity_db::Db::open_read_only(&options)
 				.map_err(|e| format!("Invalid db: {e:?}"))?;
-			if !check.index_value {
-				// Note that we should use enum parameter instead.
-				return Err("Requires one of the following check flag: --index-value".to_string())
-			}
 			let check_param = parity_db::CheckOptions::new(
 				check.column,
 				check.range_start,
@@ -273,11 +269,6 @@ pub struct Check {
 	/// Only process a given column.
 	#[clap(long)]
 	pub column: Option<u8>,
-
-	/// Parse indexes and
-	/// lookup values.
-	#[clap(long)]
-	pub index_value: bool,
 
 	/// Start range for operation.
 	/// Index start chunk in db.

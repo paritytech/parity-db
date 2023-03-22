@@ -76,33 +76,36 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 			continue
 		}
 		log::info!("Migrating col {}", c);
-		source.iter_column_while(c, |IterState { chunk_index: index, key, rc, mut value }| {
-			//TODO: more efficient ref migration
-			for _ in 0..rc {
-				let value = std::mem::take(&mut value);
-				commit
-					.indexed
-					.entry(c)
-					.or_insert_with(|| IndexedChangeSet::new(c))
-					.changes
-					.push(Operation::Set(key, value.into()));
-				nb_commit += 1;
-				if nb_commit == COMMIT_SIZE {
-					ncommits += 1;
-					if let Err(e) = dest.commit_raw(std::mem::take(&mut commit)) {
-						log::warn!("Migration error: {:?}", e);
-						return false
-					}
-					nb_commit = 0;
+		source.iter_column_index_while(
+			c,
+			|IterState { chunk_index: index, key, rc, mut value }| {
+				//TODO: more efficient ref migration
+				for _ in 0..rc {
+					let value = std::mem::take(&mut value);
+					commit
+						.indexed
+						.entry(c)
+						.or_insert_with(|| IndexedChangeSet::new(c))
+						.changes
+						.push(Operation::Set(key, value.into()));
+					nb_commit += 1;
+					if nb_commit == COMMIT_SIZE {
+						ncommits += 1;
+						if let Err(e) = dest.commit_raw(std::mem::take(&mut commit)) {
+							log::warn!("Migration error: {:?}", e);
+							return false
+						}
+						nb_commit = 0;
 
-					if last_time.elapsed() > std::time::Duration::from_secs(3) {
-						last_time = std::time::Instant::now();
-						log::info!("Migrating {} #{}, commit {}", c, index, ncommits);
+						if last_time.elapsed() > std::time::Duration::from_secs(3) {
+							last_time = std::time::Instant::now();
+							log::info!("Migrating {} #{}, commit {}", c, index, ncommits);
+						}
 					}
 				}
-			}
-			true
-		})?;
+				true
+			},
+		)?;
 		if overwrite {
 			dest.commit_raw(commit)?;
 			commit = Default::default();
