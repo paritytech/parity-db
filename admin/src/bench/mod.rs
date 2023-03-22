@@ -80,6 +80,18 @@ pub struct Stress {
 	/// Use uniform keys.
 	#[clap(long)]
 	pub uniform: bool,
+
+	/// Writer threads sleep after this many commits.
+	#[clap(long)]
+	pub writer_commits_per_sleep: Option<u64>,
+
+	/// Time (in milliseconds) writer threads sleep between commits.
+	#[clap(long)]
+	pub writer_sleep_time: Option<u64>,
+
+	/// By default reader threads will only test existing values. This option makes them also test pruned values.
+	#[clap(long)]
+	pub reader_check_pruned: bool,
 }
 
 #[derive(Clone)]
@@ -95,6 +107,9 @@ pub struct Args {
 	pub compress: bool,
 	pub ordered: bool,
 	pub uniform: bool,
+	pub writer_commits_per_sleep: u64,
+	pub writer_sleep_time: u64,
+	pub reader_check_pruned: bool,
 }
 
 impl Stress {
@@ -111,6 +126,9 @@ impl Stress {
 			compress: self.compress,
 			ordered: self.ordered,
 			uniform: self.uniform,
+			writer_commits_per_sleep : self.writer_commits_per_sleep.unwrap_or(100),
+			writer_sleep_time: self.writer_sleep_time.unwrap_or(0),
+			reader_check_pruned: self.reader_check_pruned,
 		}
 	}
 }
@@ -220,6 +238,7 @@ fn writer(
 	let commit_size = COMMIT_SIZE;
 	let mut commit = Vec::with_capacity(commit_size);
 
+	let mut num_commits_done: u64 = 0;
 	loop {
 		let n = NEXT_COMMIT.fetch_add(1, Ordering::SeqCst);
 		if n >= start_commit + args.commits || shutdown.load(Ordering::Relaxed) {
@@ -242,10 +261,16 @@ fn writer(
 		db.commit(commit.drain(..).map(|(k, v)| (0, k, v))).unwrap();
 		COMMITS.fetch_add(1, Ordering::Relaxed);
 		commit.clear();
+
+		num_commits_done += 1;
+
+		if num_commits_done % args.writer_commits_per_sleep == 0 && args.writer_sleep_time > 0 {
+			thread::sleep(std::time::Duration::from_millis(args.writer_sleep_time));
+		}
 	}
 }
 
-fn reader(db: Arc<Db>, pool: Arc<SizePool>, seed: u64, index: u64, shutdown: Arc<AtomicBool>) {
+fn reader(db: Arc<Db>, args: Arc<Args>, pool: Arc<SizePool>, seed: u64, index: u64, shutdown: Arc<AtomicBool>) {
 	// Query random keys while writing
 	let mut rng = rand::rngs::SmallRng::seed_from_u64(seed + index);
 	while !shutdown.load(Ordering::Relaxed) {
@@ -253,15 +278,31 @@ fn reader(db: Arc<Db>, pool: Arc<SizePool>, seed: u64, index: u64, shutdown: Arc
 		if commits == 0 {
 			continue
 		}
-		let num_keys = commits * COMMIT_SIZE as u64;
-		let key = pool.key(rng.next_u64() % num_keys + seed);
-		match db.get(0, &key).unwrap() {
-			Some(_) => {
-				QUERIES_HIT.fetch_add(1, Ordering::SeqCst);
-			},
-			None => {
-				QUERIES_MISS.fetch_add(1, Ordering::SeqCst);
-			},
+		if args.archive || args.reader_check_pruned {
+			let num_keys = commits * COMMIT_SIZE as u64;
+			let key = pool.key(rng.next_u64() % num_keys + seed);
+			match db.get(0, &key).unwrap() {
+				Some(_) => {
+					QUERIES_HIT.fetch_add(1, Ordering::SeqCst);
+				},
+				None => {
+					QUERIES_MISS.fetch_add(1, Ordering::SeqCst);
+				},
+			}
+		} else {
+			let num_commit_values = (COMMIT_SIZE - COMMIT_PRUNE_SIZE) as u64;
+			let num_keys = commits * num_commit_values;
+			let mut index = rng.next_u64() % num_keys;
+			index += (index / num_commit_values + 1) * COMMIT_PRUNE_SIZE as u64;
+			let key = pool.key(index + seed);
+			match db.get(0, &key).unwrap() {
+				Some(_) => {
+					QUERIES_HIT.fetch_add(1, Ordering::SeqCst);
+				},
+				None => {
+					QUERIES_MISS.fetch_add(1, Ordering::SeqCst);
+				},
+			}
 		}
 	}
 }
@@ -321,11 +362,12 @@ pub fn run_internal(args: Args, db: Db) {
 		let shutdown = shutdown.clone();
 		let offset = args.seed.unwrap_or(0);
 		let pool = pool.clone();
+		let args = args.clone();
 
 		threads.push(
 			thread::Builder::new()
 				.name(format!("reader {i}"))
-				.spawn(move || reader(db, pool, offset, i as u64, shutdown))
+				.spawn(move || reader(db, args, pool, offset, i as u64, shutdown))
 				.unwrap(),
 		);
 	}
