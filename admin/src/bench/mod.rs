@@ -286,31 +286,23 @@ fn reader(
 		if commits == 0 {
 			continue
 		}
-		if args.archive || args.reader_check_pruned {
+		let key = if args.archive || args.reader_check_pruned {
 			let num_keys = commits * COMMIT_SIZE as u64;
-			let key = pool.key(rng.next_u64() % num_keys + seed);
-			match db.get(0, &key).unwrap() {
-				Some(_) => {
-					QUERIES_HIT.fetch_add(1, Ordering::SeqCst);
-				},
-				None => {
-					QUERIES_MISS.fetch_add(1, Ordering::SeqCst);
-				},
-			}
+			pool.key(rng.next_u64() % num_keys + seed)
 		} else {
 			let num_commit_values = (COMMIT_SIZE - COMMIT_PRUNE_SIZE) as u64;
 			let num_keys = commits * num_commit_values;
 			let mut index = rng.next_u64() % num_keys;
 			index += (index / num_commit_values + 1) * COMMIT_PRUNE_SIZE as u64;
-			let key = pool.key(index + seed);
-			match db.get(0, &key).unwrap() {
-				Some(_) => {
-					QUERIES_HIT.fetch_add(1, Ordering::SeqCst);
-				},
-				None => {
-					QUERIES_MISS.fetch_add(1, Ordering::SeqCst);
-				},
-			}
+			pool.key(index + seed)
+		};
+		match db.get(0, &key).unwrap() {
+			Some(_) => {
+				QUERIES_HIT.fetch_add(1, Ordering::SeqCst);
+			},
+			None => {
+				QUERIES_MISS.fetch_add(1, Ordering::SeqCst);
+			},
 		}
 	}
 }
