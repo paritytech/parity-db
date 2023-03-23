@@ -45,7 +45,9 @@ impl DbSimulator for Simulator {
 	}
 
 	fn build_best_layer_for_recovery(layers: &[&Layer<u8>]) -> Layer<u8> {
-		layers[0].clone()
+		let mut layer = layers[0].clone();
+		layer.written = WrittenState::Yes;
+		layer
 	}
 
 	fn map_operation(operation: &(u8, Option<u8>)) -> parity_db::Operation<Vec<u8>, Vec<u8>> {
