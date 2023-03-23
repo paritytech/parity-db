@@ -80,7 +80,7 @@ impl DbSimulator for Simulator {
 				}
 			}
 		}
-		Layer { values: new_state_safe_counts, written: true }
+		Layer { values: new_state_safe_counts, written: WrittenState::Yes }
 	}
 
 	fn map_operation(operation: &Operation) -> parity_db::Operation<Vec<u8>, Vec<u8>> {
