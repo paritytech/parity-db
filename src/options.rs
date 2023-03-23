@@ -46,6 +46,7 @@ pub struct Options {
 	pub always_flush: bool,
 }
 
+/// Database column configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnOptions {
 	/// Indicates that the column value is the preimage of the key.
@@ -56,14 +57,13 @@ pub struct ColumnOptions {
 	/// the first 32 bytes have uniform distribution.
 	/// Allows for skipping additional key hashing.
 	pub uniform: bool,
-	/// Use reference counting for values.
-	///
-	/// Reference counting do not enforce immediate removal
-	/// and user should not check for missing value.
+	/// Use reference counting for values. Reference operations are allowed for a column. The value
+	/// is deleted when the counter reaches zero.
 	pub ref_counted: bool,
 	/// Compression to use for this column.
 	pub compression: CompressionType,
-	/// Column is using a btree indexing.
+	/// Column is configured to use Btree storage. Btree columns allow for ordered key iteration
+	/// and key retrieval, but are significantly less performant and require more disk space.
 	pub btree_index: bool,
 }
 
