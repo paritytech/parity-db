@@ -89,7 +89,8 @@ pub struct Stress {
 	#[clap(long)]
 	pub writer_sleep_time: Option<u64>,
 
-	/// By default reader threads will only test existing values. This option makes them also test pruned values.
+	/// By default reader threads will only test existing values. This option makes them also test
+	/// pruned values.
 	#[clap(long)]
 	pub reader_check_pruned: bool,
 }
@@ -126,7 +127,7 @@ impl Stress {
 			compress: self.compress,
 			ordered: self.ordered,
 			uniform: self.uniform,
-			writer_commits_per_sleep : self.writer_commits_per_sleep.unwrap_or(100),
+			writer_commits_per_sleep: self.writer_commits_per_sleep.unwrap_or(100),
 			writer_sleep_time: self.writer_sleep_time.unwrap_or(0),
 			reader_check_pruned: self.reader_check_pruned,
 		}
@@ -270,7 +271,14 @@ fn writer(
 	}
 }
 
-fn reader(db: Arc<Db>, args: Arc<Args>, pool: Arc<SizePool>, seed: u64, index: u64, shutdown: Arc<AtomicBool>) {
+fn reader(
+	db: Arc<Db>,
+	args: Arc<Args>,
+	pool: Arc<SizePool>,
+	seed: u64,
+	index: u64,
+	shutdown: Arc<AtomicBool>,
+) {
 	// Query random keys while writing
 	let mut rng = rand::rngs::SmallRng::seed_from_u64(seed + index);
 	while !shutdown.load(Ordering::Relaxed) {
