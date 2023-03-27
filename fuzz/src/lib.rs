@@ -70,8 +70,11 @@ impl<V: Debug> Debug for Layer<V> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WrittenState {
+	/// The state has been persisted to disk.
 	Yes,
+	/// The state has been inserted into the log. It might not be flushed yet do disk.
 	Processed,
+	/// The state is still in the in-memory cache.
 	No,
 }
 
