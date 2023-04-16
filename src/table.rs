@@ -394,7 +394,13 @@ impl ValueTable {
 			if filled == 0 {
 				filled = 1;
 			}
-			log::debug!(target: "parity-db", "Opened value table {} with {} entries, entry_size={}", id, filled, entry_size);
+			if last_removed >= filled {
+				return Err(crate::error::Error::Corruption(format!(
+					"{}: Bad removed ref {} out of {}",
+					id, last_removed, filled
+				)))
+			}
+			log::debug!(target: "parity-db", "Opened value table {} with {} entries, entry_size={}, last_removed={}", id, filled, entry_size, last_removed);
 		}
 
 		Ok(ValueTable {
@@ -942,6 +948,10 @@ impl ValueTable {
 			log::trace!(target: "parity-db", "{}: Validated {}: {}, {} bytes", self.id, index, hex(&buf[SIZE_SIZE..32]), len);
 		}
 		Ok(())
+	}
+
+	pub fn skip_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
+		self.validate_plan(index, log)
 	}
 
 	pub fn refresh_metadata(&self) -> Result<()> {

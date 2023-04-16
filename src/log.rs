@@ -706,9 +706,9 @@ impl Log {
 			queue.drain(0..count).collect()
 		};
 		for (id, ref mut file) in cleaned.iter_mut() {
-			log::debug!(target: "parity-db", "Cleaned: {}", id);
 			try_io!(file.rewind());
 			try_io!(file.set_len(0));
+			log::debug!(target: "parity-db", "Cleaned log {}", id);
 		}
 		// Move cleaned logs back to the pool
 		let mut pool = self.log_pool.write();

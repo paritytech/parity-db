@@ -257,6 +257,20 @@ impl BTreeTable {
 		Ok(())
 	}
 
+	pub fn skip_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
+		let tables = self.tables.upgradable_read();
+		match action {
+			LogAction::InsertValue(record) => {
+				tables[record.table.size_tier() as usize].skip_plan(record.index, log)?;
+			},
+			_ => {
+				log::error!(target: "parity-db", "Unexpected log action");
+				return Err(Error::Corruption("Unexpected log action".to_string()))
+			},
+		}
+		Ok(())
+	}
+
 	pub fn complete_plan(&self, log: &mut LogWriter) -> Result<()> {
 		let tables = self.tables.read();
 		for t in tables.iter() {

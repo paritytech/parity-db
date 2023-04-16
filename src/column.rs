@@ -708,6 +708,23 @@ impl HashColumn {
 		Ok(())
 	}
 
+	pub fn skip_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
+		let tables = self.tables.upgradable_read();
+		match action {
+			LogAction::InsertIndex(_record) => {
+				IndexTable::skip_plan(log)?;
+			},
+			LogAction::InsertValue(record) => {
+				tables.value[record.table.size_tier() as usize].skip_plan(record.index, log)?;
+			},
+			_ => {
+				log::error!(target: "parity-db", "Unexpected log action");
+				return Err(Error::Corruption("Unexpected log action".to_string()))
+			},
+		}
+		Ok(())
+	}
+
 	pub fn complete_plan(&self, log: &mut LogWriter) -> Result<()> {
 		let tables = self.tables.read();
 		for t in tables.value.iter() {
@@ -1114,6 +1131,13 @@ impl Column {
 		match self {
 			Column::Hash(column) => column.validate_plan(action, log),
 			Column::Tree(column) => column.validate_plan(action, log),
+		}
+	}
+
+	pub fn skip_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
+		match self {
+			Column::Hash(column) => column.skip_plan(action, log),
+			Column::Tree(column) => column.skip_plan(action, log),
 		}
 	}
 

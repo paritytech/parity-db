@@ -22,6 +22,7 @@ use crate::{
 	btree::{commit_overlay::BTreeChangeSet, BTreeIterator, BTreeTable},
 	column::{hash_key, ColId, Column, IterState, ReindexBatch, ValueIterState},
 	error::{try_io, Error, Result},
+	file,
 	hash::IdentityBuildHasher,
 	index::PlanOutcome,
 	log::{Log, LogAction},
@@ -145,7 +146,8 @@ struct DbInner {
 	next_reindex: AtomicU64,
 	bg_err: Mutex<Option<Arc<Error>>>,
 	db_version: u32,
-	_lock_file: std::fs::File,
+	// Record file contains most recent enacted record id.
+	record_file: std::fs::File,
 }
 
 #[derive(Debug)]
@@ -184,26 +186,37 @@ impl DbInner {
 			return Err(Error::DatabaseNotFound)
 		}
 
-		let mut lock_path: std::path::PathBuf = options.path.clone();
-		lock_path.push("lock");
-		let lock_file = try_io!(std::fs::OpenOptions::new()
+		let mut record_file_path: std::path::PathBuf = options.path.clone();
+		record_file_path.push("record");
+		let record_file = try_io!(std::fs::OpenOptions::new()
 			.create(true)
 			.read(true)
 			.write(true)
-			.open(lock_path.as_path()));
-		lock_file.try_lock_exclusive().map_err(Error::Locked)?;
+			.open(record_file_path.as_path()));
+		record_file.try_lock_exclusive().map_err(Error::Locked)?;
+
+		let log = Log::open(options)?;
+		// Restore last/pending record id.
+		// If the database was operating in sync mode, all previous records should be fsynced.
+		let enacted_record_id = {
+			let mut buf = [0u8; 8];
+			if let Ok(()) = file::read_file_at(&record_file, &mut buf, 0) {
+				std::cmp::max(1, u64::from_le_bytes(buf))
+			} else {
+				log.replay_record_id().unwrap_or(1)
+			}
+		};
 
 		let metadata = options.load_and_validate_metadata(opening_mode == OpeningMode::Create)?;
 		let mut columns = Vec::with_capacity(metadata.columns.len());
 		let mut commit_overlay = Vec::with_capacity(metadata.columns.len());
-		let log = Log::open(options)?;
-		let last_enacted = log.replay_record_id().unwrap_or(2) - 1;
+		let last_enacted = enacted_record_id;
 		for c in 0..metadata.columns.len() {
 			let column = Column::open(c as ColId, options, &metadata)?;
 			commit_overlay.push(CommitOverlay::new());
 			columns.push(column);
 		}
-		log::debug!(target: "parity-db", "Opened db {:?}, metadata={:?}", options, metadata);
+		log::debug!(target: "parity-db", "Opened DB, options={:?}, record_id={}, metadata={:?}", options, enacted_record_id, metadata);
 		let mut options = options.clone();
 		if options.salt.is_none() {
 			options.salt = Some(metadata.salt);
@@ -226,7 +239,7 @@ impl DbInner {
 			last_enacted: AtomicU64::new(last_enacted),
 			bg_err: Mutex::new(None),
 			db_version: metadata.version,
-			_lock_file: lock_file,
+			record_file,
 		})
 	}
 
@@ -578,11 +591,16 @@ impl DbInner {
 					reader.record_id(),
 				);
 				if validation_mode {
-					if reader.record_id() != self.last_enacted.load(Ordering::Relaxed) + 1 {
+					let last_enacted = self.last_enacted.load(Ordering::Relaxed);
+					let mut skip = false;
+					if reader.record_id() < last_enacted {
+						log::debug!(target: "parity-db", "Skipping log record {}", reader.record_id());
+						skip = true;
+					} else if reader.record_id() > last_enacted + 1 {
 						log::warn!(
 							target: "parity-db",
 							"Log sequence error. Expected record {}, got {}",
-							self.last_enacted.load(Ordering::Relaxed) + 1,
+							last_enacted + 1,
 							reader.record_id(),
 						);
 						drop(reader);
@@ -613,10 +631,12 @@ impl DbInner {
 								if let Err(e) = self.columns.get(col).map_or_else(
 									|| Err(Error::Corruption(format!("Invalid column id {col}"))),
 									|col| {
-										col.validate_plan(
-											LogAction::InsertIndex(insertion),
-											&mut reader,
-										)
+										let action = LogAction::InsertIndex(insertion);
+										if skip {
+											col.skip_plan(action, &mut reader)
+										} else {
+											col.validate_plan(action, &mut reader)
+										}
 									},
 								) {
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
@@ -630,10 +650,12 @@ impl DbInner {
 								if let Err(e) = self.columns.get(col).map_or_else(
 									|| Err(Error::Corruption(format!("Invalid column id {col}"))),
 									|col| {
-										col.validate_plan(
-											LogAction::InsertValue(insertion),
-											&mut reader,
-										)
+										let action = LogAction::InsertValue(insertion);
+										if skip {
+											col.skip_plan(action, &mut reader)
+										} else {
+											col.validate_plan(action, &mut reader)
+										}
 									},
 								) {
 									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
@@ -644,6 +666,10 @@ impl DbInner {
 							},
 							LogAction::DropTable(_) => continue,
 						}
+					}
+					if skip {
+						log::debug!(target: "parity-db", "Skipped record");
+						return Ok(true)
 					}
 					reader.reset()?;
 					reader.next()?;
@@ -697,6 +723,7 @@ impl DbInner {
 
 		if let Some((record_id, cleared, bytes)) = cleared {
 			self.log.end_read(cleared, record_id);
+			file::write_file_at(&self.record_file, &record_id.to_le_bytes(), 0)?;
 			{
 				if !validation_mode {
 					let mut queue = self.log_queue_wait.work.lock();
@@ -737,11 +764,15 @@ impl DbInner {
 		let keep_logs = if self.options.sync_data { 0 } else { KEEP_LOGS };
 		let num_cleanup = self.log.num_dirty_logs();
 		if num_cleanup > keep_logs {
+			log::trace!(target: "parity-db", "Started data flush");
+			let last_enacted = self.last_enacted.load(Ordering::SeqCst);
 			if self.options.sync_data {
 				for c in self.columns.iter() {
 					c.flush()?;
 				}
 			}
+			file::fsync(&self.record_file).map_err(Error::Io)?;
+			log::trace!(target: "parity-db", "Data flush complete at record {}", last_enacted);
 			self.log.clean_logs(num_cleanup - keep_logs)
 		} else {
 			Ok(false)
@@ -2477,6 +2508,7 @@ mod tests {
 	#[cfg(feature = "instrumentation")]
 	#[test]
 	fn test_recover_from_log_on_error() {
+		let _ = env_logger::try_init();
 		let tmp = tempdir().unwrap();
 		let mut options = Options::with_columns(tmp.path(), 1);
 		options.always_flush = true;
@@ -2498,8 +2530,8 @@ mod tests {
 			let err = db.enact_logs();
 			assert!(err.is_err());
 			db.inner.store_err(err);
-			crate::set_number_of_allowed_io_operations(usize::MAX);
 		}
+		crate::set_number_of_allowed_io_operations(usize::MAX);
 
 		// Open the databases and check that both values are there.
 		{
@@ -2597,6 +2629,42 @@ mod tests {
 
 			assert_eq!(entries, 65);
 			assert_eq!(db.inner.columns[0].index_bits(), Some(17));
+		}
+	}
+
+	#[cfg(feature = "instrumentation")]
+	#[test]
+	fn test_skips_obsolete_logs_on_recovery() {
+		let _ = env_logger::try_init();
+		let tmp = tempdir().unwrap();
+		let mut options = Options::with_columns(tmp.path(), 1);
+		options.always_flush = true;
+		options.with_background_thread = false;
+
+		// Do 2 commits.
+		{
+			let db = Db::open_or_create(&options).unwrap();
+			db.commit::<_, Vec<u8>>(vec![(0, vec![0], Some(vec![0]))]).unwrap();
+			db.process_commits().unwrap();
+			db.flush_logs().unwrap();
+			db.enact_logs().unwrap();
+			db.commit::<_, Vec<u8>>(vec![(0, vec![0], Some(vec![1]))]).unwrap();
+			db.process_commits().unwrap();
+			db.flush_logs().unwrap();
+			db.enact_logs().unwrap();
+
+			// Prevent log cleanup on shutdown.
+			crate::set_number_of_allowed_io_operations(0);
+			// Delete the last log
+			std::fs::remove_file(tmp.path().join("log1")).unwrap();
+		}
+		// Enactment of the first log should be skipped.
+		crate::set_number_of_allowed_io_operations(usize::MAX);
+
+		// Open the databases and check that value is correct.
+		{
+			let db = Db::open(&options).unwrap();
+			assert_eq!(db.get(0, &[0]).unwrap(), Some(vec![1]));
 		}
 	}
 }

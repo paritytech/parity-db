@@ -8,7 +8,7 @@ use crate::{
 	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 	table::TableId,
 };
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(target_os = "linux")]
 fn disable_read_ahead(file: &std::fs::File) -> std::io::Result<()> {
@@ -44,7 +44,7 @@ fn disable_read_ahead(_file: &std::fs::File) -> std::io::Result<()> {
 // We performed some testing with power shutdowns and kernel panics on both mac hardware
 // and VMs and in all cases `fsync` was enough to prevent data corruption.
 #[cfg(target_os = "macos")]
-fn fsync(file: &std::fs::File) -> std::io::Result<()> {
+pub fn fsync(file: &std::fs::File) -> std::io::Result<()> {
 	use std::os::unix::io::AsRawFd;
 	if unsafe { libc::fsync(file.as_raw_fd()) } != 0 {
 		Err(std::io::Error::last_os_error())
@@ -54,8 +54,74 @@ fn fsync(file: &std::fs::File) -> std::io::Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn fsync(file: &std::fs::File) -> std::io::Result<()> {
+pub fn fsync(file: &std::fs::File) -> std::io::Result<()> {
 	file.sync_data()
+}
+
+#[cfg(unix)]
+pub fn read_file_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> Result<()> {
+	use std::os::unix::fs::FileExt;
+	try_io!(file.read_exact_at(buf, offset));
+	Ok(())
+}
+
+#[cfg(unix)]
+pub fn write_file_at(file: &std::fs::File, buf: &[u8], offset: u64) -> Result<()> {
+	use std::os::unix::fs::FileExt;
+	try_io!(file.write_all_at(buf, offset));
+	Ok(())
+}
+
+#[cfg(windows)]
+pub fn read_file_at(file: &std::fs::File, mut buf: &mut [u8], mut offset: u64) -> Result<()> {
+	use crate::error::Error;
+	use std::{io, os::windows::fs::FileExt};
+
+	while !buf.is_empty() {
+		match file.seek_read(buf, offset) {
+			Ok(0) => break,
+			Ok(n) => {
+				buf = &mut buf[n..];
+				offset += n as u64;
+			},
+			Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
+				// Try again
+			},
+			Err(e) => return Err(Error::Io(e)),
+		}
+	}
+
+	if !buf.is_empty() {
+		Err(Error::Io(io::Error::new(io::ErrorKind::UnexpectedEof, "failed to fill whole buffer")))
+	} else {
+		Ok(())
+	}
+}
+
+#[cfg(windows)]
+pub fn write_file_at(file: &std::fs::File, mut buf: &[u8], mut offset: u64) -> Result<()> {
+	use crate::error::Error;
+	use std::{io, os::windows::fs::FileExt};
+
+	while !buf.is_empty() {
+		match file.seek_write(buf, offset) {
+			Ok(0) =>
+				return Err(Error::Io(io::Error::new(
+					io::ErrorKind::WriteZero,
+					"failed to write whole buffer",
+				))),
+			Ok(n) => {
+				buf = &buf[n..];
+				offset += n as u64;
+			},
+			Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
+				// Try again
+			},
+			Err(e) => return Err(Error::Io(e)),
+		}
+	}
+
+	Ok(())
 }
 
 const GROW_SIZE_BYTES: u64 = 256 * 1024;
@@ -65,7 +131,6 @@ pub struct TableFile {
 	pub file: RwLock<Option<std::fs::File>>,
 	pub path: std::path::PathBuf,
 	pub capacity: AtomicU64,
-	pub dirty: AtomicBool,
 	pub id: TableId,
 }
 
@@ -94,7 +159,6 @@ impl TableFile {
 			path: filepath,
 			file: RwLock::new(file),
 			capacity: AtomicU64::new(capacity),
-			dirty: AtomicBool::new(false),
 			id,
 		})
 	}
@@ -110,86 +174,16 @@ impl TableFile {
 		Ok(file)
 	}
 
-	#[cfg(unix)]
 	pub fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
-		use std::os::unix::fs::FileExt;
-		try_io!(self
-			.file
-			.read()
-			.as_ref()
-			.ok_or_else(|| Error::Corruption("File does not exist.".into()))?
-			.read_exact_at(buf, offset));
-		Ok(())
-	}
-
-	#[cfg(unix)]
-	pub fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
-		use std::os::unix::fs::FileExt;
-		self.dirty.store(true, Ordering::Relaxed);
-		try_io!(self.file.read().as_ref().unwrap().write_all_at(buf, offset));
-		Ok(())
-	}
-
-	#[cfg(windows)]
-	pub fn read_at(&self, mut buf: &mut [u8], mut offset: u64) -> Result<()> {
-		use crate::error::Error;
-		use std::{io, os::windows::fs::FileExt};
-
 		let file = self.file.read();
 		let file = file.as_ref().ok_or_else(|| Error::Corruption("File does not exist.".into()))?;
-
-		while !buf.is_empty() {
-			match file.seek_read(buf, offset) {
-				Ok(0) => break,
-				Ok(n) => {
-					buf = &mut buf[n..];
-					offset += n as u64;
-				},
-				Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
-					// Try again
-				},
-				Err(e) => return Err(Error::Io(e)),
-			}
-		}
-
-		if !buf.is_empty() {
-			Err(Error::Io(io::Error::new(
-				io::ErrorKind::UnexpectedEof,
-				"failed to fill whole buffer",
-			)))
-		} else {
-			Ok(())
-		}
+		read_file_at(file, buf, offset)
 	}
 
-	#[cfg(windows)]
-	pub fn write_at(&self, mut buf: &[u8], mut offset: u64) -> Result<()> {
-		use crate::error::Error;
-		use std::{io, os::windows::fs::FileExt};
-
-		self.dirty.store(true, Ordering::Relaxed);
+	pub fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
 		let file = self.file.read();
-		let file = file.as_ref().unwrap();
-
-		while !buf.is_empty() {
-			match file.seek_write(buf, offset) {
-				Ok(0) =>
-					return Err(Error::Io(io::Error::new(
-						io::ErrorKind::WriteZero,
-						"failed to write whole buffer",
-					))),
-				Ok(n) => {
-					buf = &buf[n..];
-					offset += n as u64;
-				},
-				Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
-					// Try again
-				},
-				Err(e) => return Err(Error::Io(e)),
-			}
-		}
-
-		Ok(())
+		let file = file.as_ref().ok_or_else(|| Error::Corruption("File does not exist.".into()))?;
+		write_file_at(file, buf, offset)
 	}
 
 	pub fn grow(&self, entry_size: u16) -> Result<()> {
@@ -208,12 +202,8 @@ impl TableFile {
 	}
 
 	pub fn flush(&self) -> Result<()> {
-		if let Ok(true) =
-			self.dirty.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
-		{
-			if let Some(file) = self.file.read().as_ref() {
-				try_io!(fsync(file));
-			}
+		if let Some(file) = self.file.read().as_ref() {
+			try_io!(fsync(file));
 		}
 		Ok(())
 	}
