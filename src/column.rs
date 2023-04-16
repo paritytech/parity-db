@@ -931,18 +931,18 @@ impl HashColumn {
 		Ok(())
 	}
 
-	fn dump(&self, log: &Log, check_param: &crate::CheckOptions, col: ColId) -> Result<()> {
-		let start_chunk = check_param.from.unwrap_or(0);
-		let end_chunk = check_param.bound;
+	fn dump(&self, log: &Log, check_params: &crate::CheckOptions, col: ColId) -> Result<()> {
+		let start_chunk = check_params.from.unwrap_or(0);
+		let end_chunk = check_params.bound;
 
-		let step = if check_param.fast { 1_000_000 } else { 10_000 };
-		let (denom, suffix) = if check_param.fast { (1_000_000, "m") } else { (1_000, "k") };
+		let step = if check_params.fast { 1_000_000 } else { 10_000 };
+		let (denom, suffix) = if check_params.fast { (1_000_000, "m") } else { (1_000, "k") };
 		let mut next_info_at = step;
 		let start_time = std::time::Instant::now();
 		let index_id = self.tables.read().index.id;
 		log::info!(target: "parity-db", "Column {} (hash): Starting index validation", col);
 		let iter_fn =
-			if check_param.fast { Self::iter_index_fast } else { Self::iter_index_internal };
+			if check_params.fast { Self::iter_index_fast } else { Self::iter_index_internal };
 		iter_fn(
 			self,
 			log,
@@ -962,7 +962,7 @@ impl HashColumn {
 						log::info!(target: "parity-db", "Validated {}{} / {}{} entries", item_index / denom, suffix, total_items / denom, suffix);
 					}
 
-					match check_param.display {
+					match check_params.display {
 						CheckDisplay::Full => {
 							log::info!(
 								"Index key: {:x?}\n \
@@ -1003,6 +1003,18 @@ impl HashColumn {
 		)?;
 
 		log::info!(target: "parity-db", "Index validation complete successfully, elapsed {:?}", start_time.elapsed());
+		if check_params.validate_free_refs {
+			log::info!(target: "parity-db", "Validating free refs");
+			let tables = self.tables.read();
+			let mut total = 0;
+			for t in &tables.value {
+				match t.check_free_refs() {
+					Err(e) => log::warn!(target: "parity-db", "{}: Error: {:?}", t.id, e),
+					Ok(n) => total += n,
+				}
+			}
+			log::info!(target: "parity-db", "{} Total free refs", total);
+		}
 		Ok(())
 	}
 
@@ -1249,9 +1261,9 @@ impl Column {
 		}
 	}
 
-	pub fn dump(&self, log: &Log, check_param: &crate::CheckOptions, col: ColId) -> Result<()> {
+	pub fn dump(&self, log: &Log, check_params: &crate::CheckOptions, col: ColId) -> Result<()> {
 		match self {
-			Column::Hash(column) => column.dump(log, check_param, col),
+			Column::Hash(column) => column.dump(log, check_params, col),
 			Column::Tree(_column) => Ok(()),
 		}
 	}

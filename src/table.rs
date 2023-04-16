@@ -1060,6 +1060,27 @@ impl ValueTable {
 		}
 		Ok(())
 	}
+
+	/// Validate free records sequence.
+	pub fn check_free_refs(&self) -> Result<u64> {
+		let filled = self.filled.load(Ordering::Relaxed);
+		let mut next = self.last_removed.load(Ordering::Relaxed);
+		let mut len = 0;
+		while next != 0 {
+			if next >= filled {
+				return Err(crate::error::Error::Corruption(format!(
+					"Bad removed ref {} out of {}",
+					next, filled
+				)))
+			}
+			let mut buf = PartialEntry::new_uninit();
+			self.file.read_at(buf.as_mut(), next * self.entry_size as u64)?;
+			buf.skip_size();
+			next = buf.read_next();
+			len += 1;
+		}
+		Ok(len)
+	}
 }
 
 pub mod key {
