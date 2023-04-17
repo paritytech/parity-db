@@ -187,7 +187,7 @@ impl DbInner {
 		}
 
 		let mut record_file_path: std::path::PathBuf = options.path.clone();
-		record_file_path.push("record");
+		record_file_path.push("log_record");
 		let record_file = try_io!(std::fs::OpenOptions::new()
 			.create(true)
 			.read(true)
