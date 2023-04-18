@@ -709,6 +709,7 @@ impl Log {
 			log::debug!(target: "parity-db", "Cleaned: {}", id);
 			try_io!(file.rewind());
 			try_io!(file.set_len(0));
+			file.sync_all().map_err(Error::Io)?;
 		}
 		// Move cleaned logs back to the pool
 		let mut pool = self.log_pool.write();
