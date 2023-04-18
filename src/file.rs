@@ -8,7 +8,7 @@ use crate::{
 	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 	table::TableId,
 };
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(target_os = "linux")]
 fn disable_read_ahead(file: &std::fs::File) -> std::io::Result<()> {
@@ -65,7 +65,6 @@ pub struct TableFile {
 	pub file: RwLock<Option<std::fs::File>>,
 	pub path: std::path::PathBuf,
 	pub capacity: AtomicU64,
-	pub dirty: AtomicBool,
 	pub id: TableId,
 }
 
@@ -94,7 +93,6 @@ impl TableFile {
 			path: filepath,
 			file: RwLock::new(file),
 			capacity: AtomicU64::new(capacity),
-			dirty: AtomicBool::new(false),
 			id,
 		})
 	}
@@ -125,7 +123,6 @@ impl TableFile {
 	#[cfg(unix)]
 	pub fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
 		use std::os::unix::fs::FileExt;
-		self.dirty.store(true, Ordering::Relaxed);
 		try_io!(self.file.read().as_ref().unwrap().write_all_at(buf, offset));
 		Ok(())
 	}
@@ -167,7 +164,6 @@ impl TableFile {
 		use crate::error::Error;
 		use std::{io, os::windows::fs::FileExt};
 
-		self.dirty.store(true, Ordering::Relaxed);
 		let file = self.file.read();
 		let file = file.as_ref().unwrap();
 
@@ -208,12 +204,8 @@ impl TableFile {
 	}
 
 	pub fn flush(&self) -> Result<()> {
-		if let Ok(true) =
-			self.dirty.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
-		{
-			if let Some(file) = self.file.read().as_ref() {
-				try_io!(fsync(file));
-			}
+		if let Some(file) = self.file.read().as_ref() {
+			try_io!(fsync(file));
 		}
 		Ok(())
 	}
