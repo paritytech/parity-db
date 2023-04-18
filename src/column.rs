@@ -133,7 +133,8 @@ pub struct CorruptedIndexEntryInfo {
 
 // Only used for DB validation and migration.
 pub struct IterState {
-	pub chunk_index: u64,
+	pub item_index: u64,
+	pub total_items: u64,
 	pub key: Key,
 	pub rc: u32,
 	pub value: Vec<u8>,
@@ -782,8 +783,9 @@ impl HashColumn {
 	) -> Result<()> {
 		let tables = self.tables.read();
 		let source = &tables.index;
+		let total_chunks = source.id.total_chunks();
 
-		for c in start_chunk..source.id.total_chunks() {
+		for c in start_chunk..total_chunks {
 			let entries = source.entries(c, log.overlays())?;
 			for (sub_index, entry) in entries.iter().enumerate() {
 				if entry.is_empty() {
@@ -840,8 +842,13 @@ impl HashColumn {
 					hex(&key),
 					hex(&pk),
 				);
-				let state =
-					IterStateOrCorrupted::Item(IterState { chunk_index: c, key, rc, value });
+				let state = IterStateOrCorrupted::Item(IterState {
+					item_index: c,
+					total_items: total_chunks,
+					key,
+					rc,
+					value,
+				});
 				if !f(state)? {
 					return Ok(())
 				}
@@ -850,29 +857,112 @@ impl HashColumn {
 		Ok(())
 	}
 
-	fn dump(&self, log: &Log, check_param: &crate::CheckOptions, col: ColId) -> Result<()> {
-		let start_chunk = check_param.from.unwrap_or(0);
-		let end_chunk = check_param.bound;
+	fn iter_index_fast(
+		&self,
+		log: &Log,
+		mut f: impl FnMut(IterStateOrCorrupted) -> Result<bool>,
+		_start_chunk: u64,
+	) -> Result<()> {
+		let tables = self.tables.read();
+		let index = &tables.index;
 
-		let step = 10000;
-		let mut next_info_chunk = step;
+		let entries = index.sorted_entries()?;
+		let total = entries.len();
+		for (sub_index, entry) in entries.into_iter().enumerate() {
+			let (size_tier, offset) = {
+				let address = entry.address(index.id.index_bits());
+				(address.size_tier(), address.offset())
+			};
+
+			let value = tables.value[size_tier as usize].get_with_meta(offset, log.overlays());
+			let (value, rc, pk, compressed) = match value {
+				Ok(Some(v)) => v,
+				Ok(None) => {
+					let value_entry = tables.value[size_tier as usize].dump_entry(offset).ok();
+					if !f(IterStateOrCorrupted::Corrupted(CorruptedIndexEntryInfo {
+						chunk_index: sub_index as u64,
+						sub_index: sub_index as u32,
+						value_entry,
+						entry,
+						error: None,
+					}))? {
+						return Ok(())
+					}
+					continue
+				},
+				Err(e) => {
+					let value_entry = if let Error::Corruption(_) = &e {
+						tables.value[size_tier as usize].dump_entry(offset).ok()
+					} else {
+						None
+					};
+					if !f(IterStateOrCorrupted::Corrupted(CorruptedIndexEntryInfo {
+						chunk_index: sub_index as u64,
+						sub_index: sub_index as u32,
+						value_entry,
+						entry,
+						error: Some(e),
+					}))? {
+						return Ok(())
+					}
+					continue
+				},
+			};
+			let value = if compressed { self.compression.decompress(&value)? } else { value };
+			log::debug!(
+				target: "parity-db",
+				"{}: Iterating at {}/{}, pk={:?}",
+				index.id,
+				sub_index,
+				total,
+				hex(&pk),
+			);
+			let state = IterStateOrCorrupted::Item(IterState {
+				item_index: sub_index as u64,
+				total_items: total as u64,
+				key: Default::default(),
+				rc,
+				value,
+			});
+			if !f(state)? {
+				return Ok(())
+			}
+		}
+		Ok(())
+	}
+
+	fn dump(&self, log: &Log, check_params: &crate::CheckOptions, col: ColId) -> Result<()> {
+		let start_chunk = check_params.from.unwrap_or(0);
+		let end_chunk = check_params.bound;
+
+		let step = if check_params.fast { 1_000_000 } else { 10_000 };
+		let (denom, suffix) = if check_params.fast { (1_000_000, "m") } else { (1_000, "k") };
+		let mut next_info_at = step;
 		let start_time = std::time::Instant::now();
-		let total_chunks = self.tables.read().index.id.total_chunks();
 		let index_id = self.tables.read().index.id;
 		log::info!(target: "parity-db", "Column {} (hash): Starting index validation", col);
-		self.iter_index_internal(
+		let iter_fn =
+			if check_params.fast { Self::iter_index_fast } else { Self::iter_index_internal };
+		iter_fn(
+			self,
 			log,
 			|state| match state {
-				IterStateOrCorrupted::Item(IterState { chunk_index, key, rc, value }) => {
-					if Some(chunk_index) == end_chunk {
+				IterStateOrCorrupted::Item(IterState {
+					item_index,
+					total_items,
+					key,
+					rc,
+					value,
+				}) => {
+					if Some(item_index) == end_chunk {
 						return Ok(false)
 					}
-					if chunk_index >= next_info_chunk {
-						next_info_chunk += step;
-						log::info!(target: "parity-db", "Validated {} / {} chunks", chunk_index, total_chunks);
+					if item_index >= next_info_at {
+						next_info_at += step;
+						log::info!(target: "parity-db", "Validated {}{} / {}{} entries", item_index / denom, suffix, total_items / denom, suffix);
 					}
 
-					match check_param.display {
+					match check_params.display {
 						CheckDisplay::Full => {
 							log::info!(
 								"Index key: {:x?}\n \
@@ -913,6 +1003,18 @@ impl HashColumn {
 		)?;
 
 		log::info!(target: "parity-db", "Index validation complete successfully, elapsed {:?}", start_time.elapsed());
+		if check_params.validate_free_refs {
+			log::info!(target: "parity-db", "Validating free refs");
+			let tables = self.tables.read();
+			let mut total = 0;
+			for t in &tables.value {
+				match t.check_free_refs() {
+					Err(e) => log::warn!(target: "parity-db", "{}: Error: {:?}", t.id, e),
+					Ok(n) => total += n,
+				}
+			}
+			log::info!(target: "parity-db", "{} Total free refs", total);
+		}
 		Ok(())
 	}
 
@@ -1159,9 +1261,9 @@ impl Column {
 		}
 	}
 
-	pub fn dump(&self, log: &Log, check_param: &crate::CheckOptions, col: ColId) -> Result<()> {
+	pub fn dump(&self, log: &Log, check_params: &crate::CheckOptions, col: ColId) -> Result<()> {
 		match self {
-			Column::Hash(column) => column.dump(log, check_param, col),
+			Column::Hash(column) => column.dump(log, check_params, col),
 			Column::Tree(_column) => Ok(()),
 		}
 	}

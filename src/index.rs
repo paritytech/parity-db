@@ -236,6 +236,13 @@ impl IndexTable {
 		Ok(try_io!(Ok(ptr)))
 	}
 
+	fn chunk_entries_at(index: u64, map: &memmap2::MmapMut) -> Result<&[Entry; CHUNK_ENTRIES]> {
+		let offset = META_SIZE + index as usize * CHUNK_LEN;
+		let ptr = unsafe {
+			&*(map[offset..offset + CHUNK_LEN].as_ptr() as *const [Entry; CHUNK_ENTRIES])
+		};
+		Ok(try_io!(Ok(ptr)))
+	}
 	#[cfg(target_arch = "x86_64")]
 	fn find_entry(
 		&self,
@@ -363,6 +370,28 @@ impl IndexTable {
 			return Ok(Self::transmute_chunk(chunk))
 		}
 		Ok(Self::transmute_chunk(EMPTY_CHUNK))
+	}
+
+	pub fn sorted_entries(&self) -> Result<Vec<Entry>> {
+		log::info!(target: "parity-db", "{}: Loading into memory", self.id);
+		let mut target = Vec::with_capacity(self.id.total_entries() as usize / 2);
+		if let Some(map) = &*self.map.read() {
+			for chunk_index in 0..self.id.total_chunks() {
+				let source = Self::chunk_entries_at(chunk_index, map)?;
+				for e in source {
+					if !e.is_empty() {
+						target.push(*e);
+					}
+				}
+			}
+		}
+		log::info!(target: "parity-db", "{}: Sorting index", self.id);
+		target.sort_unstable_by(|a, b| {
+			let a = a.address(self.id.index_bits());
+			let b = b.address(self.id.index_bits());
+			a.size_tier().cmp(&b.size_tier()).then_with(|| a.offset().cmp(&b.offset()))
+		});
+		Ok(target)
 	}
 
 	#[inline(always)]

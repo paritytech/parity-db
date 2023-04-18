@@ -1462,6 +1462,10 @@ pub mod check {
 		pub bound: Option<u64>,
 		/// Verbosity.
 		pub display: CheckDisplay,
+		/// Ordered validation.
+		pub fast: bool,
+		/// Make sure free lists are correct.
+		pub validate_free_refs: bool,
 	}
 
 	impl CheckOptions {
@@ -1472,6 +1476,8 @@ pub mod check {
 			bound: Option<u64>,
 			display_content: bool,
 			truncate_value_display: Option<u64>,
+			fast: bool,
+			validate_free_refs: bool,
 		) -> Self {
 			let display = if display_content {
 				match truncate_value_display {
@@ -1481,7 +1487,7 @@ pub mod check {
 			} else {
 				CheckDisplay::None
 			};
-			CheckOptions { column, from, bound, display }
+			CheckOptions { column, from, bound, display, fast, validate_free_refs }
 		}
 	}
 }

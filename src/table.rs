@@ -394,7 +394,13 @@ impl ValueTable {
 			if filled == 0 {
 				filled = 1;
 			}
-			log::debug!(target: "parity-db", "Opened value table {} with {} entries, entry_size={}", id, filled, entry_size);
+			if last_removed >= filled {
+				return Err(crate::error::Error::Corruption(format!(
+					"Bad removed ref {} out of {}",
+					last_removed, filled
+				)))
+			}
+			log::debug!(target: "parity-db", "Opened value table {} with {} entries, entry_size={}, removed={}", id, filled, entry_size, last_removed);
 		}
 
 		Ok(ValueTable {
@@ -629,11 +635,19 @@ impl ValueTable {
 
 	pub fn read_next_free(&self, index: u64, log: &LogWriter) -> Result<u64> {
 		let mut buf = PartialEntry::new_uninit();
+		let filled = self.filled.load(Ordering::Relaxed);
 		if !log.value(self.id, index, buf.as_mut()) {
 			self.file.read_at(buf.as_mut(), index * self.entry_size as u64)?;
 		}
 		buf.skip_size();
-		Ok(buf.read_next())
+		let next = buf.read_next();
+		if next >= filled {
+			return Err(crate::error::Error::Corruption(format!(
+				"Bad removed ref {} out of {}",
+				next, filled
+			)))
+		}
+		Ok(next)
 	}
 
 	pub fn read_next_part(&self, index: u64, log: &LogWriter) -> Result<Option<u64>> {
@@ -1045,6 +1059,27 @@ impl ValueTable {
 			self.file.write_at(entry.as_slice(), *at * (self.entry_size as u64))?;
 		}
 		Ok(())
+	}
+
+	/// Validate free records sequence.
+	pub fn check_free_refs(&self) -> Result<u64> {
+		let filled = self.filled.load(Ordering::Relaxed);
+		let mut next = self.last_removed.load(Ordering::Relaxed);
+		let mut len = 0;
+		while next != 0 {
+			if next >= filled {
+				return Err(crate::error::Error::Corruption(format!(
+					"Bad removed ref {} out of {}",
+					next, filled
+				)))
+			}
+			let mut buf = PartialEntry::new_uninit();
+			self.file.read_at(buf.as_mut(), next * self.entry_size as u64)?;
+			buf.skip_size();
+			next = buf.read_next();
+			len += 1;
+		}
+		Ok(len)
 	}
 }
 
