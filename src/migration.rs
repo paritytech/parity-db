@@ -78,7 +78,7 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 		log::info!("Migrating col {}", c);
 		source.iter_column_index_while(
 			c,
-			|IterState { chunk_index: index, key, rc, mut value }| {
+			|IterState { item_index: index, key, rc, mut value, .. }| {
 				//TODO: more efficient ref migration
 				for _ in 0..rc {
 					let value = std::mem::take(&mut value);

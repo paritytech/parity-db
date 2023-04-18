@@ -95,6 +95,8 @@ pub fn run() -> Result<(), String> {
 				check.range_end,
 				check.display,
 				check.display_value_max,
+				check.fast,
+				true,
 			);
 			db.dump(check_param).map_err(|e| format!("Check error: {e:?}"))?;
 		},
@@ -287,4 +289,9 @@ pub struct Check {
 	/// Max length for value to display (when using --display).
 	#[clap(long)]
 	pub display_value_max: Option<u64>,
+
+	/// Sort index to optimize disk access. Requires the largest DB index to be able to fit in
+	/// memory.
+	#[clap(long)]
+	pub fast: bool,
 }
