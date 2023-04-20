@@ -726,7 +726,7 @@ impl DbInner {
 
 				let max_logs = if self.options.sync_data { MAX_LOG_FILES } else { KEEP_LOGS };
 				let dirty_logs = self.log.num_dirty_logs();
-				if dirty_logs > max_logs {
+				while self.log.num_dirty_logs() > max_logs {
 					log::debug!(target: "parity-db", "Waiting for log cleanup. Queued: {}", dirty_logs);
 					self.cleanup_queue_wait.wait();
 				}
