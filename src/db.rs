@@ -602,8 +602,6 @@ impl DbInner {
 							Ok(next) => next,
 							Err(e) => {
 								log::debug!(target: "parity-db", "Error reading log: {:?}", e);
-								drop(reader);
-								self.log.clear_replay_logs();
 								return Ok(false)
 							},
 						};
@@ -626,7 +624,7 @@ impl DbInner {
 										)
 									},
 								) {
-									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
+									log::warn!(target: "parity-db", "Error validating log: {:?}.", e);
 									drop(reader);
 									self.log.clear_replay_logs();
 									return Ok(false)
@@ -643,7 +641,7 @@ impl DbInner {
 										)
 									},
 								) {
-									log::warn!(target: "parity-db", "Error replaying log: {:?}. Reverting", e);
+									log::warn!(target: "parity-db", "Error validating log: {:?}.", e);
 									drop(reader);
 									self.log.clear_replay_logs();
 									return Ok(false)
