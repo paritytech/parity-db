@@ -277,8 +277,13 @@ impl IndexTable {
 		);
 
 		let shift = std::cmp::max(32, Entry::address_bits(self.id.index_bits()));
+		let pk = (key_prefix << self.id.index_bits()) >> shift;
+		if pk == 0 {
+			// Fallback to base version when partial key is zero and would match empty entries.
+			return self.find_entry_base(key_prefix, sub_index, chunk)
+		}
 		unsafe {
-			let target = _mm_set1_epi32(((key_prefix << self.id.index_bits()) >> shift) as i32);
+			let target = _mm_set1_epi32(pk as i32);
 			let shift_mask = _mm_set_epi64x(0, shift.into());
 			let mut i = (sub_index >> 2) << 2; // We keep an alignment of 4
 			let mut skip = (sub_index - i) as i32;
@@ -308,7 +313,6 @@ impl IndexTable {
 		(Entry::empty(), 0)
 	}
 
-	#[cfg(any(not(target_arch = "x86_64"), test))]
 	fn find_entry_base(
 		&self,
 		key_prefix: u64,
@@ -318,7 +322,7 @@ impl IndexTable {
 		let partial_key = Entry::extract_key(key_prefix, self.id.index_bits());
 		for i in sub_index..CHUNK_ENTRIES {
 			let entry = Self::read_entry(chunk, i);
-			if entry.partial_key(self.id.index_bits()) == partial_key {
+			if entry.partial_key(self.id.index_bits()) == partial_key && !entry.is_empty() {
 				return (entry, i)
 			}
 		}
@@ -754,6 +758,26 @@ mod test {
 				let (_, i) = table.find_entry_sse2(key, start_pos, &chunk);
 				assert_eq!(i, start_pos);
 			}
+		}
+	}
+
+	#[test]
+	fn test_find_entry_zero_pk() {
+		let table =
+			IndexTable { id: TableId(16), map: RwLock::new(None), path: Default::default() };
+		let mut chunk = [0u8; CHUNK_LEN];
+		let zero_key = 0x0000000000000000;
+		let entry = Entry::new(Address::new(1, 1), zero_key, 16);
+
+		// Write at index 1. Index 0 contains an empty entry.
+		IndexTable::write_entry(&entry, 1, &mut chunk);
+
+		let (_, i) = table.find_entry_base(zero_key, 0, &chunk);
+		assert_eq!(i, 1);
+		#[cfg(target_arch = "x86_64")]
+		{
+			let (_, i) = table.find_entry_sse2(zero_key, 0, &chunk);
+			assert_eq!(i, 1);
 		}
 	}
 
