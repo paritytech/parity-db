@@ -263,11 +263,15 @@ impl HashColumn {
 		}
 	}
 
-	fn drop_files(&self) -> Result<()> {
-		let tables = self.tables.write();
-		tables.index.drop_files()?;
-		for table in tables.value.iter() {
-			table.drop_files()?;
+	fn drop_files(id: ColId, path: std::path::PathBuf) -> Result<()> {
+		for bits in (MIN_INDEX_BITS..65).rev() {
+			let id = IndexTableId::new(id, bits);
+			IndexTable::drop_files(id, path.clone())?
+		}
+
+		for size_tier in 0..crate::table::SIZE_TIERS {
+			let id = crate::table::TableId::new(id, size_tier as u8);
+			ValueTable::drop_files(id, path.clone())?;
 		}
 		Ok(())
 	}
@@ -345,10 +349,11 @@ impl Column {
 		ValueTable::open(path, id, entry_size, options, db_version)
 	}
 
-	pub fn drop_files(&self) -> Result<()> {
-		match self {
-			Column::Hash(c) => c.drop_files(),
-			Column::Tree(c) => c.drop_files(),
+	pub fn drop_files(id: ColId, path: std::path::PathBuf, options: &ColumnOptions) -> Result<()> {
+		if options.btree_index {
+			BTreeTable::drop_files(id, path)
+		} else {
+			HashColumn::drop_files(id, path)
 		}
 	}
 }

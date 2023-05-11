@@ -919,19 +919,18 @@ impl Db {
 	}
 
 	/// Drop a column from the database, optionally changing its options.
-	/// This shutdown and restart the db in write mode.
-	pub fn drop_column(&mut self, index: u8, new_options: Option<ColumnOptions>) -> Result<()> {
-		self.drop_inner();
-		if let Err(e) = self.inner.replay_all_logs() {
-			log::debug!(target: "parity-db", "Error during log replay.");
-			return Err(e)
-		} else {
-			self.inner.log.clear_replay_logs();
-			self.inner.clean_all_logs()?;
-			self.inner.log.kill_logs()?;
-		}
-		let salt = self.inner.options.salt;
-		let mut options = self.inner.options.clone();
+	/// This requires that the db is not open when called.
+	pub fn clear_column(
+		options: &mut Options,
+		index: u8,
+		new_options: Option<ColumnOptions>,
+	) -> Result<()> {
+		// We open the DB before to check metadata validity and make sure there are no pending WAL
+		// logs.
+		let db = Db::open(options)?;
+		let salt = db.inner.options.salt;
+		drop(db);
+
 		if index as usize >= options.columns.len() {
 			return Err(Error::IncompatibleColumnConfig {
 				id: index,
@@ -939,7 +938,7 @@ impl Db {
 			})
 		}
 
-		self.inner.columns[index as usize].drop_files()?;
+		Column::drop_files(index, options.path.clone(), &options.columns[index as usize])?;
 
 		if let Some(new_options) = new_options {
 			options.columns[index as usize] = new_options;
@@ -949,8 +948,6 @@ impl Db {
 			)?;
 		}
 
-		try_io!(self.inner._lock_file.unlock());
-		*self = Db::open_or_create(&options)?;
 		Ok(())
 	}
 
@@ -2685,18 +2682,18 @@ mod tests {
 		db_test_file.run_stages(&db);
 		drop(db);
 
-		let mut db = Db::open_inner(&options_std, OpeningMode::Write).unwrap();
+		let db = Db::open_inner(&options_std, OpeningMode::Write).unwrap();
 		for (col, key, value) in payload.iter() {
 			assert_eq!(db.get(*col, key).unwrap().as_ref(), value.as_ref());
 		}
-		db.drop_column(1, None).unwrap();
+		drop(db);
+		Db::clear_column(&mut options_db_files, 1, None).unwrap();
+
+		let db = Db::open_inner(&options_db_files, OpeningMode::Write).unwrap();
 		for (col, key, _value) in payload.iter() {
 			assert_eq!(db.get(*col, key).unwrap(), None);
 		}
 
-		drop(db);
-
-		let db = Db::open_inner(&options_db_files, OpeningMode::Write).unwrap();
 		let payload: Vec<(u8, _, _)> = (0u16..10)
 			.map(|i| (1, i.to_le_bytes().to_vec(), Some(i.to_be_bytes().to_vec())))
 			.collect();
@@ -2706,7 +2703,7 @@ mod tests {
 		db_test_file.run_stages(&db);
 		drop(db);
 
-		let mut db = Db::open_inner(&options_std, OpeningMode::Write).unwrap();
+		let db = Db::open_inner(&options_std, OpeningMode::Write).unwrap();
 		let payload: Vec<(u8, _, _)> = (10u16..1000)
 			.map(|i| (1, i.to_le_bytes().to_vec(), Some(i.to_be_bytes().to_vec())))
 			.collect();
@@ -2714,10 +2711,13 @@ mod tests {
 		db.commit(payload.clone()).unwrap();
 		assert!(db.iter(1).is_err());
 
+		drop(db);
+
 		let mut col_option = options_std.columns[1].clone();
 		col_option.btree_index = true;
-		db.drop_column(1, Some(col_option)).unwrap();
+		Db::clear_column(&mut options_std, 1, Some(col_option)).unwrap();
 
+		let db = Db::open_inner(&options_std, OpeningMode::Write).unwrap();
 		let payload: Vec<(u8, _, _)> = (0u16..10)
 			.map(|i| (1, i.to_le_bytes().to_vec(), Some(i.to_be_bytes().to_vec())))
 			.collect();
