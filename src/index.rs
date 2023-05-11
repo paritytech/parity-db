@@ -634,6 +634,14 @@ impl IndexTable {
 
 	#[cfg(not(unix))]
 	fn madvise_random(&self, _map: &mut memmap2::MmapMut) {}
+
+	pub(crate) fn drop_files(&self) -> Result<()> {
+		*self.map.write() = None;
+		if self.path.exists() {
+			try_io!(std::fs::remove_file(&self.path));
+		}
+		Ok(())
+	}
 }
 
 #[cfg(test)]

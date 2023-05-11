@@ -681,7 +681,7 @@ impl Log {
 		Ok(false)
 	}
 
-	pub fn replay_next(&mut self) -> Result<Option<u32>> {
+	pub fn replay_next(&self) -> Result<Option<u32>> {
 		let mut reading = self.reading.write();
 		{
 			if let Some(reading) = reading.take() {

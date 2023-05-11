@@ -1081,6 +1081,14 @@ impl ValueTable {
 		}
 		Ok(len)
 	}
+
+	pub(crate) fn drop_files(&self) -> Result<()> {
+		*self.file.file.write() = None;
+		if self.file.path.exists() {
+			try_io!(std::fs::remove_file(&self.file.path));
+		}
+		Ok(())
+	}
 }
 
 pub mod key {

@@ -362,6 +362,14 @@ impl BTreeTable {
 
 		result
 	}
+
+	pub(crate) fn drop_files(&self) -> Result<()> {
+		let tables = self.tables.write();
+		for table in tables.iter() {
+			table.drop_files()?;
+		}
+		Ok(())
+	}
 }
 
 pub mod commit_overlay {

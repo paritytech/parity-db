@@ -262,6 +262,15 @@ impl HashColumn {
 			compression: &self.compression,
 		}
 	}
+
+	fn drop_files(&self) -> Result<()> {
+		let tables = self.tables.write();
+		tables.index.drop_files()?;
+		for table in tables.value.iter() {
+			table.drop_files()?;
+		}
+		Ok(())
+	}
 }
 
 impl Column {
@@ -334,6 +343,13 @@ impl Column {
 		let id = ValueTableId::new(col, tier);
 		let entry_size = SIZES.get(tier as usize).cloned();
 		ValueTable::open(path, id, entry_size, options, db_version)
+	}
+
+	pub fn drop_files(&self) -> Result<()> {
+		match self {
+			Column::Hash(c) => c.drop_files(),
+			Column::Tree(c) => c.drop_files(),
+		}
 	}
 }
 
