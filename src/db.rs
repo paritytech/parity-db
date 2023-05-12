@@ -1152,7 +1152,7 @@ impl Db {
 			return Ok(())
 		}
 		let index = options.columns.len() - 1;
-		Self::drop_files_column(options, index as u8)?;
+		Self::remove_column_files(options, index as u8)?;
 		options.columns.pop();
 		options.write_metadata(&options.path, &salt)?;
 		Ok(())
@@ -1166,7 +1166,7 @@ impl Db {
 		new_options: Option<ColumnOptions>,
 	) -> Result<()> {
 		let salt = Self::precheck_column_operation(options)?;
-		Self::drop_files_column(options, index)?;
+		Self::remove_column_files(options, index)?;
 
 		if let Some(new_options) = new_options {
 			options.columns[index as usize] = new_options;
@@ -1176,7 +1176,7 @@ impl Db {
 		Ok(())
 	}
 
-	fn drop_files_column(options: &mut Options, index: u8) -> Result<()> {
+	fn remove_column_files(options: &mut Options, index: u8) -> Result<()> {
 		if index as usize >= options.columns.len() {
 			return Err(Error::IncompatibleColumnConfig {
 				id: index,
