@@ -2700,7 +2700,7 @@ mod tests {
 			assert_eq!(db.get(*col, key).unwrap().as_ref(), value.as_ref());
 		}
 		drop(db);
-		Db::truncate_column(&mut options_db_files, 1, None).unwrap();
+		Db::reset_column(&mut options_db_files, 1, None).unwrap();
 
 		let db = Db::open_inner(&options_db_files, OpeningMode::Write).unwrap();
 		for (col, key, _value) in payload.iter() {
@@ -2728,7 +2728,7 @@ mod tests {
 
 		let mut col_option = options_std.columns[1].clone();
 		col_option.btree_index = true;
-		Db::truncate_column(&mut options_std, 1, Some(col_option)).unwrap();
+		Db::reset_column(&mut options_std, 1, Some(col_option)).unwrap();
 
 		let db = Db::open_inner(&options_std, OpeningMode::Write).unwrap();
 		let payload: Vec<(u8, _, _)> = (0u16..10)

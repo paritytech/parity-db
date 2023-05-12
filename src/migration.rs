@@ -9,7 +9,7 @@ use crate::{
 	Error, Result,
 };
 /// Database migration.
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const COMMIT_SIZE: usize = 10240;
 const OVERWRITE_TMP_PATH: &str = "to_revert_overwrite";
