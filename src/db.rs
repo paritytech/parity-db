@@ -1126,9 +1126,7 @@ impl Db {
 
 	// We open the DB before to check metadata validity and make sure there are no pending WAL
 	// logs.
-	fn precheck_column_operation(
-		options: &mut Options,
-	) -> Result<[u8; 32]> {
+	fn precheck_column_operation(options: &mut Options) -> Result<[u8; 32]> {
 		let db = Db::open(options)?;
 		let salt = db.inner.options.salt;
 		drop(db);
@@ -1140,20 +1138,14 @@ impl Db {
 		let salt = Self::precheck_column_operation(options)?;
 
 		options.columns.push(new_column_options);
-		options.write_metadata_with_version(
-			&options.path,
-			&salt,
-			Some(CURRENT_VERSION),
-		)?;
+		options.write_metadata_with_version(&options.path, &salt, Some(CURRENT_VERSION))?;
 
 		Ok(())
 	}
 
 	/// Remove last column from the database.
 	/// Db must be close when called.
-	pub fn drop_last_column(
-		options: &mut Options,
-	) -> Result<()> {
+	pub fn drop_last_column(options: &mut Options) -> Result<()> {
 		let salt = Self::precheck_column_operation(options)?;
 		let nb_column = options.columns.len();
 		if nb_column == 0 {
@@ -1162,10 +1154,7 @@ impl Db {
 		let index = options.columns.len() - 1;
 		Self::drop_files_column(options, index as u8)?;
 		options.columns.pop();
-		options.write_metadata(
-			&options.path,
-			&salt,
-		)?;
+		options.write_metadata(&options.path, &salt)?;
 		Ok(())
 	}
 
@@ -1181,19 +1170,13 @@ impl Db {
 
 		if let Some(new_options) = new_options {
 			options.columns[index as usize] = new_options;
-			options.write_metadata(
-				&options.path,
-				&salt,
-			)?;
+			options.write_metadata(&options.path, &salt)?;
 		}
 
 		Ok(())
 	}
 
-	fn drop_files_column(
-		options: &mut Options,
-		index: u8,
-	) -> Result<()> {
+	fn drop_files_column(options: &mut Options, index: u8) -> Result<()> {
 		if index as usize >= options.columns.len() {
 			return Err(Error::IncompatibleColumnConfig {
 				id: index,

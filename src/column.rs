@@ -6,7 +6,7 @@ use crate::{
 	compress::Compress,
 	db::{check::CheckDisplay, Operation, RcValue},
 	display::hex,
-	error::{Error, Result, try_io},
+	error::{try_io, Error, Result},
 	index::{Address, IndexTable, PlanOutcome, TableId as IndexTableId},
 	log::{Log, LogAction, LogOverlays, LogQuery, LogReader, LogWriter},
 	options::{ColumnOptions, Metadata, Options, DEFAULT_COMPRESSION_THRESHOLD},
@@ -20,11 +20,11 @@ use crate::{
 };
 use std::{
 	collections::VecDeque,
+	path::PathBuf,
 	sync::{
 		atomic::{AtomicU64, Ordering},
 		Arc,
 	},
-	path::PathBuf,
 };
 
 const MIN_INDEX_BITS: u8 = 16;
