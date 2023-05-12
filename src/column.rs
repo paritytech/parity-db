@@ -6,7 +6,7 @@ use crate::{
 	compress::Compress,
 	db::{check::CheckDisplay, Operation, RcValue},
 	display::hex,
-	error::{Error, Result},
+	error::{Error, Result, try_io},
 	index::{Address, IndexTable, PlanOutcome, TableId as IndexTableId},
 	log::{Log, LogAction, LogOverlays, LogQuery, LogReader, LogWriter},
 	options::{ColumnOptions, Metadata, Options, DEFAULT_COMPRESSION_THRESHOLD},
@@ -24,6 +24,7 @@ use std::{
 		atomic::{AtomicU64, Ordering},
 		Arc,
 	},
+	path::PathBuf,
 };
 
 const MIN_INDEX_BITS: u8 = 16;
@@ -94,7 +95,7 @@ pub struct HashColumn {
 	col: ColId,
 	tables: RwLock<Tables>,
 	reindex: RwLock<Reindex>,
-	path: std::path::PathBuf,
+	path: PathBuf,
 	preimage: bool,
 	uniform_keys: bool,
 	collect_stats: bool,
@@ -262,19 +263,6 @@ impl HashColumn {
 			compression: &self.compression,
 		}
 	}
-
-	fn drop_files(id: ColId, path: std::path::PathBuf) -> Result<()> {
-		for bits in (MIN_INDEX_BITS..65).rev() {
-			let id = IndexTableId::new(id, bits);
-			IndexTable::drop_files(id, path.clone())?
-		}
-
-		for size_tier in 0..crate::table::SIZE_TIERS {
-			let id = crate::table::TableId::new(id, size_tier as u8);
-			ValueTable::drop_files(id, path.clone())?;
-		}
-		Ok(())
-	}
 }
 
 impl Column {
@@ -338,7 +326,7 @@ impl Column {
 	}
 
 	fn open_table(
-		path: Arc<std::path::PathBuf>,
+		path: Arc<PathBuf>,
 		col: ColId,
 		tier: u8,
 		options: &ColumnOptions,
@@ -349,12 +337,27 @@ impl Column {
 		ValueTable::open(path, id, entry_size, options, db_version)
 	}
 
-	pub fn drop_files(id: ColId, path: std::path::PathBuf, options: &ColumnOptions) -> Result<()> {
-		if options.btree_index {
-			BTreeTable::drop_files(id, path)
-		} else {
-			HashColumn::drop_files(id, path)
+	pub(crate) fn drop_files(column: ColId, path: PathBuf) -> Result<()> {
+		// It is not specified how read_dir behaves when deleting and iterating in the same loop
+		// We collect a list of paths to be deleted first.
+		let mut to_delete = Vec::new();
+		for entry in try_io!(std::fs::read_dir(&path)) {
+			let entry = try_io!(entry);
+			if let Some(file) = entry.path().file_name().and_then(|f| f.to_str()) {
+				if crate::index::TableId::is_file_name(column, file) ||
+					crate::table::TableId::is_file_name(column, file)
+				{
+					to_delete.push(PathBuf::from(file));
+				}
+			}
 		}
+
+		for file in to_delete {
+			let mut path = path.clone();
+			path.push(file);
+			try_io!(std::fs::remove_file(path));
+		}
+		Ok(())
 	}
 }
 

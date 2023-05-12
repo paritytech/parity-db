@@ -362,14 +362,6 @@ impl BTreeTable {
 
 		result
 	}
-
-	pub(crate) fn drop_files(id: ColId, path: std::path::PathBuf) -> Result<()> {
-		for size_tier in 0..crate::table::SIZE_TIERS {
-			let id = crate::table::TableId::new(id, size_tier as u8);
-			ValueTable::drop_files(id, path.clone())?;
-		}
-		Ok(())
-	}
 }
 
 pub mod commit_overlay {

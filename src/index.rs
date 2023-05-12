@@ -634,14 +634,6 @@ impl IndexTable {
 
 	#[cfg(not(unix))]
 	fn madvise_random(&self, _map: &mut memmap2::MmapMut) {}
-
-	pub fn drop_files(id: TableId, mut path: std::path::PathBuf) -> Result<()> {
-		path.push(id.file_name());
-		if path.exists() {
-			try_io!(std::fs::remove_file(&path));
-		}
-		Ok(())
-	}
 }
 
 #[cfg(test)]

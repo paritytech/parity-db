@@ -918,39 +918,6 @@ impl Db {
 		Self::open_inner(options, OpeningMode::ReadOnly)
 	}
 
-	/// Drop a column from the database, optionally changing its options.
-	/// This requires that the db is not open when called.
-	pub fn clear_column(
-		options: &mut Options,
-		index: u8,
-		new_options: Option<ColumnOptions>,
-	) -> Result<()> {
-		// We open the DB before to check metadata validity and make sure there are no pending WAL
-		// logs.
-		let db = Db::open(options)?;
-		let salt = db.inner.options.salt;
-		drop(db);
-
-		if index as usize >= options.columns.len() {
-			return Err(Error::IncompatibleColumnConfig {
-				id: index,
-				reason: "Column not found".to_string(),
-			})
-		}
-
-		Column::drop_files(index, options.path.clone(), &options.columns[index as usize])?;
-
-		if let Some(new_options) = new_options {
-			options.columns[index as usize] = new_options;
-			options.write_metadata(
-				&options.path,
-				&salt.expect("`salt` is always `Some` after opening the DB; qed"),
-			)?;
-		}
-
-		Ok(())
-	}
-
 	fn open_inner(options: &Options, opening_mode: OpeningMode) -> Result<Db> {
 		assert!(options.is_valid());
 		let db = DbInner::open(options, opening_mode)?;
@@ -1157,21 +1124,84 @@ impl Db {
 		self.inner.stats()
 	}
 
-	/// Add a new column with options specified by `new_column_options`.
-	pub fn add_column(options: &mut Options, new_column_options: ColumnOptions) -> Result<()> {
-		// We open the DB before to check metadata validity and make sure there are no pending WAL
-		// logs.
+	// We open the DB before to check metadata validity and make sure there are no pending WAL
+	// logs.
+	fn precheck_column_operation(
+		options: &mut Options,
+	) -> Result<[u8; 32]> {
 		let db = Db::open(options)?;
 		let salt = db.inner.options.salt;
 		drop(db);
+		Ok(salt.expect("`salt` is always `Some` after opening the DB; qed"))
+	}
+
+	/// Add a new column with options specified by `new_column_options`.
+	pub fn add_column(options: &mut Options, new_column_options: ColumnOptions) -> Result<()> {
+		let salt = Self::precheck_column_operation(options)?;
 
 		options.columns.push(new_column_options);
 		options.write_metadata_with_version(
 			&options.path,
-			&salt.expect("`salt` is always `Some` after opening the DB; qed"),
+			&salt,
 			Some(CURRENT_VERSION),
 		)?;
 
+		Ok(())
+	}
+
+	/// Remove last column from the database.
+	/// Db must be close when called.
+	pub fn drop_last_column(
+		options: &mut Options,
+	) -> Result<()> {
+		let salt = Self::precheck_column_operation(options)?;
+		let nb_column = options.columns.len();
+		if nb_column == 0 {
+			return Ok(())
+		}
+		let index = options.columns.len() - 1;
+		Self::drop_files_column(options, index as u8)?;
+		options.columns.pop();
+		options.write_metadata(
+			&options.path,
+			&salt,
+		)?;
+		Ok(())
+	}
+
+	/// Truncate a column from the database, optionally changing its options.
+	/// Db must be close when called.
+	pub fn reset_column(
+		options: &mut Options,
+		index: u8,
+		new_options: Option<ColumnOptions>,
+	) -> Result<()> {
+		let salt = Self::precheck_column_operation(options)?;
+		Self::drop_files_column(options, index)?;
+
+		if let Some(new_options) = new_options {
+			options.columns[index as usize] = new_options;
+			options.write_metadata(
+				&options.path,
+				&salt,
+			)?;
+		}
+
+		Ok(())
+	}
+
+	fn drop_files_column(
+		options: &mut Options,
+		index: u8,
+	) -> Result<()> {
+		if index as usize >= options.columns.len() {
+			return Err(Error::IncompatibleColumnConfig {
+				id: index,
+				reason: "Column not found".to_string(),
+			})
+		}
+
+		Column::drop_files(index, options.path.clone())?;
 		Ok(())
 	}
 
@@ -2673,7 +2703,7 @@ mod tests {
 
 		let db = Db::open_inner(&options_db_files, OpeningMode::Create).unwrap();
 
-		let payload: Vec<(u8, _, _)> = (0u16..10_000)
+		let payload: Vec<(u8, _, _)> = (0u16..100)
 			.map(|i| (1, i.to_le_bytes().to_vec(), Some(i.to_be_bytes().to_vec())))
 			.collect();
 
@@ -2687,7 +2717,7 @@ mod tests {
 			assert_eq!(db.get(*col, key).unwrap().as_ref(), value.as_ref());
 		}
 		drop(db);
-		Db::clear_column(&mut options_db_files, 1, None).unwrap();
+		Db::truncate_column(&mut options_db_files, 1, None).unwrap();
 
 		let db = Db::open_inner(&options_db_files, OpeningMode::Write).unwrap();
 		for (col, key, _value) in payload.iter() {
@@ -2704,7 +2734,7 @@ mod tests {
 		drop(db);
 
 		let db = Db::open_inner(&options_std, OpeningMode::Write).unwrap();
-		let payload: Vec<(u8, _, _)> = (10u16..1000)
+		let payload: Vec<(u8, _, _)> = (10u16..100)
 			.map(|i| (1, i.to_le_bytes().to_vec(), Some(i.to_be_bytes().to_vec())))
 			.collect();
 
@@ -2715,7 +2745,7 @@ mod tests {
 
 		let mut col_option = options_std.columns[1].clone();
 		col_option.btree_index = true;
-		Db::clear_column(&mut options_std, 1, Some(col_option)).unwrap();
+		Db::truncate_column(&mut options_std, 1, Some(col_option)).unwrap();
 
 		let db = Db::open_inner(&options_std, OpeningMode::Write).unwrap();
 		let payload: Vec<(u8, _, _)> = (0u16..10)

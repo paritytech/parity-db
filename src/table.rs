@@ -1081,14 +1081,6 @@ impl ValueTable {
 		}
 		Ok(len)
 	}
-
-	pub fn drop_files(id: TableId, mut filepath: std::path::PathBuf) -> Result<()> {
-		filepath.push(id.file_name());
-		if filepath.exists() {
-			try_io!(std::fs::remove_file(&filepath));
-		}
-		Ok(())
-	}
 }
 
 pub mod key {
