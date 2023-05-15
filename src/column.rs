@@ -6,7 +6,7 @@ use crate::{
 	compress::Compress,
 	db::{check::CheckDisplay, Operation, RcValue},
 	display::hex,
-	error::{Error, Result},
+	error::{try_io, Error, Result},
 	index::{Address, IndexTable, PlanOutcome, TableId as IndexTableId},
 	log::{Log, LogAction, LogOverlays, LogQuery, LogReader, LogWriter},
 	options::{ColumnOptions, Metadata, Options, DEFAULT_COMPRESSION_THRESHOLD},
@@ -20,6 +20,7 @@ use crate::{
 };
 use std::{
 	collections::VecDeque,
+	path::PathBuf,
 	sync::{
 		atomic::{AtomicU64, Ordering},
 		Arc,
@@ -94,7 +95,7 @@ pub struct HashColumn {
 	col: ColId,
 	tables: RwLock<Tables>,
 	reindex: RwLock<Reindex>,
-	path: std::path::PathBuf,
+	path: PathBuf,
 	preimage: bool,
 	uniform_keys: bool,
 	collect_stats: bool,
@@ -325,7 +326,7 @@ impl Column {
 	}
 
 	fn open_table(
-		path: Arc<std::path::PathBuf>,
+		path: Arc<PathBuf>,
 		col: ColId,
 		tier: u8,
 		options: &ColumnOptions,
@@ -334,6 +335,29 @@ impl Column {
 		let id = ValueTableId::new(col, tier);
 		let entry_size = SIZES.get(tier as usize).cloned();
 		ValueTable::open(path, id, entry_size, options, db_version)
+	}
+
+	pub(crate) fn drop_files(column: ColId, path: PathBuf) -> Result<()> {
+		// It is not specified how read_dir behaves when deleting and iterating in the same loop
+		// We collect a list of paths to be deleted first.
+		let mut to_delete = Vec::new();
+		for entry in try_io!(std::fs::read_dir(&path)) {
+			let entry = try_io!(entry);
+			if let Some(file) = entry.path().file_name().and_then(|f| f.to_str()) {
+				if crate::index::TableId::is_file_name(column, file) ||
+					crate::table::TableId::is_file_name(column, file)
+				{
+					to_delete.push(PathBuf::from(file));
+				}
+			}
+		}
+
+		for file in to_delete {
+			let mut path = path.clone();
+			path.push(file);
+			try_io!(std::fs::remove_file(path));
+		}
+		Ok(())
 	}
 }
 

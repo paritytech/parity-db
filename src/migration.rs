@@ -9,7 +9,7 @@ use crate::{
 	Error, Result,
 };
 /// Database migration.
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const COMMIT_SIZE: usize = 10240;
 const OVERWRITE_TMP_PATH: &str = "to_revert_overwrite";
@@ -163,33 +163,8 @@ pub fn clear_column(path: &Path, column: ColId) -> Result<()> {
 		return Err(Error::Migration("Invalid column index".into()))
 	}
 
-	// Validate the database by opening. This also makes sure all the logs are enacted,
-	// so that after deleting a column there are no leftover commits that may write to it.
-	let mut options = Options::with_columns(path, meta.columns.len() as u8);
-	options.columns = meta.columns;
-	options.salt = Some(meta.salt);
-	let _db = Db::open(&options)?;
-	drop(_db);
+	crate::column::Column::drop_files(column, path.to_path_buf())?;
 
-	// It is not specified how read_dir behaves when deleting and iterating in the same loop
-	// We collect a list of paths to be deleted first.
-	let mut to_delete = Vec::new();
-	for entry in try_io!(std::fs::read_dir(path)) {
-		let entry = try_io!(entry);
-		if let Some(file) = entry.path().file_name().and_then(|f| f.to_str()) {
-			if crate::index::TableId::is_file_name(column, file) ||
-				crate::table::TableId::is_file_name(column, file)
-			{
-				to_delete.push(PathBuf::from(file));
-			}
-		}
-	}
-
-	for file in to_delete {
-		let mut path = path.to_path_buf();
-		path.push(file);
-		try_io!(std::fs::remove_file(path));
-	}
 	Ok(())
 }
 

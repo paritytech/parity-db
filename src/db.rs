@@ -773,7 +773,7 @@ impl DbInner {
 		Ok(())
 	}
 
-	fn replay_all_logs(&mut self) -> Result<()> {
+	fn replay_all_logs(&self) -> Result<()> {
 		while let Some(id) = self.log.replay_next()? {
 			log::debug!(target: "parity-db", "Replaying database log {}", id);
 			while self.enact_logs(true)? {}
@@ -920,7 +920,7 @@ impl Db {
 
 	fn open_inner(options: &Options, opening_mode: OpeningMode) -> Result<Db> {
 		assert!(options.is_valid());
-		let mut db = DbInner::open(options, opening_mode)?;
+		let db = DbInner::open(options, opening_mode)?;
 		// This needs to be call before log thread: so first reindexing
 		// will run in correct state.
 		if let Err(e) = db.replay_all_logs() {
@@ -1124,21 +1124,67 @@ impl Db {
 		self.inner.stats()
 	}
 
-	/// Add a new column with options specified by `new_column_options`.
-	pub fn add_column(options: &mut Options, new_column_options: ColumnOptions) -> Result<()> {
-		// We open the DB before to check metadata validity and make sure there are no pending WAL
-		// logs.
+	// We open the DB before to check metadata validity and make sure there are no pending WAL
+	// logs.
+	fn precheck_column_operation(options: &mut Options) -> Result<[u8; 32]> {
 		let db = Db::open(options)?;
 		let salt = db.inner.options.salt;
 		drop(db);
+		Ok(salt.expect("`salt` is always `Some` after opening the DB; qed"))
+	}
+
+	/// Add a new column with options specified by `new_column_options`.
+	pub fn add_column(options: &mut Options, new_column_options: ColumnOptions) -> Result<()> {
+		let salt = Self::precheck_column_operation(options)?;
 
 		options.columns.push(new_column_options);
-		options.write_metadata_with_version(
-			&options.path,
-			&salt.expect("`salt` is always `Some` after opening the DB; qed"),
-			Some(CURRENT_VERSION),
-		)?;
+		options.write_metadata_with_version(&options.path, &salt, Some(CURRENT_VERSION))?;
 
+		Ok(())
+	}
+
+	/// Remove last column from the database.
+	/// Db must be close when called.
+	pub fn drop_last_column(options: &mut Options) -> Result<()> {
+		let salt = Self::precheck_column_operation(options)?;
+		let nb_column = options.columns.len();
+		if nb_column == 0 {
+			return Ok(())
+		}
+		let index = options.columns.len() - 1;
+		Self::remove_column_files(options, index as u8)?;
+		options.columns.pop();
+		options.write_metadata(&options.path, &salt)?;
+		Ok(())
+	}
+
+	/// Truncate a column from the database, optionally changing its options.
+	/// Db must be close when called.
+	pub fn reset_column(
+		options: &mut Options,
+		index: u8,
+		new_options: Option<ColumnOptions>,
+	) -> Result<()> {
+		let salt = Self::precheck_column_operation(options)?;
+		Self::remove_column_files(options, index)?;
+
+		if let Some(new_options) = new_options {
+			options.columns[index as usize] = new_options;
+			options.write_metadata(&options.path, &salt)?;
+		}
+
+		Ok(())
+	}
+
+	fn remove_column_files(options: &mut Options, index: u8) -> Result<()> {
+		if index as usize >= options.columns.len() {
+			return Err(Error::IncompatibleColumnConfig {
+				id: index,
+				reason: "Column not found".to_string(),
+			})
+		}
+
+		Column::drop_files(index, options.path.clone())?;
 		Ok(())
 	}
 
@@ -1175,6 +1221,12 @@ impl Db {
 
 impl Drop for Db {
 	fn drop(&mut self) {
+		self.drop_inner()
+	}
+}
+
+impl Db {
+	fn drop_inner(&mut self) {
 		self.inner.shutdown();
 		if let Some(t) = self.log_thread.take() {
 			if let Err(e) = t.join() {
@@ -2621,5 +2673,69 @@ mod tests {
 			assert_eq!(entries, 65);
 			assert_eq!(db.inner.columns[0].index_bits(), Some(17));
 		}
+	}
+
+	#[test]
+	fn test_remove_column() {
+		let tmp = tempdir().unwrap();
+		let db_test_file = EnableCommitPipelineStages::DbFile;
+		let mut options_db_files = db_test_file.options(tmp.path(), 2);
+		options_db_files.salt = Some(options_db_files.salt.unwrap_or_default());
+		let mut options_std = EnableCommitPipelineStages::Standard.options(tmp.path(), 2);
+		options_std.salt = options_db_files.salt.clone();
+
+		let db = Db::open_inner(&options_db_files, OpeningMode::Create).unwrap();
+
+		let payload: Vec<(u8, _, _)> = (0u16..100)
+			.map(|i| (1, i.to_le_bytes().to_vec(), Some(i.to_be_bytes().to_vec())))
+			.collect();
+
+		db.commit(payload.clone()).unwrap();
+
+		db_test_file.run_stages(&db);
+		drop(db);
+
+		let db = Db::open_inner(&options_std, OpeningMode::Write).unwrap();
+		for (col, key, value) in payload.iter() {
+			assert_eq!(db.get(*col, key).unwrap().as_ref(), value.as_ref());
+		}
+		drop(db);
+		Db::reset_column(&mut options_db_files, 1, None).unwrap();
+
+		let db = Db::open_inner(&options_db_files, OpeningMode::Write).unwrap();
+		for (col, key, _value) in payload.iter() {
+			assert_eq!(db.get(*col, key).unwrap(), None);
+		}
+
+		let payload: Vec<(u8, _, _)> = (0u16..10)
+			.map(|i| (1, i.to_le_bytes().to_vec(), Some(i.to_be_bytes().to_vec())))
+			.collect();
+
+		db.commit(payload.clone()).unwrap();
+
+		db_test_file.run_stages(&db);
+		drop(db);
+
+		let db = Db::open_inner(&options_std, OpeningMode::Write).unwrap();
+		let payload: Vec<(u8, _, _)> = (10u16..100)
+			.map(|i| (1, i.to_le_bytes().to_vec(), Some(i.to_be_bytes().to_vec())))
+			.collect();
+
+		db.commit(payload.clone()).unwrap();
+		assert!(db.iter(1).is_err());
+
+		drop(db);
+
+		let mut col_option = options_std.columns[1].clone();
+		col_option.btree_index = true;
+		Db::reset_column(&mut options_std, 1, Some(col_option)).unwrap();
+
+		let db = Db::open_inner(&options_std, OpeningMode::Write).unwrap();
+		let payload: Vec<(u8, _, _)> = (0u16..10)
+			.map(|i| (1, i.to_le_bytes().to_vec(), Some(i.to_be_bytes().to_vec())))
+			.collect();
+
+		db.commit(payload.clone()).unwrap();
+		assert!(db.iter(1).is_ok());
 	}
 }
