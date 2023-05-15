@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog].
 
 ## [Unreleased]
 
+## [v0.4.8] - 2023-05-15
+
+- Support for removing a column [`#210`](https://github.com/paritytech/parity-db/pull/210)
+
 ## [v0.4.7] - 2023-05-02
 
 - Fix find_entry for zero partial key [`#206`](https://github.com/paritytech/parity-db/pull/206)
