@@ -23,9 +23,9 @@ use crate::{
 	column::{hash_key, ColId, Column, IterState, ReindexBatch, ValueIterState},
 	error::{try_io, Error, Result},
 	hash::IdentityBuildHasher,
-	index::PlanOutcome,
+	index::{Address, PlanOutcome},
 	log::{Log, LogAction},
-	multitree::NewNode,
+	multitree::{Children, NewNode, NodeAddress},
 	options::{Options, CURRENT_VERSION},
 	parking_lot::{Condvar, Mutex, RwLock},
 	stats::StatSummary,
@@ -287,6 +287,37 @@ impl DbInner {
 				let l = column.with_locked(|btree| BTreeTable::get(key, &*log, btree))?;
 				Ok(l.map(|v| v.len() as u32))
 			},
+		}
+	}
+
+	fn get_root(&self, col: ColId, key: &[u8]) -> Result<Option<(Vec<u8>, Children)>> {
+		match &self.columns[col as usize] {
+			Column::Hash(column) => {
+				let value = self.get(col, key)?;
+				if let Some(data) = value {
+					return Ok(Some(column.unpack_node_data(data)?))
+				}
+				Ok(None)
+			},
+			Column::Tree(_) => Err(Error::InvalidConfiguration("Not a HashColumn.".to_string())),
+		}
+	}
+
+	fn get_node(
+		&self,
+		col: ColId,
+		node_address: NodeAddress,
+	) -> Result<Option<(Vec<u8>, Children)>> {
+		match &self.columns[col as usize] {
+			Column::Hash(column) => {
+				let log = self.log.overlays();
+				let value = column.get_value(Address::from_u64(node_address), log)?;
+				if let Some(data) = value {
+					return Ok(Some(column.unpack_node_data(data)?))
+				}
+				Ok(None)
+			},
+			Column::Tree(_) => Err(Error::InvalidConfiguration("Not a HashColumn.".to_string())),
 		}
 	}
 
@@ -1017,6 +1048,18 @@ impl Db {
 	/// `btree_indexed`.
 	pub fn iter(&self, col: ColId) -> Result<BTreeIterator> {
 		self.inner.btree_iter(col)
+	}
+
+	pub fn get_root(&self, col: ColId, key: &[u8]) -> Result<Option<(Vec<u8>, Children)>> {
+		self.inner.get_root(col, key)
+	}
+
+	pub fn get_node(
+		&self,
+		col: ColId,
+		node_address: NodeAddress,
+	) -> Result<Option<(Vec<u8>, Children)>> {
+		self.inner.get_node(col, node_address)
 	}
 
 	/// Commit a set of changes to the database.

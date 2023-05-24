@@ -9,7 +9,7 @@ use crate::{
 	error::{try_io, Error, Result},
 	index::{Address, IndexTable, PlanOutcome, TableId as IndexTableId},
 	log::{Log, LogAction, LogOverlays, LogQuery, LogReader, LogWriter},
-	multitree::{NewNode, NodeAddress, NodeRef},
+	multitree::{Children, NewNode, NodeAddress, NodeRef},
 	options::{ColumnOptions, Metadata, Options, DEFAULT_COMPRESSION_THRESHOLD},
 	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 	stats::{ColumnStatSummary, ColumnStats},
@@ -225,6 +225,23 @@ impl HashColumn {
 
 	pub fn get_size(&self, key: &Key, log: &RwLock<LogOverlays>) -> Result<Option<u32>> {
 		self.get(key, log).map(|v| v.map(|v| v.len() as u32))
+	}
+
+	pub fn get_value(&self, address: Address, log: &impl LogQuery) -> Result<Option<Value>> {
+		let tables = self.tables.read();
+		let values = self.as_ref(&tables.value);
+		if let Some((tier, value)) =
+			Column::get_value(TableKeyQuery::Check(&TableKey::NoHash), address, values, log)?
+		{
+			if self.collect_stats {
+				self.stats.query_hit(tier);
+			}
+			return Ok(Some(value))
+		}
+		if self.collect_stats {
+			self.stats.query_miss();
+		}
+		Ok(None)
 	}
 
 	fn get_in_index(
@@ -708,6 +725,28 @@ impl HashColumn {
 
 	fn pack_node_data(&self, data: Vec<u8>, child_data: Vec<u8>, num_children: u8) -> Vec<u8> {
 		[vec![num_children], data, child_data].concat()
+	}
+
+	pub fn unpack_node_data(&self, data: Vec<u8>) -> Result<(Vec<u8>, Children)> {
+		if data.len() == 0 {
+			return Err(Error::InvalidValueData)
+		}
+		let num_children = data[0] as usize;
+		let (_, data) = data.split_at(1);
+		let child_buf_len = num_children * 8;
+		if data.len() < child_buf_len {
+			return Err(Error::InvalidValueData)
+		}
+		let (data, child_buf) = data.split_at(data.len() - child_buf_len);
+
+		let mut children = Children::new();
+		for i in 0..num_children {
+			let node_address =
+				u64::from_le_bytes(child_buf[i * 8..(i + 1) * 8].try_into().unwrap());
+			children.push(node_address);
+		}
+
+		Ok((data.to_vec(), children))
 	}
 
 	pub fn write_insert_tree_plan_immediate(
