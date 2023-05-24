@@ -258,16 +258,35 @@ fn writer(
 }
 
 fn reader(
-	_db: Arc<Db>,
-	_args: Arc<Args>,
-	_chain_generator: Arc<ChainGenerator>,
-	_index: u64,
+	db: Arc<Db>,
+	args: Arc<Args>,
+	chain_generator: Arc<ChainGenerator>,
+	index: u64,
 	shutdown: Arc<AtomicBool>,
 ) {
-	// Query random keys while writing
-	/* let seed = args.seed.unwrap_or(0);
-	let mut rng = rand::rngs::SmallRng::seed_from_u64(seed + index); */
-	while !shutdown.load(Ordering::Relaxed) {}
+	// Query random values while writing
+	let offset = args.seed.unwrap_or(0);
+	let mut rng = rand::rngs::SmallRng::seed_from_u64(offset + index);
+
+	while !shutdown.load(Ordering::Relaxed) {
+		let commits = COMMITS.load(Ordering::Relaxed) as u64;
+		if commits == 0 {
+			continue
+		}
+
+		let root_seed = rng.next_u64() % commits + offset;
+
+		let (generated_node_data, generated_children) = chain_generator.generate_node(root_seed, 0);
+
+		let key = chain_generator.key(root_seed);
+		match db.get_root(0, &key).unwrap() {
+			Some((db_node_data, db_children)) => {
+				assert_eq!(generated_node_data, db_node_data);
+			},
+			None => {
+			},
+		}
+	}
 }
 
 fn iter(_db: Arc<Db>, shutdown: Arc<AtomicBool>) {
