@@ -383,13 +383,19 @@ pub mod commit_overlay {
 			BTreeChangeSet { col, changes: Default::default() }
 		}
 
-		pub fn push(&mut self, change: Operation<Value, Value>) {
+		pub fn push(&mut self, change: Operation<Value, Value>) -> Result<()> {
 			// No key hashing
 			self.changes.push(match change {
 				Operation::Set(k, v) => Operation::Set(k.into(), v.into()),
 				Operation::Dereference(k) => Operation::Dereference(k.into()),
 				Operation::Reference(k) => Operation::Reference(k.into()),
+				Operation::InsertTree(..) | Operation::RemoveTree(..) =>
+					return Err(Error::InvalidInput(format!(
+						"Invalid operation for column {}",
+						self.col
+					))),
 			});
+			Ok(())
 		}
 
 		pub fn copy_to_overlay(
@@ -426,6 +432,11 @@ pub mod commit_overlay {
 							)))
 						}
 					},
+					Operation::InsertTree(..) | Operation::RemoveTree(..) =>
+						return Err(Error::InvalidInput(format!(
+							"Invalid operation for column {}",
+							self.col
+						))),
 				}
 			}
 			Ok(())

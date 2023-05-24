@@ -14,6 +14,7 @@ mod hash;
 mod index;
 mod log;
 mod migration;
+mod multitree;
 mod options;
 mod parking_lot;
 mod stats;
@@ -27,6 +28,7 @@ pub use db::{check::CheckOptions, Db, Operation, Value};
 pub use error::set_number_of_allowed_io_operations;
 pub use error::{Error, Result};
 pub use migration::{clear_column, migrate};
+pub use multitree::{Children, NewNode, NodeAddress, NodeRef};
 pub use options::{ColumnOptions, Options};
 pub use stats::{ColumnStatSummary, StatSummary};
 

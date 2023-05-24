@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 
 mod bench;
+mod multitree_bench;
 
 /// Command line admin client entry point.
 /// Uses default column definition.
@@ -127,6 +128,30 @@ pub fn run() -> Result<(), String> {
 			let db = parity_db::Db::open_or_create(&db_options).unwrap();
 			bench::run_internal(args, db);
 		},
+		SubCommand::MultiTreeStress(bench) => {
+			let args = bench.get_args();
+			// avoid deleting folders by mistake.
+			options.path.push("test_db_multitree_stress");
+			if options.path.exists() && !args.append {
+				std::fs::remove_dir_all(options.path.as_path())
+					.map_err(|e| format!("Error clearing stress db: {e:?}"))?;
+			}
+
+			let mut db_options = options.clone();
+
+			for mut c in &mut db_options.columns {
+				c.multitree = true;
+			}
+
+			if args.compress {
+				for mut c in &mut db_options.columns {
+					c.compression = parity_db::CompressionType::Lz4;
+				}
+			}
+
+			let db = parity_db::Db::open_or_create(&db_options).unwrap();
+			multitree_bench::run_internal(args, db);
+		},
 	}
 	Ok(())
 }
@@ -187,6 +212,8 @@ pub enum SubCommand {
 	Check(Check),
 	/// Stress tests.
 	Stress(bench::Stress),
+	/// Multitree stress test.
+	MultiTreeStress(multitree_bench::MultiTreeStress),
 }
 
 impl SubCommand {
@@ -207,6 +234,7 @@ impl Cli {
 			SubCommand::Flush(flush) => &flush.shared,
 			SubCommand::Check(check) => &check.shared,
 			SubCommand::Stress(bench) => &bench.shared,
+			SubCommand::MultiTreeStress(bench) => &bench.shared,
 		}
 	}
 }

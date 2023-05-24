@@ -65,6 +65,9 @@ pub struct ColumnOptions {
 	/// Column is configured to use Btree storage. Btree columns allow for ordered key iteration
 	/// and key retrieval, but are significantly less performant and require more disk space.
 	pub btree_index: bool,
+	/// Column supports Multitree operations. This allows committing and querying of tree
+	/// structures.
+	pub multitree: bool,
 }
 
 /// Database metadata.
@@ -81,8 +84,13 @@ pub struct Metadata {
 impl ColumnOptions {
 	fn as_string(&self) -> String {
 		format!(
-			"preimage: {}, uniform: {}, refc: {}, compression: {}, ordered: {}",
-			self.preimage, self.uniform, self.ref_counted, self.compression as u8, self.btree_index,
+			"preimage: {}, uniform: {}, refc: {}, compression: {}, ordered: {}, multitree: {}",
+			self.preimage,
+			self.uniform,
+			self.ref_counted,
+			self.compression as u8,
+			self.btree_index,
+			self.multitree,
 		)
 	}
 
@@ -111,6 +119,7 @@ impl ColumnOptions {
 		let ref_counted = vals.get("refc")?.parse().ok()?;
 		let compression: u8 = vals.get("compression").and_then(|c| c.parse().ok()).unwrap_or(0);
 		let btree_index = vals.get("ordered").and_then(|c| c.parse().ok()).unwrap_or(false);
+		let multitree = vals.get("multitree").and_then(|c| c.parse().ok()).unwrap_or(false);
 
 		Some(ColumnOptions {
 			preimage,
@@ -118,6 +127,7 @@ impl ColumnOptions {
 			ref_counted,
 			compression: compression.into(),
 			btree_index,
+			multitree,
 		})
 	}
 }
@@ -130,6 +140,7 @@ impl Default for ColumnOptions {
 			ref_counted: false,
 			compression: CompressionType::NoCompression,
 			btree_index: false,
+			multitree: false,
 		}
 	}
 }

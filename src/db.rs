@@ -25,6 +25,7 @@ use crate::{
 	hash::IdentityBuildHasher,
 	index::PlanOutcome,
 	log::{Log, LogAction},
+	multitree::NewNode,
 	options::{Options, CURRENT_VERSION},
 	parking_lot::{Condvar, Mutex, RwLock},
 	stats::StatSummary,
@@ -138,6 +139,7 @@ struct DbInner {
 	log: Log,
 	commit_queue: Mutex<CommitQueue>,
 	commit_queue_full_cv: Condvar,
+	log_writer_mutex: Mutex<bool>,
 	log_worker_wait: WaitCondvar<bool>,
 	commit_worker_wait: Arc<WaitCondvar<bool>>,
 	// Overlay of most recent values in the commit queue.
@@ -222,6 +224,7 @@ impl DbInner {
 			log,
 			commit_queue: Mutex::new(Default::default()),
 			commit_queue_full_cv: Condvar::new(),
+			log_writer_mutex: Mutex::new(false),
 			log_worker_wait: WaitCondvar::new(),
 			commit_worker_wait: Arc::new(WaitCondvar::new()),
 			commit_overlay: RwLock::new(commit_overlay),
@@ -327,13 +330,38 @@ impl DbInner {
 					.btree_indexed
 					.entry(col)
 					.or_insert_with(|| BTreeChangeSet::new(col))
-					.push(change)
+					.push(change)?
+			} else if self.options.columns[col as usize].multitree {
+				let _log_writer = self.log_writer_mutex.lock();
+				let mut bytes = 0;
+
+				match &self.columns[col as usize] {
+					Column::Hash(column) => {
+						if let Some(operation) = column
+							.write_insert_tree_plan_immediate(change, &self.log, &mut bytes)?
+						{
+							commit
+								.indexed
+								.entry(col)
+								.or_insert_with(|| IndexedChangeSet::new(col))
+								.push(operation, &self.options, self.db_version)?
+						}
+					},
+					Column::Tree(_) =>
+						return Err(Error::InvalidConfiguration("Not a HashColumn".to_string())),
+				}
+
+				if bytes > 0 {
+					let mut logged_bytes = self.log_queue_wait.work.lock();
+					*logged_bytes += bytes as i64;
+					self.flush_worker_wait.signal();
+				}
 			} else {
 				commit.indexed.entry(col).or_insert_with(|| IndexedChangeSet::new(col)).push(
 					change,
 					&self.options,
 					self.db_version,
-				)
+				)?
 			}
 		}
 
@@ -1360,6 +1388,12 @@ pub enum Operation<Key, Value> {
 	/// Increment the reference count counter of an existing value for a given key.
 	/// If no value exists for the key, this operation is skipped.
 	Reference(Key),
+
+	/// Insert a new tree into a MultiTree column using root key and node structure.
+	InsertTree(Key, NewNode),
+
+	/// Remove an existing tree (at root Key) from a MultiTree column.
+	RemoveTree(Key),
 }
 
 impl<Key: Ord, Value: Eq> PartialOrd<Self> for Operation<Key, Value> {
@@ -1377,13 +1411,21 @@ impl<Key: Ord, Value: Eq> Ord for Operation<Key, Value> {
 impl<Key, Value> Operation<Key, Value> {
 	pub fn key(&self) -> &Key {
 		match self {
-			Operation::Set(k, _) | Operation::Dereference(k) | Operation::Reference(k) => k,
+			Operation::Set(k, _) |
+			Operation::Dereference(k) |
+			Operation::Reference(k) |
+			Operation::InsertTree(k, _) |
+			Operation::RemoveTree(k) => k,
 		}
 	}
 
 	pub fn into_key(self) -> Key {
 		match self {
-			Operation::Set(k, _) | Operation::Dereference(k) | Operation::Reference(k) => k,
+			Operation::Set(k, _) |
+			Operation::Dereference(k) |
+			Operation::Reference(k) |
+			Operation::InsertTree(k, _) |
+			Operation::RemoveTree(k) => k,
 		}
 	}
 }
@@ -1394,6 +1436,8 @@ impl<K: AsRef<[u8]>, Value> Operation<K, Value> {
 			Operation::Set(k, v) => Operation::Set(k.as_ref().to_vec(), v),
 			Operation::Dereference(k) => Operation::Dereference(k.as_ref().to_vec()),
 			Operation::Reference(k) => Operation::Reference(k.as_ref().to_vec()),
+			Operation::InsertTree(k, n) => Operation::InsertTree(k.as_ref().to_vec(), n),
+			Operation::RemoveTree(k) => Operation::RemoveTree(k.as_ref().to_vec()),
 		}
 	}
 }
@@ -1420,7 +1464,7 @@ impl IndexedChangeSet {
 		change: Operation<K, Vec<u8>>,
 		options: &Options,
 		db_version: u32,
-	) {
+	) -> Result<()> {
 		let salt = options.salt.unwrap_or_default();
 		let hash_key = |key: &[u8]| -> Key {
 			hash_key(key, &salt, options.columns[self.col as usize].uniform, db_version)
@@ -1430,7 +1474,14 @@ impl IndexedChangeSet {
 			Operation::Set(k, v) => Operation::Set(hash_key(k.as_ref()), v.into()),
 			Operation::Dereference(k) => Operation::Dereference(hash_key(k.as_ref())),
 			Operation::Reference(k) => Operation::Reference(hash_key(k.as_ref())),
-		})
+			Operation::InsertTree(..) | Operation::RemoveTree(..) =>
+				return Err(Error::InvalidInput(format!(
+					"Invalid operation for column {}",
+					self.col
+				))),
+		});
+
+		Ok(())
 	}
 
 	fn push_change_hashed(&mut self, change: Operation<Key, RcValue>) {
@@ -1465,6 +1516,11 @@ impl IndexedChangeSet {
 						return Err(Error::InvalidInput(format!("No Rc for column {}", self.col)))
 					}
 				},
+				Operation::InsertTree(..) | Operation::RemoveTree(..) =>
+					return Err(Error::InvalidInput(format!(
+						"Invalid operation for column {}",
+						self.col
+					))),
 			}
 		}
 		Ok(())
@@ -1505,7 +1561,9 @@ impl IndexedChangeSet {
 						}
 					}
 				},
-				Operation::Reference(..) => (),
+				Operation::Reference(..) |
+				Operation::InsertTree(..) |
+				Operation::RemoveTree(..) => (),
 			}
 		}
 	}

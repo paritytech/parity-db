@@ -9,6 +9,7 @@ use crate::{
 	error::{try_io, Error, Result},
 	index::{Address, IndexTable, PlanOutcome, TableId as IndexTableId},
 	log::{Log, LogAction, LogOverlays, LogQuery, LogReader, LogWriter},
+	multitree::{NewNode, NodeAddress, NodeRef},
 	options::{ColumnOptions, Metadata, Options, DEFAULT_COMPRESSION_THRESHOLD},
 	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 	stats::{ColumnStatSummary, ColumnStats},
@@ -589,6 +590,8 @@ impl HashColumn {
 					}
 					Ok(PlanOutcome::Skipped)
 				},
+				Operation::InsertTree(..) | Operation::RemoveTree(..) =>
+					Err(Error::InvalidConfiguration("Unsupported operation on hash column".into())),
 			}
 		}
 	}
@@ -661,6 +664,85 @@ impl HashColumn {
 			outcome = PlanOutcome::NeedReindex;
 		}
 		Ok((outcome, tables, reindex))
+	}
+
+	fn write_children(
+		&self,
+		children: Vec<NodeRef>,
+		tables: TablesRef,
+		writer: &mut LogWriter,
+	) -> Result<Vec<u8>> {
+		let mut data = Vec::new();
+		for child in children {
+			let address = match child {
+				NodeRef::New(node) => self.write_node(node, tables, writer)?,
+				NodeRef::Existing(address) => address,
+			};
+			let mut data_buf = [0u8; 8];
+			data_buf.copy_from_slice(&address.to_le_bytes());
+			data.append(&mut data_buf.to_vec());
+		}
+		Ok(data)
+	}
+
+	fn write_node(
+		&self,
+		node: NewNode,
+		tables: TablesRef,
+		writer: &mut LogWriter,
+	) -> Result<NodeAddress> {
+		let num_children = node.children.len();
+		let data = self.pack_node_data(
+			node.data,
+			self.write_children(node.children, tables, writer)?,
+			num_children as u8,
+		);
+
+		let stats = self.collect_stats.then_some(&self.stats);
+		let table_key = TableKey::NoHash;
+		let address =
+			Column::write_new_value_plan(&table_key, tables, data.as_ref(), writer, stats)?;
+
+		Ok(address.as_u64())
+	}
+
+	fn pack_node_data(&self, data: Vec<u8>, child_data: Vec<u8>, num_children: u8) -> Vec<u8> {
+		[vec![num_children], data, child_data].concat()
+	}
+
+	pub fn write_insert_tree_plan_immediate(
+		&self,
+		change: Operation<Value, Value>,
+		log: &Log,
+		bytes: &mut u64,
+	) -> Result<Option<Operation<Vec<u8>, Vec<u8>>>> {
+		match change {
+			Operation::InsertTree(key, node) => {
+				let mut writer = log.begin_record();
+				let tables = self.tables.upgradable_read();
+
+				let num_children = node.children.len();
+				let data = self.pack_node_data(
+					node.data,
+					self.write_children(node.children, self.as_ref(&tables.value), &mut writer)?,
+					num_children as u8,
+				);
+
+				self.complete_plan(&mut writer)?;
+
+				let l = writer.drain();
+				*bytes += log.end_record(l)?;
+
+				return Ok(Some(Operation::Set(key, data)))
+			},
+			Operation::RemoveTree(_key) =>
+				return Err(Error::InvalidInput(format!("RemoveTree not implemented yet"))),
+			_ =>
+				return Err(Error::InvalidInput(format!(
+					"Invalid operation for column {}",
+					self.col
+				))),
+		}
 	}
 
 	pub fn enact_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
@@ -1205,6 +1287,8 @@ impl Column {
 					Ok((Some(PlanOutcome::Written), None))
 				}
 			},
+			Operation::InsertTree(..) | Operation::RemoveTree(..) =>
+				Err(Error::InvalidInput(format!("Invalid operation for column {}", tables.col))),
 		}
 	}
 
