@@ -20,6 +20,8 @@ use std::{
 
 static COMMITS: AtomicUsize = AtomicUsize::new(0);
 static NEXT_COMMIT: AtomicUsize = AtomicUsize::new(0);
+static QUERIES: AtomicUsize = AtomicUsize::new(0);
+static ITERATIONS: AtomicUsize = AtomicUsize::new(0);
 
 /// Stress tests (warning erase db first).
 #[derive(Debug, clap::Parser)]
@@ -275,15 +277,45 @@ fn reader(
 		}
 
 		let root_seed = rng.next_u64() % commits + offset;
+		let mut depth = 0;
 
-		let (generated_node_data, generated_children) = chain_generator.generate_node(root_seed, 0);
+		let (gen_node_data, gen_children) = chain_generator.generate_node(root_seed, depth);
 
 		let key = chain_generator.key(root_seed);
 		match db.get_root(0, &key).unwrap() {
 			Some((db_node_data, db_children)) => {
-				assert_eq!(generated_node_data, db_node_data);
+				assert_eq!(gen_node_data, db_node_data);
+				assert_eq!(gen_children.len(), db_children.len());
+
+				let mut generated_children = gen_children;
+				let mut database_children = db_children;
+
+				while generated_children.len() > 0 {
+					let child_index = rng.next_u64() % generated_children.len() as u64;
+					let child_seed = generated_children[child_index as usize];
+					let child_address = database_children[child_index as usize];
+					depth += 1;
+
+					let (gen_node_data, gen_children) =
+						chain_generator.generate_node(child_seed, depth);
+					match db.get_node(0, child_address).unwrap() {
+						Some((db_node_data, db_children)) => {
+							assert_eq!(gen_node_data, db_node_data);
+							assert_eq!(gen_children.len(), db_children.len());
+
+							generated_children = gen_children;
+							database_children = db_children;
+						},
+						None => {
+							assert!(false);
+						},
+					}
+				}
+
+				QUERIES.fetch_add(1, Ordering::SeqCst);
 			},
 			None => {
+				assert!(false);
 			},
 		}
 	}
@@ -373,5 +405,15 @@ pub fn run_internal(args: Args, db: Db) {
 	let commits = commits - start_commit;
 	let elapsed_time = start_time.elapsed().as_secs_f64();
 
-	println!("Completed {} commits in {} seconds.", commits, elapsed_time);
+	let queries = QUERIES.load(Ordering::SeqCst);
+	let iterations = ITERATIONS.load(Ordering::SeqCst);
+
+	println!(
+		"Completed {} commits in {} seconds. {} cps. {} queries, {} iterations",
+		commits,
+		elapsed_time,
+		commits as f64 / elapsed_time,
+		queries,
+		iterations
+	);
 }
