@@ -142,6 +142,20 @@ fn file_size(index_bits: u8) -> u64 {
 	total_entries(index_bits) * 8 + META_SIZE as u64
 }
 
+#[cfg(unix)]
+fn madvise_random(id: TableId, map: &mut memmap2::MmapMut) {
+	unsafe {
+		libc::madvise(
+			map.as_mut_ptr() as _,
+			file_size(id.index_bits()) as usize,
+			libc::MADV_RANDOM,
+		);
+	}
+}
+
+#[cfg(not(unix))]
+fn madvise_random(_id: TableId, _map: &mut memmap2::MmapMut) {}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct TableId(u16);
 
@@ -201,7 +215,8 @@ impl IndexTable {
 		};
 
 		try_io!(file.set_len(file_size(id.index_bits())));
-		let map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
+		let mut map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
+		madvise_random(id, &mut map);
 		log::debug!(target: "parity-db", "Opened existing index {}", id);
 		Ok(Some(IndexTable { id, path, map: RwLock::new(Some(map)) }))
 	}
@@ -547,10 +562,9 @@ impl IndexTable {
 				.create_new(true)
 				.open(self.path.as_path()));
 			log::debug!(target: "parity-db", "Created new index {}", self.id);
-			//TODO: check for potential overflows on 32-bit platforms
 			try_io!(file.set_len(file_size(self.id.index_bits())));
 			let mut mmap = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
-			self.madvise_random(&mut mmap);
+			madvise_random(self.id, &mut mmap);
 			*wmap = Some(mmap);
 			map = RwLockWriteGuard::downgrade_to_upgradable(wmap);
 		}
@@ -620,20 +634,6 @@ impl IndexTable {
 		}
 		Ok(())
 	}
-
-	#[cfg(unix)]
-	fn madvise_random(&self, map: &mut memmap2::MmapMut) {
-		unsafe {
-			libc::madvise(
-				map.as_mut_ptr() as _,
-				file_size(self.id.index_bits()) as usize,
-				libc::MADV_RANDOM,
-			);
-		}
-	}
-
-	#[cfg(not(unix))]
-	fn madvise_random(&self, _map: &mut memmap2::MmapMut) {}
 }
 
 #[cfg(test)]
