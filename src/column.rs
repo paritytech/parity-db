@@ -379,6 +379,31 @@ impl Column {
 	}
 }
 
+pub fn pack_node_data(data: Vec<u8>, child_data: Vec<u8>, num_children: u8) -> Vec<u8> {
+	[vec![num_children], data, child_data].concat()
+}
+
+pub fn unpack_node_data(data: Vec<u8>) -> Result<(Vec<u8>, Children)> {
+	if data.len() == 0 {
+		return Err(Error::InvalidValueData)
+	}
+	let num_children = data[0] as usize;
+	let (_, data) = data.split_at(1);
+	let child_buf_len = num_children * 8;
+	if data.len() < child_buf_len {
+		return Err(Error::InvalidValueData)
+	}
+	let (data, child_buf) = data.split_at(data.len() - child_buf_len);
+
+	let mut children = Children::new();
+	for i in 0..num_children {
+		let node_address = u64::from_le_bytes(child_buf[i * 8..(i + 1) * 8].try_into().unwrap());
+		children.push(node_address);
+	}
+
+	Ok((data.to_vec(), children))
+}
+
 impl HashColumn {
 	fn open(
 		col: ColId,
@@ -709,7 +734,7 @@ impl HashColumn {
 		writer: &mut LogWriter,
 	) -> Result<NodeAddress> {
 		let num_children = node.children.len();
-		let data = self.pack_node_data(
+		let data = pack_node_data(
 			node.data,
 			self.write_children(node.children, tables, writer)?,
 			num_children as u8,
@@ -721,32 +746,6 @@ impl HashColumn {
 			Column::write_new_value_plan(&table_key, tables, data.as_ref(), writer, stats)?;
 
 		Ok(address.as_u64())
-	}
-
-	fn pack_node_data(&self, data: Vec<u8>, child_data: Vec<u8>, num_children: u8) -> Vec<u8> {
-		[vec![num_children], data, child_data].concat()
-	}
-
-	pub fn unpack_node_data(&self, data: Vec<u8>) -> Result<(Vec<u8>, Children)> {
-		if data.len() == 0 {
-			return Err(Error::InvalidValueData)
-		}
-		let num_children = data[0] as usize;
-		let (_, data) = data.split_at(1);
-		let child_buf_len = num_children * 8;
-		if data.len() < child_buf_len {
-			return Err(Error::InvalidValueData)
-		}
-		let (data, child_buf) = data.split_at(data.len() - child_buf_len);
-
-		let mut children = Children::new();
-		for i in 0..num_children {
-			let node_address =
-				u64::from_le_bytes(child_buf[i * 8..(i + 1) * 8].try_into().unwrap());
-			children.push(node_address);
-		}
-
-		Ok((data.to_vec(), children))
 	}
 
 	pub fn write_insert_tree_plan_immediate(
@@ -761,7 +760,7 @@ impl HashColumn {
 				let tables = self.tables.upgradable_read();
 
 				let num_children = node.children.len();
-				let data = self.pack_node_data(
+				let data = pack_node_data(
 					node.data,
 					self.write_children(node.children, self.as_ref(&tables.value), &mut writer)?,
 					num_children as u8,

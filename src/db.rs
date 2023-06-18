@@ -20,14 +20,14 @@
 
 use crate::{
 	btree::{commit_overlay::BTreeChangeSet, BTreeIterator, BTreeTable},
-	column::{hash_key, ColId, Column, IterState, ReindexBatch, ValueIterState},
+	column::{hash_key, unpack_node_data, ColId, Column, IterState, ReindexBatch, ValueIterState},
 	error::{try_io, Error, Result},
 	hash::IdentityBuildHasher,
 	index::{Address, PlanOutcome},
 	log::{Log, LogAction},
 	multitree::{Children, NewNode, NodeAddress},
 	options::{Options, CURRENT_VERSION},
-	parking_lot::{Condvar, Mutex, RwLock},
+	parking_lot::{Condvar, Mutex, RwLock, RwLockUpgradableReadGuard},
 	stats::StatSummary,
 	ColumnOptions, Key,
 };
@@ -38,7 +38,7 @@ use std::{
 	ops::Bound,
 	sync::{
 		atomic::{AtomicBool, AtomicU64, Ordering},
-		Arc,
+		Arc, Weak,
 	},
 	thread,
 };
@@ -132,6 +132,11 @@ struct CommitQueue {
 }
 
 #[derive(Debug)]
+struct Trees {
+	readers: HashMap<Key, Weak<TreeReader>, IdentityBuildHasher>,
+}
+
+#[derive(Debug)]
 struct DbInner {
 	columns: Vec<Column>,
 	options: Options,
@@ -144,6 +149,7 @@ struct DbInner {
 	commit_worker_wait: Arc<WaitCondvar<bool>>,
 	// Overlay of most recent values in the commit queue.
 	commit_overlay: RwLock<Vec<CommitOverlay>>,
+	trees: RwLock<HashMap<ColId, Trees>>,
 	// This may underflow occasionally, but is bound for 0 eventually.
 	log_queue_wait: WaitCondvar<i64>,
 	flush_worker_wait: Arc<WaitCondvar<bool>>,
@@ -228,6 +234,7 @@ impl DbInner {
 			log_worker_wait: WaitCondvar::new(),
 			commit_worker_wait: Arc::new(WaitCondvar::new()),
 			commit_overlay: RwLock::new(commit_overlay),
+			trees: RwLock::new(Default::default()),
 			log_queue_wait: WaitCondvar::new(),
 			flush_worker_wait: Arc::new(WaitCondvar::new()),
 			cleanup_worker_wait: WaitCondvar::new(),
@@ -290,18 +297,18 @@ impl DbInner {
 		}
 	}
 
-	fn get_root(&self, col: ColId, key: &[u8]) -> Result<Option<(Vec<u8>, Children)>> {
+	/* fn get_root(&self, col: ColId, key: &[u8]) -> Result<Option<(Vec<u8>, Children)>> {
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
 				let value = self.get(col, key)?;
 				if let Some(data) = value {
-					return Ok(Some(column.unpack_node_data(data)?))
+					return Ok(Some(unpack_node_data(data)?))
 				}
 				Ok(None)
 			},
 			Column::Tree(_) => Err(Error::InvalidConfiguration("Not a HashColumn.".to_string())),
 		}
-	}
+	} */
 
 	fn get_node(
 		&self,
@@ -313,9 +320,52 @@ impl DbInner {
 				let log = self.log.overlays();
 				let value = column.get_value(Address::from_u64(node_address), log)?;
 				if let Some(data) = value {
-					return Ok(Some(column.unpack_node_data(data)?))
+					return Ok(Some(unpack_node_data(data)?))
 				}
 				Ok(None)
+			},
+			Column::Tree(_) => Err(Error::InvalidConfiguration("Not a HashColumn.".to_string())),
+		}
+	}
+
+	fn get_tree(
+		&self,
+		db: &Arc<DbInner>,
+		col: ColId,
+		key: &[u8],
+	) -> Result<Option<Arc<TreeReader>>> {
+		match &self.columns[col as usize] {
+			Column::Hash(column) => {
+				let key = column.hash_key(key);
+
+				let trees = self.trees.upgradable_read();
+
+				if let Some(column_trees) = trees.get(&col) {
+					if let Some(reader) = column_trees.readers.get(&key) {
+						if let Some(reader) = reader.upgrade() {
+							return Ok(Some(reader))
+						}
+					}
+				}
+
+				// Does the tree actually exist?
+				/* let value = self.get(col, key)?;
+				if let Some(data) = value {
+					return Ok(Some(unpack_node_data(data)?))
+				} */
+
+				// Didn't manage to use an existing TreeReader so will need to change trees, hence
+				// upgrade lock.
+				let mut trees = RwLockUpgradableReadGuard::upgrade(trees);
+
+				let column_trees =
+					trees.entry(col).or_insert_with(|| Trees { readers: Default::default() });
+				let reader = Arc::new(TreeReader { db: db.clone(), col, key });
+				column_trees.readers.insert(key, Arc::downgrade(&reader));
+
+				//RwLockWriteGuard::downgrade_to_upgradable(trees);
+
+				Ok(Some(reader))
 			},
 			Column::Tree(_) => Err(Error::InvalidConfiguration("Not a HashColumn.".to_string())),
 		}
@@ -1050,16 +1100,8 @@ impl Db {
 		self.inner.btree_iter(col)
 	}
 
-	pub fn get_root(&self, col: ColId, key: &[u8]) -> Result<Option<(Vec<u8>, Children)>> {
-		self.inner.get_root(col, key)
-	}
-
-	pub fn get_node(
-		&self,
-		col: ColId,
-		node_address: NodeAddress,
-	) -> Result<Option<(Vec<u8>, Children)>> {
-		self.inner.get_node(col, node_address)
+	pub fn get_tree(&self, col: ColId, key: &[u8]) -> Result<Option<Arc<TreeReader>>> {
+		self.inner.get_tree(&self.inner, col, key)
 	}
 
 	/// Commit a set of changes to the database.
@@ -1322,6 +1364,48 @@ impl Db {
 		if let Err(e) = self.inner.kill_logs() {
 			log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
 		}
+	}
+}
+
+pub struct TreeReader {
+	db: Arc<DbInner>,
+	col: ColId,
+	key: Key,
+}
+
+impl TreeReader {
+	pub fn get_root(&self) -> Result<Option<(Vec<u8>, Children)>> {
+		/* let value = self.db.get(self.col, &self.key)?;
+		if let Some(data) = value {
+			return unpack_node_data(data).map(|x| Some(x))
+		}
+		Err(Error::InvalidValueData) */
+
+		match &self.db.columns[self.col as usize] {
+			Column::Hash(column) => {
+				let overlay = self.db.commit_overlay.read();
+				// Check commit overlay first
+				let value = if let Some(v) =
+					overlay.get(self.col as usize).and_then(|o| o.get(&self.key))
+				{
+					Ok(v.map(|i| i.value().clone()))
+				} else {
+					// Go into tables and log overlay.
+					let log = self.db.log.overlays();
+					column.get(&self.key, log)
+				}?;
+
+				if let Some(data) = value {
+					return unpack_node_data(data).map(|x| Some(x))
+				}
+			},
+			Column::Tree(..) => {},
+		};
+		Err(Error::InvalidValueData)
+	}
+
+	pub fn get_node(&self, node_address: NodeAddress) -> Result<Option<(Vec<u8>, Children)>> {
+		self.db.get_node(self.col, node_address)
 	}
 }
 

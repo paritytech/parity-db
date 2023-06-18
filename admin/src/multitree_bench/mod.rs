@@ -5,7 +5,7 @@ use super::*;
 
 mod data;
 
-pub use parity_db::{CompressionType, Db, Key, Value};
+pub use parity_db::{CompressionType, Db, Key, TreeReader, Value};
 use parity_db::{NewNode, NodeRef, Operation};
 
 use rand::{RngCore, SeedableRng};
@@ -282,37 +282,42 @@ fn reader(
 		let (gen_node_data, gen_children) = chain_generator.generate_node(root_seed, depth);
 
 		let key = chain_generator.key(root_seed);
-		match db.get_root(0, &key).unwrap() {
-			Some((db_node_data, db_children)) => {
-				assert_eq!(gen_node_data, db_node_data);
-				assert_eq!(gen_children.len(), db_children.len());
+		match db.get_tree(0, &key).unwrap() {
+			Some(reader) => match reader.get_root().unwrap() {
+				Some((db_node_data, db_children)) => {
+					assert_eq!(gen_node_data, db_node_data);
+					assert_eq!(gen_children.len(), db_children.len());
 
-				let mut generated_children = gen_children;
-				let mut database_children = db_children;
+					let mut generated_children = gen_children;
+					let mut database_children = db_children;
 
-				while generated_children.len() > 0 {
-					let child_index = rng.next_u64() % generated_children.len() as u64;
-					let child_seed = generated_children[child_index as usize];
-					let child_address = database_children[child_index as usize];
-					depth += 1;
+					while generated_children.len() > 0 {
+						let child_index = rng.next_u64() % generated_children.len() as u64;
+						let child_seed = generated_children[child_index as usize];
+						let child_address = database_children[child_index as usize];
+						depth += 1;
 
-					let (gen_node_data, gen_children) =
-						chain_generator.generate_node(child_seed, depth);
-					match db.get_node(0, child_address).unwrap() {
-						Some((db_node_data, db_children)) => {
-							assert_eq!(gen_node_data, db_node_data);
-							assert_eq!(gen_children.len(), db_children.len());
+						let (gen_node_data, gen_children) =
+							chain_generator.generate_node(child_seed, depth);
+						match reader.get_node(child_address).unwrap() {
+							Some((db_node_data, db_children)) => {
+								assert_eq!(gen_node_data, db_node_data);
+								assert_eq!(gen_children.len(), db_children.len());
 
-							generated_children = gen_children;
-							database_children = db_children;
-						},
-						None => {
-							assert!(false);
-						},
+								generated_children = gen_children;
+								database_children = db_children;
+							},
+							None => {
+								assert!(false);
+							},
+						}
 					}
-				}
 
-				QUERIES.fetch_add(1, Ordering::SeqCst);
+					QUERIES.fetch_add(1, Ordering::SeqCst);
+				},
+				None => {
+					assert!(false);
+				},
 			},
 			None => {
 				assert!(false);
@@ -325,7 +330,7 @@ fn iter_children(
 	depth: u32,
 	generated_children: &mut Vec<u64>,
 	database_children: &mut Vec<u64>,
-	db: &Db,
+	reader: &Arc<TreeReader>,
 	chain_generator: &ChainGenerator,
 ) {
 	for i in 0..generated_children.len() {
@@ -335,12 +340,18 @@ fn iter_children(
 
 		let (gen_node_data, mut gen_children) =
 			chain_generator.generate_node(child_seed, depth + 1);
-		match db.get_node(0, child_address).unwrap() {
+		match reader.get_node(child_address).unwrap() {
 			Some((db_node_data, mut db_children)) => {
 				assert_eq!(gen_node_data, db_node_data);
 				assert_eq!(gen_children.len(), db_children.len());
 
-				iter_children(depth + 1, &mut gen_children, &mut db_children, db, chain_generator);
+				iter_children(
+					depth + 1,
+					&mut gen_children,
+					&mut db_children,
+					reader,
+					chain_generator,
+				);
 			},
 			None => {
 				assert!(false);
@@ -372,24 +383,31 @@ fn iter(
 		let (gen_node_data, gen_children) = chain_generator.generate_node(root_seed, depth);
 
 		let key = chain_generator.key(root_seed);
-		match db.get_root(0, &key).unwrap() {
-			Some((db_node_data, db_children)) => {
-				assert_eq!(gen_node_data, db_node_data);
-				assert_eq!(gen_children.len(), db_children.len());
+		match db.get_tree(0, &key).unwrap() {
+			Some(reader) => {
+				match reader.get_root().unwrap() {
+					Some((db_node_data, db_children)) => {
+						assert_eq!(gen_node_data, db_node_data);
+						assert_eq!(gen_children.len(), db_children.len());
 
-				// Iterate over all children recursively in depth first order.
-				let mut generated_children = gen_children;
-				let mut database_children = db_children;
+						// Iterate over all children recursively in depth first order.
+						let mut generated_children = gen_children;
+						let mut database_children = db_children;
 
-				iter_children(
-					depth,
-					&mut generated_children,
-					&mut database_children,
-					&db,
-					&chain_generator,
-				);
+						iter_children(
+							depth,
+							&mut generated_children,
+							&mut database_children,
+							&reader,
+							&chain_generator,
+						);
 
-				ITERATIONS.fetch_add(1, Ordering::SeqCst);
+						ITERATIONS.fetch_add(1, Ordering::SeqCst);
+					},
+					None => {
+						assert!(false);
+					},
+				}
 			},
 			None => {
 				assert!(false);

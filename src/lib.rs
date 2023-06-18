@@ -23,7 +23,7 @@ mod table;
 pub use btree::BTreeIterator;
 pub use column::{ColId, ValueIterState};
 pub use compress::CompressionType;
-pub use db::{check::CheckOptions, Db, Operation, Value};
+pub use db::{check::CheckOptions, Db, Operation, TreeReader, Value};
 #[cfg(feature = "instrumentation")]
 pub use error::set_number_of_allowed_io_operations;
 pub use error::{Error, Result};
