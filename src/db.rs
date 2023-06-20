@@ -38,7 +38,7 @@ use std::{
 	ops::Bound,
 	sync::{
 		atomic::{AtomicBool, AtomicU64, Ordering},
-		Arc, Weak,
+		Arc,
 	},
 	thread,
 };
@@ -133,7 +133,7 @@ struct CommitQueue {
 
 #[derive(Debug)]
 struct Trees {
-	readers: HashMap<Key, Weak<TreeReader>, IdentityBuildHasher>,
+	readers: HashMap<Key, Arc<RwLock<TreeReader>>, IdentityBuildHasher>,
 }
 
 #[derive(Debug)]
@@ -333,7 +333,7 @@ impl DbInner {
 		db: &Arc<DbInner>,
 		col: ColId,
 		key: &[u8],
-	) -> Result<Option<Arc<TreeReader>>> {
+	) -> Result<Option<Arc<RwLock<TreeReader>>>> {
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
 				let key = column.hash_key(key);
@@ -342,28 +342,21 @@ impl DbInner {
 
 				if let Some(column_trees) = trees.get(&col) {
 					if let Some(reader) = column_trees.readers.get(&key) {
-						if let Some(reader) = reader.upgrade() {
-							return Ok(Some(reader))
-						}
+						let reader = reader.clone();
+						return Ok(Some(reader))
 					}
 				}
 
-				// Does the tree actually exist?
-				/* let value = self.get(col, key)?;
-				if let Some(data) = value {
-					return Ok(Some(unpack_node_data(data)?))
-				} */
+				// TODO: Check if the tree actually exists
 
-				// Didn't manage to use an existing TreeReader so will need to change trees, hence
-				// upgrade lock.
 				let mut trees = RwLockUpgradableReadGuard::upgrade(trees);
 
 				let column_trees =
 					trees.entry(col).or_insert_with(|| Trees { readers: Default::default() });
-				let reader = Arc::new(TreeReader { db: db.clone(), col, key });
-				column_trees.readers.insert(key, Arc::downgrade(&reader));
 
-				//RwLockWriteGuard::downgrade_to_upgradable(trees);
+				let reader = Arc::new(RwLock::new(TreeReader { db: db.clone(), col, key }));
+
+				column_trees.readers.insert(key, reader.clone());
 
 				Ok(Some(reader))
 			},
@@ -1100,7 +1093,7 @@ impl Db {
 		self.inner.btree_iter(col)
 	}
 
-	pub fn get_tree(&self, col: ColId, key: &[u8]) -> Result<Option<Arc<TreeReader>>> {
+	pub fn get_tree(&self, col: ColId, key: &[u8]) -> Result<Option<Arc<RwLock<TreeReader>>>> {
 		self.inner.get_tree(&self.inner, col, key)
 	}
 
@@ -1367,6 +1360,7 @@ impl Db {
 	}
 }
 
+#[derive(Debug)]
 pub struct TreeReader {
 	db: Arc<DbInner>,
 	col: ColId,
