@@ -54,6 +54,7 @@ use crate::{
 	table::key::{TableKey, TableKeyQuery, PARTIAL_SIZE},
 };
 use std::{
+	collections::BTreeSet,
 	convert::TryInto,
 	io::Read,
 	mem::MaybeUninit,
@@ -126,6 +127,12 @@ impl std::fmt::Display for TableId {
 }
 
 #[derive(Debug)]
+struct FreeEntries {
+	stack: Vec<u64>,
+	ordered: BTreeSet<u64>,
+}
+
+#[derive(Debug)]
 pub struct ValueTable {
 	pub id: TableId,
 	pub entry_size: u16,
@@ -133,6 +140,7 @@ pub struct ValueTable {
 	filled: AtomicU64,
 	last_removed: AtomicU64,
 	dirty_header: AtomicBool,
+	free_entries: Option<RwLock<FreeEntries>>,
 	multipart: bool,
 	ref_counted: bool,
 	db_version: u32,
@@ -403,6 +411,33 @@ impl ValueTable {
 			log::debug!(target: "parity-db", "Opened value table {} with {} entries, entry_size={}, removed={}", id, filled, entry_size, last_removed);
 		}
 
+		let free_entries = if options.multitree {
+			let mut stack: Vec<u64> = Default::default();
+			let mut ordered: BTreeSet<u64> = Default::default();
+
+			let mut next = last_removed;
+			while next != 0 {
+				if next >= filled {
+					return Err(crate::error::Error::Corruption(format!(
+						"Bad removed ref {} out of {}",
+						next, filled
+					)))
+				}
+
+				stack.insert(0, next);
+				ordered.insert(next);
+
+				let mut buf = PartialEntry::new_uninit();
+				file.read_at(buf.as_mut(), next * entry_size as u64)?;
+				buf.skip_size();
+				next = buf.read_next();
+			}
+
+			Some(RwLock::new(FreeEntries { stack, ordered }))
+		} else {
+			None
+		};
+
 		Ok(ValueTable {
 			id,
 			entry_size,
@@ -410,6 +445,7 @@ impl ValueTable {
 			filled: AtomicU64::new(filled),
 			last_removed: AtomicU64::new(last_removed),
 			dirty_header: AtomicBool::new(false),
+			free_entries,
 			multipart,
 			ref_counted: options.ref_counted,
 			db_version,
@@ -675,6 +711,12 @@ impl ValueTable {
 				last_removed,
 			);
 			self.last_removed.store(next_removed, Ordering::Relaxed);
+			if let Some(free_entries) = &self.free_entries {
+				let mut free_entries = free_entries.write();
+				let last = free_entries.stack.pop().unwrap();
+				assert_eq!(last, last_removed);
+				free_entries.ordered.remove(&last_removed);
+			}
 			last_removed
 		} else {
 			log::trace!(
@@ -688,6 +730,40 @@ impl ValueTable {
 		};
 		self.dirty_header.store(true, Ordering::Relaxed);
 		Ok(index)
+	}
+
+	pub fn claim_next_free(&self) -> Result<u64> {
+		match &self.free_entries {
+			Some(free_entries) => {
+				let filled = self.filled.load(Ordering::Relaxed);
+				let last_removed = self.last_removed.load(Ordering::Relaxed);
+				let index = if last_removed != 0 {
+					let mut free_entries = free_entries.write();
+
+					let last = free_entries.stack.pop().unwrap();
+					assert_eq!(last, last_removed);
+					free_entries.ordered.remove(&last_removed);
+
+					let next_removed = *free_entries.stack.last().unwrap_or(&0u64);
+
+					self.last_removed.store(next_removed, Ordering::Relaxed);
+					last_removed
+				} else {
+					self.filled.store(filled + 1, Ordering::Relaxed);
+					filled
+				};
+				self.dirty_header.store(true, Ordering::Relaxed);
+				Ok(index)
+			},
+			None =>
+				return Err(crate::error::Error::InvalidConfiguration(format!(
+					"claim_next_free called without free_entries"
+				))),
+		}
+	}
+
+	pub fn claim_contiguous_entries(&self, num: u64, min_span_length: u64) -> Vec<u64> {
+		Vec::new()
 	}
 
 	fn overwrite_chain(
@@ -807,6 +883,13 @@ impl ValueTable {
 		log.insert_value(self.id, index, buf[0..buf.offset()].to_vec());
 		self.last_removed.store(index, Ordering::Relaxed);
 		self.dirty_header.store(true, Ordering::Relaxed);
+
+		if let Some(free_entries) = &self.free_entries {
+			let mut free_entries = free_entries.write();
+			free_entries.stack.push(index);
+			free_entries.ordered.insert(index);
+		}
+
 		Ok(())
 	}
 
