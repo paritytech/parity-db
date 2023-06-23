@@ -4,7 +4,7 @@
 use crate::{
 	btree::BTreeTable,
 	compress::Compress,
-	db::{check::CheckDisplay, Operation, RcValue},
+	db::{check::CheckDisplay, NodeChange, Operation, RcValue},
 	display::hex,
 	error::{try_io, Error, Result},
 	index::{Address, IndexTable, PlanOutcome, TableId as IndexTableId},
@@ -708,16 +708,16 @@ impl HashColumn {
 		Ok((outcome, tables, reindex))
 	}
 
-	fn write_children(
+	fn claim_children(
 		&self,
 		children: Vec<NodeRef>,
 		tables: TablesRef,
-		writer: &mut LogWriter,
+		node_values: &mut Vec<NodeChange>,
 	) -> Result<Vec<u8>> {
 		let mut data = Vec::new();
 		for child in children {
 			let address = match child {
-				NodeRef::New(node) => self.write_node(node, tables, writer)?,
+				NodeRef::New(node) => self.claim_node(node, tables, node_values)?,
 				NodeRef::Existing(address) => address,
 			};
 			let mut data_buf = [0u8; 8];
@@ -727,51 +727,68 @@ impl HashColumn {
 		Ok(data)
 	}
 
-	fn write_node(
+	fn claim_node(
 		&self,
 		node: NewNode,
 		tables: TablesRef,
-		writer: &mut LogWriter,
+		node_values: &mut Vec<NodeChange>,
 	) -> Result<NodeAddress> {
 		let num_children = node.children.len();
 		let data = pack_node_data(
 			node.data,
-			self.write_children(node.children, tables, writer)?,
+			self.claim_children(node.children, tables, node_values)?,
 			num_children as u8,
 		);
 
-		let stats = self.collect_stats.then_some(&self.stats);
 		let table_key = TableKey::NoHash;
-		let address =
-			Column::write_new_value_plan(&table_key, tables, data.as_ref(), writer, stats)?;
+
+		let (cval, target_tier) =
+			Column::compress(tables.compression, &table_key, data.as_ref(), tables.tables);
+		let (cval, compressed) = cval
+			.as_ref()
+			.map(|cval| (cval.as_slice(), true))
+			.unwrap_or((data.as_ref(), false));
+
+		let cval: RcValue = cval.to_vec().into();
+		let val = if compressed { data.into() } else { cval.clone() };
+
+		assert!(
+			(target_tier >= (SIZE_TIERS - 1)) ||
+				cval.value().len() <=
+					tables.tables[target_tier].value_size(&table_key).unwrap() as usize
+		);
+
+		let offset = tables.tables[target_tier].claim_next_free()?;
+		let address = Address::new(offset, target_tier as u8);
+
+		node_values.push(NodeChange { address: address.as_u64(), val, cval, compressed });
 
 		Ok(address.as_u64())
 	}
 
-	pub fn write_insert_tree_plan_immediate(
+	/// returns value for the root node and vector of NodeChange for nodes.
+	pub fn claim_tree_values(
 		&self,
-		change: Operation<Value, Value>,
-		log: &Log,
-		bytes: &mut u64,
-	) -> Result<Option<Operation<Vec<u8>, Vec<u8>>>> {
+		change: &Operation<Value, Value>,
+	) -> Result<(Vec<u8>, Vec<NodeChange>)> {
 		match change {
-			Operation::InsertTree(key, node) => {
-				let mut writer = log.begin_record();
+			Operation::InsertTree(_key, node) => {
 				let tables = self.tables.upgradable_read();
+
+				let mut node_values: Vec<NodeChange> = Default::default();
 
 				let num_children = node.children.len();
 				let data = pack_node_data(
-					node.data,
-					self.write_children(node.children, self.as_ref(&tables.value), &mut writer)?,
+					node.data.clone(),
+					self.claim_children(
+						node.children.clone(),
+						self.as_ref(&tables.value),
+						&mut node_values,
+					)?,
 					num_children as u8,
 				);
 
-				self.complete_plan(&mut writer)?;
-
-				let l = writer.drain();
-				*bytes += log.end_record(l)?;
-
-				return Ok(Some(Operation::Set(key, data)))
+				return Ok((data, node_values))
 			},
 			Operation::RemoveTree(_key) =>
 				return Err(Error::InvalidInput(format!("RemoveTree not implemented yet"))),
@@ -781,6 +798,35 @@ impl HashColumn {
 					self.col
 				))),
 		}
+	}
+
+	pub fn write_address_value_plan(
+		&self,
+		address: u64,
+		cval: RcValue,
+		compressed: bool,
+		val_len: u32,
+		log: &mut LogWriter,
+	) -> Result<PlanOutcome> {
+		let tables = self.tables.upgradable_read();
+		let tables = self.as_ref(&tables.value);
+		let address = Address::from_u64(address);
+		let target_tier = address.size_tier();
+		let offset = address.offset();
+		tables.tables[target_tier as usize].write_claimed_plan(
+			offset,
+			&TableKey::NoHash,
+			cval.as_ref(),
+			log,
+			compressed,
+		)?;
+
+		let stats = self.collect_stats.then_some(&self.stats);
+		if let Some(stats) = stats {
+			stats.insert_val(val_len, cval.value().len() as u32);
+		}
+
+		Ok(PlanOutcome::Written)
 	}
 
 	pub fn enact_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {

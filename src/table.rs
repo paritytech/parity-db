@@ -762,9 +762,9 @@ impl ValueTable {
 		}
 	}
 
-	pub fn claim_contiguous_entries(&self, num: u64, min_span_length: u64) -> Vec<u64> {
+	/* pub fn claim_contiguous_entries(&self, num: u64, min_span_length: u64) -> Vec<u64> {
 		Vec::new()
-	}
+	} */
 
 	fn overwrite_chain(
 		&self,
@@ -772,6 +772,7 @@ impl ValueTable {
 		value: &[u8],
 		log: &mut LogWriter,
 		at: Option<u64>,
+		claimed: bool,
 		compressed: bool,
 	) -> Result<u64> {
 		let mut remainder = value.len() + self.ref_size() + key.encoded_size();
@@ -779,7 +780,7 @@ impl ValueTable {
 		let mut start = 0;
 		assert!(self.multipart || value.len() <= self.value_size(key).unwrap() as usize);
 		let (mut index, mut follow) = match at {
-			Some(index) => (index, true),
+			Some(index) => (index, !claimed),
 			None => (self.next_free(log)?, false),
 		};
 		loop {
@@ -900,7 +901,7 @@ impl ValueTable {
 		log: &mut LogWriter,
 		compressed: bool,
 	) -> Result<u64> {
-		self.overwrite_chain(key, value, log, None, compressed)
+		self.overwrite_chain(key, value, log, None, false, compressed)
 	}
 
 	pub fn write_replace_plan(
@@ -911,7 +912,19 @@ impl ValueTable {
 		log: &mut LogWriter,
 		compressed: bool,
 	) -> Result<()> {
-		self.overwrite_chain(key, value, log, Some(index), compressed)?;
+		self.overwrite_chain(key, value, log, Some(index), false, compressed)?;
+		Ok(())
+	}
+
+	pub fn write_claimed_plan(
+		&self,
+		index: u64,
+		key: &TableKey,
+		value: &[u8],
+		log: &mut LogWriter,
+		compressed: bool,
+	) -> Result<()> {
+		self.overwrite_chain(key, value, log, Some(index), true, compressed)?;
 		Ok(())
 	}
 
@@ -1133,7 +1146,7 @@ impl ValueTable {
 
 		let empty_overlays = RwLock::new(Default::default());
 		let mut log = LogWriter::new(&empty_overlays, 0);
-		let at = self.overwrite_chain(&TableKey::NoHash, entry, &mut log, None, false)?;
+		let at = self.overwrite_chain(&TableKey::NoHash, entry, &mut log, None, false, false)?;
 		self.complete_plan(&mut log)?;
 		assert_eq!(at, 1);
 		let log = log.drain();

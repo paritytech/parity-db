@@ -144,7 +144,6 @@ struct DbInner {
 	log: Log,
 	commit_queue: Mutex<CommitQueue>,
 	commit_queue_full_cv: Condvar,
-	log_writer_mutex: Mutex<bool>,
 	log_worker_wait: WaitCondvar<bool>,
 	commit_worker_wait: Arc<WaitCondvar<bool>>,
 	// Overlay of most recent values in the commit queue.
@@ -230,7 +229,6 @@ impl DbInner {
 			log,
 			commit_queue: Mutex::new(Default::default()),
 			commit_queue_full_cv: Condvar::new(),
-			log_writer_mutex: Mutex::new(false),
 			log_worker_wait: WaitCondvar::new(),
 			commit_worker_wait: Arc::new(WaitCondvar::new()),
 			commit_overlay: RwLock::new(commit_overlay),
@@ -317,6 +315,12 @@ impl DbInner {
 	) -> Result<Option<(Vec<u8>, Children)>> {
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
+				let overlay = self.commit_overlay.read();
+				// Check commit overlay first
+				if let Some(v) = overlay.get(col as usize).and_then(|o| o.get_address(node_address))
+				{
+					return Ok(Some(unpack_node_data(v.value().clone())?))
+				}
 				let log = self.log.overlays();
 				let value = column.get_value(Address::from_u64(node_address), log)?;
 				if let Some(data) = value {
@@ -406,29 +410,28 @@ impl DbInner {
 					.or_insert_with(|| BTreeChangeSet::new(col))
 					.push(change)?
 			} else if self.options.columns[col as usize].multitree {
-				let _log_writer = self.log_writer_mutex.lock();
-				let mut bytes = 0;
-
+				// TODO: Allow normal Operations as well?
 				match &self.columns[col as usize] {
 					Column::Hash(column) => {
-						if let Some(operation) = column
-							.write_insert_tree_plan_immediate(change, &self.log, &mut bytes)?
-						{
+						let (root_data, node_values) = column.claim_tree_values(&change)?;
+
+						let root_operation = Operation::Set(change.key(), root_data);
+						commit
+							.indexed
+							.entry(col)
+							.or_insert_with(|| IndexedChangeSet::new(col))
+							.push(root_operation, &self.options, self.db_version)?;
+
+						for node_change in node_values {
 							commit
 								.indexed
 								.entry(col)
 								.or_insert_with(|| IndexedChangeSet::new(col))
-								.push(operation, &self.options, self.db_version)?
+								.push_node_change(node_change);
 						}
 					},
 					Column::Tree(_) =>
 						return Err(Error::InvalidConfiguration("Not a HashColumn".to_string())),
-				}
-
-				if bytes > 0 {
-					let mut logged_bytes = self.log_queue_wait.work.lock();
-					*logged_bytes += bytes as i64;
-					self.flush_worker_wait.signal();
 				}
 			} else {
 				commit.indexed.entry(col).or_insert_with(|| IndexedChangeSet::new(col)).push(
@@ -1404,22 +1407,28 @@ impl TreeReader {
 }
 
 pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<RcValue>), IdentityBuildHasher>;
+pub type AddressCommitOverlay = HashMap<u64, (u64, RcValue)>;
 pub type BTreeCommitOverlay = BTreeMap<RcValue, (u64, Option<RcValue>)>;
 
 #[derive(Debug)]
 pub struct CommitOverlay {
 	indexed: IndexedCommitOverlay,
+	address: AddressCommitOverlay,
 	btree_indexed: BTreeCommitOverlay,
 }
 
 impl CommitOverlay {
 	fn new() -> Self {
-		CommitOverlay { indexed: Default::default(), btree_indexed: Default::default() }
+		CommitOverlay {
+			indexed: Default::default(),
+			address: Default::default(),
+			btree_indexed: Default::default(),
+		}
 	}
 
 	#[cfg(test)]
 	fn is_empty(&self) -> bool {
-		self.indexed.is_empty() && self.btree_indexed.is_empty()
+		self.indexed.is_empty() && self.address.is_empty() && self.btree_indexed.is_empty()
 	}
 }
 
@@ -1434,6 +1443,10 @@ impl CommitOverlay {
 
 	fn get_size(&self, key: &[u8]) -> Option<Option<u32>> {
 		self.get_ref(key).map(|res| res.as_ref().map(|b| b.value().len() as u32))
+	}
+
+	fn get_address(&self, address: u64) -> Option<RcValue> {
+		self.address.get(&address).map(|(_, v)| v.clone())
 	}
 
 	fn btree_get(&self, key: &[u8]) -> Option<Option<&RcValue>> {
@@ -1563,6 +1576,14 @@ impl<K: AsRef<[u8]>, Value> Operation<K, Value> {
 	}
 }
 
+#[derive(Debug)]
+pub struct NodeChange {
+	pub address: u64,
+	pub val: RcValue,
+	pub cval: RcValue,
+	pub compressed: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct CommitChangeSet {
 	pub indexed: HashMap<ColId, IndexedChangeSet>,
@@ -1573,11 +1594,12 @@ pub struct CommitChangeSet {
 pub struct IndexedChangeSet {
 	pub col: ColId,
 	pub changes: Vec<Operation<Key, RcValue>>,
+	pub node_changes: Vec<NodeChange>,
 }
 
 impl IndexedChangeSet {
 	pub fn new(col: ColId) -> Self {
-		IndexedChangeSet { col, changes: Default::default() }
+		IndexedChangeSet { col, changes: Default::default(), node_changes: Default::default() }
 	}
 
 	fn push<K: AsRef<[u8]>>(
@@ -1607,6 +1629,10 @@ impl IndexedChangeSet {
 
 	fn push_change_hashed(&mut self, change: Operation<Key, RcValue>) {
 		self.changes.push(change);
+	}
+
+	fn push_node_change(&mut self, change: NodeChange) {
+		self.node_changes.push(change);
 	}
 
 	fn copy_to_overlay(
@@ -1644,6 +1670,9 @@ impl IndexedChangeSet {
 					))),
 			}
 		}
+		for change in self.node_changes.iter() {
+			overlay.address.insert(change.address, (record_id, change.val.clone()));
+		}
 		Ok(())
 	}
 
@@ -1668,6 +1697,15 @@ impl IndexedChangeSet {
 			}
 			*ops += 1;
 		}
+		for change in self.node_changes.iter() {
+			column.write_address_value_plan(
+				change.address,
+				change.cval.clone(),
+				change.compressed,
+				change.val.value().len() as u32,
+				writer,
+			)?;
+		}
 		Ok(())
 	}
 
@@ -1686,6 +1724,9 @@ impl IndexedChangeSet {
 				Operation::InsertTree(..) |
 				Operation::RemoveTree(..) => (),
 			}
+		}
+		for change in self.node_changes.iter() {
+			overlay.address.remove(&change.address);
 		}
 	}
 }

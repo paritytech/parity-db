@@ -187,9 +187,14 @@ impl ChainGenerator {
 			) as usize;
 		}
 		let mut v = Vec::new();
+
 		v.resize(size, 0);
 		let fill = size;
 		rng.fill_bytes(&mut v[..fill]);
+		/* // Purely random values as above result in compression never creating smaller values. Do the following to test compression.
+		// TODO: Better value generation that has random parts and also runs to allow compression to work. Then we can just use that for both cases.
+		let val = (rng.next_u64() & 256) as u8;
+		v.resize(size, val); */
 
 		(v, children_seeds)
 	}
@@ -229,6 +234,63 @@ fn num_new_child_nodes(node: &NodeRef) -> u32 {
 	}
 }
 
+fn read_value(
+	root_seed: u64,
+	rng: &mut rand::rngs::SmallRng,
+	db: &Db,
+	chain_generator: &ChainGenerator,
+) {
+	let mut depth = 0;
+
+	let (gen_node_data, gen_children) = chain_generator.generate_node(root_seed, depth);
+
+	let key = chain_generator.key(root_seed);
+	match db.get_tree(0, &key).unwrap() {
+		Some(reader) => {
+			let reader = reader.read();
+			match reader.get_root().unwrap() {
+				Some((db_node_data, db_children)) => {
+					assert_eq!(gen_node_data, db_node_data);
+					assert_eq!(gen_children.len(), db_children.len());
+
+					let mut generated_children = gen_children;
+					let mut database_children = db_children;
+
+					while generated_children.len() > 0 {
+						let child_index = rng.next_u64() % generated_children.len() as u64;
+						let child_seed = generated_children[child_index as usize];
+						let child_address = database_children[child_index as usize];
+						depth += 1;
+
+						let (gen_node_data, gen_children) =
+							chain_generator.generate_node(child_seed, depth);
+						match reader.get_node(child_address).unwrap() {
+							Some((db_node_data, db_children)) => {
+								assert_eq!(gen_node_data, db_node_data);
+								assert_eq!(gen_children.len(), db_children.len());
+
+								generated_children = gen_children;
+								database_children = db_children;
+							},
+							None => {
+								assert!(false);
+							},
+						}
+					}
+
+					QUERIES.fetch_add(1, Ordering::SeqCst);
+				},
+				None => {
+					assert!(false);
+				},
+			}
+		},
+		None => {
+			assert!(false);
+		},
+	}
+}
+
 fn writer(
 	db: Arc<Db>,
 	args: Arc<Args>,
@@ -257,6 +319,10 @@ fn writer(
 			db.commit_changes(commit.drain(..)).unwrap();
 			COMMITS.fetch_add(1, Ordering::Relaxed);
 			commit.clear();
+
+			// Immediately read and check a random value from the tree
+			let mut rng = rand::rngs::SmallRng::seed_from_u64(offset + n as u64);
+			read_value(root_seed, &mut rng, &db, &chain_generator);
 		}
 	}
 }
@@ -279,55 +345,8 @@ fn reader(
 		}
 
 		let root_seed = rng.next_u64() % commits + offset;
-		let mut depth = 0;
 
-		let (gen_node_data, gen_children) = chain_generator.generate_node(root_seed, depth);
-
-		let key = chain_generator.key(root_seed);
-		match db.get_tree(0, &key).unwrap() {
-			Some(reader) => {
-				let reader = reader.read();
-				match reader.get_root().unwrap() {
-					Some((db_node_data, db_children)) => {
-						assert_eq!(gen_node_data, db_node_data);
-						assert_eq!(gen_children.len(), db_children.len());
-
-						let mut generated_children = gen_children;
-						let mut database_children = db_children;
-
-						while generated_children.len() > 0 {
-							let child_index = rng.next_u64() % generated_children.len() as u64;
-							let child_seed = generated_children[child_index as usize];
-							let child_address = database_children[child_index as usize];
-							depth += 1;
-
-							let (gen_node_data, gen_children) =
-								chain_generator.generate_node(child_seed, depth);
-							match reader.get_node(child_address).unwrap() {
-								Some((db_node_data, db_children)) => {
-									assert_eq!(gen_node_data, db_node_data);
-									assert_eq!(gen_children.len(), db_children.len());
-
-									generated_children = gen_children;
-									database_children = db_children;
-								},
-								None => {
-									assert!(false);
-								},
-							}
-						}
-
-						QUERIES.fetch_add(1, Ordering::SeqCst);
-					},
-					None => {
-						assert!(false);
-					},
-				}
-			},
-			None => {
-				assert!(false);
-			},
-		}
+		read_value(root_seed, &mut rng, &db, &chain_generator);
 	}
 }
 
