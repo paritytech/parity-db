@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog].
 
 ## [Unreleased]
 
+## [v0.4.9] - 2023-07-03
+
+- Call madvise for existing index files [`#211`](https://github.com/paritytech/parity-db/pull/211)
+
 ## [v0.4.8] - 2023-05-15
 
 - Support for removing a column [`#210`](https://github.com/paritytech/parity-db/pull/210)
