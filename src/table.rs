@@ -47,7 +47,7 @@
 use crate::{
 	column::ColId,
 	display::hex,
-	error::{try_io, Result},
+	error::Result,
 	log::{LogQuery, LogReader, LogWriter},
 	options::ColumnOptions as Options,
 	parking_lot::RwLock,
@@ -55,7 +55,6 @@ use crate::{
 };
 use std::{
 	convert::TryInto,
-	io::Read,
 	mem::MaybeUninit,
 	sync::{
 		atomic::{AtomicBool, AtomicU64, Ordering},
@@ -386,9 +385,9 @@ impl ValueTable {
 		let file = crate::file::TableFile::open(filepath, entry_size, id)?;
 		let mut filled = 1;
 		let mut last_removed = 0;
-		if let Some(file) = &mut *file.file.write() {
+		if file.map.read().is_some() {
 			let mut header = Header::default();
-			try_io!(file.read_exact(&mut header.0));
+			file.read_at(&mut header.0, 0)?;
 			last_removed = header.last_removed();
 			filled = header.filled();
 			if filled == 0 {
@@ -959,7 +958,7 @@ impl ValueTable {
 	}
 
 	pub fn refresh_metadata(&self) -> Result<()> {
-		if self.file.file.read().is_none() {
+		if self.file.map.read().is_none() {
 			return Ok(())
 		}
 		let mut header = Header::default();
@@ -1033,7 +1032,7 @@ impl ValueTable {
 	}
 
 	pub fn is_init(&self) -> bool {
-		self.file.file.read().is_some()
+		self.file.map.read().is_some()
 	}
 
 	pub fn init_with_entry(&self, entry: &[u8]) -> Result<()> {
