@@ -30,6 +30,26 @@ pub const DEPTH_CHILD_COUNT_HISTOGRAMS: &[(u32, [u32; 17])] = &[
 	(13, [8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
 ];
 
+// Test data (not collected from Polkadot).
+pub const AGE_HISTOGRAM: &[(u32, u32)] = &[
+	(0, 100),
+	(1, 10),
+	(2, 5),
+	(3, 4),
+	(4, 4),
+	(5, 3),
+	(6, 3),
+	(7, 3),
+	(8, 2),
+	(9, 2),
+	(10, 2),
+	(11, 2),
+	(12, 1),
+	(13, 1),
+	(14, 1),
+	(15, 1),
+];
+
 pub const _KEY_LENGTH_HISTOGRAM: &[(u32, u32)] = &[
 	(5, 1),
 	(20, 1),
