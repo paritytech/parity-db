@@ -362,7 +362,7 @@ impl DbInner {
 		let mut overlay = self.commit_overlay.write();
 
 		queue.record_id += 1;
-		let record_id = queue.record_id + 1;
+		let record_id = queue.record_id;
 
 		let mut bytes = 0;
 		for (c, indexed) in &commit.indexed {
