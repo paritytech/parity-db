@@ -1,6 +1,8 @@
 // Copyright 2021-2022 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or MIT.
 
+use parking_lot::{RwLockReadGuard, MappedRwLockReadGuard};
+
 use crate::{
 	column::ColId,
 	error::{try_io, Error, Result},
@@ -46,6 +48,8 @@ pub enum LogAction {
 }
 
 pub trait LogQuery {
+	type ValueRef<'a>: std::ops::Deref<Target=[u8]> where Self: 'a;
+
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
 		&self,
 		table: IndexTableId,
@@ -53,6 +57,7 @@ pub trait LogQuery {
 		f: F,
 	) -> Option<R>;
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool;
+	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>>;
 }
 
 #[derive(Default, Debug)]
@@ -69,21 +74,29 @@ impl LogOverlays {
 }
 
 impl LogQuery for RwLock<LogOverlays> {
+	type ValueRef<'a> = MappedRwLockReadGuard<'a, [u8]>;
+
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
 		&self,
 		table: IndexTableId,
 		index: u64,
 		f: F,
 	) -> Option<R> {
-		self.read().with_index(table, index, f)
+		(&*self.read()).with_index(table, index, f)
 	}
 
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool {
-		self.read().value(table, index, dest)
+		(&*self.read()).value(table, index, dest)
+	}
+
+	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>> {
+		let lock = RwLockReadGuard::try_map(self.read(), |o| o.value_ref(table, index));
+		lock.ok()
 	}
 }
 
 impl LogQuery for LogOverlays {
+	type ValueRef<'a> = &'a [u8];
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
 		&self,
 		table: IndexTableId,
@@ -105,6 +118,10 @@ impl LogQuery for LogOverlays {
 		} else {
 			false
 		}
+	}
+	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>> {
+		log::debug!(target: "parity-db", "Query overlay index {}, record {}, size={}/{}", table, index, self.value.len(), self.value.get(&table).map_or(0, |o| o.map.len()));
+		self.value.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_slice()))
 	}
 }
 
@@ -361,7 +378,23 @@ impl<'a> LogWriter<'a> {
 	}
 }
 
-impl<'a> LogQuery for LogWriter<'a> {
+pub enum LogWriterLock<'a> {
+	Local(&'a [u8]),
+	Overlay(MappedRwLockReadGuard<'a, [u8]>),
+}
+
+impl std::ops::Deref for LogWriterLock<'_> {
+	type Target = [u8];
+	fn deref(&self) -> &[u8] {
+		match self {
+			LogWriterLock::Local(data) => data,
+			LogWriterLock::Overlay(data) => data.deref(),
+		}
+	}
+}
+
+impl<'q> LogQuery for LogWriter<'q> {
+	type ValueRef<'a> = LogWriterLock<'a> where Self: 'a;
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
 		&self,
 		table: IndexTableId,
@@ -384,7 +417,7 @@ impl<'a> LogQuery for LogWriter<'a> {
 			.log
 			.local_values
 			.get(&table)
-			.and_then(|o| o.map.get(&index).map(|(_id, data)| data))
+			.and_then(|o| o.map.get(&index).map(|(_id, data)|  data))
 		{
 			let len = dest.len().min(d.len());
 			dest[0..len].copy_from_slice(&d[0..len]);
@@ -392,6 +425,15 @@ impl<'a> LogQuery for LogWriter<'a> {
 		} else {
 			self.overlays.value(table, index, dest)
 		}
+	}
+	fn value_ref<'v> (&'v self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'v>> {
+		log::debug!(target: "parity-db", "Query local overlay index {}, record {}", table, index);
+		self
+			.log
+			.local_values
+			.get(&table)
+			.and_then(|o| o.map.get(&index).map(|(_id, data)| LogWriterLock::Local(data.as_slice())))
+			.or_else(|| self.overlays.value_ref(table, index).map(|data| LogWriterLock::Overlay(data)))
 	}
 }
 

@@ -37,7 +37,7 @@ fn disable_read_ahead(_file: &std::fs::File) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn madvise_random(map: &mut memmap2::MmapMut) {
+pub fn madvise_random(map: &mut memmap2::MmapMut) {
 	unsafe {
 		libc::madvise(
 			map.as_mut_ptr() as _,
@@ -48,7 +48,7 @@ fn madvise_random(map: &mut memmap2::MmapMut) {
 }
 
 #[cfg(not(unix))]
-fn madvise_random(_id: TableId, _map: &mut memmap2::MmapMut) {}
+pub fn madvise_random(_id: TableId, _map: &mut memmap2::MmapMut) {}
 
 const GROW_SIZE_BYTES: u64 = 256 * 1024;
 
@@ -102,7 +102,6 @@ impl TableFile {
 		Ok(file)
 	}
 
-	#[cfg(unix)]
 	pub fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
 		let offset = offset as usize;
 		let map = self.map.read();
@@ -111,7 +110,17 @@ impl TableFile {
 		Ok(())
 	}
 
-	#[cfg(unix)]
+	pub fn slice_at(&self, offset: u64, len: usize) -> &[u8] {
+		let offset = offset as usize;
+		let map = self.map.read();
+		let (map, _) = map.as_ref().unwrap();
+		let data: &[u8] = unsafe {
+			let ptr = map.as_ptr().add(offset);
+			std::slice::from_raw_parts(ptr, len)
+		};
+		data
+	}
+
 	pub fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
 		let map = self.map.read();
 		let (map, _) = map.as_ref().unwrap();
@@ -125,44 +134,6 @@ impl TableFile {
 			std::slice::from_raw_parts_mut(ptr, buf.len())
 		};
 		data.copy_from_slice(buf);
-		Ok(())
-	}
-
-	#[cfg(windows)]
-	pub fn read_at(&self, mut buf: &mut [u8], mut offset: u64) -> Result<()> {
-		let (map, _) = self.map.read().as_ref().unwrap();
-		let map = map.as_mut().unwrap();
-		let offset = offset as usize;
-		map[offset..offset + buf.len()].copy_from_slice(buf);
-		Ok(())
-	}
-
-	#[cfg(windows)]
-	pub fn write_at(&self, mut buf: &[u8], mut offset: u64) -> Result<()> {
-		use crate::error::Error;
-		use std::{io, os::windows::fs::FileExt};
-
-		let file = self.file.read();
-		let file = file.as_ref().unwrap();
-
-		while !buf.is_empty() {
-			match file.seek_write(buf, offset) {
-				Ok(0) =>
-					return Err(Error::Io(io::Error::new(
-						io::ErrorKind::WriteZero,
-						"failed to write whole buffer",
-					))),
-				Ok(n) => {
-					buf = &buf[n..];
-					offset += n as u64;
-				},
-				Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
-					// Try again
-				},
-				Err(e) => return Err(Error::Io(e)),
-			}
-		}
-
 		Ok(())
 	}
 
