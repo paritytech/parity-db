@@ -1,8 +1,6 @@
 // Copyright 2021-2022 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or MIT.
 
-use parking_lot::{MappedRwLockReadGuard, RwLockReadGuard};
-
 use crate::{
 	column::ColId,
 	error::{try_io, Error, Result},
@@ -18,6 +16,7 @@ use std::{
 	io::{ErrorKind, Read, Seek, Write},
 	sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
+use parking_lot::{MappedRwLockReadGuard, RwLockReadGuard};
 
 const MAX_LOG_POOL_SIZE: usize = 16;
 const BEGIN_RECORD: u8 = 1;
