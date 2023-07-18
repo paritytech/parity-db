@@ -9,6 +9,7 @@ use crate::{
 	parking_lot::{RwLock, RwLockWriteGuard},
 	table::TableId as ValueTableId,
 };
+use parking_lot::{MappedRwLockReadGuard, RwLockReadGuard};
 use std::{
 	cmp::min,
 	collections::{HashMap, VecDeque},
@@ -16,7 +17,6 @@ use std::{
 	io::{ErrorKind, Read, Seek, Write},
 	sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
-use parking_lot::{MappedRwLockReadGuard, RwLockReadGuard};
 
 const MAX_LOG_POOL_SIZE: usize = 16;
 const BEGIN_RECORD: u8 = 1;
