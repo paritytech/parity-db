@@ -150,7 +150,7 @@ pub fn run() -> Result<(), String> {
 			}
 
 			let db = parity_db::Db::open_or_create(&db_options).unwrap();
-			multitree_bench::run_internal(args, db);
+			multitree_bench::run_internal(args, db)?;
 		},
 	}
 	Ok(())

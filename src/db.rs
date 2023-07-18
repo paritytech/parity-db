@@ -133,7 +133,7 @@ struct CommitQueue {
 
 #[derive(Debug)]
 struct Trees {
-	readers: HashMap<Key, Arc<RwLock<TreeReader>>, IdentityBuildHasher>,
+	readers: HashMap<Key, Arc<RwLock<DbTreeReader>>, IdentityBuildHasher>,
 }
 
 #[derive(Debug)]
@@ -337,7 +337,7 @@ impl DbInner {
 		db: &Arc<DbInner>,
 		col: ColId,
 		key: &[u8],
-	) -> Result<Option<Arc<RwLock<TreeReader>>>> {
+	) -> Result<Option<Arc<RwLock<dyn TreeReader>>>> {
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
 				let key = column.hash_key(key);
@@ -358,7 +358,7 @@ impl DbInner {
 				let column_trees =
 					trees.entry(col).or_insert_with(|| Trees { readers: Default::default() });
 
-				let reader = Arc::new(RwLock::new(TreeReader { db: db.clone(), col, key }));
+				let reader = Arc::new(RwLock::new(DbTreeReader { db: db.clone(), col, key }));
 
 				column_trees.readers.insert(key, reader.clone());
 
@@ -1096,7 +1096,7 @@ impl Db {
 		self.inner.btree_iter(col)
 	}
 
-	pub fn get_tree(&self, col: ColId, key: &[u8]) -> Result<Option<Arc<RwLock<TreeReader>>>> {
+	pub fn get_tree(&self, col: ColId, key: &[u8]) -> Result<Option<Arc<RwLock<dyn TreeReader>>>> {
 		self.inner.get_tree(&self.inner, col, key)
 	}
 
@@ -1363,15 +1363,22 @@ impl Db {
 	}
 }
 
+// Use a trait here to allow client code to have better control over lock guard lifetime without
+// lifetime proliferation within Db (which would be required if not using a dynamic object).
+pub trait TreeReader {
+	fn get_root(&self) -> Result<Option<(Vec<u8>, Children)>>;
+	fn get_node(&self, node_address: NodeAddress) -> Result<Option<(Vec<u8>, Children)>>;
+}
+
 #[derive(Debug)]
-pub struct TreeReader {
+pub struct DbTreeReader {
 	db: Arc<DbInner>,
 	col: ColId,
 	key: Key,
 }
 
-impl TreeReader {
-	pub fn get_root(&self) -> Result<Option<(Vec<u8>, Children)>> {
+impl TreeReader for DbTreeReader {
+	fn get_root(&self) -> Result<Option<(Vec<u8>, Children)>> {
 		/* let value = self.db.get(self.col, &self.key)?;
 		if let Some(data) = value {
 			return unpack_node_data(data).map(|x| Some(x))
@@ -1401,7 +1408,7 @@ impl TreeReader {
 		Err(Error::InvalidValueData)
 	}
 
-	pub fn get_node(&self, node_address: NodeAddress) -> Result<Option<(Vec<u8>, Children)>> {
+	fn get_node(&self, node_address: NodeAddress) -> Result<Option<(Vec<u8>, Children)>> {
 		self.db.get_node(self.col, node_address)
 	}
 }

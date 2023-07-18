@@ -8,11 +8,12 @@ mod data;
 pub use parity_db::{CompressionType, Db, Key, TreeReader, Value};
 use parity_db::{NewNode, NodeRef, Operation};
 
-use parking_lot::RwLockReadGuard;
+use parking_lot::{RwLock, RwLockReadGuard};
 
 use rand::{RngCore, SeedableRng};
 use std::{
-	collections::BTreeMap,
+	collections::{BTreeMap, HashMap, HashSet},
+	ops::Deref,
 	sync::{
 		atomic::{AtomicBool, AtomicUsize, Ordering},
 		Arc,
@@ -217,6 +218,8 @@ impl ChainGenerator {
 			if child_tree_index == tree_index {
 				children.push(NodeSpec::Direct(tree_index, depth + 1, rng.next_u64()));
 			} else {
+				// Always generate path seed even if only_direct_children is true to ensure
+				// determinism.
 				let path_seed = rng.next_u64();
 				if only_direct_children {
 					children.push(NodeSpec::UnresolvedPath());
@@ -310,7 +313,7 @@ impl ChainGenerator {
 		(v, children)
 	}
 
-	fn execute_path(&self, tree_index: u64, path: Vec<u32>) -> (u64, u32, u64) {
+	fn execute_path(&self, tree_index: u64, path: Vec<u32>) -> Result<(u64, u32, u64), String> {
 		let mut depth = 0;
 		let mut seed = self.root_seed(tree_index);
 		for child_index in path {
@@ -322,61 +325,173 @@ impl ChainGenerator {
 				depth = *child_depth;
 				seed = *child_seed;
 			} else {
-				assert!(false);
+				return Err("Non-direct node in path".to_string())
 			}
 		}
-		(tree_index, depth, seed)
+		Ok((tree_index, depth, seed))
 	}
 }
 
-fn informant(shutdown: Arc<AtomicBool>) {
+fn informant(shutdown: Arc<AtomicBool>) -> Result<(), String> {
 	while !shutdown.load(Ordering::Relaxed) {
 		thread::sleep(std::time::Duration::from_secs(1));
 	}
+	Ok(())
 }
 
-fn build_commit_tree(
-	node_data: (Vec<u8>, Vec<NodeSpec>),
+fn find_dependent_trees(
+	node_data: &(Vec<u8>, Vec<NodeSpec>),
 	chain_generator: &ChainGenerator,
-) -> NodeRef {
+	trees: &mut HashSet<u64>,
+) -> Result<(), String> {
+	for spec in &node_data.1 {
+		match spec {
+			NodeSpec::Direct(child_tree_index, child_depth, child_seed) => {
+				let child_data = chain_generator.generate_node(
+					*child_tree_index,
+					*child_depth,
+					*child_seed,
+					false,
+				);
+				find_dependent_trees(&child_data, chain_generator, trees)?;
+			},
+			NodeSpec::UnresolvedPath() => return Err("UnresolvedPath found".to_string()),
+			NodeSpec::Path(tree_index, _path) => {
+				trees.insert(*tree_index);
+			},
+		}
+	}
+	Ok(())
+}
+
+fn build_commit_tree<'s, 'd: 's>(
+	node_data: (Vec<u8>, Vec<NodeSpec>),
+	db: &Db,
+	chain_generator: &ChainGenerator,
+	tree_refs: &'s HashMap<Key, TreeReaderRef<'d>>,
+	tree_guards: &mut HashMap<Key, TreeReaderGuard<'s, 'd>>,
+) -> Result<NodeRef, String> {
 	let mut children = Vec::default();
 	for spec in node_data.1 {
 		match spec {
 			NodeSpec::Direct(child_tree_index, child_depth, child_seed) => {
 				let child_data =
 					chain_generator.generate_node(child_tree_index, child_depth, child_seed, false);
-				let child_node = build_commit_tree(child_data, chain_generator);
+				let child_node =
+					build_commit_tree(child_data, db, chain_generator, tree_refs, tree_guards)?;
 				children.push(child_node);
 			},
-			NodeSpec::UnresolvedPath() => {
-				assert!(false);
-			},
+			NodeSpec::UnresolvedPath() => return Err("UnresolvedPath found".to_string()),
 			NodeSpec::Path(tree_index, path) => {
-				// Note, this duplicates the nodes from previous trees.
-				// TODO: Make it share the nodes when possible.
-				let (child_tree_index, child_depth, child_seed) =
-					chain_generator.execute_path(tree_index, path);
-				let child_data =
-					chain_generator.generate_node(child_tree_index, child_depth, child_seed, false);
-				let child_node = build_commit_tree(child_data, chain_generator);
-				children.push(child_node);
+				let root_seed = chain_generator.root_seed(tree_index);
+				let key = chain_generator.key(root_seed);
+
+				if let None = tree_guards.get(&key) {
+					if let Some(tree_ref) = tree_refs.get(&key) {
+						tree_guards.insert(key.clone(), tree_ref.read());
+					}
+				}
+
+				let mut final_child_address: Option<u64> = None;
+				if let Some(tree_guard) = tree_guards.get(&key) {
+					if let Some((db_node_data, db_children)) = tree_guard.get_root().unwrap() {
+						// Note: We don't actually have to generate any nodes here; we could just
+						// traverse down the database nodes. Only generating them to verify data.
+						let (gen_node_data, gen_children) =
+							chain_generator.generate_node(tree_index, 0, root_seed, false);
+
+						assert_eq!(gen_node_data, db_node_data);
+						assert_eq!(gen_children.len(), db_children.len());
+
+						let mut generated_children = gen_children;
+						let mut database_children = db_children;
+
+						for index in 0..path.len() {
+							let child_index = path[index];
+
+							let child_address = database_children[child_index as usize];
+
+							if index == path.len() - 1 {
+								final_child_address = Some(child_address);
+								break
+							}
+
+							let (child_tree_index, child_depth, child_seed) =
+								match &generated_children[child_index as usize] {
+									NodeSpec::Direct(child_tree_index, child_depth, child_seed) =>
+										(*child_tree_index, *child_depth, *child_seed),
+									NodeSpec::UnresolvedPath() =>
+										return Err("UnresolvedPath found".to_string()),
+									NodeSpec::Path(_tree_index, _path) =>
+										return Err("NodeSpec::Path found within path".to_string()),
+								};
+
+							let (gen_node_data, gen_children) = chain_generator.generate_node(
+								child_tree_index,
+								child_depth,
+								child_seed,
+								false,
+							);
+
+							match tree_guard.get_node(child_address).unwrap() {
+								Some((db_node_data, db_children)) => {
+									assert_eq!(gen_node_data, db_node_data);
+									assert_eq!(gen_children.len(), db_children.len());
+
+									generated_children = gen_children;
+									database_children = db_children;
+								},
+								None => return Err("Child address not in database".to_string()),
+							}
+						}
+					}
+				}
+
+				match final_child_address {
+					Some(address) => {
+						let child_node = NodeRef::Existing(address);
+						children.push(child_node);
+					},
+					None => {
+						// Not able to get the existing child address so duplicate sub-tree
+						let (child_tree_index, child_depth, child_seed) =
+							chain_generator.execute_path(tree_index, path)?;
+						let child_data = chain_generator.generate_node(
+							child_tree_index,
+							child_depth,
+							child_seed,
+							false,
+						);
+						let child_node = build_commit_tree(
+							child_data,
+							db,
+							chain_generator,
+							tree_refs,
+							tree_guards,
+						)?;
+						children.push(child_node);
+					},
+				}
 			},
 		}
 	}
 	let new_node = NewNode { data: node_data.0, children };
-	NodeRef::New(new_node)
+	Ok(NodeRef::New(new_node))
 }
 
-fn num_new_child_nodes(node: &NodeRef) -> u32 {
+fn num_new_nodes(node: &NodeRef, num_existing: &mut u32) -> u32 {
 	match node {
 		NodeRef::New(node) => {
-			let mut num = 0;
+			let mut num = 1;
 			for child in &node.children {
-				num += num_new_child_nodes(child) + 1;
+				num += num_new_nodes(child, num_existing);
 			}
 			num
 		},
-		NodeRef::Existing(_) => 0,
+		NodeRef::Existing(_) => {
+			*num_existing += 1;
+			0
+		},
 	}
 }
 
@@ -385,7 +500,7 @@ fn read_value(
 	rng: &mut rand::rngs::SmallRng,
 	db: &Db,
 	chain_generator: &ChainGenerator,
-) {
+) -> Result<(), String> {
 	let mut depth = 0;
 	let root_seed = chain_generator.root_seed(tree_index);
 
@@ -411,13 +526,11 @@ fn read_value(
 							match &generated_children[child_index as usize] {
 								NodeSpec::Direct(child_tree_index, _child_depth, child_seed) =>
 									(*child_tree_index, *child_seed),
-								NodeSpec::UnresolvedPath() => {
-									assert!(false);
-									(0, 0)
-								},
+								NodeSpec::UnresolvedPath() =>
+									return Err("UnresolvedPath found".to_string()),
 								NodeSpec::Path(tree_index, path) => {
 									let (child_tree_index, child_depth, child_seed) =
-										chain_generator.execute_path(*tree_index, path.clone());
+										chain_generator.execute_path(*tree_index, path.clone())?;
 									assert_eq!(child_depth, depth + 1);
 									(child_tree_index, child_seed)
 								},
@@ -440,22 +553,40 @@ fn read_value(
 								generated_children = gen_children;
 								database_children = db_children;
 							},
-							None => {
-								assert!(false);
-							},
+							None => return Err("Child address not in database".to_string()),
 						}
 					}
 
 					QUERIES.fetch_add(1, Ordering::SeqCst);
 				},
-				None => {
-					assert!(false);
-				},
+				None => return Err("Tree root not in database".to_string()),
 			}
 		},
-		None => {
-			assert!(false);
-		},
+		None => return Err("Tree not in database".to_string()),
+	}
+
+	Ok(())
+}
+
+struct TreeReaderRef<'d> {
+	reader_ref: Arc<RwLock<dyn TreeReader + 'd>>,
+}
+
+impl<'d> TreeReaderRef<'d> {
+	pub fn read<'s>(&'s self) -> TreeReaderGuard<'s, 'd> {
+		TreeReaderGuard { lock_guard: self.reader_ref.read() }
+	}
+}
+
+struct TreeReaderGuard<'s, 'd: 's> {
+	lock_guard: RwLockReadGuard<'s, dyn TreeReader + 'd>,
+}
+
+impl<'s, 'd: 's> Deref for TreeReaderGuard<'s, 'd> {
+	type Target = dyn TreeReader + 'd;
+
+	fn deref(&self) -> &Self::Target {
+		self.lock_guard.deref()
 	}
 }
 
@@ -465,7 +596,7 @@ fn writer(
 	chain_generator: Arc<ChainGenerator>,
 	shutdown: Arc<AtomicBool>,
 	start_commit: usize,
-) {
+) -> Result<(), String> {
 	let seed = args.seed.unwrap_or(0);
 	let mut commit = Vec::new();
 
@@ -479,9 +610,40 @@ fn writer(
 		let root_seed = chain_generator.root_seed(tree_index);
 
 		let node_data = chain_generator.generate_node(tree_index, 0, root_seed, false);
-		let root_node_ref = build_commit_tree(node_data, &chain_generator);
-		let num_new_nodes = num_new_child_nodes(&root_node_ref) + 1;
-		println!("Tree commit num new nodes: {}", num_new_nodes);
+
+		// First phase. Find all trees that this commit is dependent on.
+		let mut trees: HashSet<u64> = Default::default();
+		find_dependent_trees(&node_data, &chain_generator, &mut trees)?;
+
+		let mut tree_refs: HashMap<Key, TreeReaderRef> = Default::default();
+		let mut tree_guards: HashMap<Key, TreeReaderGuard> = Default::default();
+		for index in trees {
+			let seed = chain_generator.root_seed(index);
+			let key = chain_generator.key(seed);
+			match db.get_tree(0, &key).unwrap() {
+				Some(reader) => {
+					let reader_ref = TreeReaderRef { reader_ref: reader };
+					tree_refs.insert(key, reader_ref);
+				},
+				None => {
+					// It's fine for the tree to not be in the database. The commit will regenerate
+					// the required nodes.
+				},
+			}
+		}
+
+		/* for (key, tree_ref) in tree_refs.iter() {
+			tree_guards.insert(key.clone(), tree_ref.read());
+		} */
+
+		let root_node_ref =
+			build_commit_tree(node_data, &db, &chain_generator, &tree_refs, &mut tree_guards)?;
+		let mut num_existing_nodes = 0;
+		let num_new_nodes = num_new_nodes(&root_node_ref, &mut num_existing_nodes);
+		println!(
+			"Tree commit num new nodes: {}, num existing: {}",
+			num_new_nodes, num_existing_nodes
+		);
 		if let NodeRef::New(node) = root_node_ref {
 			let key = chain_generator.key(root_seed);
 			commit.push((0, Operation::InsertTree(key.to_vec(), node)));
@@ -492,9 +654,11 @@ fn writer(
 
 			// Immediately read and check a random value from the tree
 			let mut rng = rand::rngs::SmallRng::seed_from_u64(seed + n as u64);
-			read_value(tree_index, &mut rng, &db, &chain_generator);
+			read_value(tree_index, &mut rng, &db, &chain_generator)?;
 		}
 	}
+
+	Ok(())
 }
 
 fn reader(
@@ -503,7 +667,7 @@ fn reader(
 	chain_generator: Arc<ChainGenerator>,
 	index: u64,
 	shutdown: Arc<AtomicBool>,
-) {
+) -> Result<(), String> {
 	// Query random values from random trees while writing
 	let offset = args.seed.unwrap_or(0);
 	let mut rng = rand::rngs::SmallRng::seed_from_u64(offset + index);
@@ -516,30 +680,29 @@ fn reader(
 
 		let tree_index = rng.next_u64() % commits;
 
-		read_value(tree_index, &mut rng, &db, &chain_generator);
+		read_value(tree_index, &mut rng, &db, &chain_generator)?;
 	}
+
+	Ok(())
 }
 
 fn iter_children<'a>(
 	depth: u32,
 	generated_children: &mut Vec<NodeSpec>,
 	database_children: &mut Vec<u64>,
-	reader: &RwLockReadGuard<'a, TreeReader>,
+	reader: &RwLockReadGuard<'a, dyn TreeReader>,
 	chain_generator: &ChainGenerator,
-) {
+) -> Result<(), String> {
 	for i in 0..generated_children.len() {
 		let child_index = i;
 
 		let (child_tree_index, child_seed) = match &generated_children[child_index as usize] {
 			NodeSpec::Direct(child_tree_index, _child_depth, child_seed) =>
 				(*child_tree_index, *child_seed),
-			NodeSpec::UnresolvedPath() => {
-				assert!(false);
-				(0, 0)
-			},
+			NodeSpec::UnresolvedPath() => return Err("UnresolvedPath found".to_string()),
 			NodeSpec::Path(tree_index, path) => {
 				let (child_tree_index, child_depth, child_seed) =
-					chain_generator.execute_path(*tree_index, path.clone());
+					chain_generator.execute_path(*tree_index, path.clone())?;
 				assert_eq!(child_depth, depth + 1);
 				(child_tree_index, child_seed)
 			},
@@ -560,13 +723,13 @@ fn iter_children<'a>(
 					&mut db_children,
 					reader,
 					chain_generator,
-				);
+				)?;
 			},
-			None => {
-				assert!(false);
-			},
+			None => return Err("Child address not in database".to_string()),
 		}
 	}
+
+	Ok(())
 }
 
 fn iter(
@@ -575,7 +738,7 @@ fn iter(
 	chain_generator: Arc<ChainGenerator>,
 	index: u64,
 	shutdown: Arc<AtomicBool>,
-) {
+) -> Result<(), String> {
 	// Iterate over nodes in random trees while writing
 	let offset = args.seed.unwrap_or(0);
 	let mut rng = rand::rngs::SmallRng::seed_from_u64(offset + index);
@@ -612,23 +775,21 @@ fn iter(
 							&mut database_children,
 							&reader,
 							&chain_generator,
-						);
+						)?;
 
 						ITERATIONS.fetch_add(1, Ordering::SeqCst);
 					},
-					None => {
-						assert!(false);
-					},
+					None => return Err("Tree root not in database".to_string()),
 				}
 			},
-			None => {
-				assert!(false);
-			},
+			None => return Err("Tree not in database".to_string()),
 		}
 	}
+
+	Ok(())
 }
 
-pub fn run_internal(args: Args, db: Db) {
+pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 	let args = Arc::new(args);
 	let shutdown = Arc::new(AtomicBool::new(false));
 	let db = Arc::new(db);
@@ -711,7 +872,7 @@ pub fn run_internal(args: Args, db: Db) {
 	shutdown.store(true, Ordering::SeqCst);
 
 	for t in threads.into_iter() {
-		t.join().unwrap();
+		t.join().unwrap()?;
 	}
 
 	let commits = COMMITS.load(Ordering::SeqCst);
@@ -729,4 +890,6 @@ pub fn run_internal(args: Args, db: Db) {
 		queries,
 		iterations
 	);
+
+	Ok(())
 }
