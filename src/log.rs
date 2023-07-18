@@ -9,7 +9,6 @@ use crate::{
 	parking_lot::{RwLock, RwLockWriteGuard},
 	table::TableId as ValueTableId,
 };
-use parking_lot::{MappedRwLockReadGuard, RwLockReadGuard};
 use std::{
 	cmp::min,
 	collections::{HashMap, VecDeque},
@@ -93,8 +92,37 @@ impl LogOverlays {
 	}
 }
 
+
+#[cfg(feature = "loom")]
+pub struct  MappedBytesGuard<'a> {
+	_phantom: std::marker::PhantomData<&'a ()>,
+	data: Vec<u8>,
+}
+
+#[cfg(feature = "loom")]
+impl <'a> MappedBytesGuard<'a> {
+	fn new(data: Vec<u8>) -> Self {
+		Self {
+			_phantom: std::marker::PhantomData,
+			data,
+		}
+	}
+}
+
+#[cfg(feature = "loom")]
+impl <'a> std::ops::Deref for MappedBytesGuard<'a> {
+	type Target = [u8];
+
+	fn deref(&self) -> &Self::Target {
+		self.data.as_slice()
+	}
+}
+
+#[cfg(not(feature = "loom"))]
+type MappedBytesGuard<'a> = parking_lot::MappedRwLockReadGuard<'a, [u8]>;
+
 impl LogQuery for RwLock<LogOverlays> {
-	type ValueRef<'a> = MappedRwLockReadGuard<'a, [u8]>;
+	type ValueRef<'a> = MappedBytesGuard<'a>;
 
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
 		&self,
@@ -109,9 +137,15 @@ impl LogQuery for RwLock<LogOverlays> {
 		(&*self.read()).value(table, index, dest)
 	}
 
+	#[cfg(not(feature = "loom"))]
 	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>> {
-		let lock = RwLockReadGuard::try_map(self.read(), |o| o.value_ref(table, index));
+		let lock = parking_lot::RwLockReadGuard::try_map(self.read(), |o| o.value_ref(table, index));
 		lock.ok()
+	}
+
+	#[cfg(feature = "loom")]
+	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>> {
+		self.read().value_ref(table, index).map(|o| MappedBytesGuard::new(o.to_vec()))
 	}
 }
 
@@ -404,7 +438,7 @@ impl<'a> LogWriter<'a> {
 
 pub enum LogWriterValueGuard<'a> {
 	Local(&'a [u8]),
-	Overlay(MappedRwLockReadGuard<'a, [u8]>),
+	Overlay(MappedBytesGuard<'a>),
 }
 
 impl std::ops::Deref for LogWriterValueGuard<'_> {
