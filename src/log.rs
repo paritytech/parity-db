@@ -93,6 +93,7 @@ impl LogOverlays {
 }
 
 
+// Loom is missing support for guard projection, so we copy the data as a workaround.
 #[cfg(feature = "loom")]
 pub struct  MappedBytesGuard<'a> {
 	_phantom: std::marker::PhantomData<&'a ()>,
