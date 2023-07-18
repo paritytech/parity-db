@@ -139,7 +139,7 @@ impl TableFile {
 
 		self.capacity.store(capacity, Ordering::Relaxed);
 		let mut map_and_file = self.map.write();
-		match map_and_file.as_mut() {
+		match map_and_file.take() {
 			None => {
 				let file = self.create_file()?;
 				try_io!(file.set_len(capacity * entry_size as u64));
@@ -147,11 +147,11 @@ impl TableFile {
 				madvise_random(&mut map);
 				*map_and_file = Some((map, file));
 			},
-			Some((map, file)) => {
+			Some((_map, file)) => {
 				try_io!(file.set_len(capacity * entry_size as u64));
-				let mut m = try_io!(unsafe { memmap2::MmapMut::map_mut(&*file) });
+				let mut m = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
 				madvise_random(&mut m);
-				*map = m;
+				*map_and_file = Some((m, file));
 			},
 		}
 		Ok(())
