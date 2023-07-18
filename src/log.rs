@@ -92,26 +92,22 @@ impl LogOverlays {
 	}
 }
 
-
 // Loom is missing support for guard projection, so we copy the data as a workaround.
 #[cfg(feature = "loom")]
-pub struct  MappedBytesGuard<'a> {
+pub struct MappedBytesGuard<'a> {
 	_phantom: std::marker::PhantomData<&'a ()>,
 	data: Vec<u8>,
 }
 
 #[cfg(feature = "loom")]
-impl <'a> MappedBytesGuard<'a> {
+impl<'a> MappedBytesGuard<'a> {
 	fn new(data: Vec<u8>) -> Self {
-		Self {
-			_phantom: std::marker::PhantomData,
-			data,
-		}
+		Self { _phantom: std::marker::PhantomData, data }
 	}
 }
 
 #[cfg(feature = "loom")]
-impl <'a> std::ops::Deref for MappedBytesGuard<'a> {
+impl<'a> std::ops::Deref for MappedBytesGuard<'a> {
 	type Target = [u8];
 
 	fn deref(&self) -> &Self::Target {
@@ -140,7 +136,8 @@ impl LogQuery for RwLock<LogOverlays> {
 
 	#[cfg(not(feature = "loom"))]
 	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>> {
-		let lock = parking_lot::RwLockReadGuard::try_map(self.read(), |o| o.value_ref(table, index));
+		let lock =
+			parking_lot::RwLockReadGuard::try_map(self.read(), |o| o.value_ref(table, index));
 		lock.ok()
 	}
 
