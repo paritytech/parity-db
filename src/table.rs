@@ -124,6 +124,12 @@ impl TableId {
 	pub const fn max_log_tables(num_columns: usize) -> usize {
 		SIZE_TIERS * num_columns
 	}
+
+	pub fn from_log_index(i: usize) -> Self {
+		let col = i / SIZE_TIERS;
+		let tier = i % SIZE_TIERS;
+		Self::new(col as ColId, tier as u8)
+	}
 }
 
 impl std::fmt::Display for TableId {

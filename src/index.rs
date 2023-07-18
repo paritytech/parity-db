@@ -187,6 +187,12 @@ impl TableId {
 		self.col() as usize * (64 - MIN_INDEX_BITS) as usize + self.index_bits() as usize
 	}
 
+	pub fn from_log_index(i: usize) -> Self {
+		let col = i / (64 - MIN_INDEX_BITS) as usize;
+		let bits = i % (64 - MIN_INDEX_BITS) as usize;
+		TableId::new(col as ColId, bits as u8)
+	}
+
 	pub const fn max_log_indicies(num_columns: usize) -> usize {
 		(64 - MIN_INDEX_BITS) as usize * num_columns
 	}

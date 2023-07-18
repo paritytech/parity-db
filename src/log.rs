@@ -26,8 +26,12 @@ const INSERT_VALUE: u8 = 3;
 const END_RECORD: u8 = 4;
 const DROP_TABLE: u8 = 5;
 
-const MAX_INDEX_OVERLAY_CAPACITY_ITEMS: usize = 1024;
-const MAX_VALUE_OVERLAY_CAPACITY_ITEMS: usize = 65536;
+// Once index overly uses less than 1/10 of its capacity, it will be reclaimed.
+const INDEX_OVERLAY_RECLAIM_FACTOR: usize = 10;
+// Once value overly uses less than 1/10 of its capacity, it will be reclaimed.
+const VALUE_OVERLAY_RECLAIM_FACTOR: usize = 10;
+// Min number of value items to initiate reclaim. Each item is around 40 bytes.
+const VALUE_OVERLAY_MIN_RECLAIM_ITEMS: usize = 10240;
 
 #[derive(Debug)]
 pub struct InsertIndexAction {
@@ -737,24 +741,26 @@ impl Log {
 			}
 		}
 		// Reclaim overlay memory
-		for o in overlays.index.iter_mut() {
-			if o.map.is_empty() && o.map.capacity() > MAX_INDEX_OVERLAY_CAPACITY_ITEMS {
-				log::info!(
-					"Schrinking index {}/{} -> {}",
+		for (i, o) in overlays.index.iter_mut().enumerate() {
+			if o.map.capacity() > o.map.len() * INDEX_OVERLAY_RECLAIM_FACTOR {
+				log::trace!(
+					"Schrinking index overlay {}: {}/{}",
+					IndexTableId::from_log_index(i),
 					o.map.len(),
 					o.map.capacity(),
-					MAX_INDEX_OVERLAY_CAPACITY_ITEMS
 				);
 				o.map.shrink_to_fit();
 			}
 		}
-		for o in overlays.value.iter_mut() {
-			if o.map.is_empty() && o.map.capacity() > MAX_VALUE_OVERLAY_CAPACITY_ITEMS {
-				log::info!(
-					"Schrinking value {}/{} -> {}",
+		for (i, o) in overlays.value.iter_mut().enumerate() {
+			if o.map.capacity() > VALUE_OVERLAY_MIN_RECLAIM_ITEMS &&
+				o.map.capacity() > o.map.len() * VALUE_OVERLAY_RECLAIM_FACTOR
+			{
+				log::trace!(
+					"Schrinking value overlay {}: {}/{}",
+					ValueTableId::from_log_index(i),
 					o.map.len(),
 					o.map.capacity(),
-					MAX_VALUE_OVERLAY_CAPACITY_ITEMS
 				);
 				o.map.shrink_to_fit();
 			}
