@@ -39,11 +39,7 @@ fn disable_read_ahead(_file: &std::fs::File) -> std::io::Result<()> {
 #[cfg(unix)]
 pub fn madvise_random(map: &mut memmap2::MmapMut) {
 	unsafe {
-		libc::madvise(
-			map.as_mut_ptr() as _,
-			map.len(),
-			libc::MADV_RANDOM,
-		);
+		libc::madvise(map.as_mut_ptr() as _, map.len(), libc::MADV_RANDOM);
 	}
 }
 
@@ -150,13 +146,13 @@ impl TableFile {
 				let mut map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
 				madvise_random(&mut map);
 				*map_and_file = Some((map, file));
-			}
+			},
 			Some((map, file)) => {
 				try_io!(file.set_len(capacity * entry_size as u64));
-				let mut m  = try_io!(unsafe { memmap2::MmapMut::map_mut(&*file) });
+				let mut m = try_io!(unsafe { memmap2::MmapMut::map_mut(&*file) });
 				madvise_random(&mut m);
 				*map = m;
-			}
+			},
 		}
 		Ok(())
 	}

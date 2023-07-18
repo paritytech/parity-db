@@ -48,7 +48,7 @@ use crate::{
 	column::ColId,
 	display::hex,
 	error::Result,
-	log::{LogQuery, LogReader, LogWriter},
+	log::{LogOverlays, LogQuery, LogReader, LogWriter},
 	options::ColumnOptions as Options,
 	parking_lot::RwLock,
 	table::key::{TableKey, TableKeyQuery, PARTIAL_SIZE},
@@ -115,6 +115,14 @@ impl TableId {
 
 	pub fn as_u16(&self) -> u16 {
 		self.0
+	}
+
+	pub fn log_index(&self) -> usize {
+		self.col() as usize * SIZE_TIERS + self.size_tier() as usize
+	}
+
+	pub const fn max_log_tables(num_columns: usize) -> usize {
+		SIZE_TIERS * num_columns
 	}
 }
 
@@ -1055,7 +1063,7 @@ impl ValueTable {
 	fn do_init_with_entry(&self, entry: &[u8]) -> Result<()> {
 		self.file.grow(self.entry_size)?;
 
-		let empty_overlays = RwLock::new(Default::default());
+		let empty_overlays = RwLock::new(LogOverlays::with_columns(0));
 		let mut log = LogWriter::new(&empty_overlays, 0);
 		let at = self.overwrite_chain(&TableKey::NoHash, entry, &mut log, None, false)?;
 		self.complete_plan(&mut log)?;
@@ -1091,7 +1099,7 @@ impl ValueTable {
 }
 
 pub mod key {
-	use super::{FullEntry, EntryRef};
+	use super::{EntryRef, FullEntry};
 	use crate::{Key, Result};
 
 	pub const PARTIAL_SIZE: usize = 26;

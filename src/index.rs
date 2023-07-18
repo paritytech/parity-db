@@ -2,14 +2,14 @@
 // This file is dual-licensed as Apache-2.0 or MIT.
 
 use crate::{
-	column::ColId,
+	column::{ColId, MIN_INDEX_BITS},
 	display::hex,
 	error::{try_io, Error, Result},
+	file::madvise_random,
 	log::{LogQuery, LogReader, LogWriter},
 	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 	stats::{self, ColumnStats},
 	table::{key::TableKey, SIZE_TIERS_BITS},
-	file::madvise_random,
 	Key,
 };
 #[cfg(target_arch = "x86")]
@@ -181,6 +181,14 @@ impl TableId {
 
 	pub fn total_entries(&self) -> u64 {
 		total_entries(self.index_bits())
+	}
+
+	pub fn log_index(&self) -> usize {
+		self.col() as usize * (64 - MIN_INDEX_BITS) as usize + self.index_bits() as usize
+	}
+
+	pub const fn max_log_indicies(num_columns: usize) -> usize {
+		(64 - MIN_INDEX_BITS) as usize * num_columns
 	}
 }
 
