@@ -147,7 +147,8 @@ impl TableFile {
 				madvise_random(&mut map);
 				*map_and_file = Some((map, file));
 			},
-			Some((_map, file)) => {
+			Some((map, file)) => {
+				std::mem::drop(map);
 				try_io!(file.set_len(capacity * entry_size as u64));
 				let mut m = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
 				madvise_random(&mut m);
