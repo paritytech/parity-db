@@ -10,7 +10,12 @@ use crate::{
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const RESERVE_ADDRESS_SPACE: usize = 512 * 1024 * 1024;
+#[cfg(not(test))]
+const RESERVE_ADDRESS_SPACE: usize = 1024 * 1024 * 1024; // 1 Gb
+
+// Use different value for tests to work around docker limits on the test machine.
+#[cfg(test)]
+const RESERVE_ADDRESS_SPACE: usize = 64 * 1024 * 1024; // 64 Mb
 
 #[cfg(target_os = "linux")]
 fn disable_read_ahead(file: &std::fs::File) -> std::io::Result<()> {
