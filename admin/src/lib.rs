@@ -134,7 +134,7 @@ pub fn run() -> Result<(), String> {
 			options.path.push("test_db_multitree_stress");
 			if options.path.exists() && !args.append {
 				std::fs::remove_dir_all(options.path.as_path())
-					.map_err(|e| format!("Error clearing stress db: {e:?}"))?;
+					.map_err(|e| format!("Error clearing multitree stress db: {e:?}"))?;
 			}
 
 			let mut db_options = options.clone();
@@ -148,6 +148,16 @@ pub fn run() -> Result<(), String> {
 					c.compression = parity_db::CompressionType::Lz4;
 				}
 			}
+
+			if db_options.columns.len() < 2 {
+				let info_column: parity_db::ColumnOptions = Default::default();
+				db_options.columns.push(info_column);
+			}
+
+			let info_column = &mut db_options.columns[1];
+			info_column.uniform = false;
+			info_column.ref_counted = false;
+			info_column.multitree = false;
 
 			let db = parity_db::Db::open_or_create(&db_options).unwrap();
 			multitree_bench::run_internal(args, db)?;

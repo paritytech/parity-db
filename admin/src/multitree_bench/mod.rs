@@ -23,8 +23,15 @@ use std::{
 
 static COMMITS: AtomicUsize = AtomicUsize::new(0);
 static NEXT_COMMIT: AtomicUsize = AtomicUsize::new(0);
+static NUM_REMOVED: AtomicUsize = AtomicUsize::new(0);
 static QUERIES: AtomicUsize = AtomicUsize::new(0);
 static ITERATIONS: AtomicUsize = AtomicUsize::new(0);
+
+const TREE_COLUMN: u8 = 0;
+const INFO_COLUMN: u8 = 1;
+
+const KEY_LAST_COMMIT: Key = [1u8; 32];
+const KEY_NUM_REMOVED: Key = [2u8; 32];
 
 /// Stress tests (warning erase db first).
 #[derive(Debug, clap::Parser)]
@@ -56,9 +63,9 @@ pub struct MultiTreeStress {
 	#[clap(long)]
 	pub append: bool,
 
-	/// Do not apply pruning.
+	/// Number of trees to keep (Older are removed). 0 means never remove. [default: 8]
 	#[clap(long)]
-	pub archive: bool,
+	pub pruning: Option<u64>,
 
 	/// Enable compression.
 	#[clap(long)]
@@ -77,7 +84,7 @@ pub struct Args {
 	pub commits: usize,
 	pub seed: Option<u64>,
 	pub append: bool,
-	pub archive: bool,
+	pub pruning: u64,
 	pub compress: bool,
 	pub commit_time: u64,
 }
@@ -91,7 +98,7 @@ impl MultiTreeStress {
 			commits: self.commits.unwrap_or(100_000),
 			seed: self.seed,
 			append: self.append,
-			archive: self.archive,
+			pruning: self.pruning.unwrap_or(8),
 			compress: self.compress,
 			commit_time: self.commit_time.unwrap_or(0),
 		}
@@ -508,7 +515,7 @@ fn read_value(
 		chain_generator.generate_node(tree_index, depth, root_seed, false);
 
 	let key = chain_generator.key(root_seed);
-	match db.get_tree(0, &key).unwrap() {
+	match db.get_tree(TREE_COLUMN, &key).unwrap() {
 		Some(reader) => {
 			let reader = reader.read();
 			match reader.get_root().unwrap() {
@@ -559,7 +566,13 @@ fn read_value(
 
 					QUERIES.fetch_add(1, Ordering::SeqCst);
 				},
-				None => return Err("Tree root not in database".to_string()),
+				None => {
+					// Is this expected?
+					let num_removed = NUM_REMOVED.load(Ordering::Relaxed);
+					if tree_index >= num_removed as u64 {
+						return Err("Tree root not in database".to_string())
+					}
+				},
 			}
 		},
 		None => return Err("Tree not in database".to_string()),
@@ -641,12 +654,17 @@ fn writer(
 		let mut num_existing_nodes = 0;
 		let num_new_nodes = num_new_nodes(&root_node_ref, &mut num_existing_nodes);
 		println!(
-			"Tree commit num new nodes: {}, num existing: {}",
-			num_new_nodes, num_existing_nodes
+			"Commit tree {}, num new nodes: {}, num existing: {}",
+			tree_index, num_new_nodes, num_existing_nodes
 		);
 		if let NodeRef::New(node) = root_node_ref {
 			let key = chain_generator.key(root_seed);
-			commit.push((0, Operation::InsertTree(key.to_vec(), node)));
+			commit.push((TREE_COLUMN, Operation::InsertTree(key.to_vec(), node)));
+
+			commit.push((
+				INFO_COLUMN,
+				Operation::Set(KEY_LAST_COMMIT.to_vec(), (n as u64).to_be_bytes().to_vec()),
+			));
 
 			db.commit_changes(commit.drain(..)).unwrap();
 			COMMITS.fetch_add(1, Ordering::Relaxed);
@@ -655,6 +673,47 @@ fn writer(
 			// Immediately read and check a random value from the tree
 			let mut rng = rand::rngs::SmallRng::seed_from_u64(seed + n as u64);
 			read_value(tree_index, &mut rng, &db, &chain_generator)?;
+		}
+	}
+
+	Ok(())
+}
+
+fn pruner(
+	db: Arc<Db>,
+	args: Arc<Args>,
+	chain_generator: Arc<ChainGenerator>,
+	shutdown: Arc<AtomicBool>,
+) -> Result<(), String> {
+	let mut commit = Vec::new();
+
+	while !shutdown.load(Ordering::Relaxed) {
+		let num_removed = NUM_REMOVED.load(Ordering::Relaxed);
+		let commits = COMMITS.load(Ordering::Relaxed);
+
+		let target_num_removed =
+			if commits as u64 > args.pruning { commits as u64 - args.pruning } else { 0 };
+
+		if target_num_removed > num_removed as u64 {
+			// Need to remove a tree
+			let tree_index = num_removed as u64;
+			let root_seed = chain_generator.root_seed(tree_index);
+			let key = chain_generator.key(root_seed);
+
+			println!("Remove tree {}", tree_index);
+
+			commit.push((TREE_COLUMN, Operation::RemoveTree(key.to_vec())));
+			commit.push((
+				INFO_COLUMN,
+				Operation::Set(
+					KEY_NUM_REMOVED.to_vec(),
+					((num_removed + 1) as u64).to_be_bytes().to_vec(),
+				),
+			));
+
+			db.commit_changes(commit.drain(..)).unwrap();
+			NUM_REMOVED.fetch_add(1, Ordering::Relaxed);
+			commit.clear();
 		}
 	}
 
@@ -673,12 +732,14 @@ fn reader(
 	let mut rng = rand::rngs::SmallRng::seed_from_u64(offset + index);
 
 	while !shutdown.load(Ordering::Relaxed) {
+		let num_removed = NUM_REMOVED.load(Ordering::Relaxed) as u64;
 		let commits = COMMITS.load(Ordering::Relaxed) as u64;
 		if commits == 0 {
 			continue
 		}
 
-		let tree_index = rng.next_u64() % commits;
+		//let tree_index = rng.next_u64() % commits;
+		let tree_index = (rng.next_u64() % (commits - num_removed)) + num_removed;
 
 		read_value(tree_index, &mut rng, &db, &chain_generator)?;
 	}
@@ -744,12 +805,15 @@ fn iter(
 	let mut rng = rand::rngs::SmallRng::seed_from_u64(offset + index);
 
 	while !shutdown.load(Ordering::Relaxed) {
+		let num_removed = NUM_REMOVED.load(Ordering::Relaxed) as u64;
 		let commits = COMMITS.load(Ordering::Relaxed) as u64;
 		if commits == 0 {
 			continue
 		}
 
-		let tree_index = rng.next_u64() % commits;
+		//let tree_index = rng.next_u64() % commits;
+		let tree_index = (rng.next_u64() % (commits - num_removed)) + num_removed;
+
 		let root_seed = chain_generator.root_seed(tree_index);
 		let depth = 0;
 
@@ -757,7 +821,7 @@ fn iter(
 			chain_generator.generate_node(tree_index, depth, root_seed, false);
 
 		let key = chain_generator.key(root_seed);
-		match db.get_tree(0, &key).unwrap() {
+		match db.get_tree(TREE_COLUMN, &key).unwrap() {
 			Some(reader) => {
 				let reader = reader.read();
 				match reader.get_root().unwrap() {
@@ -779,7 +843,13 @@ fn iter(
 
 						ITERATIONS.fetch_add(1, Ordering::SeqCst);
 					},
-					None => return Err("Tree root not in database".to_string()),
+					None => {
+						// Is this expected?
+						let num_removed = NUM_REMOVED.load(Ordering::Relaxed);
+						if tree_index >= num_removed as u64 {
+							return Err("Tree root not in database".to_string())
+						}
+					},
 				}
 			},
 			None => return Err("Tree not in database".to_string()),
@@ -796,7 +866,21 @@ pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 
 	let mut threads = Vec::new();
 
-	let start_commit = 0;
+	let start_commit = if let Some(start) = db.get(INFO_COLUMN, &KEY_LAST_COMMIT).unwrap() {
+		let mut buf = [0u8; 8];
+		buf.copy_from_slice(&start[0..8]);
+		u64::from_be_bytes(buf) as usize + 1
+	} else {
+		0
+	};
+
+	let num_removed = if let Some(start) = db.get(INFO_COLUMN, &KEY_NUM_REMOVED).unwrap() {
+		let mut buf = [0u8; 8];
+		buf.copy_from_slice(&start[0..8]);
+		u64::from_be_bytes(buf) as usize
+	} else {
+		0
+	};
 
 	let total_num_expected_tree_nodes: u32 =
 		data::DEPTH_CHILD_COUNT_HISTOGRAMS.iter().map(|x| x.1.iter().sum::<u32>()).sum();
@@ -815,6 +899,7 @@ pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 
 	COMMITS.store(start_commit, Ordering::SeqCst);
 	NEXT_COMMIT.store(start_commit, Ordering::SeqCst);
+	NUM_REMOVED.store(num_removed, Ordering::SeqCst);
 
 	{
 		let shutdown = shutdown.clone();
@@ -862,6 +947,20 @@ pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 			thread::Builder::new()
 				.name(format!("writer {i}"))
 				.spawn(move || writer(db, args, chain_generator, shutdown, start_commit))
+				.unwrap(),
+		);
+	}
+
+	if args.pruning > 0 {
+		let db = db.clone();
+		let shutdown = shutdown.clone();
+		let args = args.clone();
+		let chain_generator = chain_generator.clone();
+
+		threads.push(
+			thread::Builder::new()
+				.name(format!("pruner"))
+				.spawn(move || pruner(db, args, chain_generator, shutdown))
 				.unwrap(),
 		);
 	}

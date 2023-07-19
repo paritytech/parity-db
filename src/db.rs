@@ -410,25 +410,40 @@ impl DbInner {
 					.or_insert_with(|| BTreeChangeSet::new(col))
 					.push(change)?
 			} else if self.options.columns[col as usize].multitree {
-				// TODO: Allow normal Operations as well?
 				match &self.columns[col as usize] {
-					Column::Hash(column) => {
-						let (root_data, node_values) = column.claim_tree_values(&change)?;
+					Column::Hash(column) => match change {
+						Operation::Set(..) |
+						Operation::Dereference(..) |
+						Operation::Reference(..) =>
+							return Err(Error::InvalidConfiguration(
+								"Invalid operation for multitree column".to_string(),
+							)),
+						Operation::InsertTree(..) => {
+							let (root_data, node_values) = column.claim_tree_values(&change)?;
 
-						let root_operation = Operation::Set(change.key(), root_data);
-						commit
-							.indexed
-							.entry(col)
-							.or_insert_with(|| IndexedChangeSet::new(col))
-							.push(root_operation, &self.options, self.db_version)?;
-
-						for node_change in node_values {
+							let root_operation = Operation::Set(change.key(), root_data);
 							commit
 								.indexed
 								.entry(col)
 								.or_insert_with(|| IndexedChangeSet::new(col))
-								.push_node_change(node_change);
-						}
+								.push(root_operation, &self.options, self.db_version)?;
+
+							for node_change in node_values {
+								commit
+									.indexed
+									.entry(col)
+									.or_insert_with(|| IndexedChangeSet::new(col))
+									.push_node_change(node_change);
+							}
+						},
+						Operation::RemoveTree(..) => {
+							let root_operation = Operation::Dereference(change.key());
+							commit
+								.indexed
+								.entry(col)
+								.or_insert_with(|| IndexedChangeSet::new(col))
+								.push(root_operation, &self.options, self.db_version)?;
+						},
 					},
 					Column::Tree(_) =>
 						return Err(Error::InvalidConfiguration("Not a HashColumn".to_string())),
@@ -1402,10 +1417,12 @@ impl TreeReader for DbTreeReader {
 				if let Some(data) = value {
 					return unpack_node_data(data).map(|x| Some(x))
 				}
+
+				return Ok(None)
 			},
-			Column::Tree(..) => {},
+			Column::Tree(..) =>
+				return Err(Error::InvalidConfiguration("Not a HashColumn.".to_string())),
 		};
-		Err(Error::InvalidValueData)
 	}
 
 	fn get_node(&self, node_address: NodeAddress) -> Result<Option<(Vec<u8>, Children)>> {
