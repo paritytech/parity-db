@@ -10,7 +10,7 @@ use crate::{
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const RESERVE_ADDRESS_SPACE: usize = 1024 * 1024 * 1024;
+const RESERVE_ADDRESS_SPACE: usize = 64 * 1024 * 1024;
 
 #[cfg(target_os = "linux")]
 fn disable_read_ahead(file: &std::fs::File) -> std::io::Result<()> {
