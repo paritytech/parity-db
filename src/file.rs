@@ -75,7 +75,7 @@ impl TableFile {
 			if len == 0 {
 				// Preallocate.
 				capacity += GROW_SIZE_BYTES / entry_size as u64;
-				try_io!(file.set_len(capacity * entry_size as u64));
+				try_io!(file.set_len(GROW_SIZE_BYTES));
 			} else {
 				capacity = len / entry_size as u64;
 			}
@@ -141,23 +141,21 @@ impl TableFile {
 	}
 
 	pub fn grow(&self, entry_size: u16) -> Result<()> {
-		let mut capacity = self.capacity.load(Ordering::Relaxed);
-		capacity += GROW_SIZE_BYTES / entry_size as u64;
-
-		self.capacity.store(capacity, Ordering::Relaxed);
 		let mut map_and_file = self.map.write();
-		match map_and_file.as_mut() {
+		let new_len = match map_and_file.as_mut() {
 			None => {
 				let file = self.create_file()?;
-				try_io!(file.set_len(capacity * entry_size as u64));
+				let len = GROW_SIZE_BYTES;
+				try_io!(file.set_len(len));
 				let mut map = try_io!(unsafe {
 					memmap2::MmapOptions::new().len(RESERVE_ADDRESS_SPACE).map_mut(&file)
 				});
 				madvise_random(&mut map);
 				*map_and_file = Some((map, file));
+				len
 			},
 			Some((map, file)) => {
-				let new_len = capacity * entry_size as u64;
+				let new_len = try_io!(file.metadata()).len() + GROW_SIZE_BYTES;
 				try_io!(file.set_len(new_len));
 				if map.len() < new_len as usize {
 					let mut new_map = try_io!(unsafe {
@@ -169,8 +167,11 @@ impl TableFile {
 					// Leak the old mapping as there might be concurrent readers.
 					std::mem::forget(old_map);
 				}
+				new_len
 			},
-		}
+		};
+		let capacity = new_len / entry_size as u64;
+		self.capacity.store(capacity, Ordering::Relaxed);
 		Ok(())
 	}
 
