@@ -10,6 +10,8 @@ use crate::{
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
+const RESERVE_ADDRESS_SPACE: usize = 1024 * 1024 * 1024;
+
 #[cfg(target_os = "linux")]
 fn disable_read_ahead(file: &std::fs::File) -> std::io::Result<()> {
 	use std::os::unix::io::AsRawFd;
@@ -56,6 +58,10 @@ pub struct TableFile {
 	pub id: TableId,
 }
 
+fn map_len(file_len: u64) -> usize {
+	file_len as usize + RESERVE_ADDRESS_SPACE
+}
+
 impl TableFile {
 	pub fn open(filepath: std::path::PathBuf, entry_size: u16, id: TableId) -> Result<Self> {
 		let mut capacity = 0u64;
@@ -73,7 +79,8 @@ impl TableFile {
 			} else {
 				capacity = len / entry_size as u64;
 			}
-			let mut map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
+			let mut map =
+				try_io!(unsafe { memmap2::MmapOptions::new().len(map_len(len)).map_mut(&file) });
 			madvise_random(&mut map);
 			Some((map, file))
 		} else {
@@ -139,20 +146,29 @@ impl TableFile {
 
 		self.capacity.store(capacity, Ordering::Relaxed);
 		let mut map_and_file = self.map.write();
-		match map_and_file.take() {
+		match map_and_file.as_mut() {
 			None => {
 				let file = self.create_file()?;
 				try_io!(file.set_len(capacity * entry_size as u64));
-				let mut map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
+				let mut map = try_io!(unsafe {
+					memmap2::MmapOptions::new().len(RESERVE_ADDRESS_SPACE).map_mut(&file)
+				});
 				madvise_random(&mut map);
 				*map_and_file = Some((map, file));
 			},
 			Some((map, file)) => {
-				std::mem::drop(map);
-				try_io!(file.set_len(capacity * entry_size as u64));
-				let mut m = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
-				madvise_random(&mut m);
-				*map_and_file = Some((m, file));
+				let new_len = capacity * entry_size as u64;
+				try_io!(file.set_len(new_len));
+				if map.len() < new_len as usize {
+					let mut new_map = try_io!(unsafe {
+						memmap2::MmapOptions::new().len(map_len(new_len)).map_mut(&*file)
+					});
+					madvise_random(&mut new_map);
+					let old_map = std::mem::replace(map, new_map);
+					try_io!(old_map.flush());
+					// Leak the old mapping as there might be concurrent readers.
+					std::mem::forget(old_map);
+				}
 			},
 		}
 		Ok(())
