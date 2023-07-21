@@ -114,12 +114,12 @@ pub fn run() -> Result<(), String> {
 
 			let mut db_options = options.clone();
 			if args.compress {
-				for mut c in &mut db_options.columns {
+				for c in &mut db_options.columns {
 					c.compression = parity_db::CompressionType::Lz4;
 				}
 			}
 			if args.uniform {
-				for mut c in &mut db_options.columns {
+				for c in &mut db_options.columns {
 					c.uniform = true;
 				}
 			}

@@ -4,11 +4,18 @@
 //! Utilities for db file.
 
 use crate::{
-	error::{try_io, Error, Result},
-	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
+	error::{try_io, Result},
+	parking_lot::RwLock,
 	table::TableId,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(not(test))]
+const RESERVE_ADDRESS_SPACE: usize = 1024 * 1024 * 1024; // 1 Gb
+
+// Use different value for tests to work around docker limits on the test machine.
+#[cfg(test)]
+const RESERVE_ADDRESS_SPACE: usize = 64 * 1024 * 1024; // 64 Mb
 
 #[cfg(target_os = "linux")]
 fn disable_read_ahead(file: &std::fs::File) -> std::io::Result<()> {
@@ -36,42 +43,34 @@ fn disable_read_ahead(_file: &std::fs::File) -> std::io::Result<()> {
 	Ok(())
 }
 
-// `File::sync_data` uses F_FULLSYNC fcntl on MacOS. It it supposed to be
-// the safest way to make sure data is fully persisted. However starting from
-// MacOS 11.0 it severely degrades parallel write performance, even when writing to
-// other files. Regular `fsync` is good enough for our use case.
-// SSDs used in modern macs seem to be able to flush data even on unexpected power loss.
-// We performed some testing with power shutdowns and kernel panics on both mac hardware
-// and VMs and in all cases `fsync` was enough to prevent data corruption.
-#[cfg(target_os = "macos")]
-fn fsync(file: &std::fs::File) -> std::io::Result<()> {
-	use std::os::unix::io::AsRawFd;
-	if unsafe { libc::fsync(file.as_raw_fd()) } != 0 {
-		Err(std::io::Error::last_os_error())
-	} else {
-		Ok(())
+#[cfg(unix)]
+pub fn madvise_random(map: &mut memmap2::MmapMut) {
+	unsafe {
+		libc::madvise(map.as_mut_ptr() as _, map.len(), libc::MADV_RANDOM);
 	}
 }
 
-#[cfg(not(target_os = "macos"))]
-fn fsync(file: &std::fs::File) -> std::io::Result<()> {
-	file.sync_data()
-}
+#[cfg(not(unix))]
+pub fn madvise_random(_id: TableId, _map: &mut memmap2::MmapMut) {}
 
 const GROW_SIZE_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug)]
 pub struct TableFile {
-	pub file: RwLock<Option<std::fs::File>>,
+	pub map: RwLock<Option<(memmap2::MmapMut, std::fs::File)>>,
 	pub path: std::path::PathBuf,
 	pub capacity: AtomicU64,
 	pub id: TableId,
 }
 
+fn map_len(file_len: u64) -> usize {
+	file_len as usize + RESERVE_ADDRESS_SPACE
+}
+
 impl TableFile {
 	pub fn open(filepath: std::path::PathBuf, entry_size: u16, id: TableId) -> Result<Self> {
 		let mut capacity = 0u64;
-		let file = if std::fs::metadata(&filepath).is_ok() {
+		let map = if std::fs::metadata(&filepath).is_ok() {
 			let file = try_io!(std::fs::OpenOptions::new()
 				.read(true)
 				.write(true)
@@ -81,17 +80,20 @@ impl TableFile {
 			if len == 0 {
 				// Preallocate.
 				capacity += GROW_SIZE_BYTES / entry_size as u64;
-				try_io!(file.set_len(capacity * entry_size as u64));
+				try_io!(file.set_len(GROW_SIZE_BYTES));
 			} else {
 				capacity = len / entry_size as u64;
 			}
-			Some(file)
+			let mut map =
+				try_io!(unsafe { memmap2::MmapOptions::new().len(map_len(len)).map_mut(&file) });
+			madvise_random(&mut map);
+			Some((map, file))
 		} else {
 			None
 		};
 		Ok(TableFile {
 			path: filepath,
-			file: RwLock::new(file),
+			map: RwLock::new(map),
 			capacity: AtomicU64::new(capacity),
 			id,
 		})
@@ -108,111 +110,87 @@ impl TableFile {
 		Ok(file)
 	}
 
-	#[cfg(unix)]
 	pub fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
-		use std::os::unix::fs::FileExt;
-		try_io!(self
-			.file
-			.read()
-			.as_ref()
-			.ok_or_else(|| Error::Corruption("File does not exist.".into()))?
-			.read_exact_at(buf, offset));
+		let offset = offset as usize;
+		let map = self.map.read();
+		let (map, _) = map.as_ref().unwrap();
+		buf.copy_from_slice(&map[offset..offset + buf.len()]);
 		Ok(())
 	}
 
-	#[cfg(unix)]
+	pub fn slice_at(&self, offset: u64, len: usize) -> &[u8] {
+		let offset = offset as usize;
+		let map = self.map.read();
+		let (map, _) = map.as_ref().unwrap();
+		let data: &[u8] = unsafe {
+			let ptr = map.as_ptr().add(offset);
+			std::slice::from_raw_parts(ptr, len)
+		};
+		data
+	}
+
 	pub fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
-		use std::os::unix::fs::FileExt;
-		try_io!(self.file.read().as_ref().unwrap().write_all_at(buf, offset));
-		Ok(())
-	}
+		let map = self.map.read();
+		let (map, _) = map.as_ref().unwrap();
+		let offset = offset as usize;
 
-	#[cfg(windows)]
-	pub fn read_at(&self, mut buf: &mut [u8], mut offset: u64) -> Result<()> {
-		use crate::error::Error;
-		use std::{io, os::windows::fs::FileExt};
-
-		let file = self.file.read();
-		let file = file.as_ref().ok_or_else(|| Error::Corruption("File does not exist.".into()))?;
-
-		while !buf.is_empty() {
-			match file.seek_read(buf, offset) {
-				Ok(0) => break,
-				Ok(n) => {
-					buf = &mut buf[n..];
-					offset += n as u64;
-				},
-				Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
-					// Try again
-				},
-				Err(e) => return Err(Error::Io(e)),
-			}
-		}
-
-		if !buf.is_empty() {
-			Err(Error::Io(io::Error::new(
-				io::ErrorKind::UnexpectedEof,
-				"failed to fill whole buffer",
-			)))
-		} else {
-			Ok(())
-		}
-	}
-
-	#[cfg(windows)]
-	pub fn write_at(&self, mut buf: &[u8], mut offset: u64) -> Result<()> {
-		use crate::error::Error;
-		use std::{io, os::windows::fs::FileExt};
-
-		let file = self.file.read();
-		let file = file.as_ref().unwrap();
-
-		while !buf.is_empty() {
-			match file.seek_write(buf, offset) {
-				Ok(0) =>
-					return Err(Error::Io(io::Error::new(
-						io::ErrorKind::WriteZero,
-						"failed to write whole buffer",
-					))),
-				Ok(n) => {
-					buf = &buf[n..];
-					offset += n as u64;
-				},
-				Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
-					// Try again
-				},
-				Err(e) => return Err(Error::Io(e)),
-			}
-		}
-
+		// Nasty mutable pointer cast. We do ensure that all chunks that are being written are
+		// accessed through the overlay in other threads.
+		let ptr: *mut u8 = map.as_ptr() as *mut u8;
+		let data: &mut [u8] = unsafe {
+			let ptr = ptr.add(offset);
+			std::slice::from_raw_parts_mut(ptr, buf.len())
+		};
+		data.copy_from_slice(buf);
 		Ok(())
 	}
 
 	pub fn grow(&self, entry_size: u16) -> Result<()> {
-		let mut capacity = self.capacity.load(Ordering::Relaxed);
-		capacity += GROW_SIZE_BYTES / entry_size as u64;
-
+		let mut map_and_file = self.map.write();
+		let new_len = match map_and_file.as_mut() {
+			None => {
+				let file = self.create_file()?;
+				let len = GROW_SIZE_BYTES;
+				try_io!(file.set_len(len));
+				let mut map = try_io!(unsafe {
+					memmap2::MmapOptions::new().len(RESERVE_ADDRESS_SPACE).map_mut(&file)
+				});
+				madvise_random(&mut map);
+				*map_and_file = Some((map, file));
+				len
+			},
+			Some((map, file)) => {
+				let new_len = try_io!(file.metadata()).len() + GROW_SIZE_BYTES;
+				try_io!(file.set_len(new_len));
+				if map.len() < new_len as usize {
+					let mut new_map = try_io!(unsafe {
+						memmap2::MmapOptions::new().len(map_len(new_len)).map_mut(&*file)
+					});
+					madvise_random(&mut new_map);
+					let old_map = std::mem::replace(map, new_map);
+					try_io!(old_map.flush());
+					// Leak the old mapping as there might be concurrent readers.
+					std::mem::forget(old_map);
+				}
+				new_len
+			},
+		};
+		let capacity = new_len / entry_size as u64;
 		self.capacity.store(capacity, Ordering::Relaxed);
-		let mut file = self.file.upgradable_read();
-		if file.is_none() {
-			let mut wfile = RwLockUpgradableReadGuard::upgrade(file);
-			*wfile = Some(self.create_file()?);
-			file = RwLockWriteGuard::downgrade_to_upgradable(wfile);
-		}
-		try_io!(file.as_ref().unwrap().set_len(capacity * entry_size as u64));
 		Ok(())
 	}
 
 	pub fn flush(&self) -> Result<()> {
-		if let Some(file) = self.file.read().as_ref() {
-			try_io!(fsync(file));
+		if let Some((map, _)) = self.map.read().as_ref() {
+			try_io!(map.flush());
 		}
 		Ok(())
 	}
 
 	pub fn remove(&self) -> Result<()> {
-		let mut file = self.file.write();
-		if let Some(file) = file.take() {
+		let mut map = self.map.write();
+		if let Some((map, file)) = map.take() {
+			drop(map);
 			drop(file);
 			try_io!(std::fs::remove_file(&self.path));
 		}

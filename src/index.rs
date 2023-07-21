@@ -2,9 +2,10 @@
 // This file is dual-licensed as Apache-2.0 or MIT.
 
 use crate::{
-	column::ColId,
+	column::{ColId, MIN_INDEX_BITS},
 	display::hex,
 	error::{try_io, Error, Result},
+	file::madvise_random,
 	log::{LogQuery, LogReader, LogWriter},
 	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 	stats::{self, ColumnStats},
@@ -142,20 +143,6 @@ fn file_size(index_bits: u8) -> u64 {
 	total_entries(index_bits) * 8 + META_SIZE as u64
 }
 
-#[cfg(unix)]
-fn madvise_random(id: TableId, map: &mut memmap2::MmapMut) {
-	unsafe {
-		libc::madvise(
-			map.as_mut_ptr() as _,
-			file_size(id.index_bits()) as usize,
-			libc::MADV_RANDOM,
-		);
-	}
-}
-
-#[cfg(not(unix))]
-fn madvise_random(_id: TableId, _map: &mut memmap2::MmapMut) {}
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct TableId(u16);
 
@@ -195,6 +182,20 @@ impl TableId {
 	pub fn total_entries(&self) -> u64 {
 		total_entries(self.index_bits())
 	}
+
+	pub fn log_index(&self) -> usize {
+		self.col() as usize * (64 - MIN_INDEX_BITS) as usize + self.index_bits() as usize
+	}
+
+	pub fn from_log_index(i: usize) -> Self {
+		let col = i / (64 - MIN_INDEX_BITS) as usize;
+		let bits = i % (64 - MIN_INDEX_BITS) as usize;
+		TableId::new(col as ColId, bits as u8)
+	}
+
+	pub const fn max_log_indicies(num_columns: usize) -> usize {
+		(64 - MIN_INDEX_BITS) as usize * num_columns
+	}
 }
 
 impl std::fmt::Display for TableId {
@@ -216,7 +217,7 @@ impl IndexTable {
 
 		try_io!(file.set_len(file_size(id.index_bits())));
 		let mut map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
-		madvise_random(id, &mut map);
+		madvise_random(&mut map);
 		log::debug!(target: "parity-db", "Opened existing index {}", id);
 		Ok(Some(IndexTable { id, path, map: RwLock::new(Some(map)) }))
 	}
@@ -564,7 +565,7 @@ impl IndexTable {
 			log::debug!(target: "parity-db", "Created new index {}", self.id);
 			try_io!(file.set_len(file_size(self.id.index_bits())));
 			let mut mmap = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
-			madvise_random(self.id, &mut mmap);
+			madvise_random(&mut mmap);
 			*wmap = Some(mmap);
 			map = RwLockWriteGuard::downgrade_to_upgradable(wmap);
 		}
@@ -641,7 +642,6 @@ mod test {
 	use super::*;
 	use rand::{Rng, SeedableRng};
 	use std::path::PathBuf;
-
 	#[cfg(feature = "bench")]
 	use test::Bencher;
 	#[cfg(feature = "bench")]

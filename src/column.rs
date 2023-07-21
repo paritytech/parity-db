@@ -27,7 +27,7 @@ use std::{
 	},
 };
 
-const MIN_INDEX_BITS: u8 = 16;
+pub const MIN_INDEX_BITS: u8 = 16;
 // Measured in index entries
 const MAX_REINDEX_BATCH: usize = 8192;
 
