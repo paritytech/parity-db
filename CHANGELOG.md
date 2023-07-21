@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog].
 
 ## [Unreleased]
 
+## [v0.4.10] - 2023-07-21
+
+- Use mmap IO for value tables [`#214`](https://github.com/paritytech/parity-db/pull/214)
+
 ## [v0.4.9] - 2023-07-03
 
 - Call madvise for existing index files [`#211`](https://github.com/paritytech/parity-db/pull/211)
