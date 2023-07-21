@@ -1304,22 +1304,16 @@ impl CommitOverlay {
 		match &last_key {
 			LastKey::End => self
 				.btree
-				.range::<Vec<u8>, _>(..)
-				.rev()
-				.next()
+				.range::<Vec<u8>, _>(..).next_back()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Start => None,
 			LastKey::At(key) => self
 				.btree
-				.range::<Vec<u8>, _>(..key)
-				.rev()
-				.next()
+				.range::<Vec<u8>, _>(..key).next_back()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Seeked(key) => self
 				.btree
-				.range::<Vec<u8>, _>(..=key)
-				.rev()
-				.next()
+				.range::<Vec<u8>, _>(..=key).next_back()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 		}
 	}
@@ -2623,7 +2617,7 @@ mod tests {
 		let mut options_db_files = db_test_file.options(tmp.path(), 2);
 		options_db_files.salt = Some(options_db_files.salt.unwrap_or_default());
 		let mut options_std = EnableCommitPipelineStages::Standard.options(tmp.path(), 2);
-		options_std.salt = options_db_files.salt.clone();
+		options_std.salt = options_db_files.salt;
 
 		let db = Db::open_inner(&options_db_files, OpeningMode::Create).unwrap();
 

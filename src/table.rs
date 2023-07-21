@@ -1061,7 +1061,7 @@ pub mod key {
 			}
 		}
 
-		pub fn fetch_partial<'a>(buf: &mut EntryRef<'a>) -> Result<[u8; PARTIAL_SIZE]> {
+		pub fn fetch_partial(buf: &mut EntryRef<'_>) -> Result<[u8; PARTIAL_SIZE]> {
 			let mut result = [0u8; PARTIAL_SIZE];
 			if buf.1.len() >= PARTIAL_SIZE {
 				let pks = buf.read_partial();
@@ -1071,7 +1071,7 @@ pub mod key {
 			Err(crate::error::Error::InvalidValueData)
 		}
 
-		pub fn fetch<'a>(&self, buf: &mut EntryRef<'a>) -> Result<Option<[u8; PARTIAL_SIZE]>> {
+		pub fn fetch(&self, buf: &mut EntryRef<'_>) -> Result<Option<[u8; PARTIAL_SIZE]>> {
 			match self {
 				TableKey::Partial(_k) => Ok(Some(Self::fetch_partial(buf)?)),
 				TableKey::NoHash => Ok(None),
@@ -1344,7 +1344,7 @@ mod test {
 				];
 
 				for (k, v) in &entries {
-					table.write_insert(k, &v, compressed).unwrap();
+					table.write_insert(k, v, compressed).unwrap();
 				}
 
 				let mut res = Vec::new();

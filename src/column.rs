@@ -168,7 +168,7 @@ pub fn hash_key(key: &[u8], salt: &Salt, uniform: bool, db_version: u32) -> Key 
 			#[cfg(any(test, feature = "instrumentation"))]
 			// Used for forcing collisions in tests.
 			if salt == &Salt::default() {
-				k.copy_from_slice(&key);
+				k.copy_from_slice(key);
 				return k
 			}
 			// siphash 1-3 first 128 bits of the key
@@ -177,7 +177,7 @@ pub fn hash_key(key: &[u8], salt: &Salt, uniform: bool, db_version: u32) -> Key 
 			let mut hasher = siphasher::sip128::SipHasher13::new_with_key(
 				salt[..16].try_into().expect("Salt length is 32"),
 			);
-			hasher.write(&key);
+			hasher.write(key);
 			let hash = hasher.finish128();
 			k[0..8].copy_from_slice(&hash.h1.to_le_bytes());
 			k[8..16].copy_from_slice(&hash.h2.to_le_bytes());
