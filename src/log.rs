@@ -4,17 +4,17 @@
 use crate::{
 	column::ColId,
 	error::{try_io, Error, Result},
-	index::{Chunk as IndexChunk, TableId as IndexTableId, ENTRY_BYTES},
+	index::TableId as IndexTableId,
 	options::Options,
 	parking_lot::{RwLock, RwLockWriteGuard},
-	table::TableId as ValueTableId,
+	table::TableId as ValueTableId, Operation, db::Commit,
 };
 use std::{
 	cmp::min,
-	collections::{HashMap, VecDeque},
+	collections::VecDeque,
 	convert::TryInto,
 	io::{ErrorKind, Read, Seek, Write},
-	sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+	sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 const MAX_LOG_POOL_SIZE: usize = 16;
@@ -23,13 +23,10 @@ const INSERT_INDEX: u8 = 2;
 const INSERT_VALUE: u8 = 3;
 const END_RECORD: u8 = 4;
 const DROP_TABLE: u8 = 5;
-
-// Once index overly uses less than 1/10 of its capacity, it will be reclaimed.
-const INDEX_OVERLAY_RECLAIM_FACTOR: usize = 10;
-// Once value overly uses less than 1/10 of its capacity, it will be reclaimed.
-const VALUE_OVERLAY_RECLAIM_FACTOR: usize = 10;
-// Min number of value items to initiate reclaim. Each item is around 40 bytes.
-const VALUE_OVERLAY_MIN_RECLAIM_ITEMS: usize = 10240;
+const SET: u8 = 6;
+const REFERENCE: u8 = 7;
+const DEREFERENCE: u8 = 8;
+const COLUMN_OPS: u8 = 9;
 
 #[derive(Debug)]
 pub struct InsertIndexAction {
@@ -49,28 +46,16 @@ pub enum LogAction {
 	InsertIndex(InsertIndexAction),
 	InsertValue(InsertValueAction),
 	DropTable(IndexTableId),
+	ColumnOps((ColId, u32)),
 	EndRecord,
+	Set,
+	Reference,
+	Dereference,
 }
 
-pub trait LogQuery {
-	type ValueRef<'a>: std::ops::Deref<Target = [u8]>
-	where
-		Self: 'a;
-
-	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
-		&self,
-		table: IndexTableId,
-		index: u64,
-		f: F,
-	) -> Option<R>;
-	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool;
-	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>>;
-}
 
 #[derive(Debug)]
 pub struct LogOverlays {
-	index: Vec<IndexLogOverlay>,
-	value: Vec<ValueLogOverlay>,
 	last_record_ids: Vec<u64>,
 }
 
@@ -81,110 +66,9 @@ impl LogOverlays {
 
 	pub fn with_columns(count: usize) -> Self {
 		Self {
-			index: (0..IndexTableId::max_log_indicies(count))
-				.map(|_| IndexLogOverlay::default())
-				.collect(),
-			value: (0..ValueTableId::max_log_tables(count))
-				.map(|_| ValueLogOverlay::default())
-				.collect(),
 			last_record_ids: (0..count).map(|_| 0).collect(),
 		}
 	}
-}
-
-// Loom is missing support for guard projection, so we copy the data as a workaround.
-#[cfg(feature = "loom")]
-pub struct MappedBytesGuard<'a> {
-	_phantom: std::marker::PhantomData<&'a ()>,
-	data: Vec<u8>,
-}
-
-#[cfg(feature = "loom")]
-impl<'a> MappedBytesGuard<'a> {
-	fn new(data: Vec<u8>) -> Self {
-		Self { _phantom: std::marker::PhantomData, data }
-	}
-}
-
-#[cfg(feature = "loom")]
-impl<'a> std::ops::Deref for MappedBytesGuard<'a> {
-	type Target = [u8];
-
-	fn deref(&self) -> &Self::Target {
-		self.data.as_slice()
-	}
-}
-
-#[cfg(not(feature = "loom"))]
-type MappedBytesGuard<'a> = parking_lot::MappedRwLockReadGuard<'a, [u8]>;
-
-impl LogQuery for RwLock<LogOverlays> {
-	type ValueRef<'a> = MappedBytesGuard<'a>;
-
-	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
-		&self,
-		table: IndexTableId,
-		index: u64,
-		f: F,
-	) -> Option<R> {
-		(&*self.read()).with_index(table, index, f)
-	}
-
-	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool {
-		(&*self.read()).value(table, index, dest)
-	}
-
-	#[cfg(not(feature = "loom"))]
-	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>> {
-		let lock =
-			parking_lot::RwLockReadGuard::try_map(self.read(), |o| o.value_ref(table, index));
-		lock.ok()
-	}
-
-	#[cfg(feature = "loom")]
-	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>> {
-		self.read().value_ref(table, index).map(|o| MappedBytesGuard::new(o.to_vec()))
-	}
-}
-
-impl LogQuery for LogOverlays {
-	type ValueRef<'a> = &'a [u8];
-	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
-		&self,
-		table: IndexTableId,
-		index: u64,
-		f: F,
-	) -> Option<R> {
-		self.index
-			.get(table.log_index())
-			.and_then(|o| o.map.get(&index).map(|(_id, _mask, data)| f(data)))
-	}
-
-	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool {
-		let s = self;
-		if let Some(d) = s
-			.value
-			.get(table.log_index())
-			.and_then(|o| o.map.get(&index).map(|(_id, data)| data))
-		{
-			let len = dest.len().min(d.len());
-			dest[0..len].copy_from_slice(&d[0..len]);
-			true
-		} else {
-			false
-		}
-	}
-	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>> {
-		self.value
-			.get(table.log_index())
-			.and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_slice()))
-	}
-}
-
-#[derive(Debug, Default)]
-pub struct Cleared {
-	index: Vec<(IndexTableId, u64)>,
-	values: Vec<(ValueTableId, u64)>,
 }
 
 #[derive(Debug)]
@@ -194,7 +78,6 @@ pub struct LogReader<'a> {
 	read_bytes: u64,
 	crc32: crc32fast::Hasher,
 	validate: bool,
-	cleared: Cleared,
 }
 
 impl<'a> LogReader<'a> {
@@ -204,7 +87,6 @@ impl<'a> LogReader<'a> {
 
 	fn new(reading: RwLockWriteGuard<'a, Option<Reading>>, validate: bool) -> LogReader<'a> {
 		LogReader {
-			cleared: Default::default(),
 			reading,
 			record_id: 0,
 			read_bytes: 0,
@@ -214,7 +96,6 @@ impl<'a> LogReader<'a> {
 	}
 
 	pub fn reset(&mut self) -> Result<()> {
-		self.cleared = Default::default();
 		try_io!(self
 			.reading
 			.as_mut()
@@ -252,7 +133,6 @@ impl<'a> LogReader<'a> {
 					IndexTableId::from_u16(u16::from_le_bytes(buf[0..2].try_into().unwrap()));
 				read_buf(8, &mut buf)?;
 				let index = u64::from_le_bytes(buf);
-				self.cleared.index.push((table, index));
 				Ok(LogAction::InsertIndex(InsertIndexAction { table, index }))
 			},
 			INSERT_VALUE => {
@@ -261,7 +141,6 @@ impl<'a> LogReader<'a> {
 					ValueTableId::from_u16(u16::from_le_bytes(buf[0..2].try_into().unwrap()));
 				read_buf(8, &mut buf)?;
 				let index = u64::from_le_bytes(buf);
-				self.cleared.values.push((table, index));
 				Ok(LogAction::InsertValue(InsertValueAction { table, index }))
 			},
 			END_RECORD => {
@@ -289,6 +168,22 @@ impl<'a> LogReader<'a> {
 					IndexTableId::from_u16(u16::from_le_bytes(buf[0..2].try_into().unwrap()));
 				Ok(LogAction::DropTable(table))
 			},
+			COLUMN_OPS => {
+				read_buf(1, &mut buf)?;
+				let col = u8::from_le_bytes(buf[0..1].try_into().unwrap());
+				read_buf(4, &mut buf)?;
+				let count = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+				Ok(LogAction::ColumnOps((col, count)))
+			},
+			SET => {
+				Ok(LogAction::Set)
+			},
+			REFERENCE => {
+				Ok(LogAction::Reference)
+			},
+			DEREFERENCE => {
+				Ok(LogAction::Dereference)
+			}
 			_ => Err(Error::Corruption("Bad log entry type".into())),
 		}
 	}
@@ -302,258 +197,32 @@ impl<'a> LogReader<'a> {
 		Ok(())
 	}
 
-	pub fn drain(self) -> Cleared {
-		self.cleared
+	pub fn skip(&mut self, len: usize) -> Result<()> {
+		let mut remaining = len;
+		if self.validate {
+			while remaining != 0 {
+				let mut buf = [0u8; 4096];
+				let read_to = &mut buf[0..std::cmp::min(remaining, 4096)];
+				try_io!(self.reading.as_mut().unwrap().file.read_exact(read_to));
+				self.crc32.update(read_to);
+				remaining -= read_to.len();
+			}
+		} else {
+			try_io!(self.reading.as_mut().unwrap().file.seek(std::io::SeekFrom::Current(len as i64)));
+		}
+		self.read_bytes += len as u64;
+		Ok(())
+	}
+
+	pub fn read_u32(&mut self) -> Result<u32> {
+		let mut buf = [0u8; 4];
+		self.read(&mut buf)?;
+		Ok(u32::from_le_bytes(buf))
 	}
 
 	pub fn read_bytes(&self) -> u64 {
 		self.read_bytes
 	}
-}
-
-#[derive(Debug)]
-pub struct LogChange {
-	local_index: HashMap<IndexTableId, IndexLogOverlay>,
-	local_values: HashMap<ValueTableId, ValueLogOverlayLocal>,
-	record_id: u64,
-	dropped_tables: Vec<IndexTableId>,
-}
-
-impl LogChange {
-	fn new(record_id: u64) -> LogChange {
-		LogChange {
-			local_index: Default::default(),
-			local_values: Default::default(),
-			dropped_tables: Default::default(),
-			record_id,
-		}
-	}
-
-	pub fn local_values_changes(&self, id: ValueTableId) -> Option<&ValueLogOverlayLocal> {
-		self.local_values.get(&id)
-	}
-
-	fn flush_to_file(self, file: &mut std::io::BufWriter<std::fs::File>) -> Result<FlushedLog> {
-		let mut crc32 = crc32fast::Hasher::new();
-		let mut bytes: u64 = 0;
-
-		let mut write = |buf: &[u8]| -> Result<()> {
-			try_io!(file.write_all(buf));
-			crc32.update(buf);
-			bytes += buf.len() as u64;
-			Ok(())
-		};
-
-		write(&BEGIN_RECORD.to_le_bytes())?;
-		write(&self.record_id.to_le_bytes())?;
-
-		for (id, overlay) in self.local_index.iter() {
-			for (index, (_, modified_entries_mask, chunk)) in overlay.map.iter() {
-				write(INSERT_INDEX.to_le_bytes().as_ref())?;
-				write(&id.as_u16().to_le_bytes())?;
-				write(&index.to_le_bytes())?;
-				write(&modified_entries_mask.to_le_bytes())?;
-				let mut mask = *modified_entries_mask;
-				while mask != 0 {
-					let i = mask.trailing_zeros();
-					mask &= !(1 << i);
-					write(&chunk[i as usize * ENTRY_BYTES..(i as usize + 1) * ENTRY_BYTES])?;
-				}
-			}
-		}
-		for (id, overlay) in self.local_values.iter() {
-			for (index, (_, value)) in overlay.map.iter() {
-				write(INSERT_VALUE.to_le_bytes().as_ref())?;
-				write(&id.as_u16().to_le_bytes())?;
-				write(&index.to_le_bytes())?;
-				write(value)?;
-			}
-		}
-		for id in self.dropped_tables.iter() {
-			log::debug!(target: "parity-db", "Finalizing drop {}", id);
-			write(DROP_TABLE.to_le_bytes().as_ref())?;
-			write(&id.as_u16().to_le_bytes())?;
-		}
-		write(&END_RECORD.to_le_bytes())?;
-		let checksum: u32 = crc32.finalize();
-		try_io!(file.write_all(&checksum.to_le_bytes()));
-		bytes += 4;
-		try_io!(file.flush());
-		Ok(FlushedLog { index: self.local_index, values: self.local_values, bytes })
-	}
-}
-
-#[derive(Debug)]
-struct FlushedLog {
-	index: HashMap<IndexTableId, IndexLogOverlay>,
-	values: HashMap<ValueTableId, ValueLogOverlayLocal>,
-	bytes: u64,
-}
-
-#[derive(Debug)]
-pub struct LogWriter<'a> {
-	overlays: &'a RwLock<LogOverlays>,
-	log: LogChange,
-}
-
-impl<'a> LogWriter<'a> {
-	pub fn new(overlays: &'a RwLock<LogOverlays>, record_id: u64) -> LogWriter<'a> {
-		LogWriter { overlays, log: LogChange::new(record_id) }
-	}
-
-	pub fn record_id(&self) -> u64 {
-		self.log.record_id
-	}
-
-	pub fn insert_index(&mut self, table: IndexTableId, index: u64, sub: u8, data: &IndexChunk) {
-		match self.log.local_index.entry(table).or_default().map.entry(index) {
-			std::collections::hash_map::Entry::Occupied(mut entry) => {
-				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), *data);
-			},
-			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert((self.log.record_id, 1 << sub, *data));
-			},
-		}
-	}
-
-	pub fn insert_value(&mut self, table: ValueTableId, index: u64, data: Vec<u8>) {
-		self.log
-			.local_values
-			.entry(table)
-			.or_default()
-			.map
-			.insert(index, (self.log.record_id, data));
-	}
-
-	pub fn drop_table(&mut self, id: IndexTableId) {
-		self.log.dropped_tables.push(id);
-	}
-
-	pub fn drain(self) -> LogChange {
-		self.log
-	}
-}
-
-pub enum LogWriterValueGuard<'a> {
-	Local(&'a [u8]),
-	Overlay(MappedBytesGuard<'a>),
-}
-
-impl std::ops::Deref for LogWriterValueGuard<'_> {
-	type Target = [u8];
-	fn deref(&self) -> &[u8] {
-		match self {
-			LogWriterValueGuard::Local(data) => data,
-			LogWriterValueGuard::Overlay(data) => data.deref(),
-		}
-	}
-}
-
-impl<'q> LogQuery for LogWriter<'q> {
-	type ValueRef<'a> = LogWriterValueGuard<'a> where Self: 'a;
-	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
-		&self,
-		table: IndexTableId,
-		index: u64,
-		f: F,
-	) -> Option<R> {
-		match self
-			.log
-			.local_index
-			.get(&table)
-			.and_then(|o| o.map.get(&index).map(|(_id, _mask, data)| data))
-		{
-			Some(data) => Some(f(data)),
-			None => self.overlays.with_index(table, index, f),
-		}
-	}
-
-	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool {
-		if let Some(d) = self
-			.log
-			.local_values
-			.get(&table)
-			.and_then(|o| o.map.get(&index).map(|(_id, data)| data))
-		{
-			let len = dest.len().min(d.len());
-			dest[0..len].copy_from_slice(&d[0..len]);
-			true
-		} else {
-			self.overlays.value(table, index, dest)
-		}
-	}
-	fn value_ref<'v>(&'v self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'v>> {
-		self.log
-			.local_values
-			.get(&table)
-			.and_then(|o| {
-				o.map.get(&index).map(|(_id, data)| LogWriterValueGuard::Local(data.as_slice()))
-			})
-			.or_else(|| {
-				self.overlays
-					.value_ref(table, index)
-					.map(|data| LogWriterValueGuard::Overlay(data))
-			})
-	}
-}
-
-// Identity hash.
-#[derive(Debug, Default, Clone)]
-pub struct IdentityHash(u64);
-pub type BuildIdHash = std::hash::BuildHasherDefault<IdentityHash>;
-
-impl std::hash::Hasher for IdentityHash {
-	fn write(&mut self, _: &[u8]) {
-		unreachable!()
-	}
-	fn write_u8(&mut self, _: u8) {
-		unreachable!()
-	}
-	fn write_u16(&mut self, _: u16) {
-		unreachable!()
-	}
-	fn write_u32(&mut self, _: u32) {
-		unreachable!()
-	}
-	fn write_u64(&mut self, n: u64) {
-		self.0 = n
-	}
-	fn write_usize(&mut self, _: usize) {
-		unreachable!()
-	}
-	fn write_i8(&mut self, _: i8) {
-		unreachable!()
-	}
-	fn write_i16(&mut self, _: i16) {
-		unreachable!()
-	}
-	fn write_i32(&mut self, _: i32) {
-		unreachable!()
-	}
-	fn write_i64(&mut self, _: i64) {
-		unreachable!()
-	}
-	fn write_isize(&mut self, _: isize) {
-		unreachable!()
-	}
-	fn finish(&self) -> u64 {
-		self.0
-	}
-}
-
-#[derive(Debug, Default)]
-pub struct IndexLogOverlay {
-	pub map: HashMap<u64, (u64, u64, IndexChunk)>, // index -> (record_id, modified_mask, entry)
-}
-
-// We use identity hash for value overlay/log records so that writes to value tables are in order.
-#[derive(Debug, Default)]
-pub struct ValueLogOverlay {
-	pub map: HashMap<u64, (u64, Vec<u8>)>, // index -> (record_id, entry)
-}
-#[derive(Debug, Default)]
-pub struct ValueLogOverlayLocal {
-	pub map: HashMap<u64, (u64, Vec<u8>), BuildIdHash>, // index -> (record_id, entry)
 }
 
 #[derive(Debug)]
@@ -575,7 +244,6 @@ pub struct Log {
 	appending: RwLock<Option<Appending>>,
 	reading: RwLock<Option<Reading>>,
 	read_queue: RwLock<VecDeque<(u32, std::fs::File)>>,
-	next_record_id: AtomicU64,
 	dirty: AtomicBool,
 	log_pool: RwLock<VecDeque<(u32, std::fs::File)>>,
 	cleanup_queue: RwLock<VecDeque<(u32, std::fs::File)>>,
@@ -620,7 +288,6 @@ impl Log {
 			appending: RwLock::new(None),
 			reading: RwLock::new(None),
 			read_queue: RwLock::default(),
-			next_record_id: AtomicU64::new(1),
 			next_log_id: AtomicU32::new(next_log_id),
 			dirty: AtomicBool::new(true),
 			sync: options.sync_wal,
@@ -681,26 +348,14 @@ impl Log {
 			self.cleanup_queue.write().push_back((id, file));
 		}
 		let mut overlays = self.overlays.write();
-		for o in overlays.index.iter_mut() {
-			o.map.clear();
-		}
-		for o in overlays.value.iter_mut() {
-			o.map.clear();
-		}
 		for r in overlays.last_record_ids.iter_mut() {
 			*r = 0;
 		}
 		self.dirty.store(false, Ordering::Relaxed);
 	}
 
-	pub fn begin_record(&self) -> LogWriter<'_> {
-		let id = self.next_record_id.fetch_add(1, Ordering::Relaxed);
-		LogWriter::new(&self.overlays, id)
-	}
-
-	pub fn end_record(&self, log: LogChange) -> Result<u64> {
-		assert_eq!(log.record_id + 1, self.next_record_id.load(Ordering::Relaxed));
-		let record_id = log.record_id;
+	pub fn write_commit(&self, commit: &Commit) -> Result<u64> {
+		let record_id = commit.id;
 		let mut appending = self.appending.write();
 		if appending.is_none() {
 			// Find a log file in the pool or create a new one
@@ -722,80 +377,101 @@ impl Log {
 			*appending = Some(Appending { size: 0, file: std::io::BufWriter::new(file), id });
 		}
 		let appending = appending.as_mut().unwrap();
-		let FlushedLog { index, values, bytes } = log.flush_to_file(&mut appending.file)?;
+		let bytes = Self::write_commit_to_file(&mut appending.file, commit)?;
 		let mut overlays = self.overlays.write();
-		let mut total_index = 0;
-		for (id, overlay) in index.into_iter() {
-			total_index += overlay.map.len();
-			overlays.index[id.log_index()].map.extend(overlay.map.into_iter());
-		}
-		let mut total_value = 0;
-		for (id, overlay) in values.into_iter() {
-			total_value += overlay.map.len();
-			overlays.last_record_ids[id.col() as usize] = record_id;
-			overlays.value[id.log_index()].map.extend(overlay.map.into_iter());
+
+		for (c, _) in commit.changeset.btree_indexed.iter() {
+			overlays.last_record_ids[*c as usize] = commit.id;
 		}
 
 		log::debug!(
 			target: "parity-db",
-			"Finalizing log record {} ({} index, {} value)",
+			"Finalizing log record {} ({} bytes)",
 			record_id,
-			total_index,
-			total_value,
+			bytes,
 		);
 		appending.size += bytes;
 		self.dirty.store(true, Ordering::Relaxed);
 		Ok(bytes)
 	}
 
-	pub fn end_read(&self, cleared: Cleared, record_id: u64) {
-		if record_id >= self.next_record_id.load(Ordering::Relaxed) {
-			self.next_record_id.store(record_id + 1, Ordering::Relaxed);
-		}
-		let mut overlays = self.overlays.write();
-		for (table, index) in cleared.index.into_iter() {
-			if let Some(ref mut overlay) = overlays.index.get_mut(table.log_index()) {
-				if let std::collections::hash_map::Entry::Occupied(e) = overlay.map.entry(index) {
-					if e.get().0 == record_id {
-						e.remove_entry();
-					}
+	fn write_commit_to_file(file: &mut std::io::BufWriter<std::fs::File>, commit: &Commit) -> Result<u64> {
+		let mut crc32 = crc32fast::Hasher::new();
+		let mut bytes: u64 = 0;
+
+		let mut write = |buf: &[u8]| -> Result<()> {
+			try_io!(file.write_all(buf));
+			crc32.update(buf);
+			bytes += buf.len() as u64;
+			Ok(())
+		};
+
+		write(&BEGIN_RECORD.to_le_bytes())?;
+		write(&commit.id.to_le_bytes())?;
+
+		for (col, changeset) in &commit.changeset.indexed {
+			write(COLUMN_OPS.to_le_bytes().as_ref())?;
+			write(col.to_le_bytes().as_ref())?;
+			let count = changeset.changes.len() as u32;
+			write(&count.to_le_bytes())?;
+			for change in &changeset.changes {
+				match change {
+					Operation::Set(key, value) => {
+						write(SET.to_le_bytes().as_ref())?;
+						write(key)?;
+						let len = value.as_ref().len() as u32;
+						write(&len.to_le_bytes())?;
+						write(value.as_ref())?;
+					},
+					Operation::Reference(key) => {
+						write(REFERENCE.to_le_bytes().as_ref())?;
+						write(key)?;
+					},
+					Operation::Dereference(key) => {
+						write(DEREFERENCE.to_le_bytes().as_ref())?;
+						write(key)?;
+					},
 				}
 			}
 		}
-		for (table, index) in cleared.values.into_iter() {
-			if let Some(ref mut overlay) = overlays.value.get_mut(table.log_index()) {
-				if let std::collections::hash_map::Entry::Occupied(e) = overlay.map.entry(index) {
-					if e.get().0 == record_id {
-						e.remove_entry();
-					}
+		for (col, changeset) in &commit.changeset.btree_indexed {
+			write(COLUMN_OPS.to_le_bytes().as_ref())?;
+			write(col.to_le_bytes().as_ref())?;
+			let count = changeset.changes.len() as u32;
+			write(&count.to_le_bytes())?;
+			for change in &changeset.changes {
+				match change {
+					Operation::Set(key, value) => {
+						write(SET.to_le_bytes().as_ref())?;
+						let len = key.as_ref().len() as u32;
+						write(&len.to_le_bytes())?;
+						write(key.as_ref())?;
+						let len = value.as_ref().len() as u32;
+						write(&len.to_le_bytes())?;
+						write(value.as_ref())?;
+					},
+					Operation::Reference(key) => {
+						write(REFERENCE.to_le_bytes().as_ref())?;
+						let len = key.as_ref().len() as u32;
+						write(&len.to_le_bytes())?;
+						write(key.as_ref())?;
+					},
+					Operation::Dereference(key) => {
+						write(DEREFERENCE.to_le_bytes().as_ref())?;
+						let len = key.as_ref().len() as u32;
+						write(&len.to_le_bytes())?;
+						write(key.as_ref())?;
+					},
 				}
 			}
 		}
-		// Reclaim overlay memory
-		for (i, o) in overlays.index.iter_mut().enumerate() {
-			if o.map.capacity() > o.map.len() * INDEX_OVERLAY_RECLAIM_FACTOR {
-				log::trace!(
-					"Schrinking index overlay {}: {}/{}",
-					IndexTableId::from_log_index(i),
-					o.map.len(),
-					o.map.capacity(),
-				);
-				o.map.shrink_to_fit();
-			}
-		}
-		for (i, o) in overlays.value.iter_mut().enumerate() {
-			if o.map.capacity() > VALUE_OVERLAY_MIN_RECLAIM_ITEMS &&
-				o.map.capacity() > o.map.len() * VALUE_OVERLAY_RECLAIM_FACTOR
-			{
-				log::trace!(
-					"Schrinking value overlay {}: {}/{}",
-					ValueTableId::from_log_index(i),
-					o.map.len(),
-					o.map.capacity(),
-				);
-				o.map.shrink_to_fit();
-			}
-		}
+
+		write(&END_RECORD.to_le_bytes())?;
+		let checksum: u32 = crc32.finalize();
+		try_io!(file.write_all(&checksum.to_le_bytes()));
+		bytes += 4;
+		try_io!(file.flush());
+		Ok(bytes)
 	}
 
 	pub fn flush_one(&self, min_size: u64) -> Result<bool> {

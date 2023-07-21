@@ -20,10 +20,10 @@
 
 use crate::{
 	btree::{commit_overlay::BTreeChangeSet, BTreeIterator, BTreeTable},
-	column::{hash_key, ColId, Column, IterState, ReindexBatch, ValueIterState},
+	column::{hash_key, ColId, Column, IterState, ValueIterState},
 	error::{try_io, Error, Result},
 	hash::IdentityBuildHasher,
-	index::PlanOutcome,
+	index::WriteOutcome,
 	log::{Log, LogAction},
 	options::{Options, CURRENT_VERSION},
 	parking_lot::{Condvar, Mutex, RwLock},
@@ -108,22 +108,22 @@ impl<const N: usize> TryFrom<RcValue> for [u8; N] {
 
 // Commit data passed to `commit`
 #[derive(Debug, Default)]
-struct Commit {
+pub struct Commit {
 	// Commit ID. This is not the same as log record id, as some records
 	// are originated within the DB. E.g. reindex.
-	id: u64,
+	pub id: u64,
 	// Size of user data pending insertion (keys + values) or
 	// removal (keys)
-	bytes: usize,
+	pub bytes: usize,
 	// Operations.
-	changeset: CommitChangeSet,
+	pub changeset: CommitChangeSet,
 }
 
 // Pending commits. This may not grow beyond `MAX_COMMIT_QUEUE_BYTES` bytes.
 #[derive(Debug, Default)]
 struct CommitQueue {
-	// Log record.
-	record_id: u64,
+	// Next commit ID.
+	next_record_id: u64,
 	// Total size of all commits in the queue.
 	bytes: usize,
 	// FIFO queue.
@@ -141,14 +141,14 @@ struct DbInner {
 	log_worker_wait: WaitCondvar<bool>,
 	commit_worker_wait: Arc<WaitCondvar<bool>>,
 	// Overlay of most recent values in the commit queue.
-	commit_overlay: RwLock<Vec<CommitOverlay>>,
+	commit_overlay: Vec<RwLock<CommitOverlay>>,
 	// This may underflow occasionally, but is bound for 0 eventually.
 	log_queue_wait: WaitCondvar<i64>,
 	flush_worker_wait: Arc<WaitCondvar<bool>>,
 	cleanup_worker_wait: WaitCondvar<bool>,
 	cleanup_queue_wait: WaitCondvar<bool>,
 	last_enacted: AtomicU64,
-	next_reindex: AtomicU64,
+	need_reindex: AtomicBool,
 	bg_err: Mutex<Option<Arc<Error>>>,
 	db_version: u32,
 	_lock_file: std::fs::File,
@@ -206,7 +206,7 @@ impl DbInner {
 		let last_enacted = log.replay_record_id().unwrap_or(2) - 1;
 		for c in 0..metadata.columns.len() {
 			let column = Column::open(c as ColId, options, &metadata)?;
-			commit_overlay.push(CommitOverlay::new());
+			commit_overlay.push(RwLock::new(CommitOverlay::new()));
 			columns.push(column);
 		}
 		log::debug!(target: "parity-db", "Opened db {:?}, metadata={:?}", options, metadata);
@@ -215,21 +215,27 @@ impl DbInner {
 			options.salt = Some(metadata.salt);
 		}
 
+		let commit_queue = CommitQueue {
+			next_record_id: 1,
+			bytes: 0,
+			commits: VecDeque::new(),
+		};
+
 		Ok(DbInner {
 			columns,
 			options,
 			shutdown: AtomicBool::new(false),
 			log,
-			commit_queue: Mutex::new(Default::default()),
+			commit_queue: Mutex::new(commit_queue),
 			commit_queue_full_cv: Condvar::new(),
 			log_worker_wait: WaitCondvar::new(),
 			commit_worker_wait: Arc::new(WaitCondvar::new()),
-			commit_overlay: RwLock::new(commit_overlay),
+			commit_overlay,
 			log_queue_wait: WaitCondvar::new(),
 			flush_worker_wait: Arc::new(WaitCondvar::new()),
 			cleanup_worker_wait: WaitCondvar::new(),
 			cleanup_queue_wait: WaitCondvar::new(),
-			next_reindex: AtomicU64::new(1),
+			need_reindex: AtomicBool::new(true),
 			last_enacted: AtomicU64::new(last_enacted),
 			bg_err: Mutex::new(None),
 			db_version: metadata.version,
@@ -241,23 +247,21 @@ impl DbInner {
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
 				let key = column.hash_key(key);
-				let overlay = self.commit_overlay.read();
 				// Check commit overlay first
-				if let Some(v) = overlay.get(col as usize).and_then(|o| o.get(&key)) {
+				if let Some(v) = self.commit_overlay.get(col as usize).and_then(|o| o.read().get(&key)) {
 					return Ok(v.map(|i| i.value().clone()))
 				}
-				// Go into tables and log overlay.
-				let log = self.log.overlays();
-				column.get(&key, log)
+				// Get from on-disk data.
+				column.get(&key)
 			},
 			Column::Tree(column) => {
-				let overlay = self.commit_overlay.read();
-				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
-					return Ok(l.map(|i| i.value().clone()))
+				if let Some(overlay) = self.commit_overlay.get(col as usize) {
+					if let Some(v) = overlay.read().btree_get(key) {
+						return Ok(v.map(|i| i.value().clone()))
+					}
 				}
 				// We lock log, if btree structure changed while reading that would be an issue.
-				let log = self.log.overlays().read();
-				column.with_locked(|btree| BTreeTable::get(key, &*log, btree))
+				column.with_locked(|btree| BTreeTable::get(key, btree))
 			},
 		}
 	}
@@ -266,22 +270,20 @@ impl DbInner {
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
 				let key = column.hash_key(key);
-				let overlay = self.commit_overlay.read();
 				// Check commit overlay first
-				if let Some(l) = overlay.get(col as usize).and_then(|o| o.get_size(&key)) {
+				if let Some(l) = self.commit_overlay.get(col as usize).and_then(|o| o.read().get_size(&key)) {
 					return Ok(l)
 				}
 				// Go into tables and log overlay.
-				let log = self.log.overlays();
-				column.get_size(&key, log)
+				column.get_size(&key)
 			},
 			Column::Tree(column) => {
-				let overlay = self.commit_overlay.read();
-				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
-					return Ok(l.map(|v| v.value().len() as u32))
+				if let Some(overlay) = self.commit_overlay.get(col as usize) {
+					if let Some(l) = overlay.read().btree_get(key) {
+						return Ok(l.map(|v| v.value().len() as u32))
+					}
 				}
-				let log = self.log.overlays().read();
-				let l = column.with_locked(|btree| BTreeTable::get(key, &*log, btree))?;
+				let l = column.with_locked(|btree| BTreeTable::get(key, btree))?;
 				Ok(l.map(|v| v.len() as u32))
 			},
 		}
@@ -293,7 +295,7 @@ impl DbInner {
 				Err(Error::InvalidConfiguration("Not an indexed column.".to_string())),
 			Column::Tree(column) => {
 				let log = self.log.overlays();
-				BTreeIterator::new(column, col, log, &self.commit_overlay)
+				BTreeIterator::new(column, col, log, &self.commit_overlay[col as usize])
 			},
 		}
 	}
@@ -359,15 +361,13 @@ impl DbInner {
 			}
 		}
 
-		let mut overlay = self.commit_overlay.write();
-
-		queue.record_id += 1;
-		let record_id = queue.record_id;
+		let record_id = queue.next_record_id;
+		queue.next_record_id += 1;
 
 		let mut bytes = 0;
 		for (c, indexed) in &commit.indexed {
 			indexed.copy_to_overlay(
-				&mut overlay[*c as usize],
+				&mut self.commit_overlay[*c as usize].write(),
 				record_id,
 				&mut bytes,
 				&self.options,
@@ -376,7 +376,7 @@ impl DbInner {
 
 		for (c, iterset) in &commit.btree_indexed {
 			iterset.copy_to_overlay(
-				&mut overlay[*c as usize].btree_indexed,
+				&mut self.commit_overlay[*c as usize].write().btree_indexed,
 				record_id,
 				&mut bytes,
 				&self.options,
@@ -416,7 +416,7 @@ impl DbInner {
 				queue.bytes -= commit.bytes;
 				log::debug!(
 					target: "parity-db",
-					"Removed {}. Still queued commits {} bytes",
+					"Commit queue {} bytes cleared. Still queued commits {} bytes",
 					commit.bytes,
 					queue.bytes,
 				);
@@ -436,135 +436,47 @@ impl DbInner {
 			}
 		};
 
-		if let Some(mut commit) = commit {
-			let mut reindex = false;
-			let mut writer = self.log.begin_record();
+		if let Some(commit) = commit {
+			let bytes = self.log.write_commit(&commit)?;
 			log::debug!(
 				target: "parity-db",
-				"Processing commit {}, record {}, {} bytes",
+				"Processing commit {}, {} bytes, {} written",
 				commit.id,
-				writer.record_id(),
 				commit.bytes,
+				bytes,
 			);
-			let mut ops: u64 = 0;
-			for (c, key_values) in commit.changeset.indexed.iter() {
-				key_values.write_plan(
-					&self.columns[*c as usize],
-					&mut writer,
-					&mut ops,
-					&mut reindex,
-				)?;
-			}
 
-			for (c, btree) in commit.changeset.btree_indexed.iter_mut() {
-				match &self.columns[*c as usize] {
-					Column::Hash(_column) =>
-						return Err(Error::InvalidConfiguration(
-							"Not an indexed column.".to_string(),
-						)),
-					Column::Tree(column) => {
-						btree.write_plan(column, &mut writer, &mut ops)?;
-					},
-				}
-			}
-
-			// Collect final changes to value tables
-			for c in self.columns.iter() {
-				c.complete_plan(&mut writer)?;
-			}
-			let record_id = writer.record_id();
-			let l = writer.drain();
-
-			let bytes = {
-				let bytes = self.log.end_record(l)?;
+			{
 				let mut logged_bytes = self.log_queue_wait.work.lock();
 				*logged_bytes += bytes as i64;
 				self.flush_worker_wait.signal();
-				bytes
 			};
-
-			{
-				// Cleanup the commit overlay.
-				let mut overlay = self.commit_overlay.write();
-				for (c, key_values) in commit.changeset.indexed.iter() {
-					key_values.clean_overlay(&mut overlay[*c as usize], commit.id);
-				}
-				for (c, iterset) in commit.changeset.btree_indexed.iter_mut() {
-					iterset.clean_overlay(&mut overlay[*c as usize].btree_indexed, commit.id);
-				}
-			}
-
-			if reindex {
-				self.start_reindex(record_id);
-			}
-
-			log::debug!(
-				target: "parity-db",
-				"Processed commit {} (record {}), {} ops, {} bytes written",
-				commit.id,
-				record_id,
-				ops,
-				bytes,
-			);
 			Ok(true)
 		} else {
 			Ok(false)
 		}
 	}
 
-	fn start_reindex(&self, record_id: u64) {
-		log::trace!(target: "parity-db", "Scheduled reindex at record {}", record_id);
-		self.next_reindex.store(record_id, Ordering::SeqCst);
+	fn start_reindex(&self) {
+		log::trace!(target: "parity-db", "Scheduled reindex");
+		self.need_reindex.store(true, Ordering::SeqCst);
 	}
 
 	fn process_reindex(&self) -> Result<bool> {
-		let next_reindex = self.next_reindex.load(Ordering::SeqCst);
-		if next_reindex == 0 || next_reindex > self.last_enacted.load(Ordering::SeqCst) {
+		let need_reindex = self.need_reindex.load(Ordering::SeqCst);
+		if !need_reindex {
 			return Ok(false)
 		}
 		// Process any pending reindexes
+		let mut more = false;
 		for column in self.columns.iter() {
 			let column = if let Column::Hash(c) = column { c } else { continue };
-			let ReindexBatch { drop_index, batch } = column.reindex(&self.log)?;
-			if !batch.is_empty() || drop_index.is_some() {
-				let mut next_reindex = false;
-				let mut writer = self.log.begin_record();
-				log::debug!(
-					target: "parity-db",
-					"Creating reindex record {}",
-					writer.record_id(),
-				);
-				for (key, address) in batch.into_iter() {
-					if let PlanOutcome::NeedReindex =
-						column.write_reindex_plan(&key, address, &mut writer)?
-					{
-						next_reindex = true
-					}
-				}
-				if let Some(table) = drop_index {
-					writer.drop_table(table);
-				}
-				let record_id = writer.record_id();
-				let l = writer.drain();
-
-				let mut logged_bytes = self.log_queue_wait.work.lock();
-				let bytes = self.log.end_record(l)?;
-				log::debug!(
-					target: "parity-db",
-					"Created reindex record {}, {} bytes",
-					record_id,
-					bytes,
-				);
-				*logged_bytes += bytes as i64;
-				if next_reindex {
-					self.start_reindex(record_id);
-				}
-				self.flush_worker_wait.signal();
-				return Ok(true)
+			if let WriteOutcome::Written | WriteOutcome::NeedReindex = column.reindex()? {
+				more = true;
 			}
 		}
-		self.next_reindex.store(0, Ordering::SeqCst);
-		Ok(false)
+		self.need_reindex.store(more, Ordering::SeqCst);
+		Ok(more)
 	}
 
 	fn enact_logs(&self, validation_mode: bool) -> Result<bool> {
@@ -618,7 +530,7 @@ impl DbInner {
 								if let Err(e) = self.columns.get(col).map_or_else(
 									|| Err(Error::Corruption(format!("Invalid column id {col}"))),
 									|col| {
-										col.validate_plan(
+										col.validate_plan_obsolete(
 											LogAction::InsertIndex(insertion),
 											&mut reader,
 										)
@@ -635,7 +547,7 @@ impl DbInner {
 								if let Err(e) = self.columns.get(col).map_or_else(
 									|| Err(Error::Corruption(format!("Invalid column id {col}"))),
 									|col| {
-										col.validate_plan(
+										col.validate_plan_obsolete(
 											LogAction::InsertValue(insertion),
 											&mut reader,
 										)
@@ -648,10 +560,47 @@ impl DbInner {
 								}
 							},
 							LogAction::DropTable(_) => continue,
+							LogAction::ColumnOps((col, len)) => {
+								if let Err(e) = self.columns.get(col as usize).map_or_else(
+									|| Err(Error::Corruption(format!("Invalid column id {col}"))),
+									|col| {
+										col.validate_ops(len, &mut reader)
+									},
+								) {
+									log::warn!(target: "parity-db", "Error validating log: {:?}.", e);
+									drop(reader);
+									self.log.clear_replay_logs();
+									return Ok(false)
+								}
+							}
+							LogAction::Set => {
+								log::warn!(target: "parity-db", "Error validating log: Unexpected Set operation");
+								drop(reader);
+								self.log.clear_replay_logs();
+								return Ok(false)
+							}
+							LogAction::Reference => {
+								log::warn!(target: "parity-db", "Error validating log: Unexpected Reference operation");
+								drop(reader);
+								self.log.clear_replay_logs();
+								return Ok(false)
+							}
+							LogAction::Dereference => {
+								log::warn!(target: "parity-db", "Error validating log: Unexpected Dereference operation");
+								drop(reader);
+								self.log.clear_replay_logs();
+								return Ok(false)
+							}
 						}
 					}
 					reader.reset()?;
 					reader.next()?;
+					{
+						let mut queue = self.commit_queue.lock();
+						if reader.record_id() >= queue.next_record_id {
+							queue.next_record_id = reader.record_id() + 1;
+						}
+					}
 				}
 				loop {
 					match reader.next()? {
@@ -660,11 +609,11 @@ impl DbInner {
 						LogAction::EndRecord => break,
 						LogAction::InsertIndex(insertion) => {
 							self.columns[insertion.table.col() as usize]
-								.enact_plan(LogAction::InsertIndex(insertion), &mut reader)?;
+								.enact_plan_obsolete(LogAction::InsertIndex(insertion), &mut reader)?;
 						},
 						LogAction::InsertValue(insertion) => {
 							self.columns[insertion.table.col() as usize]
-								.enact_plan(LogAction::InsertValue(insertion), &mut reader)?;
+								.enact_plan_obsolete(LogAction::InsertValue(insertion), &mut reader)?;
 						},
 						LogAction::DropTable(id) => {
 							log::debug!(
@@ -673,35 +622,47 @@ impl DbInner {
 								id,
 							);
 							match &self.columns[id.col() as usize] {
-								Column::Hash(col) => {
-									col.drop_index(id)?;
+								Column::Hash(_) => {
 									// Check if there's another reindex on the next iteration
-									self.start_reindex(reader.record_id());
+									self.start_reindex();
 								},
 								Column::Tree(_) => (),
 							}
 						},
+						LogAction::ColumnOps((col, len)) => {
+							if let WriteOutcome::NeedReindex = self.columns[col as usize].enact_ops(len, &mut reader, &self.commit_overlay[col as usize])? {
+								self.start_reindex();
+							}
+						}
+						LogAction::Set => 
+							return Err(Error::Corruption("Bad log record".into())),
+						LogAction::Reference => 
+							return Err(Error::Corruption("Bad log record".into())),
+						LogAction::Dereference => 
+							return Err(Error::Corruption("Bad log record".into())),
 					}
 				}
+				// Collect final changes to value tables
+				for c in self.columns.iter() {
+					c.finalize_write()?;
+				}
+				let record_id = reader.record_id();
 				log::debug!(
 					target: "parity-db",
-					"Enacted log record {}, {} bytes",
+					"Enacted log record {}, {} bytes.",
 					reader.record_id(),
 					reader.read_bytes(),
 				);
-				let record_id = reader.record_id();
 				let bytes = reader.read_bytes();
-				let cleared = reader.drain();
 				self.last_enacted.store(record_id, Ordering::SeqCst);
-				Some((record_id, cleared, bytes))
+				Some((record_id, bytes))
 			} else {
 				log::debug!(target: "parity-db", "End of log");
 				None
 			}
 		};
 
-		if let Some((record_id, cleared, bytes)) = cleared {
-			self.log.end_read(cleared, record_id);
+		if let Some((record_id, bytes)) = cleared {
 			{
 				if !validation_mode {
 					let mut queue = self.log_queue_wait.work.lock();
@@ -712,7 +673,7 @@ impl DbInner {
 							record_id,
 							bytes,
 							*queue,
-							self.next_reindex.load(Ordering::SeqCst),
+							self.need_reindex.load(Ordering::SeqCst),
 						);
 					}
 					*queue -= bytes as i64;
@@ -872,14 +833,14 @@ impl DbInner {
 
 	fn iter_column_while(&self, c: ColId, f: impl FnMut(ValueIterState) -> bool) -> Result<()> {
 		match &self.columns[c as usize] {
-			Column::Hash(column) => column.iter_values(&self.log, f),
+			Column::Hash(column) => column.iter_values(f),
 			Column::Tree(_) => unimplemented!(),
 		}
 	}
 
 	fn iter_column_index_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
 		match &self.columns[c as usize] {
-			Column::Hash(column) => column.iter_index(&self.log, f),
+			Column::Hash(column) => column.iter_index(f),
 			Column::Tree(_) => unimplemented!(),
 		}
 	}
@@ -1110,10 +1071,10 @@ impl Db {
 	/// Print database contents in text form to stderr.
 	pub fn dump(&self, check_param: check::CheckOptions) -> Result<()> {
 		if let Some(col) = check_param.column {
-			self.inner.columns[col as usize].dump(&self.inner.log, &check_param, col)?;
+			self.inner.columns[col as usize].dump(&check_param, col)?;
 		} else {
 			for (ix, c) in self.inner.columns.iter().enumerate() {
-				c.dump(&self.inner.log, &check_param, ix as ColId)?;
+				c.dump(&check_param, ix as ColId)?;
 			}
 		}
 		Ok(())
@@ -1289,6 +1250,33 @@ impl CommitOverlay {
 
 	fn btree_get(&self, key: &[u8]) -> Option<Option<&RcValue>> {
 		self.btree_indexed.get(key).map(|(_, v)| v.as_ref())
+	}
+
+	pub fn remove_hash_entry(&mut self, key: &Key, record_id: u64) {
+		if let Some((id, val)) = self.indexed.remove(key) {
+			if id > record_id {
+				// Put it back
+				self.indexed.insert(*key, (id, val));
+			}
+		}
+	}
+
+	pub fn get_hash_entry(&self, key: &Key, record_id: u64) -> Option<Option<RcValue>>{
+		if let Some((id, val)) = self.indexed.get(key) {
+			if *id == record_id {
+				return Some(val.clone());
+			}
+		}
+		None
+	}
+
+	pub fn remove_btree_entry(&mut self, key: &[u8], record_id: u64) {
+		if let Some((k, (id, val))) = self.btree_indexed.remove_entry(key) {
+			if id > record_id {
+				// Put it back
+				self.btree_indexed.insert(k, (id, val));
+			}
+		}
 	}
 
 	pub fn btree_next(
@@ -1469,47 +1457,8 @@ impl IndexedChangeSet {
 		}
 		Ok(())
 	}
-
-	fn write_plan(
-		&self,
-		column: &Column,
-		writer: &mut crate::log::LogWriter,
-		ops: &mut u64,
-		reindex: &mut bool,
-	) -> Result<()> {
-		let column = match column {
-			Column::Hash(column) => column,
-			Column::Tree(_) => {
-				log::warn!(target: "parity-db", "Skipping unindex commit in indexed column");
-				return Ok(())
-			},
-		};
-		for change in self.changes.iter() {
-			if let PlanOutcome::NeedReindex = column.write_plan(change, writer)? {
-				// Reindex has triggered another reindex.
-				*reindex = true;
-			}
-			*ops += 1;
-		}
-		Ok(())
-	}
-
-	fn clean_overlay(&self, overlay: &mut CommitOverlay, record_id: u64) {
-		use std::collections::hash_map::Entry;
-		for change in self.changes.iter() {
-			match change {
-				Operation::Set(k, _) | Operation::Dereference(k) => {
-					if let Entry::Occupied(e) = overlay.indexed.entry(*k) {
-						if e.get().0 == record_id {
-							e.remove_entry();
-						}
-					}
-				},
-				Operation::Reference(..) => (),
-			}
-		}
-	}
 }
+
 
 /// Verification operation utilities.
 pub mod check {
@@ -1633,11 +1582,11 @@ mod tests {
 
 		fn check_empty_overlay(&self, db: &DbInner, col: ColId) -> bool {
 			match self {
-				EnableCommitPipelineStages::DbFile | EnableCommitPipelineStages::LogOverlay => {
-					if let Some(overlay) = db.commit_overlay.read().get(col as usize) {
-						if !overlay.is_empty() {
+				EnableCommitPipelineStages::DbFile => {
+					if let Some(overlay) = db.commit_overlay.get(col as usize) {
+						if !overlay.read().is_empty() {
 							let mut replayed = 5;
-							while !overlay.is_empty() {
+							while !overlay.read().is_empty() {
 								if replayed > 0 {
 									replayed -= 1;
 									// the signal is triggered just before cleaning the overlay, so
@@ -1718,6 +1667,7 @@ mod tests {
 		test_indexed_keyvalues_inner(EnableCommitPipelineStages::Standard);
 	}
 	fn test_indexed_keyvalues_inner(db_test: EnableCommitPipelineStages) {
+		let _ = env_logger::try_init();
 		let tmp = tempdir().unwrap();
 		let options = db_test.options(tmp.path(), 5);
 		let col_nb = 0;

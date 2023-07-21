@@ -7,7 +7,7 @@ use crate::{
 	compress::Compress,
 	error::{Error, Result},
 	index::Address,
-	log::{LogAction, LogQuery, LogReader, LogWriter},
+	log::{LogAction, LogReader},
 	options::{Metadata, Options, DEFAULT_COMPRESSION_THRESHOLD},
 	parking_lot::RwLock,
 	table::{
@@ -15,9 +15,12 @@ use crate::{
 		Entry as ValueTableEntry, Value, ValueTable,
 	},
 	Operation,
+	db::CommitOverlay,
 };
 pub use iter::{BTreeIterator, LastIndex, LastKey};
 use node::SeparatorInner;
+
+use self::commit_overlay::BTreeChangeSet;
 
 #[allow(clippy::module_inception)]
 mod btree;
@@ -164,11 +167,11 @@ impl BTreeTable {
 		})
 	}
 
-	fn btree_header(log: &impl LogQuery, values: TablesRef) -> Result<BTreeHeader> {
+	fn btree_header(values: TablesRef) -> Result<BTreeHeader> {
 		let mut root = NULL_ADDRESS;
 		let mut depth = 0;
 		let key_query = TableKeyQuery::Fetch(None);
-		if let Some(encoded) = Column::get_value(key_query, HEADER_ADDRESS, values, log)? {
+		if let Some(encoded) = Column::get_value(key_query, HEADER_ADDRESS, values)? {
 			let mut buf: ValueTableEntry<Vec<u8>> = ValueTableEntry::new(encoded.1);
 			buf.check_remaining_len(8 + 4, || Error::Corruption("Invalid header length.".into()))?;
 			root = Address::from_u64(buf.read_u64());
@@ -181,11 +184,10 @@ impl BTreeTable {
 		&self,
 		key: TableKeyQuery,
 		address: Address,
-		log: &impl LogQuery,
 	) -> Result<Option<(u8, Value)>> {
 		let tables = self.tables.read();
 		let btree = self.locked(&tables);
-		Column::get_value(key, address, btree, log)
+		Column::get_value(key, address, btree)
 	}
 
 	pub fn flush(&self) -> Result<()> {
@@ -196,20 +198,20 @@ impl BTreeTable {
 		Ok(())
 	}
 
-	pub fn get(key: &[u8], log: &impl LogQuery, values: TablesRef) -> Result<Option<Vec<u8>>> {
-		let btree_header = Self::btree_header(log, values)?;
+	pub fn get(key: &[u8], values: TablesRef) -> Result<Option<Vec<u8>>> {
+		let btree_header = Self::btree_header(values)?;
 		if btree_header.root == NULL_ADDRESS {
 			return Ok(None)
 		}
 		let record_id = 0; // lifetime of Btree is the query, so no invalidate.
 				   // keeping log locked when parsing tree.
 		let tree = BTree::new(Some(btree_header.root), btree_header.depth, record_id);
-		tree.get(key, values, log)
+		tree.get(key, values)
 	}
 
-	fn get_encoded_entry(at: Address, log: &impl LogQuery, tables: TablesRef) -> Result<Vec<u8>> {
+	fn get_encoded_entry(at: Address, tables: TablesRef) -> Result<Vec<u8>> {
 		let key_query = TableKeyQuery::Check(&TableKey::NoHash);
-		if let Some((_tier, value)) = Column::get_value(key_query, at, tables, log)? {
+		if let Some((_tier, value)) = Column::get_value(key_query, at, tables)? {
 			Ok(value)
 		} else {
 			Err(Error::Corruption(format!("Missing btree entry at {at}")))
@@ -232,22 +234,22 @@ impl BTreeTable {
 		apply(locked)
 	}
 
-	pub fn enact_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
+	pub fn enact_plan_obsolete(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
 		let tables = self.tables.read();
 		match action {
 			LogAction::InsertValue(record) => {
-				tables[record.table.size_tier() as usize].enact_plan(record.index, log)?;
+				tables[record.table.size_tier() as usize].enact_plan_obsolete(record.index, log)?;
 			},
 			_ => panic!("Unexpected log action"),
 		}
 		Ok(())
 	}
 
-	pub fn validate_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
+	pub fn validate_plan_obsolete(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
 		let tables = self.tables.upgradable_read();
 		match action {
 			LogAction::InsertValue(record) => {
-				tables[record.table.size_tier() as usize].validate_plan(record.index, log)?;
+				tables[record.table.size_tier() as usize].validate_plan_obsolete(record.index, log)?;
 			},
 			_ => {
 				log::error!(target: "parity-db", "Unexpected log action");
@@ -257,10 +259,78 @@ impl BTreeTable {
 		Ok(())
 	}
 
-	pub fn complete_plan(&self, log: &mut LogWriter) -> Result<()> {
+	pub fn enact_ops(&self, count: u32, log: &mut LogReader, commit_overlay: &RwLock<CommitOverlay>) -> Result<()> {
+		let mut changeset = BTreeChangeSet::new(self.id);
+		for _ in 0 .. count {
+			match log.next()? {
+				LogAction::Set => {
+					let key_len = log.read_u32()?;
+					let mut key = Vec::new();
+					key.resize(key_len as usize, 0);
+					log.read(&mut key)?;
+					let len = log.read_u32()?;
+					let mut value = Vec::new();
+					value.resize(len as usize, 0);
+					log.read(&mut value)?;
+					changeset.push(Operation::Set(key, value));
+				}
+				LogAction::Reference => {
+					let key_len = log.read_u32()?;
+					let mut key = Vec::new();
+					key.resize(key_len as usize, 0);
+					log.read(&mut key)?;
+					changeset.push(Operation::Reference(key));
+				}
+				LogAction::Dereference => {
+					let key_len = log.read_u32()?;
+					let mut key = Vec::new();
+					key.resize(key_len as usize, 0);
+					log.read(&mut key)?;
+					changeset.push(Operation::Dereference(key));
+				}
+				_ => {
+					return Err(Error::Corruption("Unexpected action".into()))
+				}
+			}
+		}
+		changeset.write(self, log.record_id())?;
+		let mut commit_overlay = commit_overlay.write();
+		for c in changeset.changes {
+			commit_overlay.remove_btree_entry(c.key().as_ref(), log.record_id());
+		}
+		
+		Ok(())
+	}
+
+	pub fn validate_ops(&self, count: u32, log: &mut LogReader) -> Result<()> {
+		for _ in 0 .. count {
+			match log.next()? {
+				LogAction::Set => {
+					let len = log.read_u32()?;
+					log.skip(len as usize)?;
+					let len = log.read_u32()?;
+					log.skip(len as usize)?;
+				}
+				LogAction::Reference => {
+					let len = log.read_u32()?;
+					log.skip(len as usize)?;
+				}
+				LogAction::Dereference => {
+					let len = log.read_u32()?;
+					log.skip(len as usize)?;
+				}
+				_ => {
+					return Err(Error::Corruption("Unexpected action".into()))
+				}
+			}
+		}
+		Ok(())
+	}
+
+	pub fn finalize_write(&self) -> Result<()> {
 		let tables = self.tables.read();
 		for t in tables.iter() {
-			t.complete_plan(log)?;
+			t.finalize_write()?;
 		}
 		Ok(())
 	}
@@ -273,27 +343,24 @@ impl BTreeTable {
 		Ok(())
 	}
 
-	fn write_plan_remove_node(
+	fn write_remove_node(
 		tables: TablesRef,
-		writer: &mut LogWriter,
 		node_index: Address,
 	) -> Result<()> {
-		Column::write_existing_value_plan::<_, Vec<u8>>(
+		Column::write_existing_value::<_, Vec<u8>>(
 			&TableKey::NoHash,
 			tables,
 			node_index,
 			&Operation::Dereference(()),
-			writer,
 			None,
 			false,
 		)?;
 		Ok(())
 	}
 
-	fn write_node_plan(
+	fn write_node(
 		mut tables: TablesRef,
 		mut node: Node,
-		writer: &mut LogWriter,
 		node_id: Option<Address>,
 	) -> Result<Option<Address>> {
 		for child in node.children.as_mut().iter_mut() {
@@ -341,12 +408,11 @@ impl BTreeTable {
 		tables.compression = &crate::compress::NO_COMPRESSION;
 		let result = Ok(if let Some(existing) = node_id {
 			let k = TableKey::NoHash;
-			if let (_, Some(new_index)) = Column::write_existing_value_plan(
+			if let (_, Some(new_index)) = Column::write_existing_value(
 				&k,
 				tables,
 				existing,
 				&Operation::Set((), entry.encoded),
-				writer,
 				None,
 				false,
 			)? {
@@ -356,7 +422,7 @@ impl BTreeTable {
 			}
 		} else {
 			let k = TableKey::NoHash;
-			Some(Column::write_new_value_plan(&k, tables, entry.encoded.as_ref(), writer, None)?)
+			Some(Column::write_new_value(&k, tables, entry.encoded.as_ref(), None)?)
 		});
 		tables.compression = old_comp;
 
@@ -431,37 +497,21 @@ pub mod commit_overlay {
 			Ok(())
 		}
 
-		pub fn clean_overlay(&mut self, overlay: &mut BTreeCommitOverlay, record_id: u64) {
-			use std::collections::btree_map::Entry;
-			for change in self.changes.drain(..) {
-				let key = change.into_key();
-				if let Entry::Occupied(e) = overlay.entry(key) {
-					if e.get().0 == record_id {
-						e.remove_entry();
-					}
-				}
-			}
-		}
-
-		pub fn write_plan(
+		pub fn write(
 			&mut self,
 			btree: &BTreeTable,
-			writer: &mut LogWriter,
-			ops: &mut u64,
+			record_id: u64,
 		) -> Result<()> {
-			let record_id = writer.record_id();
-
 			let locked_tables = btree.tables.read();
 			let locked = btree.locked(&locked_tables);
-			let mut tree = BTree::open(locked, writer, record_id)?;
+			let mut tree = BTree::open(locked, record_id)?;
 
 			let mut btree_header =
 				BTreeHeader { root: tree.root_index.unwrap_or(NULL_ADDRESS), depth: tree.depth };
 			let old_btree_header = btree_header.clone();
 
 			self.changes.sort();
-			tree.write_sorted_changes(self.changes.as_slice(), locked, writer)?;
-			*ops += self.changes.len() as u64;
+			tree.write_sorted_changes(self.changes.as_slice(), locked)?;
 
 			btree_header.root = tree.root_index.unwrap_or(NULL_ADDRESS);
 			btree_header.depth = tree.depth;
@@ -469,18 +519,17 @@ pub mod commit_overlay {
 			if old_btree_header != btree_header {
 				let mut entry = Entry::empty();
 				entry.write_header(&btree_header);
-				Column::write_existing_value_plan(
+				Column::write_existing_value(
 					&TableKey::NoHash,
 					locked,
 					HEADER_ADDRESS,
 					&Operation::Set((), &entry.encoded.as_ref()[..HEADER_SIZE as usize]),
-					writer,
 					None,
 					false,
 				)?;
 			}
 			#[cfg(test)]
-			tree.is_balanced(locked, writer)?;
+			tree.is_balanced(locked)?;
 			Ok(())
 		}
 	}

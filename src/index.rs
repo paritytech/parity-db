@@ -2,11 +2,11 @@
 // This file is dual-licensed as Apache-2.0 or MIT.
 
 use crate::{
-	column::{ColId, MIN_INDEX_BITS},
+	column::ColId,
 	display::hex,
 	error::{try_io, Error, Result},
 	file::madvise_random,
-	log::{LogQuery, LogReader, LogWriter},
+	log::LogReader,
 	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 	stats::{self, ColumnStats},
 	table::{key::TableKey, SIZE_TIERS_BITS},
@@ -85,6 +85,17 @@ impl Entry {
 	fn from_u64(e: u64) -> Self {
 		Entry(e)
 	}
+
+	// Restore first 54 bits of the key.
+	pub fn recover_key_prefix(&self, chunk: u64, id: TableId) -> Key {
+		let partial_key = self.partial_key(id.index_bits());
+		let k = 64 - Entry::address_bits(id.index_bits());
+		let index_key = (chunk << (64 - id.index_bits())) |
+			(partial_key << (64 - k - id.index_bits()));
+		let mut key = Key::default();
+		key[0..8].copy_from_slice(&index_key.to_be_bytes());
+		key
+	}
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
@@ -118,7 +129,7 @@ impl std::fmt::Display for Address {
 	}
 }
 
-pub enum PlanOutcome {
+pub enum WriteOutcome {
 	Written,
 	NeedReindex,
 	Skipped,
@@ -171,30 +182,12 @@ impl TableId {
 		name.starts_with(&format!("index_{col:02}_"))
 	}
 
-	pub fn as_u16(&self) -> u16 {
-		self.0
-	}
-
 	pub fn total_chunks(&self) -> u64 {
 		total_chunks(self.index_bits())
 	}
 
 	pub fn total_entries(&self) -> u64 {
 		total_entries(self.index_bits())
-	}
-
-	pub fn log_index(&self) -> usize {
-		self.col() as usize * (64 - MIN_INDEX_BITS) as usize + self.index_bits() as usize
-	}
-
-	pub fn from_log_index(i: usize) -> Self {
-		let col = i / (64 - MIN_INDEX_BITS) as usize;
-		let bits = i % (64 - MIN_INDEX_BITS) as usize;
-		TableId::new(col as ColId, bits as u8)
-	}
-
-	pub const fn max_log_indicies(num_columns: usize) -> usize {
-		(64 - MIN_INDEX_BITS) as usize * num_columns
 	}
 }
 
@@ -357,33 +350,20 @@ impl IndexTable {
 		key
 	}
 
-	pub fn get(&self, key: &Key, sub_index: usize, log: &impl LogQuery) -> Result<(Entry, usize)> {
-		log::trace!(target: "parity-db", "{}: Querying {}", self.id, hex(key));
+	pub fn get(&self, key: &Key, sub_index: usize) -> Result<(Entry, usize)> {
 		let key = TableKey::index_from_partial(key);
 		let chunk_index = self.chunk_index(key);
-
-		if let Some(entry) = log.with_index(self.id, chunk_index, |chunk| {
-			log::trace!(target: "parity-db", "{}: Querying overlay at {}", self.id, chunk_index);
-			self.find_entry(key, sub_index, chunk)
-		}) {
-			return Ok(entry)
-		}
+		log::trace!(target: "parity-db", "{}: Querying chunk at {}", self.id, chunk_index);
 
 		if let Some(map) = &*self.map.read() {
-			log::trace!(target: "parity-db", "{}: Querying chunk at {}", self.id, chunk_index);
 			let chunk = Self::chunk_at(chunk_index, map)?;
 			return Ok(self.find_entry(key, sub_index, chunk))
 		}
 		Ok((Entry::empty(), 0))
 	}
 
-	pub fn entries(&self, chunk_index: u64, log: &impl LogQuery) -> Result<[Entry; CHUNK_ENTRIES]> {
+	pub fn entries(&self, chunk_index: u64) -> Result<[Entry; CHUNK_ENTRIES]> {
 		let mut chunk = [0; CHUNK_LEN];
-		if let Some(entry) =
-			log.with_index(self.id, chunk_index, |chunk| Self::transmute_chunk(*chunk))
-		{
-			return Ok(entry)
-		}
 		if let Some(map) = &*self.map.read() {
 			let source = Self::chunk_at(chunk_index, map)?;
 			chunk.copy_from_slice(source);
@@ -426,7 +406,7 @@ impl IndexTable {
 	}
 
 	#[inline(always)]
-	fn write_entry(entry: &Entry, at: usize, chunk: &mut [u8; CHUNK_LEN]) {
+	fn place_entry(entry: &Entry, at: usize, chunk: &mut [u8; CHUNK_LEN]) {
 		chunk[at * 8..at * 8 + 8].copy_from_slice(&entry.as_u64().to_le_bytes());
 	}
 
@@ -440,79 +420,40 @@ impl IndexTable {
 		key_prefix >> (ENTRY_BITS - self.id.index_bits())
 	}
 
-	fn plan_insert_chunk(
+	fn insert_chunk(
 		&self,
 		key_prefix: u64,
 		address: Address,
-		source: &[u8],
 		sub_index: Option<usize>,
-		log: &mut LogWriter,
-	) -> Result<PlanOutcome> {
+	) -> Result<WriteOutcome> {
 		let chunk_index = self.chunk_index(key_prefix);
 		if address.as_u64() > Entry::last_address(self.id.index_bits()) {
 			// Address overflow
 			log::warn!(target: "parity-db", "{}: Address space overflow at {}: {}", self.id, chunk_index, address);
-			return Ok(PlanOutcome::NeedReindex)
+			return Ok(WriteOutcome::NeedReindex)
 		}
-		let mut chunk = [0; CHUNK_LEN];
-		chunk.copy_from_slice(source);
 		let partial_key = Entry::extract_key(key_prefix, self.id.index_bits());
 		let new_entry = Entry::new(address, partial_key, self.id.index_bits());
-		if let Some(i) = sub_index {
-			let entry = Self::read_entry(&chunk, i);
-			assert_eq!(
-				entry.partial_key(self.id.index_bits()),
-				new_entry.partial_key(self.id.index_bits())
-			);
-			Self::write_entry(&new_entry, i, &mut chunk);
-			log::trace!(target: "parity-db", "{}: Replaced at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
-			log.insert_index(self.id, chunk_index, i as u8, &chunk);
-			return Ok(PlanOutcome::Written)
-		}
-		for i in 0..CHUNK_ENTRIES {
-			let entry = Self::read_entry(&chunk, i);
-			if entry.is_empty() {
-				Self::write_entry(&new_entry, i, &mut chunk);
-				log::trace!(target: "parity-db", "{}: Inserted at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
-				log.insert_index(self.id, chunk_index, i as u8, &chunk);
-				return Ok(PlanOutcome::Written)
-			}
-		}
-		log::debug!(target: "parity-db", "{}: Index chunk full at {}", self.id, chunk_index);
-		Ok(PlanOutcome::NeedReindex)
+		self.write_entry(chunk_index, sub_index, new_entry)
 	}
 
-	pub fn write_insert_plan(
+	pub fn write_insert(
 		&self,
 		key: &Key,
 		address: Address,
 		sub_index: Option<usize>,
-		log: &mut LogWriter,
-	) -> Result<PlanOutcome> {
+	) -> Result<WriteOutcome> {
 		log::trace!(target: "parity-db", "{}: Inserting {} -> {}", self.id, hex(key), address);
 		let key_prefix = TableKey::index_from_partial(key);
-		let chunk_index = self.chunk_index(key_prefix);
-
-		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| *chunk) {
-			return self.plan_insert_chunk(key_prefix, address, &chunk, sub_index, log)
-		}
-
-		if let Some(map) = &*self.map.read() {
-			let chunk = Self::chunk_at(chunk_index, map)?;
-			return self.plan_insert_chunk(key_prefix, address, chunk, sub_index, log)
-		}
-
-		let chunk = &EMPTY_CHUNK;
-		self.plan_insert_chunk(key_prefix, address, chunk, sub_index, log)
+		self.insert_chunk(key_prefix, address, sub_index)
 	}
 
-	fn plan_remove_chunk(
+	fn remove_chunk(
 		&self,
 		key_prefix: u64,
 		source: &[u8],
 		sub_index: usize,
-		log: &mut LogWriter,
-	) -> Result<PlanOutcome> {
+	) -> Result<WriteOutcome> {
 		let mut chunk = [0; CHUNK_LEN];
 		chunk.copy_from_slice(source);
 		let chunk_index = self.chunk_index(key_prefix);
@@ -522,38 +463,72 @@ impl IndexTable {
 		let entry = Self::read_entry(&chunk, i);
 		if !entry.is_empty() && entry.partial_key(self.id.index_bits()) == partial_key {
 			let new_entry = Entry::empty();
-			Self::write_entry(&new_entry, i, &mut chunk);
-			log.insert_index(self.id, chunk_index, i as u8, &chunk);
+			self.write_entry(chunk_index, Some(i), new_entry)?;
 			log::trace!(target: "parity-db", "{}: Removed at {}.{}", self.id, chunk_index, i);
-			return Ok(PlanOutcome::Written)
+			return Ok(WriteOutcome::Written)
 		}
-		Ok(PlanOutcome::Skipped)
+		Ok(WriteOutcome::Skipped)
 	}
 
-	pub fn write_remove_plan(
+	pub fn write_remove(
 		&self,
 		key: &Key,
 		sub_index: usize,
-		log: &mut LogWriter,
-	) -> Result<PlanOutcome> {
+	) -> Result<WriteOutcome> {
 		log::trace!(target: "parity-db", "{}: Removing {}", self.id, hex(key));
 		let key_prefix = TableKey::index_from_partial(key);
 
 		let chunk_index = self.chunk_index(key_prefix);
 
-		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| *chunk) {
-			return self.plan_remove_chunk(key_prefix, &chunk, sub_index, log)
-		}
-
 		if let Some(map) = &*self.map.read() {
 			let chunk = Self::chunk_at(chunk_index, map)?;
-			return self.plan_remove_chunk(key_prefix, chunk, sub_index, log)
+			return self.remove_chunk(key_prefix, chunk, sub_index)
 		}
 
-		Ok(PlanOutcome::Skipped)
+		Ok(WriteOutcome::Skipped)
 	}
 
-	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
+	pub fn write_entry(&self, index: u64, sub_index: Option<usize>, entry: Entry) -> Result<WriteOutcome> {
+		let mut map = self.map.upgradable_read();
+		if map.is_none() {
+			let mut wmap = RwLockUpgradableReadGuard::upgrade(map);
+			let file = try_io!(std::fs::OpenOptions::new()
+				.write(true)
+				.read(true)
+				.create_new(true)
+				.open(self.path.as_path()));
+			log::debug!(target: "parity-db", "Created new index {}", self.id);
+			try_io!(file.set_len(file_size(self.id.index_bits())));
+			let mut mmap = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
+			madvise_random(&mut mmap);
+			*wmap = Some(mmap);
+			map = RwLockWriteGuard::downgrade_to_upgradable(wmap);
+		}
+
+		let map = map.as_ref().unwrap();
+		let offset = META_SIZE + index as usize * CHUNK_LEN;
+		// Nasty mutable pointer cast. We do ensure that all chunks that are being written are
+		// accessed through the overlay in other threads.
+		let ptr: *mut [u8; CHUNK_LEN] = unsafe { map.as_ptr().offset(offset as isize) as *mut [u8; CHUNK_LEN] };
+		let chunk: &mut [u8; CHUNK_LEN] = unsafe { ptr.as_mut().unwrap() };
+		if let Some(i) = sub_index {
+			Self::place_entry(&entry, i, chunk);
+			log::trace!(target: "parity-db", "{}: Replaced at {}.{}: {}", self.id, index, i, entry.address(self.id.index_bits()));
+            return Ok(WriteOutcome::Written)
+		} else {
+			for i in 0..CHUNK_ENTRIES {
+				if Self::read_entry(chunk, i).is_empty() {
+					Self::place_entry(&entry, i, chunk);
+					log::trace!(target: "parity-db", "{}: Inserted at {}.{}: {}", self.id, index, i, entry.address(self.id.index_bits()));
+					return Ok(WriteOutcome::Written)
+				}
+			}
+		}
+		log::debug!(target: "parity-db", "{}: Index chunk full at {}", self.id, index);
+		Ok(WriteOutcome::NeedReindex)
+	}
+
+	pub fn enact_plan_obsolete(&self, index: u64, log: &mut LogReader) -> Result<()> {
 		let mut map = self.map.upgradable_read();
 		if map.is_none() {
 			let mut wmap = RwLockUpgradableReadGuard::upgrade(map);
@@ -593,7 +568,7 @@ impl IndexTable {
 		Ok(())
 	}
 
-	pub fn validate_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
+	pub fn validate_plan_obsolete(&self, index: u64, log: &mut LogReader) -> Result<()> {
 		if index >= self.id.total_entries() {
 			return Err(Error::Corruption("Bad index".into()))
 		}
@@ -609,7 +584,7 @@ impl IndexTable {
 		Ok(())
 	}
 
-	pub fn skip_plan(log: &mut LogReader) -> Result<()> {
+	pub fn skip_plan_obsolete(log: &mut LogReader) -> Result<()> {
 		let mut buf = [0u8; 8];
 		log.read(&mut buf)?;
 		let mut mask = u64::from_le_bytes(buf);
@@ -660,7 +635,7 @@ mod test {
 			i.hash(&mut hasher);
 			let hash = hasher.finish();
 			let entry = Entry::from_u64(hash);
-			IndexTable::write_entry(&entry, i, &mut chunk2);
+			IndexTable::place_entry(&entry, i, &mut chunk2);
 			*chunk = entry;
 		}
 
@@ -714,7 +689,7 @@ mod test {
 			let partial_key = Entry::extract_key(keys[i], 18);
 			let e = Entry::new(Address::new(0, 0), partial_key, 18);
 			entries[i] = e;
-			IndexTable::write_entry(&e, i, &mut chunk);
+			IndexTable::place_entry(&e, i, &mut chunk);
 		}
 
 		for target in 0..CHUNK_ENTRIES {
@@ -747,7 +722,7 @@ mod test {
 		let partial_key = Entry::extract_key(key, 18);
 		let entry = Entry::new(Address::new(0, 0), partial_key, 18);
 		for i in 0..CHUNK_ENTRIES {
-			IndexTable::write_entry(&entry, i, &mut chunk);
+			IndexTable::place_entry(&entry, i, &mut chunk);
 		}
 
 		for start_pos in 0..CHUNK_ENTRIES {
@@ -770,7 +745,7 @@ mod test {
 		let entry = Entry::new(Address::new(1, 1), zero_key, 16);
 
 		// Write at index 1. Index 0 contains an empty entry.
-		IndexTable::write_entry(&entry, 1, &mut chunk);
+		IndexTable::place_entry(&entry, 1, &mut chunk);
 
 		let (_, i) = table.find_entry_base(zero_key, 0, &chunk);
 		assert_eq!(i, 1);

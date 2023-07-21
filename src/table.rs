@@ -48,9 +48,8 @@ use crate::{
 	column::ColId,
 	display::hex,
 	error::Result,
-	log::{LogOverlays, LogQuery, LogReader, LogWriter},
+	log::LogReader,
 	options::ColumnOptions as Options,
-	parking_lot::RwLock,
 	table::key::{TableKey, TableKeyQuery, PARTIAL_SIZE},
 };
 use std::{
@@ -111,24 +110,6 @@ impl TableId {
 
 	pub fn is_file_name(col: ColId, name: &str) -> bool {
 		name.starts_with(&format!("table_{col:02}_"))
-	}
-
-	pub fn as_u16(&self) -> u16 {
-		self.0
-	}
-
-	pub fn log_index(&self) -> usize {
-		self.col() as usize * SIZE_TIERS + self.size_tier() as usize
-	}
-
-	pub const fn max_log_tables(num_columns: usize) -> usize {
-		SIZE_TIERS * num_columns
-	}
-
-	pub fn from_log_index(i: usize) -> Self {
-		let col = i / SIZE_TIERS;
-		let tier = i % SIZE_TIERS;
-		Self::new(col as ColId, tier as u8)
 	}
 }
 
@@ -447,7 +428,6 @@ impl ValueTable {
 		&self,
 		key: &mut TableKeyQuery,
 		mut index: u64,
-		log: &impl LogQuery,
 		mut f: impl FnMut(&[u8]) -> bool,
 	) -> Result<(u32, bool)> {
 		let mut part = 0;
@@ -455,24 +435,13 @@ impl ValueTable {
 		let mut rc = 1;
 		let entry_size = self.entry_size as usize;
 		loop {
-			let vbuf = log.value_ref(self.id, index);
-			let buf: &[u8] = if let Some(buf) = vbuf.as_deref() {
-				log::trace!(
-					target: "parity-db",
-					"{}: Found in overlay {}",
-					self.id,
-					index,
-				);
-				buf
-			} else {
-				log::trace!(
-					target: "parity-db",
-					"{}: Query slot {}",
-					self.id,
-					index,
-				);
-				self.file.slice_at(index * self.entry_size as u64, entry_size)
-			};
+			log::trace!(
+				target: "parity-db",
+				"{}: Query slot {}",
+				self.id,
+				index,
+			);
+			let buf = self.file.slice_at(index * self.entry_size as u64, entry_size);
 			let mut buf = EntryRef::new(buf);
 
 			buf.set_offset(0);
@@ -552,10 +521,9 @@ impl ValueTable {
 		&self,
 		key: &TableKey,
 		index: u64,
-		log: &impl LogQuery,
 	) -> Result<Option<(Value, bool)>> {
 		if let Some((value, compressed, _)) =
-			self.query(&mut TableKeyQuery::Check(key), index, log)?
+			self.query(&mut TableKeyQuery::Check(key), index)?
 		{
 			Ok(Some((value, compressed)))
 		} else {
@@ -574,10 +542,9 @@ impl ValueTable {
 		&self,
 		key: &mut TableKeyQuery,
 		index: u64,
-		log: &impl LogQuery,
 	) -> Result<Option<(Value, bool, u32)>> {
 		let mut result = Vec::new();
-		let (rc, compressed) = self.for_parts(key, index, log, |buf| {
+		let (rc, compressed) = self.for_parts(key, index, |buf| {
 			result.extend_from_slice(buf);
 			true
 		})?;
@@ -591,11 +558,10 @@ impl ValueTable {
 	pub fn get_with_meta(
 		&self,
 		index: u64,
-		log: &impl LogQuery,
 	) -> Result<Option<(Value, u32, [u8; PARTIAL_SIZE], bool)>> {
 		let mut query_key = Default::default();
 		if let Some((value, compressed, rc)) =
-			self.query(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index, log)?
+			self.query(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index)?
 		{
 			return Ok(Some((value, rc, query_key, compressed)))
 		}
@@ -606,11 +572,10 @@ impl ValueTable {
 		&self,
 		key: &TableKey,
 		index: u64,
-		log: &impl LogQuery,
 	) -> Result<Option<(u32, bool)>> {
 		let mut result = 0;
 		let (rc, compressed) =
-			self.for_parts(&mut TableKeyQuery::Check(key), index, log, |buf| {
+			self.for_parts(&mut TableKeyQuery::Check(key), index, |buf| {
 				result += buf.len() as u32;
 				true
 			})?;
@@ -620,46 +585,38 @@ impl ValueTable {
 		Ok(None)
 	}
 
-	pub fn has_key_at(&self, index: u64, key: &TableKey, log: &LogWriter) -> Result<bool> {
+	pub fn has_key_at(&self, index: u64, key: &TableKey) -> Result<bool> {
 		match key {
-			TableKey::Partial(k) => Ok(match self.partial_key_at(index, log)? {
+			TableKey::Partial(k) => Ok(match self.partial_key_at(index)? {
 				Some(existing_key) => &existing_key[..] == key::partial_key(k),
 				None => false,
 			}),
-			TableKey::NoHash => Ok(!self.is_tombstone(index, log)?),
+			TableKey::NoHash => Ok(!self.is_tombstone(index)?),
 		}
 	}
 
 	pub fn partial_key_at(
 		&self,
 		index: u64,
-		log: &impl LogQuery,
 	) -> Result<Option<[u8; PARTIAL_SIZE]>> {
 		let mut query_key = Default::default();
 		let (rc, _compressed) =
-			self.for_parts(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index, log, |_buf| {
+			self.for_parts(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index, |_buf| {
 				false
 			})?;
 		Ok(if rc == 0 { None } else { Some(query_key) })
 	}
 
-	pub fn is_tombstone(&self, index: u64, log: &impl LogQuery) -> Result<bool> {
+	pub fn is_tombstone(&self, index: u64) -> Result<bool> {
 		let mut buf = PartialKeyEntry::new_uninit();
-		let buf = if log.value(self.id, index, buf.as_mut()) {
-			&mut buf
-		} else {
-			self.file.read_at(buf.as_mut(), index * self.entry_size as u64)?;
-			&mut buf
-		};
+		self.file.read_at(buf.as_mut(), index * self.entry_size as u64)?;
 		Ok(buf.is_tombstone())
 	}
 
-	pub fn read_next_free(&self, index: u64, log: &LogWriter) -> Result<u64> {
+	pub fn read_next_free(&self, index: u64) -> Result<u64> {
 		let mut buf = PartialEntry::new_uninit();
 		let filled = self.filled.load(Ordering::Relaxed);
-		if !log.value(self.id, index, buf.as_mut()) {
-			self.file.read_at(buf.as_mut(), index * self.entry_size as u64)?;
-		}
+		self.file.read_at(buf.as_mut(), index * self.entry_size as u64)?;
 		buf.skip_size();
 		let next = buf.read_next();
 		if next >= filled {
@@ -671,11 +628,9 @@ impl ValueTable {
 		Ok(next)
 	}
 
-	pub fn read_next_part(&self, index: u64, log: &LogWriter) -> Result<Option<u64>> {
+	pub fn read_next_part(&self, index: u64) -> Result<Option<u64>> {
 		let mut buf = PartialEntry::new_uninit();
-		if !log.value(self.id, index, buf.as_mut()) {
-			self.file.read_at(buf.as_mut(), index * self.entry_size as u64)?;
-		}
+		self.file.read_at(buf.as_mut(), index * self.entry_size as u64)?;
 		if self.multipart && buf.is_multi(self.db_version) {
 			buf.skip_size();
 			let next = buf.read_next();
@@ -684,11 +639,11 @@ impl ValueTable {
 		Ok(None)
 	}
 
-	pub fn next_free(&self, log: &mut LogWriter) -> Result<u64> {
+	pub fn next_free(&self) -> Result<u64> {
 		let filled = self.filled.load(Ordering::Relaxed);
 		let last_removed = self.last_removed.load(Ordering::Relaxed);
 		let index = if last_removed != 0 {
-			let next_removed = self.read_next_free(last_removed, log)?;
+			let next_removed = self.read_next_free(last_removed)?;
 			log::trace!(
 				target: "parity-db",
 				"{}: Inserting into removed slot {}",
@@ -715,7 +670,6 @@ impl ValueTable {
 		&self,
 		key: &TableKey,
 		value: &[u8],
-		log: &mut LogWriter,
 		at: Option<u64>,
 		compressed: bool,
 	) -> Result<u64> {
@@ -725,13 +679,13 @@ impl ValueTable {
 		assert!(self.multipart || value.len() <= self.value_size(key).unwrap() as usize);
 		let (mut index, mut follow) = match at {
 			Some(index) => (index, true),
-			None => (self.next_free(log)?, false),
+			None => (self.next_free()?, false),
 		};
 		loop {
 			let mut next_index = 0;
 			if follow {
 				// check existing link
-				match self.read_next_part(index, log)? {
+				match self.read_next_part(index)? {
 					Some(next) => {
 						next_index = next;
 					},
@@ -751,7 +705,7 @@ impl ValueTable {
 			let free_space = self.entry_size as usize - SIZE_SIZE;
 			let value_len = if remainder > free_space {
 				if !follow {
-					next_index = self.next_free(log)?
+					next_index = self.next_free()?
 				}
 				if start == 0 {
 					if compressed {
@@ -777,9 +731,18 @@ impl ValueTable {
 				key.write(&mut buf);
 			}
 			let written = buf.offset() - init_offset;
-			buf.write_slice(&value[offset..offset + value_len - written]);
+
+			while index >= self.file.capacity.load(Ordering::Relaxed) {
+				self.file.grow(self.entry_size)?;
+			}
+			self.file
+				.write_at(&buf[0..buf.offset()], index * (self.entry_size as u64))?;
+			self.file
+				.write_at(&value[offset..offset + value_len - written], index * (self.entry_size as u64) + buf.offset() as u64)?;
+			log::trace!(target: "parity-db", "{}: Enacted {}: {}, {} bytes", self.id, index, hex(&buf.1[6..32]), buf.offset());
+
 			offset += value_len - written;
-			log.insert_value(self.id, index, buf[0..buf.offset()].to_vec());
+
 			remainder -= value_len;
 			if start == 0 {
 				start = index;
@@ -788,7 +751,7 @@ impl ValueTable {
 			if remainder == 0 {
 				if index != 0 {
 					// End of new entry. Clear the remaining tail and exit
-					self.clear_chain(index, log)?;
+					self.clear_chain(index)?;
 				}
 				break
 			}
@@ -797,22 +760,22 @@ impl ValueTable {
 		Ok(start)
 	}
 
-	fn clear_chain(&self, mut index: u64, log: &mut LogWriter) -> Result<()> {
+	fn clear_chain(&self, mut index: u64) -> Result<()> {
 		loop {
-			match self.read_next_part(index, log)? {
+			match self.read_next_part(index)? {
 				Some(next) => {
-					self.clear_slot(index, log)?;
+					self.clear_slot(index)?;
 					index = next;
 				},
 				None => {
-					self.clear_slot(index, log)?;
+					self.clear_slot(index)?;
 					return Ok(())
 				},
 			}
 		}
 	}
 
-	fn clear_slot(&self, index: u64, log: &mut LogWriter) -> Result<()> {
+	fn clear_slot(&self, index: u64) -> Result<()> {
 		let last_removed = self.last_removed.load(Ordering::Relaxed);
 		log::trace!(
 			target: "parity-db",
@@ -825,65 +788,61 @@ impl ValueTable {
 		buf.write_tombstone();
 		buf.write_next(last_removed);
 
-		log.insert_value(self.id, index, buf[0..buf.offset()].to_vec());
+		self.file
+			.write_at(&buf[0..SIZE_SIZE + INDEX_SIZE], index * (self.entry_size as u64))?;
+		log::trace!(target: "parity-db", "{}: Enacted tombstone in slot {}", self.id, index);
+
 		self.last_removed.store(index, Ordering::Relaxed);
 		self.dirty_header.store(true, Ordering::Relaxed);
 		Ok(())
 	}
 
-	pub fn write_insert_plan(
+	pub fn write_insert(
 		&self,
 		key: &TableKey,
 		value: &[u8],
-		log: &mut LogWriter,
 		compressed: bool,
 	) -> Result<u64> {
-		self.overwrite_chain(key, value, log, None, compressed)
+		self.overwrite_chain(key, value, None, compressed)
 	}
 
-	pub fn write_replace_plan(
+	pub fn write_replace(
 		&self,
 		index: u64,
 		key: &TableKey,
 		value: &[u8],
-		log: &mut LogWriter,
 		compressed: bool,
 	) -> Result<()> {
-		self.overwrite_chain(key, value, log, Some(index), compressed)?;
+		self.overwrite_chain(key, value, Some(index), compressed)?;
 		Ok(())
 	}
 
-	pub fn write_remove_plan(&self, index: u64, log: &mut LogWriter) -> Result<()> {
+	pub fn write_remove(&self, index: u64) -> Result<()> {
 		if self.multipart {
-			self.clear_chain(index, log)?;
+			self.clear_chain(index)?;
 		} else {
-			self.clear_slot(index, log)?;
+			self.clear_slot(index)?;
 		}
 		Ok(())
 	}
 
-	pub fn write_inc_ref(&self, index: u64, log: &mut LogWriter) -> Result<()> {
-		self.change_ref(index, 1, log)?;
+	pub fn write_inc_ref(&self, index: u64) -> Result<()> {
+		self.change_ref(index, 1)?;
 		Ok(())
 	}
 
-	pub fn write_dec_ref(&self, index: u64, log: &mut LogWriter) -> Result<bool> {
-		if self.change_ref(index, -1, log)? {
+	pub fn write_dec_ref(&self, index: u64) -> Result<bool> {
+		if self.change_ref(index, -1)? {
 			return Ok(true)
 		}
-		self.write_remove_plan(index, log)?;
+		self.write_remove(index)?;
 		Ok(false)
 	}
 
-	pub fn change_ref(&self, index: u64, delta: i32, log: &mut LogWriter) -> Result<bool> {
+	pub fn change_ref(&self, index: u64, delta: i32) -> Result<bool> {
 		let mut buf = FullEntry::new_uninit_full_entry();
-		let buf = if log.value(self.id, index, buf.as_mut()) {
-			&mut buf
-		} else {
-			self.file
-				.read_at(&mut buf[0..self.entry_size as usize], index * self.entry_size as u64)?;
-			&mut buf
-		};
+		self.file
+			.read_at(&mut buf[0..self.entry_size as usize], index * self.entry_size as u64)?;
 
 		if buf.is_tombstone() {
 			return Ok(false)
@@ -916,11 +875,13 @@ impl ValueTable {
 		buf.set_offset(rc_offset);
 		buf.write_rc(counter);
 		// TODO: optimize actual buf size
-		log.insert_value(self.id, index, buf[0..size].to_vec());
+		self.file
+			.write_at(&buf[0..size], index * (self.entry_size as u64))?;
+		log::trace!(target: "parity-db", "{}: Enacted new ref in slot {}", self.id, index);
 		Ok(true)
 	}
 
-	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
+	pub fn enact_plan_obsolete(&self, index: u64, log: &mut LogReader) -> Result<()> {
 		while index >= self.file.capacity.load(Ordering::Relaxed) {
 			self.file.grow(self.entry_size)?;
 		}
@@ -954,7 +915,7 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn validate_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
+	pub fn validate_plan_obsolete(&self, index: u64, log: &mut LogReader) -> Result<()> {
 		if index == 0 {
 			let mut header = Header::default();
 			log.read(&mut header.0)?;
@@ -995,18 +956,20 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn complete_plan(&self, log: &mut LogWriter) -> Result<()> {
+	pub fn finalize_write(&self) -> Result<()> {
 		if let Ok(true) =
 			self.dirty_header
 				.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
 		{
-			// last_removed or filled pointers were modified. Add them to the log
+			// last_removed or filled pointers were modified. Write them to disk.
 			let mut buf = Header::default();
 			let last_removed = self.last_removed.load(Ordering::Relaxed);
 			let filled = self.filled.load(Ordering::Relaxed);
 			buf.set_last_removed(last_removed);
 			buf.set_filled(filled);
-			log.insert_value(self.id, 0, buf.0.to_vec());
+
+			self.file.write_at(&buf.0, 0)?;
+			log::trace!(target: "parity-db", "{}: Enacted header, {} filled", self.id, filled);
 		}
 		Ok(())
 	}
@@ -1025,7 +988,6 @@ impl ValueTable {
 
 	pub fn iter_while(
 		&self,
-		log: &impl LogQuery,
 		mut f: impl FnMut(u64, u32, Vec<u8>, bool) -> bool,
 	) -> Result<()> {
 		let filled = self.filled.load(Ordering::Relaxed);
@@ -1036,7 +998,6 @@ impl ValueTable {
 			match self.for_parts(
 				&mut TableKeyQuery::Fetch(Some(&mut _fetch_key)),
 				index,
-				log,
 				|buf| {
 					result.extend_from_slice(buf);
 					true
@@ -1069,16 +1030,9 @@ impl ValueTable {
 	fn do_init_with_entry(&self, entry: &[u8]) -> Result<()> {
 		self.file.grow(self.entry_size)?;
 
-		let empty_overlays = RwLock::new(LogOverlays::with_columns(0));
-		let mut log = LogWriter::new(&empty_overlays, 0);
-		let at = self.overwrite_chain(&TableKey::NoHash, entry, &mut log, None, false)?;
-		self.complete_plan(&mut log)?;
+		let at = self.overwrite_chain(&TableKey::NoHash, entry, None, false)?;
+		self.finalize_write()?;
 		assert_eq!(at, 1);
-		let log = log.drain();
-		let change = log.local_values_changes(self.id).expect("entry written above");
-		for (at, (_rec_id, entry)) in change.map.iter() {
-			self.file.write_at(entry.as_slice(), *at * (self.entry_size as u64))?;
-		}
 		Ok(())
 	}
 
@@ -1187,8 +1141,7 @@ mod test {
 
 	use super::{TableId, Value, ValueTable, MULTIPART_ENTRY_SIZE};
 	use crate::{
-		log::{Log, LogAction, LogWriter},
-		options::{ColumnOptions, Options, CURRENT_VERSION},
+		options::{ColumnOptions, CURRENT_VERSION},
 		table::key::TableKey,
 		Key,
 	};
@@ -1199,37 +1152,6 @@ mod test {
 		let id = TableId::new(0, 0);
 		ValueTable::open(Arc::new(dir.path().to_path_buf()), id, size, options, CURRENT_VERSION)
 			.unwrap()
-	}
-
-	fn new_log(dir: &TempDir) -> Log {
-		let options = Options::with_columns(dir.path(), 1);
-		Log::open(&options).unwrap()
-	}
-
-	fn write_ops<F: FnOnce(&mut LogWriter)>(table: &ValueTable, log: &Log, f: F) {
-		let mut writer = log.begin_record();
-		f(&mut writer);
-		let bytes_written = log.end_record(writer.drain()).unwrap();
-		let _ = log.read_next(false);
-		log.flush_one(0).unwrap();
-		let mut reader = log.read_next(false).unwrap().unwrap();
-		loop {
-			match reader.next().unwrap() {
-				LogAction::BeginRecord |
-				LogAction::InsertIndex { .. } |
-				LogAction::DropTable { .. } => {
-					panic!("Unexpected log entry");
-				},
-				LogAction::EndRecord => {
-					let bytes_read = reader.read_bytes();
-					assert_eq!(bytes_written, bytes_read);
-					break
-				},
-				LogAction::InsertValue(insertion) => {
-					table.enact_plan(insertion.index, &mut reader).unwrap();
-				},
-			}
-		}
 	}
 
 	fn key(k: u32) -> Key {
@@ -1267,7 +1189,6 @@ mod test {
 	fn insert_simple_inner(options: &ColumnOptions) {
 		let dir = tempdir().unwrap();
 		let table = new_table(&dir, Some(ENTRY_SIZE), options);
-		let log = new_log(&dir);
 
 		let key = key(1);
 		let key = TableKey::Partial(key);
@@ -1275,12 +1196,10 @@ mod test {
 		let val = value(19);
 		let compressed = true;
 
-		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(key, &val, writer, compressed).unwrap();
-			assert_eq!(table.get(key, 1, writer).unwrap(), Some((val.clone(), compressed)));
-		});
+		table.write_insert(key, &val, compressed).unwrap();
+		assert_eq!(table.get(key, 1).unwrap(), Some((val.clone(), compressed)));
 
-		assert_eq!(table.get(key, 1, log.overlays()).unwrap(), Some((val, compressed)));
+		assert_eq!(table.get(key, 1).unwrap(), Some((val, compressed)));
 		assert_eq!(table.filled.load(Ordering::Relaxed), 2);
 	}
 
@@ -1299,7 +1218,6 @@ mod test {
 	fn remove_simple_inner(options: &ColumnOptions) {
 		let dir = tempdir().unwrap();
 		let table = new_table(&dir, Some(ENTRY_SIZE), options);
-		let log = new_log(&dir);
 
 		let key1 = key(1);
 		let key1 = &TableKey::Partial(key1);
@@ -1309,22 +1227,16 @@ mod test {
 		let val2 = value(21);
 		let compressed = false;
 
-		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(key1, &val1, writer, compressed).unwrap();
-			table.write_insert_plan(key2, &val2, writer, compressed).unwrap();
-		});
+		table.write_insert(key1, &val1, compressed).unwrap();
+		table.write_insert(key2, &val2, compressed).unwrap();
 
-		write_ops(&table, &log, |writer| {
-			table.write_remove_plan(1, writer).unwrap();
-		});
+		table.write_remove(1).unwrap();
 
-		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), None);
+		assert_eq!(table.get(key1, 1).unwrap(), None);
 		assert_eq!(table.last_removed.load(Ordering::Relaxed), 1);
 
-		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(key1, &val1, writer, compressed).unwrap();
-		});
-		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), Some((val1, compressed)));
+		table.write_insert(key1, &val1, compressed).unwrap();
+		assert_eq!(table.get(key1, 1).unwrap(), Some((val1, compressed)));
 		assert_eq!(table.last_removed.load(Ordering::Relaxed), 0);
 	}
 
@@ -1338,7 +1250,6 @@ mod test {
 	fn replace_simple_inner(options: &ColumnOptions, table_key: fn(Key) -> TableKey) {
 		let dir = tempdir().unwrap();
 		let table = new_table(&dir, Some(ENTRY_SIZE), options);
-		let log = new_log(&dir);
 
 		let key1 = key(1);
 		let key1 = &table_key(key1);
@@ -1349,16 +1260,12 @@ mod test {
 		let val3 = value(26); // max size for full hash and rc
 		let compressed = true;
 
-		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(key1, &val1, writer, compressed).unwrap();
-			table.write_insert_plan(key2, &val2, writer, compressed).unwrap();
-		});
+		table.write_insert(key1, &val1, compressed).unwrap();
+		table.write_insert(key2, &val2, compressed).unwrap();
 
-		write_ops(&table, &log, |writer| {
-			table.write_replace_plan(1, key2, &val3, writer, false).unwrap();
-		});
+		table.write_replace(1, key2, &val3, false).unwrap();
 
-		assert_eq!(table.get(key2, 1, log.overlays()).unwrap(), Some((val3, false)));
+		assert_eq!(table.get(key2, 1).unwrap(), Some((val3, false)));
 		assert_eq!(table.last_removed.load(Ordering::Relaxed), 0);
 	}
 
@@ -1370,7 +1277,6 @@ mod test {
 	fn replace_multipart_shorter_inner(options: &ColumnOptions) {
 		let dir = tempdir().unwrap();
 		let table = new_table(&dir, None, options);
-		let log = new_log(&dir);
 
 		let key1 = key(1);
 		let key1 = &TableKey::Partial(key1);
@@ -1381,25 +1287,19 @@ mod test {
 		let val1s = value(5000);
 		let compressed = false;
 
-		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(key1, &val1, writer, compressed).unwrap();
-			table.write_insert_plan(key2, &val2, writer, compressed).unwrap();
-		});
+		table.write_insert(key1, &val1, compressed).unwrap();
+		table.write_insert(key2, &val2, compressed).unwrap();
 
-		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), Some((val1, compressed)));
+		assert_eq!(table.get(key1, 1).unwrap(), Some((val1, compressed)));
 		assert_eq!(table.last_removed.load(Ordering::Relaxed), 0);
 		assert_eq!(table.filled.load(Ordering::Relaxed), 7);
 
-		write_ops(&table, &log, |writer| {
-			table.write_replace_plan(1, key1, &val1s, writer, compressed).unwrap();
-		});
-		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), Some((val1s, compressed)));
+		table.write_replace(1, key1, &val1s, compressed).unwrap();
+		assert_eq!(table.get(key1, 1).unwrap(), Some((val1s, compressed)));
 		assert_eq!(table.last_removed.load(Ordering::Relaxed), 5);
-		write_ops(&table, &log, |writer| {
-			assert_eq!(table.read_next_free(5, writer).unwrap(), 4);
-			assert_eq!(table.read_next_free(4, writer).unwrap(), 3);
-			assert_eq!(table.read_next_free(3, writer).unwrap(), 0);
-		});
+		assert_eq!(table.read_next_free(5).unwrap(), 4);
+		assert_eq!(table.read_next_free(4).unwrap(), 3);
+		assert_eq!(table.read_next_free(3).unwrap(), 0);
 	}
 
 	#[test]
@@ -1410,7 +1310,6 @@ mod test {
 	fn replace_multipart_longer_inner(options: &ColumnOptions) {
 		let dir = tempdir().unwrap();
 		let table = new_table(&dir, None, options);
-		let log = new_log(&dir);
 
 		let key1 = key(1);
 		let key1 = &TableKey::Partial(key1);
@@ -1421,19 +1320,16 @@ mod test {
 		let val1l = value(20000);
 		let compressed = false;
 
-		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(key1, &val1, writer, compressed).unwrap();
-			table.write_insert_plan(key2, &val2, writer, compressed).unwrap();
-		});
+		table.write_insert(key1, &val1, compressed).unwrap();
+		table.write_insert(key2, &val2, compressed).unwrap();
 
-		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), Some((val1, compressed)));
+		assert_eq!(table.get(key1, 1).unwrap(), Some((val1, compressed)));
 		assert_eq!(table.last_removed.load(Ordering::Relaxed), 0);
 		assert_eq!(table.filled.load(Ordering::Relaxed), 4);
 
-		write_ops(&table, &log, |writer| {
-			table.write_replace_plan(1, key1, &val1l, writer, compressed).unwrap();
-		});
-		assert_eq!(table.get(key1, 1, log.overlays()).unwrap(), Some((val1l, compressed)));
+		table.write_replace(1, key1, &val1l, compressed).unwrap();
+
+		assert_eq!(table.get(key1, 1).unwrap(), Some((val1l, compressed)));
 		assert_eq!(table.last_removed.load(Ordering::Relaxed), 0);
 		assert_eq!(table.filled.load(Ordering::Relaxed), 7);
 	}
@@ -1443,25 +1339,18 @@ mod test {
 		for compressed in [false, true] {
 			let dir = tempdir().unwrap();
 			let table = new_table(&dir, None, &rc_options());
-			let log = new_log(&dir);
 
 			let key = key(1);
 			let key = &TableKey::Partial(key);
 			let val = value(5000);
 
-			write_ops(&table, &log, |writer| {
-				table.write_insert_plan(key, &val, writer, compressed).unwrap();
-				table.write_inc_ref(1, writer).unwrap();
-			});
-			assert_eq!(table.get(key, 1, log.overlays()).unwrap(), Some((val.clone(), compressed)));
-			write_ops(&table, &log, |writer| {
-				table.write_dec_ref(1, writer).unwrap();
-			});
-			assert_eq!(table.get(key, 1, log.overlays()).unwrap(), Some((val, compressed)));
-			write_ops(&table, &log, |writer| {
-				table.write_dec_ref(1, writer).unwrap();
-			});
-			assert_eq!(table.get(key, 1, log.overlays()).unwrap(), None);
+			table.write_insert(key, &val, compressed).unwrap();
+			table.write_inc_ref(1).unwrap();
+			assert_eq!(table.get(key, 1).unwrap(), Some((val.clone(), compressed)));
+			table.write_dec_ref(1).unwrap();
+			assert_eq!(table.get(key, 1).unwrap(), Some((val, compressed)));
+			table.write_dec_ref(1).unwrap();
+			assert_eq!(table.get(key, 1).unwrap(), None);
 		}
 	}
 
@@ -1474,7 +1363,6 @@ mod test {
 
 				let dir = tempdir().unwrap();
 				let table = new_table(&dir, entry_size, &rc_options());
-				let log = new_log(&dir);
 
 				let (v1, v2, v3) = (
 					value(MULTIPART_ENTRY_SIZE as usize / 8 * size_mul),
@@ -1487,15 +1375,13 @@ mod test {
 					(TableKey::Partial(key(3)), &v3),
 				];
 
-				write_ops(&table, &log, |writer| {
-					for (k, v) in &entries {
-						table.write_insert_plan(k, &v, writer, compressed).unwrap();
-					}
-				});
+				for (k, v) in &entries {
+					table.write_insert(k, &v, compressed).unwrap();
+				}
 
 				let mut res = Vec::new();
 				table
-					.iter_while(log.overlays(), |_index, _rc, v, cmpr| {
+					.iter_while(|_index, _rc, v, cmpr| {
 						res.push((v.len(), cmpr));
 						true
 					})
@@ -1506,13 +1392,11 @@ mod test {
 				);
 
 				let v2_index = 2 + v1.len() as u64 / super::MULTIPART_ENTRY_SIZE as u64;
-				write_ops(&table, &log, |writer| {
-					table.write_remove_plan(v2_index, writer).unwrap();
-				});
+				table.write_remove(v2_index).unwrap();
 
 				let mut res = Vec::new();
 				table
-					.iter_while(log.overlays(), |_index, _rc, v, cmpr| {
+					.iter_while(|_index, _rc, v, cmpr| {
 						res.push((v.len(), cmpr));
 						true
 					})
@@ -1526,24 +1410,19 @@ mod test {
 	fn ref_underflow() {
 		let dir = tempdir().unwrap();
 		let table = new_table(&dir, Some(ENTRY_SIZE), &rc_options());
-		let log = new_log(&dir);
 
 		let key = key(1);
 		let key = &TableKey::Partial(key);
 		let val = value(10);
 
 		let compressed = false;
-		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(key, &val, writer, compressed).unwrap();
-			table.write_inc_ref(1, writer).unwrap();
-		});
-		assert_eq!(table.get(key, 1, log.overlays()).unwrap(), Some((val, compressed)));
-		write_ops(&table, &log, |writer| {
-			table.write_dec_ref(1, writer).unwrap();
-			table.write_dec_ref(1, writer).unwrap();
-			table.write_dec_ref(1, writer).unwrap();
-		});
-		assert_eq!(table.get(key, 1, log.overlays()).unwrap(), None);
+		table.write_insert(key, &val, compressed).unwrap();
+		table.write_inc_ref(1).unwrap();
+		assert_eq!(table.get(key, 1).unwrap(), Some((val, compressed)));
+		table.write_dec_ref(1).unwrap();
+		table.write_dec_ref(1).unwrap();
+		table.write_dec_ref(1).unwrap();
+		assert_eq!(table.get(key, 1).unwrap(), None);
 	}
 
 	#[test]
@@ -1560,51 +1439,40 @@ mod test {
 		assert!(size > MAX_ENTRY_SIZE);
 		let dir = tempdir().unwrap();
 		let table = new_table(&dir, Some(MAX_ENTRY_SIZE as u16), &rc_options());
-		let log = new_log(&dir);
 
 		let key = key(1);
 		let key = &TableKey::Partial(key);
 		let val = value(32225); // This result in 0x7dff entry size, which conflicts with v4 multipart definition
 
 		let compressed = true;
-		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(key, &val, writer, compressed).unwrap();
-		});
-		assert_eq!(table.get(key, 1, log.overlays()).unwrap(), Some((val, compressed)));
-		write_ops(&table, &log, |writer| {
-			table.write_dec_ref(1, writer).unwrap();
-		});
+		table.write_insert(key, &val, compressed).unwrap();
+		assert_eq!(table.get(key, 1).unwrap(), Some((val, compressed)));
+		table.write_dec_ref(1).unwrap();
 		assert_eq!(table.last_removed.load(Ordering::Relaxed), 1);
 
 		// Check that max entry size values are OK.
 		let value_size = table.value_size(key).unwrap();
 		assert_eq!(0x7fd8, table.value_size(key).unwrap()); // Max value size for this configuration.
 		let val = value(value_size as usize); // This result in 0x7ff8 entry size.
-		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(key, &val, writer, compressed).unwrap();
-		});
-		assert_eq!(table.get(key, 1, log.overlays()).unwrap(), Some((val, compressed)));
+		table.write_insert(key, &val, compressed).unwrap();
+		assert_eq!(table.get(key, 1).unwrap(), Some((val, compressed)));
 	}
 
 	#[test]
 	fn bad_size_header() {
 		let dir = tempdir().unwrap();
 		let table = new_table(&dir, Some(36), &rc_options());
-		let log = new_log(&dir);
 
 		let key = &TableKey::Partial(key(1));
 		let val = value(4);
 
 		let compressed = false;
-		write_ops(&table, &log, |writer| {
-			table.write_insert_plan(key, &val, writer, compressed).unwrap();
-		});
+		table.write_insert(key, &val, compressed).unwrap();
 		// Corrupt entry 1
 		let zeroes = [0u8, 0u8];
 		table.file.write_at(&zeroes, table.entry_size as u64).unwrap();
-		let log = new_log(&dir);
 		assert!(matches!(
-			table.get(key, 1, log.overlays()),
+			table.get(key, 1),
 			Err(crate::error::Error::Corruption(_))
 		));
 	}

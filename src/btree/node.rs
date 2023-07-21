@@ -12,7 +12,6 @@ use crate::{
 	db::{RcKey, RcValue},
 	error::Result,
 	index::Address,
-	log::{LogQuery, LogWriter},
 	table::key::TableKey,
 	Operation,
 };
@@ -28,11 +27,10 @@ impl Node {
 		i: usize,
 		child: Self,
 		btree: TablesRef,
-		log: &mut LogWriter,
 	) -> Result<()> {
 		if child.changed {
 			let child_index = self.children[i].entry_index;
-			let new_index = BTreeTable::write_node_plan(btree, child, log, child_index)?;
+			let new_index = BTreeTable::write_node(btree, child, child_index)?;
 			if new_index.is_some() {
 				self.changed = true;
 				self.children[i].entry_index = new_index;
@@ -45,9 +43,8 @@ impl Node {
 		right_ix: Option<Address>,
 		right: Node,
 		btree: TablesRef,
-		log: &mut LogWriter,
 	) -> Result<Child> {
-		let new_index = BTreeTable::write_node_plan(btree, right, log, right_ix)?;
+		let new_index = BTreeTable::write_node(btree, right, right_ix)?;
 		let right_ix = if new_index.is_some() { new_index } else { right_ix };
 		Ok(Self::new_child(right_ix))
 	}
@@ -58,7 +55,6 @@ impl Node {
 		depth: u32,
 		changes: &mut &[Operation<RcKey, RcValue>],
 		btree: TablesRef,
-		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
 		loop {
 			if !btree.ref_counted &&
@@ -71,8 +67,8 @@ impl Node {
 			}
 			let r = match &changes[0] {
 				Operation::Set(key, value) =>
-					self.insert(depth, key.value(), value.value(), changes, btree, log)?,
-				_ => self.on_existing(depth, changes, btree, log)?,
+					self.insert(depth, key.value(), value.value(), changes, btree)?,
+				_ => self.on_existing(depth, changes, btree)?,
 			};
 			if r.0.is_some() || r.1 {
 				return Ok(r)
@@ -108,7 +104,6 @@ impl Node {
 		value: &[u8],
 		changes: &mut &[Operation<RcKey, RcValue>],
 		btree: TablesRef,
-		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
 		let has_child = depth != 0;
 
@@ -116,16 +111,16 @@ impl Node {
 		// insert
 		if !at {
 			if has_child {
-				return Ok(if let Some(mut child) = self.fetch_child(i, btree, log)? {
-					let r = child.change(Some((self, i)), depth - 1, changes, btree, log)?;
-					self.write_child(i, child, btree, log)?;
+				return Ok(if let Some(mut child) = self.fetch_child(i, btree)? {
+					let r = child.change(Some((self, i)), depth - 1, changes, btree)?;
+					self.write_child(i, child, btree)?;
 					match r {
 						(Some((sep, right)), _) => {
 							// insert from child
-							(self.insert_node(depth, i, sep, right, btree, log)?, false)
+							(self.insert_node(depth, i, sep, right, btree)?, false)
 						},
 						(None, true) => {
-							self.rebalance(depth, i, btree, log)?;
+							self.rebalance(depth, i, btree)?;
 							(None, self.need_rebalance())
 						},
 						r => r,
@@ -139,12 +134,12 @@ impl Node {
 				// full
 				let middle = ORDER / 2;
 				let insert = i;
-				let insert_separator = Self::create_separator(key, value, btree, log, None)?;
+				let insert_separator = Self::create_separator(key, value, btree, None)?;
 
 				return match insert.cmp(&middle) {
 					Ordering::Equal => {
 						let (right, right_ix) = self.split(middle, true, None, None, has_child);
-						let right = Self::write_split_child(right_ix, right, btree, log)?;
+						let right = Self::write_split_child(right_ix, right, btree)?;
 						Ok((Some((insert_separator, right)), false))
 					},
 					Ordering::Less => {
@@ -152,7 +147,7 @@ impl Node {
 						let sep = self.remove_separator(middle - 1);
 						self.shift_from(insert, has_child, false);
 						self.set_separator(insert, insert_separator);
-						let right = Self::write_split_child(right_ix, right, btree, log)?;
+						let right = Self::write_split_child(right_ix, right, btree)?;
 						Ok((Some((sep, right)), false))
 					},
 					Ordering::Greater => {
@@ -164,17 +159,17 @@ impl Node {
 							has_child,
 						);
 						let sep = self.remove_separator(middle);
-						let right = Self::write_split_child(right_ix, right, btree, log)?;
+						let right = Self::write_split_child(right_ix, right, btree)?;
 						Ok((Some((sep, right)), false))
 					},
 				}
 			}
 
 			self.shift_from(i, has_child, false);
-			self.set_separator(i, Self::create_separator(key, value, btree, log, None)?);
+			self.set_separator(i, Self::create_separator(key, value, btree, None)?);
 		} else {
 			let existing = self.separator_address(i);
-			self.set_separator(i, Self::create_separator(key, value, btree, log, existing)?);
+			self.set_separator(i, Self::create_separator(key, value, btree, existing)?);
 		}
 		Ok((None, false))
 	}
@@ -186,7 +181,6 @@ impl Node {
 		separator: Separator,
 		right_child: Child,
 		btree: TablesRef,
-		log: &mut LogWriter,
 	) -> Result<Option<(Separator, Child)>> {
 		debug_assert!(depth != 0);
 		let has_child = true;
@@ -200,7 +194,7 @@ impl Node {
 				Ordering::Equal => {
 					let (mut right, right_ix) = self.split(middle, true, None, None, has_child);
 					right.set_child(0, child);
-					let right = Self::write_split_child(right_ix, right, btree, log)?;
+					let right = Self::write_split_child(right_ix, right, btree)?;
 					Ok(Some((separator, right)))
 				},
 				Ordering::Less => {
@@ -209,7 +203,7 @@ impl Node {
 					self.shift_from(insert, has_child, false);
 					self.set_separator(insert, separator);
 					self.set_child(insert + 1, child);
-					let right = Self::write_split_child(right_ix, right, btree, log)?;
+					let right = Self::write_split_child(right_ix, right, btree)?;
 					Ok(Some((sep, right)))
 				},
 				Ordering::Greater => {
@@ -221,7 +215,7 @@ impl Node {
 						has_child,
 					);
 					let sep = self.remove_separator(middle);
-					let right = Self::write_split_child(right_ix, right, btree, log)?;
+					let right = Self::write_split_child(right_ix, right, btree)?;
 					Ok(Some((sep, right)))
 				},
 			}
@@ -238,7 +232,6 @@ impl Node {
 		depth: u32,
 		changes: &mut &[Operation<RcKey, RcValue>],
 		values: TablesRef,
-		log: &mut LogWriter,
 	) -> Result<(Option<(Separator, Child)>, bool)> {
 		let change = &changes[0];
 		let key = change.key();
@@ -247,12 +240,11 @@ impl Node {
 		if at {
 			let existing = self.separator_address(i);
 			if let Some(existing) = existing {
-				if Column::write_existing_value_plan::<_, RcValue>(
+				if Column::write_existing_value::<_, RcValue>(
 					&TableKey::NoHash,
 					values,
 					existing,
 					change,
-					log,
 					None,
 					values.ref_counted,
 				)?
@@ -262,14 +254,14 @@ impl Node {
 					let _ = self.remove_separator(i);
 					if depth != 0 {
 						// replace by bigger value in left child.
-						if let Some(mut child) = self.fetch_child(i, values, log)? {
-							let (need_balance, sep) = child.remove_last(depth - 1, values, log)?;
-							self.write_child(i, child, values, log)?;
+						if let Some(mut child) = self.fetch_child(i, values)? {
+							let (need_balance, sep) = child.remove_last(depth - 1, values)?;
+							self.write_child(i, child, values)?;
 							if let Some(sep) = sep {
 								self.set_separator(i, sep);
 							}
 							if need_balance {
-								self.rebalance(depth, i, values, log)?;
+								self.rebalance(depth, i, values)?;
 							}
 						}
 					} else {
@@ -281,16 +273,16 @@ impl Node {
 			if !has_child {
 				return Ok((None, false))
 			}
-			return if let Some(mut child) = self.fetch_child(i, values, log)? {
-				let r = child.change(Some((self, i)), depth - 1, changes, values, log)?;
-				self.write_child(i, child, values, log)?;
+			return if let Some(mut child) = self.fetch_child(i, values)? {
+				let r = child.change(Some((self, i)), depth - 1, changes, values)?;
+				self.write_child(i, child, values)?;
 				Ok(match r {
 					(Some((sep, right)), _) => {
 						// insert from child
-						(self.insert_node(depth, i, sep, right, values, log)?, false)
+						(self.insert_node(depth, i, sep, right, values)?, false)
 					},
 					(None, true) => {
-						self.rebalance(depth, i, values, log)?;
+						self.rebalance(depth, i, values)?;
 						(None, self.need_rebalance())
 					},
 					r => r,
@@ -308,14 +300,13 @@ impl Node {
 		depth: u32,
 		at: usize,
 		values: TablesRef,
-		log: &mut LogWriter,
 	) -> Result<()> {
 		let has_child = depth - 1 != 0;
 		let middle = ORDER / 2;
 		let mut balance_from_left = false;
 		let mut left = None;
 		if at > 0 {
-			left = self.fetch_child(at - 1, values, log)?;
+			left = self.fetch_child(at - 1, values)?;
 			if let Some(node) = left.as_ref() {
 				if node.has_separator(middle) {
 					balance_from_left = true;
@@ -332,14 +323,14 @@ impl Node {
 			let separator2 = left.remove_separator(last_sibling);
 			let separator = self.remove_separator(at - 1);
 			self.set_separator(at - 1, separator2);
-			let mut right = self.fetch_child(at, values, log)?.unwrap();
+			let mut right = self.fetch_child(at, values)?.unwrap();
 			right.shift_from(0, has_child, true);
 			if let Some(child) = child {
 				right.set_child(0, child);
 			}
 			right.set_separator(0, separator);
-			self.write_child(at - 1, left, values, log)?;
-			self.write_child(at, right, values, log)?;
+			self.write_child(at - 1, left, values)?;
+			self.write_child(at, right, values)?;
 			return Ok(())
 		}
 
@@ -347,7 +338,7 @@ impl Node {
 		let mut balance_from_right = false;
 		let mut right = None;
 		if at + 1 < number_child {
-			right = self.fetch_child(at + 1, values, log)?;
+			right = self.fetch_child(at + 1, values)?;
 			if let Some(node) = right.as_ref() {
 				if node.has_separator(middle) {
 					balance_from_right = true;
@@ -365,24 +356,24 @@ impl Node {
 			right.remove_from(0, has_child, true);
 			let separator = self.remove_separator(at);
 			self.set_separator(at, separator2);
-			let mut left = self.fetch_child(at, values, log)?.unwrap();
+			let mut left = self.fetch_child(at, values)?.unwrap();
 			let last_left = left.number_separator();
 			left.set_separator(last_left, separator);
 			if let Some(child) = child {
 				left.set_child(last_left + 1, child);
 			}
-			self.write_child(at, left, values, log)?;
-			self.write_child(at + 1, right, values, log)?;
+			self.write_child(at, left, values)?;
+			self.write_child(at + 1, right, values)?;
 			return Ok(())
 		}
 
 		let (at, at_right) = if at + 1 == number_child {
-			right = self.fetch_child(at, values, log)?;
+			right = self.fetch_child(at, values)?;
 			(at - 1, at)
 		} else {
-			left = self.fetch_child(at, values, log)?;
+			left = self.fetch_child(at, values)?;
 			if right.is_none() {
-				right = self.fetch_child(at + 1, values, log)?;
+				right = self.fetch_child(at + 1, values)?;
 			}
 			(at, at + 1)
 		};
@@ -415,9 +406,9 @@ impl Node {
 
 		let removed = self.remove_child(at_right);
 		if let Some(index) = removed.entry_index {
-			BTreeTable::write_plan_remove_node(values, log, index)?;
+			BTreeTable::write_remove_node(values, index)?;
 		}
-		self.write_child(at, left, values, log)?;
+		self.write_child(at, left, values)?;
 		let has_child = true; // rebalance on parent.
 		self.remove_from(at, has_child, false);
 		Ok(())
@@ -431,10 +422,9 @@ impl Node {
 	pub fn need_remove_root(
 		&mut self,
 		values: TablesRef,
-		log: &mut LogWriter,
 	) -> Result<Option<(Option<Address>, Node)>> {
-		if self.number_separator() == 0 && self.fetch_child(0, values, log)?.is_some() {
-			if let Some(node) = self.fetch_child(0, values, log)? {
+		if self.number_separator() == 0 && self.fetch_child(0, values)?.is_some() {
+			if let Some(node) = self.fetch_child(0, values)? {
 				let child = self.remove_child(0);
 				return Ok(Some((child.entry_index, node)))
 			}
@@ -446,7 +436,6 @@ impl Node {
 		&mut self,
 		depth: u32,
 		values: TablesRef,
-		log: &mut LogWriter,
 	) -> Result<(bool, Option<Separator>)> {
 		let last = if let Some(last) = self.last_separator_index() {
 			last
@@ -458,11 +447,11 @@ impl Node {
 			let result = self.remove_separator(i);
 
 			Ok((self.need_rebalance(), Some(result)))
-		} else if let Some(mut child) = self.fetch_child(i + 1, values, log)? {
-			let result = child.remove_last(depth - 1, values, log)?;
-			self.write_child(i + 1, child, values, log)?;
+		} else if let Some(mut child) = self.fetch_child(i + 1, values)? {
+			let result = child.remove_last(depth - 1, values)?;
+			self.write_child(i + 1, child, values)?;
 			if result.0 {
-				self.rebalance(depth, i + 1, values, log)?;
+				self.rebalance(depth, i + 1, values)?;
 				Ok((self.need_rebalance(), result.1))
 			} else {
 				Ok(result)
@@ -476,14 +465,13 @@ impl Node {
 		&self,
 		key: &[u8],
 		values: TablesRef,
-		log: &impl LogQuery,
 	) -> Result<Option<Address>> {
 		let (at, i) = self.position(key)?;
 		if at {
 			Ok(self.separator_address(i))
 		} else {
-			if let Some(child) = self.fetch_child(i, values, log)? {
-				return child.get(key, values, log)
+			if let Some(child) = self.fetch_child(i, values)? {
+				return child.get(key, values)
 			}
 
 			Ok(None)
@@ -494,7 +482,6 @@ impl Node {
 		self,
 		seek_to: SeekTo,
 		values: TablesRef,
-		log: &impl LogQuery,
 		mut depth: u32,
 		stack: &mut Vec<(LastIndex, Self)>,
 	) -> Result<()> {
@@ -517,7 +504,7 @@ impl Node {
 				stack.push((LastIndex::Before(i), from));
 				return Ok(())
 			}
-			if let Some(child) = from.fetch_child(i, values, log)? {
+			if let Some(child) = from.fetch_child(i, values)? {
 				stack.push((LastIndex::Descend(i), from));
 				from = child;
 				depth -= 1
@@ -531,7 +518,6 @@ impl Node {
 	pub fn is_balanced(
 		&self,
 		tables: TablesRef,
-		log: &impl LogQuery,
 		parent_size: usize,
 	) -> Result<bool> {
 		let size = self.number_separator();
@@ -541,12 +527,12 @@ impl Node {
 
 		let mut i = 0;
 		while i < ORDER {
-			let child = self.fetch_child(i, tables, log)?;
+			let child = self.fetch_child(i, tables)?;
 			i += 1;
 			if child.is_none() {
 				continue
 			}
-			if !child.unwrap().is_balanced(tables, log, size)? {
+			if !child.unwrap().is_balanced(tables, size)? {
 				return Ok(false)
 			}
 		}
@@ -664,24 +650,22 @@ impl Node {
 		key: &[u8],
 		value: &[u8],
 		btree: TablesRef,
-		log: &mut LogWriter,
 		existing: Option<Address>,
 	) -> Result<Separator> {
 		let key = key.to_vec();
 		let value = if let Some(address) = existing {
-			Column::write_existing_value_plan(
+			Column::write_existing_value(
 				&TableKey::NoHash,
 				btree,
 				address,
 				&Operation::Set((), value),
-				log,
 				None,
 				btree.ref_counted,
 			)?
 			.1
 			.unwrap_or(address)
 		} else {
-			Column::write_new_value_plan(&TableKey::NoHash, btree, value, log, None)?
+			Column::write_new_value(&TableKey::NoHash, btree, value, None)?
 		};
 		let modified = Some(value) != existing;
 		Ok(Separator { modified, separator: Some(SeparatorInner { key, value }) })
@@ -817,10 +801,9 @@ impl Node {
 		&self,
 		i: usize,
 		values: TablesRef,
-		log: &impl LogQuery,
 	) -> Result<Option<Self>> {
 		if let Some(ix) = self.children[i].entry_index {
-			let entry = BTreeTable::get_encoded_entry(ix, log, values)?;
+			let entry = BTreeTable::get_encoded_entry(ix, values)?;
 			return Ok(Some(Self::from_encoded(entry)?))
 		}
 		Ok(None)
