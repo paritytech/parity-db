@@ -451,37 +451,21 @@ impl IndexTable {
 	fn remove_chunk(
 		&self,
 		key_prefix: u64,
-		source: &[u8],
 		sub_index: usize,
 	) -> Result<WriteOutcome> {
-		let mut chunk = [0; CHUNK_LEN];
-		chunk.copy_from_slice(source);
 		let chunk_index = self.chunk_index(key_prefix);
-		let partial_key = Entry::extract_key(key_prefix, self.id.index_bits());
 
 		let i = sub_index;
-		let entry = Self::read_entry(&chunk, i);
-		if !entry.is_empty() && entry.partial_key(self.id.index_bits()) == partial_key {
-			let new_entry = Entry::empty();
-			self.write_entry(chunk_index, Some(i), new_entry)?;
-			log::trace!(target: "parity-db", "{}: Removed at {}.{}", self.id, chunk_index, i);
-			return Ok(WriteOutcome::Written)
-		}
-		Ok(WriteOutcome::Skipped)
+		let new_entry = Entry::empty();
+		self.write_entry(chunk_index, Some(i), new_entry)?;
+		log::trace!(target: "parity-db", "{}: Removed at {}.{}", self.id, chunk_index, i);
+		return Ok(WriteOutcome::Written)
 	}
 
 	pub fn write_remove(&self, key: &Key, sub_index: usize) -> Result<WriteOutcome> {
 		log::trace!(target: "parity-db", "{}: Removing {}", self.id, hex(key));
 		let key_prefix = TableKey::index_from_partial(key);
-
-		let chunk_index = self.chunk_index(key_prefix);
-
-		if let Some(map) = &*self.map.read() {
-			let chunk = Self::chunk_at(chunk_index, map)?;
-			return self.remove_chunk(key_prefix, chunk, sub_index)
-		}
-
-		Ok(WriteOutcome::Skipped)
+		self.remove_chunk(key_prefix, sub_index)
 	}
 
 	pub fn write_entry(
