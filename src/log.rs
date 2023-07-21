@@ -56,21 +56,6 @@ pub enum LogAction {
 }
 
 #[derive(Debug)]
-pub struct LogOverlays {
-	last_record_ids: Vec<u64>,
-}
-
-impl LogOverlays {
-	pub fn last_record_id(&self, col: ColId) -> u64 {
-		self.last_record_ids.get(col as usize).cloned().unwrap_or(u64::MAX)
-	}
-
-	pub fn with_columns(count: usize) -> Self {
-		Self { last_record_ids: (0..count).map(|_| 0).collect() }
-	}
-}
-
-#[derive(Debug)]
 pub struct LogReader<'a> {
 	reading: RwLockWriteGuard<'a, Option<Reading>>,
 	record_id: u64,
@@ -238,7 +223,6 @@ struct Reading {
 
 #[derive(Debug)]
 pub struct Log {
-	overlays: RwLock<LogOverlays>,
 	appending: RwLock<Option<Appending>>,
 	reading: RwLock<Option<Reading>>,
 	read_queue: RwLock<VecDeque<(u32, std::fs::File)>>,
@@ -282,7 +266,6 @@ impl Log {
 		let next_log_id = if logs.is_empty() { 0 } else { max_log_id + 1 };
 
 		Ok(Log {
-			overlays: RwLock::new(LogOverlays::with_columns(options.columns.len())),
 			appending: RwLock::new(None),
 			reading: RwLock::new(None),
 			read_queue: RwLock::default(),
@@ -345,10 +328,6 @@ impl Log {
 		for (id, _, file) in self.replay_queue.write().drain(0..) {
 			self.cleanup_queue.write().push_back((id, file));
 		}
-		let mut overlays = self.overlays.write();
-		for r in overlays.last_record_ids.iter_mut() {
-			*r = 0;
-		}
 		self.dirty.store(false, Ordering::Relaxed);
 	}
 
@@ -376,11 +355,6 @@ impl Log {
 		}
 		let appending = appending.as_mut().unwrap();
 		let bytes = Self::write_commit_to_file(&mut appending.file, commit)?;
-		let mut overlays = self.overlays.write();
-
-		for (c, _) in commit.changeset.btree.iter() {
-			overlays.last_record_ids[*c as usize] = commit.id;
-		}
 
 		log::debug!(
 			target: "parity-db",
@@ -567,10 +541,6 @@ impl Log {
 			},
 			Err(e) => Err(e),
 		}
-	}
-
-	pub fn overlays(&self) -> &RwLock<LogOverlays> {
-		&self.overlays
 	}
 
 	pub fn has_log_files_to_read(&self) -> bool {

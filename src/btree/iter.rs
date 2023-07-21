@@ -33,10 +33,8 @@ impl<'a> SeekTo<'a> {
 #[derive(Debug)]
 pub struct BTreeIterator<'a> {
 	table: &'a BTreeTable,
-	log: &'a RwLock<crate::log::LogOverlays>,
 	commit_overlay: &'a RwLock<CommitOverlay>,
 	iter: BtreeIterBackend,
-	col: ColId,
 	pending_backend: Option<PendingBackend>,
 	last_key: LastKey,
 }
@@ -71,28 +69,23 @@ pub struct BtreeIterBackend(BTree, BTreeIterState);
 impl<'a> BTreeIterator<'a> {
 	pub(crate) fn new(
 		table: &'a BTreeTable,
-		col: ColId,
-		log: &'a RwLock<crate::log::LogOverlays>,
 		commit_overlay: &'a RwLock<CommitOverlay>,
 	) -> Result<Self> {
-		let record_id = log.read().last_record_id(col);
+		let record_id = commit_overlay.read().last_btree_commit();
 		let tree = table.with_locked(|btree| BTree::open(btree, record_id))?;
 		let iter = BTreeIterState::new(tree.record_id);
 		Ok(BTreeIterator {
 			table,
 			iter: BtreeIterBackend(tree, iter),
-			col,
 			pending_backend: None,
 			last_key: LastKey::Start,
-			log,
 			commit_overlay,
 		})
 	}
 
 	pub fn seek(&mut self, key: &[u8]) -> Result<()> {
 		// seek require log do not change
-		let log = self.log.read();
-		let record_id = log.last_record_id(self.col);
+		let record_id = self.commit_overlay.read().last_btree_commit();
 		self.last_key = LastKey::Seeked(key.to_vec());
 		self.pending_backend = None;
 		self.seek_backend(SeekTo::Include(key), record_id, self.table)
@@ -103,8 +96,7 @@ impl<'a> BTreeIterator<'a> {
 	}
 
 	pub fn seek_to_last(&mut self) -> Result<()> {
-		let log = self.log.read();
-		let record_id = log.last_record_id(self.col);
+		let record_id = self.commit_overlay.read().last_btree_commit();
 		self.last_key = LastKey::End;
 		self.seek_backend_to_last(record_id, self.table)
 	}
@@ -126,8 +118,7 @@ impl<'a> BTreeIterator<'a> {
 				IterDirection::Forward => commit_overlay.btree_next(&self.last_key),
 				IterDirection::Backward => commit_overlay.btree_prev(&self.last_key),
 			};
-			let log = self.log.read();
-			let record_id = log.last_record_id(self.col);
+			let record_id = commit_overlay.last_btree_commit();
 			// No consistency over iteration, allows dropping lock to overlay.
 			drop(commit_overlay);
 			if record_id != self.iter.1.record_id {
@@ -229,7 +220,12 @@ impl<'a> BTreeIterator<'a> {
 		iter.next(tree, col, direction)
 	}
 
-	fn seek_backend(&mut self, seek_to: SeekTo, record_id: u64, col: &BTreeTable) -> Result<()> {
+	fn seek_backend(
+		&mut self,
+		seek_to: SeekTo,
+		record_id: u64,
+		col: &BTreeTable,
+	) -> Result<()> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
 		if record_id != tree.record_id {
 			let new_tree = col.with_locked(|btree| BTree::open(btree, record_id))?;
@@ -239,7 +235,11 @@ impl<'a> BTreeIterator<'a> {
 		iter.seek(seek_to, tree, col)
 	}
 
-	fn seek_backend_to_last(&mut self, record_id: u64, col: &BTreeTable) -> Result<()> {
+	fn seek_backend_to_last(
+		&mut self,
+		record_id: u64,
+		col: &BTreeTable,
+	) -> Result<()> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
 		if record_id != tree.record_id {
 			let new_tree = col.with_locked(|btree| BTree::open(btree, record_id))?;
@@ -375,7 +375,12 @@ impl BTreeIterState {
 		Ok(None)
 	}
 
-	pub fn seek(&mut self, seek_to: SeekTo, btree: &mut BTree, col: &BTreeTable) -> Result<()> {
+	pub fn seek(
+		&mut self,
+		seek_to: SeekTo,
+		btree: &mut BTree,
+		col: &BTreeTable,
+	) -> Result<()> {
 		self.state.clear();
 		col.with_locked(|b| {
 			let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), b)?;
@@ -383,7 +388,11 @@ impl BTreeIterState {
 		})
 	}
 
-	pub fn seek_to_last(&mut self, btree: &mut BTree, col: &BTreeTable) -> Result<()> {
+	pub fn seek_to_last(
+		&mut self,
+		btree: &mut BTree,
+		col: &BTreeTable,
+	) -> Result<()> {
 		self.seek(SeekTo::Last, btree, col)
 	}
 }

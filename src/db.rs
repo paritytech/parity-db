@@ -294,8 +294,7 @@ impl DbInner {
 			Column::Hash(_column) =>
 				Err(Error::InvalidConfiguration("Not a hash column.".to_string())),
 			Column::Tree(column) => {
-				let log = self.log.overlays();
-				BTreeIterator::new(column, col, log, &self.commit_overlay[col as usize])
+				BTreeIterator::new(column, &self.commit_overlay[col as usize])
 			},
 		}
 	}
@@ -371,8 +370,10 @@ impl DbInner {
 		}
 
 		for (c, iterset) in &commit.btree {
+			let mut commit_overlay = self.commit_overlay[*c as usize].write();
+			commit_overlay.last_btree_commit = record_id;
 			iterset.copy_to_overlay(
-				&mut self.commit_overlay[*c as usize].write().btree,
+				&mut commit_overlay.btree,
 				record_id,
 				&mut bytes,
 				&self.options,
@@ -1215,11 +1216,12 @@ pub type BTreeCommitOverlay = BTreeMap<RcValue, (u64, Option<RcValue>)>;
 pub struct CommitOverlay {
 	hash_table: HashTableCommitOverlay,
 	btree: BTreeCommitOverlay,
+	last_btree_commit: u64,
 }
 
 impl CommitOverlay {
 	fn new() -> Self {
-		CommitOverlay { hash_table: Default::default(), btree: Default::default() }
+		CommitOverlay { hash_table: Default::default(), btree: Default::default(), last_btree_commit: 0 }
 	}
 
 	#[cfg(test)]
@@ -1243,6 +1245,10 @@ impl CommitOverlay {
 
 	fn btree_get(&self, key: &[u8]) -> Option<Option<&RcValue>> {
 		self.btree.get(key).map(|(_, v)| v.as_ref())
+	}
+
+	pub fn last_btree_commit(&self) -> u64 {
+		self.last_btree_commit
 	}
 
 	pub fn remove_hash_entry(&mut self, key: &Key, record_id: u64) {
