@@ -589,12 +589,6 @@ impl DbInner {
 					}
 					reader.reset()?;
 					reader.next()?;
-					{
-						let mut queue = self.commit_queue.lock();
-						if reader.record_id() >= queue.next_record_id {
-							queue.next_record_id = reader.record_id() + 1;
-						}
-					}
 				}
 				loop {
 					match reader.next()? {

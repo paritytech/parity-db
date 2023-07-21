@@ -635,18 +635,6 @@ impl HashColumn {
 					let mut key = Key::default();
 					log.read(&mut key)?;
 					let len = log.read_u32()?;
-
-					/*
-					let maybe_value = { commit_overlay.read().get_hash_entry(&key, log.record_id()) };
-					if let Some(Some(value)) = maybe_value {
-						log.skip(len as usize)?;
-						if let WriteOutcome::NeedReindex = self.write_plan(&Operation::Set(key, value))? {
-							reindex = true;
-						}
-						commit_overlay.write().remove_hash_entry(&key, log.record_id());
-						continue
-					}*/
-
 					let mut value = Vec::with_capacity(len as usize);
 					unsafe {
 						value.set_len(len as usize);
