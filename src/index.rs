@@ -448,18 +448,12 @@ impl IndexTable {
 		self.insert_chunk(key_prefix, address, sub_index)
 	}
 
-	fn remove_chunk(&self, key_prefix: u64, sub_index: usize) -> Result<WriteOutcome> {
-		let chunk_index = self.chunk_index(key_prefix);
-		let new_entry = Entry::empty();
-		self.write_entry(chunk_index, Some(sub_index), new_entry)?;
-		log::trace!(target: "parity-db", "{}: Removed at {}.{}", self.id, chunk_index, sub_index);
-		return Ok(WriteOutcome::Written)
-	}
-
-	pub fn write_remove(&self, key: &Key, sub_index: usize) -> Result<WriteOutcome> {
-		log::trace!(target: "parity-db", "{}: Removing {}", self.id, hex(key));
+	pub fn write_remove(&self, key: &Key, sub_index: usize) -> Result<()> {
 		let key_prefix = TableKey::index_from_partial(key);
-		self.remove_chunk(key_prefix, sub_index)
+		let chunk_index = self.chunk_index(key_prefix);
+		self.write_entry(chunk_index, Some(sub_index), Entry::empty())?;
+		log::trace!(target: "parity-db", "{}: Removed {} at {}.{}", self.id, hex(key), chunk_index, sub_index);
+		Ok(())
 	}
 
 	pub fn write_entry(
