@@ -517,14 +517,8 @@ impl ValueTable {
 		Ok((rc, compressed))
 	}
 
-	pub fn get(
-		&self,
-		key: &TableKey,
-		index: u64,
-	) -> Result<Option<(Value, bool)>> {
-		if let Some((value, compressed, _)) =
-			self.query(&mut TableKeyQuery::Check(key), index)?
-		{
+	pub fn get(&self, key: &TableKey, index: u64) -> Result<Option<(Value, bool)>> {
+		if let Some((value, compressed, _)) = self.query(&mut TableKeyQuery::Check(key), index)? {
 			Ok(Some((value, compressed)))
 		} else {
 			Ok(None)
@@ -538,11 +532,7 @@ impl ValueTable {
 		Ok(buf[0..entry_size].to_vec())
 	}
 
-	pub fn query(
-		&self,
-		key: &mut TableKeyQuery,
-		index: u64,
-	) -> Result<Option<(Value, bool, u32)>> {
+	pub fn query(&self, key: &mut TableKeyQuery, index: u64) -> Result<Option<(Value, bool, u32)>> {
 		let mut result = Vec::new();
 		let (rc, compressed) = self.for_parts(key, index, |buf| {
 			result.extend_from_slice(buf);
@@ -568,17 +558,12 @@ impl ValueTable {
 		Ok(None)
 	}
 
-	pub fn size(
-		&self,
-		key: &TableKey,
-		index: u64,
-	) -> Result<Option<(u32, bool)>> {
+	pub fn size(&self, key: &TableKey, index: u64) -> Result<Option<(u32, bool)>> {
 		let mut result = 0;
-		let (rc, compressed) =
-			self.for_parts(&mut TableKeyQuery::Check(key), index, |buf| {
-				result += buf.len() as u32;
-				true
-			})?;
+		let (rc, compressed) = self.for_parts(&mut TableKeyQuery::Check(key), index, |buf| {
+			result += buf.len() as u32;
+			true
+		})?;
 		if rc > 0 {
 			return Ok(Some((result, compressed)))
 		}
@@ -595,15 +580,10 @@ impl ValueTable {
 		}
 	}
 
-	pub fn partial_key_at(
-		&self,
-		index: u64,
-	) -> Result<Option<[u8; PARTIAL_SIZE]>> {
+	pub fn partial_key_at(&self, index: u64) -> Result<Option<[u8; PARTIAL_SIZE]>> {
 		let mut query_key = Default::default();
 		let (rc, _compressed) =
-			self.for_parts(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index, |_buf| {
-				false
-			})?;
+			self.for_parts(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index, |_buf| false)?;
 		Ok(if rc == 0 { None } else { Some(query_key) })
 	}
 
@@ -735,10 +715,11 @@ impl ValueTable {
 			while index >= self.file.capacity.load(Ordering::Relaxed) {
 				self.file.grow(self.entry_size)?;
 			}
-			self.file
-				.write_at(&buf[0..buf.offset()], index * (self.entry_size as u64))?;
-			self.file
-				.write_at(&value[offset..offset + value_len - written], index * (self.entry_size as u64) + buf.offset() as u64)?;
+			self.file.write_at(&buf[0..buf.offset()], index * (self.entry_size as u64))?;
+			self.file.write_at(
+				&value[offset..offset + value_len - written],
+				index * (self.entry_size as u64) + buf.offset() as u64,
+			)?;
 			log::trace!(target: "parity-db", "{}: Enacted {}: {}, {} bytes", self.id, index, hex(&buf.1[6..32]), buf.offset());
 
 			offset += value_len - written;
@@ -797,12 +778,7 @@ impl ValueTable {
 		Ok(())
 	}
 
-	pub fn write_insert(
-		&self,
-		key: &TableKey,
-		value: &[u8],
-		compressed: bool,
-	) -> Result<u64> {
+	pub fn write_insert(&self, key: &TableKey, value: &[u8], compressed: bool) -> Result<u64> {
 		self.overwrite_chain(key, value, None, compressed)
 	}
 
@@ -875,8 +851,7 @@ impl ValueTable {
 		buf.set_offset(rc_offset);
 		buf.write_rc(counter);
 		// TODO: optimize actual buf size
-		self.file
-			.write_at(&buf[0..size], index * (self.entry_size as u64))?;
+		self.file.write_at(&buf[0..size], index * (self.entry_size as u64))?;
 		log::trace!(target: "parity-db", "{}: Enacted new ref in slot {}", self.id, index);
 		Ok(true)
 	}
@@ -986,23 +961,16 @@ impl ValueTable {
 		}
 	}
 
-	pub fn iter_while(
-		&self,
-		mut f: impl FnMut(u64, u32, Vec<u8>, bool) -> bool,
-	) -> Result<()> {
+	pub fn iter_while(&self, mut f: impl FnMut(u64, u32, Vec<u8>, bool) -> bool) -> Result<()> {
 		let filled = self.filled.load(Ordering::Relaxed);
 		for index in 1..filled {
 			let mut result = Vec::new();
 			// expect only indexed key.
 			let mut _fetch_key = Default::default();
-			match self.for_parts(
-				&mut TableKeyQuery::Fetch(Some(&mut _fetch_key)),
-				index,
-				|buf| {
-					result.extend_from_slice(buf);
-					true
-				},
-			) {
+			match self.for_parts(&mut TableKeyQuery::Fetch(Some(&mut _fetch_key)), index, |buf| {
+				result.extend_from_slice(buf);
+				true
+			}) {
 				Ok((rc, compressed)) =>
 					if rc > 0 && !f(index, rc, result, compressed) {
 						break
@@ -1471,9 +1439,6 @@ mod test {
 		// Corrupt entry 1
 		let zeroes = [0u8, 0u8];
 		table.file.write_at(&zeroes, table.entry_size as u64).unwrap();
-		assert!(matches!(
-			table.get(key, 1),
-			Err(crate::error::Error::Corruption(_))
-		));
+		assert!(matches!(table.get(key, 1), Err(crate::error::Error::Corruption(_))));
 	}
 }

@@ -3,7 +3,7 @@
 
 use crate::{
 	column::{ColId, IterState},
-	db::{CommitChangeSet, Db, IndexedChangeSet, Operation},
+	db::{CommitChangeSet, Db, HashTableChangeSet, Operation},
 	error::try_io,
 	options::Options,
 	Error, Result,
@@ -83,9 +83,9 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 				for _ in 0..rc {
 					let value = std::mem::take(&mut value);
 					commit
-						.indexed
+						.hash_table
 						.entry(c)
-						.or_insert_with(|| IndexedChangeSet::new(c))
+						.or_insert_with(|| HashTableChangeSet::new(c))
 						.changes
 						.push(Operation::Set(key, value.into()));
 					nb_commit += 1;

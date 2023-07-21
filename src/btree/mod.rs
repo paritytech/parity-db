@@ -5,6 +5,7 @@ use crate::{
 	btree::{btree::BTree, node::Node},
 	column::{ColId, Column, TablesRef},
 	compress::Compress,
+	db::CommitOverlay,
 	error::{Error, Result},
 	index::Address,
 	log::{LogAction, LogReader},
@@ -15,7 +16,6 @@ use crate::{
 		Entry as ValueTableEntry, Value, ValueTable,
 	},
 	Operation,
-	db::CommitOverlay,
 };
 pub use iter::{BTreeIterator, LastIndex, LastKey};
 use node::SeparatorInner;
@@ -249,7 +249,8 @@ impl BTreeTable {
 		let tables = self.tables.upgradable_read();
 		match action {
 			LogAction::InsertValue(record) => {
-				tables[record.table.size_tier() as usize].validate_plan_obsolete(record.index, log)?;
+				tables[record.table.size_tier() as usize]
+					.validate_plan_obsolete(record.index, log)?;
 			},
 			_ => {
 				log::error!(target: "parity-db", "Unexpected log action");
@@ -259,9 +260,14 @@ impl BTreeTable {
 		Ok(())
 	}
 
-	pub fn enact_ops(&self, count: u32, log: &mut LogReader, commit_overlay: &RwLock<CommitOverlay>) -> Result<()> {
+	pub fn enact_ops(
+		&self,
+		count: u32,
+		log: &mut LogReader,
+		commit_overlay: &RwLock<CommitOverlay>,
+	) -> Result<()> {
 		let mut changeset = BTreeChangeSet::new(self.id);
-		for _ in 0 .. count {
+		for _ in 0..count {
 			match log.next()? {
 				LogAction::Set => {
 					let key_len = log.read_u32()?;
@@ -273,24 +279,22 @@ impl BTreeTable {
 					value.resize(len as usize, 0);
 					log.read(&mut value)?;
 					changeset.push(Operation::Set(key, value));
-				}
+				},
 				LogAction::Reference => {
 					let key_len = log.read_u32()?;
 					let mut key = Vec::new();
 					key.resize(key_len as usize, 0);
 					log.read(&mut key)?;
 					changeset.push(Operation::Reference(key));
-				}
+				},
 				LogAction::Dereference => {
 					let key_len = log.read_u32()?;
 					let mut key = Vec::new();
 					key.resize(key_len as usize, 0);
 					log.read(&mut key)?;
 					changeset.push(Operation::Dereference(key));
-				}
-				_ => {
-					return Err(Error::Corruption("Unexpected action".into()))
-				}
+				},
+				_ => return Err(Error::Corruption("Unexpected action".into())),
 			}
 		}
 		changeset.write(self, log.record_id())?;
@@ -298,30 +302,28 @@ impl BTreeTable {
 		for c in changeset.changes {
 			commit_overlay.remove_btree_entry(c.key().as_ref(), log.record_id());
 		}
-		
+
 		Ok(())
 	}
 
 	pub fn validate_ops(&self, count: u32, log: &mut LogReader) -> Result<()> {
-		for _ in 0 .. count {
+		for _ in 0..count {
 			match log.next()? {
 				LogAction::Set => {
 					let len = log.read_u32()?;
 					log.skip(len as usize)?;
 					let len = log.read_u32()?;
 					log.skip(len as usize)?;
-				}
+				},
 				LogAction::Reference => {
 					let len = log.read_u32()?;
 					log.skip(len as usize)?;
-				}
+				},
 				LogAction::Dereference => {
 					let len = log.read_u32()?;
 					log.skip(len as usize)?;
-				}
-				_ => {
-					return Err(Error::Corruption("Unexpected action".into()))
-				}
+				},
+				_ => return Err(Error::Corruption("Unexpected action".into())),
 			}
 		}
 		Ok(())
@@ -343,10 +345,7 @@ impl BTreeTable {
 		Ok(())
 	}
 
-	fn write_remove_node(
-		tables: TablesRef,
-		node_index: Address,
-	) -> Result<()> {
+	fn write_remove_node(tables: TablesRef, node_index: Address) -> Result<()> {
 		Column::write_existing_value::<_, Vec<u8>>(
 			&TableKey::NoHash,
 			tables,
@@ -497,11 +496,7 @@ pub mod commit_overlay {
 			Ok(())
 		}
 
-		pub fn write(
-			&mut self,
-			btree: &BTreeTable,
-			record_id: u64,
-		) -> Result<()> {
+		pub fn write(&mut self, btree: &BTreeTable, record_id: u64) -> Result<()> {
 			let locked_tables = btree.tables.read();
 			let locked = btree.locked(&locked_tables);
 			let mut tree = BTree::open(locked, record_id)?;

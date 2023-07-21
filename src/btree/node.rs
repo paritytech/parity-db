@@ -22,12 +22,7 @@ impl Node {
 		self.separators.iter().rposition(|separator| separator.separator.is_some())
 	}
 
-	pub fn write_child(
-		&mut self,
-		i: usize,
-		child: Self,
-		btree: TablesRef,
-	) -> Result<()> {
+	pub fn write_child(&mut self, i: usize, child: Self, btree: TablesRef) -> Result<()> {
 		if child.changed {
 			let child_index = self.children[i].entry_index;
 			let new_index = BTreeTable::write_node(btree, child, child_index)?;
@@ -295,12 +290,7 @@ impl Node {
 		Ok((None, self.need_rebalance()))
 	}
 
-	pub fn rebalance(
-		&mut self,
-		depth: u32,
-		at: usize,
-		values: TablesRef,
-	) -> Result<()> {
+	pub fn rebalance(&mut self, depth: u32, at: usize, values: TablesRef) -> Result<()> {
 		let has_child = depth - 1 != 0;
 		let middle = ORDER / 2;
 		let mut balance_from_left = false;
@@ -461,11 +451,7 @@ impl Node {
 		}
 	}
 
-	pub fn get(
-		&self,
-		key: &[u8],
-		values: TablesRef,
-	) -> Result<Option<Address>> {
+	pub fn get(&self, key: &[u8], values: TablesRef) -> Result<Option<Address>> {
 		let (at, i) = self.position(key)?;
 		if at {
 			Ok(self.separator_address(i))
@@ -515,11 +501,7 @@ impl Node {
 	}
 
 	#[cfg(test)]
-	pub fn is_balanced(
-		&self,
-		tables: TablesRef,
-		parent_size: usize,
-	) -> Result<bool> {
+	pub fn is_balanced(&self, tables: TablesRef, parent_size: usize) -> Result<bool> {
 		let size = self.number_separator();
 		if parent_size != 0 && size < ORDER / 2 {
 			return Ok(false)
@@ -797,11 +779,7 @@ impl Node {
 		Ok((false, i))
 	}
 
-	pub fn fetch_child(
-		&self,
-		i: usize,
-		values: TablesRef,
-	) -> Result<Option<Self>> {
+	pub fn fetch_child(&self, i: usize, values: TablesRef) -> Result<Option<Self>> {
 		if let Some(ix) = self.children[i].entry_index {
 			let entry = BTreeTable::get_encoded_entry(ix, values)?;
 			return Ok(Some(Self::from_encoded(entry)?))

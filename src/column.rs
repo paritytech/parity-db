@@ -4,10 +4,10 @@
 use crate::{
 	btree::BTreeTable,
 	compress::Compress,
-	db::{check::CheckDisplay, Operation, CommitOverlay},
+	db::{check::CheckDisplay, CommitOverlay, Operation},
 	display::hex,
 	error::{try_io, Error, Result},
-	index::{Address, IndexTable, WriteOutcome, TableId as IndexTableId},
+	index::{Address, IndexTable, TableId as IndexTableId, WriteOutcome},
 	log::{LogAction, LogReader},
 	options::{ColumnOptions, Metadata, Options, DEFAULT_COMPRESSION_THRESHOLD},
 	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
@@ -230,11 +230,8 @@ impl HashColumn {
 		let (mut entry, mut sub_index) = index.get(key, 0)?;
 		while !entry.is_empty() {
 			let address = entry.address(index.id.index_bits());
-			let value = Column::get_value(
-				TableKeyQuery::Check(&TableKey::Partial(*key)),
-				address,
-				tables,
-			)?;
+			let value =
+				Column::get_value(TableKeyQuery::Check(&TableKey::Partial(*key)), address, tables)?;
 			match value {
 				Some(result) => return Ok(Some(result)),
 				None => {
@@ -458,15 +455,17 @@ impl HashColumn {
 		mut reindex: RwLockUpgradableReadGuard<'b, Reindex>,
 		key: &Key,
 		address: Address,
-	) -> Result<(WriteOutcome, RwLockUpgradableReadGuard<'a, Tables>, RwLockUpgradableReadGuard<'b, Reindex>)> {
+	) -> Result<(
+		WriteOutcome,
+		RwLockUpgradableReadGuard<'a, Tables>,
+		RwLockUpgradableReadGuard<'b, Reindex>,
+	)> {
 		if Self::contains_partial_key_with_address(key, address, &tables.index)? {
 			log::trace!(target: "parity-db", "{}: Skipped reindex entry {} when reindexing", tables.index.id, hex(key));
 			return Ok((WriteOutcome::Skipped, tables, reindex))
 		}
 		let mut outcome = WriteOutcome::Written;
-		while let WriteOutcome::NeedReindex =
-			tables.index.write_insert(key, address, None)?
-		{
+		while let WriteOutcome::NeedReindex = tables.index.write_insert(key, address, None)? {
 			log::debug!(target: "parity-db", "{}: Index chunk full {} when reindexing", tables.index.id, hex(key));
 			(tables, reindex) = Self::trigger_reindex(tables, reindex, self.path.as_path());
 			outcome = WriteOutcome::NeedReindex;
@@ -484,10 +483,9 @@ impl HashColumn {
 			let existing_address = existing_entry.address(index.id.index_bits());
 			let existing_tier = existing_address.size_tier();
 			let table_key = TableKey::Partial(*key);
-			if tables.value[existing_tier as usize].has_key_at(
-				existing_address.offset(),
-				&table_key,
-			)? {
+			if tables.value[existing_tier as usize]
+				.has_key_at(existing_address.offset(), &table_key)?
+			{
 				return Ok(Some((index, sub_index, existing_address)))
 			}
 
@@ -534,10 +532,7 @@ impl HashColumn {
 		Ok(None)
 	}
 
-	pub fn write_change<V: AsRef<[u8]>>(
-		&self,
-		change: &Operation<Key, V>,
-	) -> Result<WriteOutcome> {
+	pub fn write_change<V: AsRef<[u8]>>(&self, change: &Operation<Key, V>) -> Result<WriteOutcome> {
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
 		let existing = Self::search_all_indexes(change.key(), &tables, &reindex)?;
@@ -546,8 +541,7 @@ impl HashColumn {
 		} else {
 			match change {
 				Operation::Set(key, value) => {
-					let (r, _, _) =
-						self.write_new(tables, reindex, key, value.as_ref())?;
+					let (r, _, _) = self.write_new(tables, reindex, key, value.as_ref())?;
 					Ok(r)
 				},
 				Operation::Dereference(key) => {
@@ -617,16 +611,10 @@ impl HashColumn {
 	)> {
 		let stats = self.collect_stats.then_some(&self.stats);
 		let table_key = TableKey::Partial(*key);
-		let address = Column::write_new_value(
-			&table_key,
-			self.as_ref(&tables.value),
-			value,
-			stats,
-		)?;
+		let address =
+			Column::write_new_value(&table_key, self.as_ref(&tables.value), value, stats)?;
 		let mut outcome = WriteOutcome::Written;
-		while let WriteOutcome::NeedReindex =
-			tables.index.write_insert(key, address, None)?
-		{
+		while let WriteOutcome::NeedReindex = tables.index.write_insert(key, address, None)? {
 			log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
 			(tables, reindex) = Self::trigger_reindex(tables, reindex, self.path.as_path());
 			outcome = WriteOutcome::NeedReindex;
@@ -634,16 +622,21 @@ impl HashColumn {
 		Ok((outcome, tables, reindex))
 	}
 
-	pub fn enact_ops(&self, count: u32, log: &mut LogReader, commit_overlay: &RwLock<CommitOverlay>) -> Result<WriteOutcome> {
+	pub fn enact_ops(
+		&self,
+		count: u32,
+		log: &mut LogReader,
+		commit_overlay: &RwLock<CommitOverlay>,
+	) -> Result<WriteOutcome> {
 		let mut reindex = false;
-		for _ in 0 .. count {
+		for _ in 0..count {
 			match log.next()? {
 				LogAction::Set => {
 					let mut key = Key::default();
 					log.read(&mut key)?;
 					let len = log.read_u32()?;
 
-					/* 
+					/*
 					let maybe_value = { commit_overlay.read().get_hash_entry(&key, log.record_id()) };
 					if let Some(Some(value)) = maybe_value {
 						log.skip(len as usize)?;
@@ -655,27 +648,29 @@ impl HashColumn {
 					}*/
 
 					let mut value = Vec::with_capacity(len as usize);
-					unsafe { value.set_len(len as usize);}
+					unsafe {
+						value.set_len(len as usize);
+					}
 					log.read(&mut value)?;
-					if let WriteOutcome::NeedReindex = self.write_change(&Operation::Set(key, value))? {
+					if let WriteOutcome::NeedReindex =
+						self.write_change(&Operation::Set(key, value))?
+					{
 						reindex = true;
 					}
 					commit_overlay.write().remove_hash_entry(&key, log.record_id());
-				}
+				},
 				LogAction::Reference => {
 					let mut key = Key::default();
 					log.read(&mut key)?;
 					self.write_change(&Operation::<Key, Value>::Reference(key))?;
-				}
+				},
 				LogAction::Dereference => {
 					let mut key = Key::default();
 					log.read(&mut key)?;
 					self.write_change(&Operation::<Key, Value>::Dereference(key))?;
 					commit_overlay.write().remove_hash_entry(&key, log.record_id());
-				}
-				_ => {
-					return Err(Error::Corruption("Unexpected action".into()))
-				}
+				},
+				_ => return Err(Error::Corruption("Unexpected action".into())),
 			}
 		}
 		if reindex {
@@ -686,25 +681,23 @@ impl HashColumn {
 	}
 
 	pub fn validate_ops(&self, count: u32, log: &mut LogReader) -> Result<()> {
-		for _ in 0 .. count {
+		for _ in 0..count {
 			match log.next()? {
 				LogAction::Set => {
 					let mut key = Key::default();
 					log.read(&mut key)?;
 					let len = log.read_u32()?;
 					log.skip(len as usize)?;
-				}
+				},
 				LogAction::Reference => {
 					let mut key = Key::default();
 					log.read(&mut key)?;
-				}
+				},
 				LogAction::Dereference => {
 					let mut key = Key::default();
 					log.read(&mut key)?;
-				}
-				_ => {
-					return Err(Error::Corruption("Unexpected action".into()))
-				}
+				},
+				_ => return Err(Error::Corruption("Unexpected action".into())),
 			}
 		}
 		Ok(())
@@ -732,7 +725,8 @@ impl HashColumn {
 				}
 			},
 			LogAction::InsertValue(record) => {
-				tables.value[record.table.size_tier() as usize].enact_plan_obsolete(record.index, log)?;
+				tables.value[record.table.size_tier() as usize]
+					.enact_plan_obsolete(record.index, log)?;
 			},
 			// This should never happen, unless something has modified the log file while the
 			// database is running. Existing logs should be validated with `validate_plan` on
@@ -770,7 +764,8 @@ impl HashColumn {
 				}
 			},
 			LogAction::InsertValue(record) => {
-				tables.value[record.table.size_tier() as usize].validate_plan_obsolete(record.index, log)?;
+				tables.value[record.table.size_tier() as usize]
+					.validate_plan_obsolete(record.index, log)?;
 			},
 			_ => {
 				log::error!(target: "parity-db", "Unexpected log action");
@@ -1109,9 +1104,10 @@ impl HashColumn {
 						let key = entry.recover_key_prefix(source_index, source_id);
 						let address = entry.address(source_id.index_bits());
 						let outcome;
-						(outcome, tables, reindex) = self.write_reindex_locked(tables, reindex, &key, address)?;
+						(outcome, tables, reindex) =
+							self.write_reindex_locked(tables, reindex, &key, address)?;
 						if let WriteOutcome::NeedReindex = outcome {
-							return Ok(WriteOutcome::NeedReindex);
+							return Ok(WriteOutcome::NeedReindex)
 						}
 						count += 1;
 					}
@@ -1153,10 +1149,8 @@ impl Column {
 				tables.tables[tier].size(key, address.offset())?.unwrap_or((0, false));
 			Ok(if compressed {
 				// This is very costly.
-				let compressed = tables.tables[tier]
-					.get(key, address.offset())?
-					.expect("Same query as size")
-					.0;
+				let compressed =
+					tables.tables[tier].get(key, address.offset())?.expect("Same query as size").0;
 				let uncompressed = tables.compression.decompress(compressed.as_slice())?;
 
 				(cur_size, uncompressed.len() as u32)
@@ -1277,7 +1271,7 @@ impl Column {
 
 	pub fn validate_plan_obsolete(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
 		match self {
-			Column::Hash(column) => column.validate_plan_obsolete(action,log),
+			Column::Hash(column) => column.validate_plan_obsolete(action, log),
 			Column::Tree(column) => column.validate_plan_obsolete(action, log),
 		}
 	}
@@ -1296,13 +1290,18 @@ impl Column {
 		}
 	}
 
-	pub fn enact_ops(&self, count: u32, log: &mut LogReader, commit_overlay: &RwLock<CommitOverlay>) -> Result<WriteOutcome> {
+	pub fn enact_ops(
+		&self,
+		count: u32,
+		log: &mut LogReader,
+		commit_overlay: &RwLock<CommitOverlay>,
+	) -> Result<WriteOutcome> {
 		match self {
 			Column::Hash(column) => column.enact_ops(count, log, commit_overlay),
 			Column::Tree(column) => {
 				column.enact_ops(count, log, commit_overlay)?;
 				Ok(WriteOutcome::Written)
-			}
+			},
 		}
 	}
 

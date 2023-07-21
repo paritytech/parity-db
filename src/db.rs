@@ -215,11 +215,7 @@ impl DbInner {
 			options.salt = Some(metadata.salt);
 		}
 
-		let commit_queue = CommitQueue {
-			next_record_id: 1,
-			bytes: 0,
-			commits: VecDeque::new(),
-		};
+		let commit_queue = CommitQueue { next_record_id: 1, bytes: 0, commits: VecDeque::new() };
 
 		Ok(DbInner {
 			columns,
@@ -248,7 +244,9 @@ impl DbInner {
 			Column::Hash(column) => {
 				let key = column.hash_key(key);
 				// Check commit overlay first
-				if let Some(v) = self.commit_overlay.get(col as usize).and_then(|o| o.read().get(&key)) {
+				if let Some(v) =
+					self.commit_overlay.get(col as usize).and_then(|o| o.read().get(&key))
+				{
 					return Ok(v.map(|i| i.value().clone()))
 				}
 				// Get from on-disk data.
@@ -271,7 +269,9 @@ impl DbInner {
 			Column::Hash(column) => {
 				let key = column.hash_key(key);
 				// Check commit overlay first
-				if let Some(l) = self.commit_overlay.get(col as usize).and_then(|o| o.read().get_size(&key)) {
+				if let Some(l) =
+					self.commit_overlay.get(col as usize).and_then(|o| o.read().get_size(&key))
+				{
 					return Ok(l)
 				}
 				// Go into tables and log overlay.
@@ -292,7 +292,7 @@ impl DbInner {
 	fn btree_iter(&self, col: ColId) -> Result<BTreeIterator> {
 		match &self.columns[col as usize] {
 			Column::Hash(_column) =>
-				Err(Error::InvalidConfiguration("Not an indexed column.".to_string())),
+				Err(Error::InvalidConfiguration("Not a hash column.".to_string())),
 			Column::Tree(column) => {
 				let log = self.log.overlays();
 				BTreeIterator::new(column, col, log, &self.commit_overlay[col as usize])
@@ -325,17 +325,13 @@ impl DbInner {
 		let mut commit: CommitChangeSet = Default::default();
 		for (col, change) in tx.into_iter() {
 			if self.options.columns[col as usize].btree_index {
-				commit
-					.btree_indexed
-					.entry(col)
-					.or_insert_with(|| BTreeChangeSet::new(col))
-					.push(change)
+				commit.btree.entry(col).or_insert_with(|| BTreeChangeSet::new(col)).push(change)
 			} else {
-				commit.indexed.entry(col).or_insert_with(|| IndexedChangeSet::new(col)).push(
-					change,
-					&self.options,
-					self.db_version,
-				)
+				commit
+					.hash_table
+					.entry(col)
+					.or_insert_with(|| HashTableChangeSet::new(col))
+					.push(change, &self.options, self.db_version)
 			}
 		}
 
@@ -365,8 +361,8 @@ impl DbInner {
 		queue.next_record_id += 1;
 
 		let mut bytes = 0;
-		for (c, indexed) in &commit.indexed {
-			indexed.copy_to_overlay(
+		for (c, changeset) in &commit.hash_table {
+			changeset.copy_to_overlay(
 				&mut self.commit_overlay[*c as usize].write(),
 				record_id,
 				&mut bytes,
@@ -374,9 +370,9 @@ impl DbInner {
 			)?;
 		}
 
-		for (c, iterset) in &commit.btree_indexed {
+		for (c, iterset) in &commit.btree {
 			iterset.copy_to_overlay(
-				&mut self.commit_overlay[*c as usize].write().btree_indexed,
+				&mut self.commit_overlay[*c as usize].write().btree,
 				record_id,
 				&mut bytes,
 				&self.options,
@@ -563,34 +559,32 @@ impl DbInner {
 							LogAction::ColumnOps((col, len)) => {
 								if let Err(e) = self.columns.get(col as usize).map_or_else(
 									|| Err(Error::Corruption(format!("Invalid column id {col}"))),
-									|col| {
-										col.validate_ops(len, &mut reader)
-									},
+									|col| col.validate_ops(len, &mut reader),
 								) {
 									log::warn!(target: "parity-db", "Error validating log: {:?}.", e);
 									drop(reader);
 									self.log.clear_replay_logs();
 									return Ok(false)
 								}
-							}
+							},
 							LogAction::Set => {
 								log::warn!(target: "parity-db", "Error validating log: Unexpected Set operation");
 								drop(reader);
 								self.log.clear_replay_logs();
 								return Ok(false)
-							}
+							},
 							LogAction::Reference => {
 								log::warn!(target: "parity-db", "Error validating log: Unexpected Reference operation");
 								drop(reader);
 								self.log.clear_replay_logs();
 								return Ok(false)
-							}
+							},
 							LogAction::Dereference => {
 								log::warn!(target: "parity-db", "Error validating log: Unexpected Dereference operation");
 								drop(reader);
 								self.log.clear_replay_logs();
 								return Ok(false)
-							}
+							},
 						}
 					}
 					reader.reset()?;
@@ -608,12 +602,16 @@ impl DbInner {
 							return Err(Error::Corruption("Bad log record".into())),
 						LogAction::EndRecord => break,
 						LogAction::InsertIndex(insertion) => {
-							self.columns[insertion.table.col() as usize]
-								.enact_plan_obsolete(LogAction::InsertIndex(insertion), &mut reader)?;
+							self.columns[insertion.table.col() as usize].enact_plan_obsolete(
+								LogAction::InsertIndex(insertion),
+								&mut reader,
+							)?;
 						},
 						LogAction::InsertValue(insertion) => {
-							self.columns[insertion.table.col() as usize]
-								.enact_plan_obsolete(LogAction::InsertValue(insertion), &mut reader)?;
+							self.columns[insertion.table.col() as usize].enact_plan_obsolete(
+								LogAction::InsertValue(insertion),
+								&mut reader,
+							)?;
 						},
 						LogAction::DropTable(id) => {
 							log::debug!(
@@ -630,15 +628,16 @@ impl DbInner {
 							}
 						},
 						LogAction::ColumnOps((col, len)) => {
-							if let WriteOutcome::NeedReindex = self.columns[col as usize].enact_ops(len, &mut reader, &self.commit_overlay[col as usize])? {
+							if let WriteOutcome::NeedReindex = self.columns[col as usize]
+								.enact_ops(len, &mut reader, &self.commit_overlay[col as usize])?
+							{
 								self.start_reindex();
 							}
-						}
-						LogAction::Set => 
+						},
+						LogAction::Set => return Err(Error::Corruption("Bad log record".into())),
+						LogAction::Reference =>
 							return Err(Error::Corruption("Bad log record".into())),
-						LogAction::Reference => 
-							return Err(Error::Corruption("Bad log record".into())),
-						LogAction::Dereference => 
+						LogAction::Dereference =>
 							return Err(Error::Corruption("Bad log record".into())),
 					}
 				}
@@ -1215,29 +1214,29 @@ impl Db {
 	}
 }
 
-pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<RcValue>), IdentityBuildHasher>;
+pub type HashTableCommitOverlay = HashMap<Key, (u64, Option<RcValue>), IdentityBuildHasher>;
 pub type BTreeCommitOverlay = BTreeMap<RcValue, (u64, Option<RcValue>)>;
 
 #[derive(Debug)]
 pub struct CommitOverlay {
-	indexed: IndexedCommitOverlay,
-	btree_indexed: BTreeCommitOverlay,
+	hash_table: HashTableCommitOverlay,
+	btree: BTreeCommitOverlay,
 }
 
 impl CommitOverlay {
 	fn new() -> Self {
-		CommitOverlay { indexed: Default::default(), btree_indexed: Default::default() }
+		CommitOverlay { hash_table: Default::default(), btree: Default::default() }
 	}
 
 	#[cfg(test)]
 	fn is_empty(&self) -> bool {
-		self.indexed.is_empty() && self.btree_indexed.is_empty()
+		self.hash_table.is_empty() && self.btree.is_empty()
 	}
 }
 
 impl CommitOverlay {
 	fn get_ref(&self, key: &[u8]) -> Option<Option<&RcValue>> {
-		self.indexed.get(key).map(|(_, v)| v.as_ref())
+		self.hash_table.get(key).map(|(_, v)| v.as_ref())
 	}
 
 	fn get(&self, key: &[u8]) -> Option<Option<RcValue>> {
@@ -1249,32 +1248,23 @@ impl CommitOverlay {
 	}
 
 	fn btree_get(&self, key: &[u8]) -> Option<Option<&RcValue>> {
-		self.btree_indexed.get(key).map(|(_, v)| v.as_ref())
+		self.btree.get(key).map(|(_, v)| v.as_ref())
 	}
 
 	pub fn remove_hash_entry(&mut self, key: &Key, record_id: u64) {
-		if let Some((id, val)) = self.indexed.remove(key) {
+		if let Some((id, val)) = self.hash_table.remove(key) {
 			if id > record_id {
 				// Put it back
-				self.indexed.insert(*key, (id, val));
+				self.hash_table.insert(*key, (id, val));
 			}
 		}
-	}
-
-	pub fn get_hash_entry(&self, key: &Key, record_id: u64) -> Option<Option<RcValue>>{
-		if let Some((id, val)) = self.indexed.get(key) {
-			if *id == record_id {
-				return Some(val.clone());
-			}
-		}
-		None
 	}
 
 	pub fn remove_btree_entry(&mut self, key: &[u8], record_id: u64) {
-		if let Some((k, (id, val))) = self.btree_indexed.remove_entry(key) {
+		if let Some((k, (id, val))) = self.btree.remove_entry(key) {
 			if id > record_id {
 				// Put it back
-				self.btree_indexed.insert(k, (id, val));
+				self.btree.insert(k, (id, val));
 			}
 		}
 	}
@@ -1286,18 +1276,18 @@ impl CommitOverlay {
 		use crate::btree::LastKey;
 		match &last_key {
 			LastKey::Start => self
-				.btree_indexed
+				.btree
 				.range::<Vec<u8>, _>(..)
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::End => None,
 			LastKey::At(key) => self
-				.btree_indexed
+				.btree
 				.range::<Vec<u8>, _>((Bound::Excluded(key), Bound::Unbounded))
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Seeked(key) => self
-				.btree_indexed
+				.btree
 				.range::<Value, _>(key..)
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
@@ -1311,20 +1301,20 @@ impl CommitOverlay {
 		use crate::btree::LastKey;
 		match &last_key {
 			LastKey::End => self
-				.btree_indexed
+				.btree
 				.range::<Vec<u8>, _>(..)
 				.rev()
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Start => None,
 			LastKey::At(key) => self
-				.btree_indexed
+				.btree
 				.range::<Vec<u8>, _>(..key)
 				.rev()
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Seeked(key) => self
-				.btree_indexed
+				.btree
 				.range::<Vec<u8>, _>(..=key)
 				.rev()
 				.next()
@@ -1388,19 +1378,19 @@ impl<K: AsRef<[u8]>, Value> Operation<K, Value> {
 
 #[derive(Debug, Default)]
 pub struct CommitChangeSet {
-	pub indexed: HashMap<ColId, IndexedChangeSet>,
-	pub btree_indexed: HashMap<ColId, BTreeChangeSet>,
+	pub hash_table: HashMap<ColId, HashTableChangeSet>,
+	pub btree: HashMap<ColId, BTreeChangeSet>,
 }
 
 #[derive(Debug)]
-pub struct IndexedChangeSet {
+pub struct HashTableChangeSet {
 	pub col: ColId,
 	pub changes: Vec<Operation<Key, RcValue>>,
 }
 
-impl IndexedChangeSet {
+impl HashTableChangeSet {
 	pub fn new(col: ColId) -> Self {
-		IndexedChangeSet { col, changes: Default::default() }
+		HashTableChangeSet { col, changes: Default::default() }
 	}
 
 	fn push<K: AsRef<[u8]>>(
@@ -1438,12 +1428,12 @@ impl IndexedChangeSet {
 				Operation::Set(k, v) => {
 					*bytes += k.len();
 					*bytes += v.value().len();
-					overlay.indexed.insert(*k, (record_id, Some(v.clone())));
+					overlay.hash_table.insert(*k, (record_id, Some(v.clone())));
 				},
 				Operation::Dereference(k) => {
 					// Don't add removed ref-counted values to overlay.
 					if !ref_counted {
-						overlay.indexed.insert(*k, (record_id, None));
+						overlay.hash_table.insert(*k, (record_id, None));
 					}
 				},
 				Operation::Reference(..) => {
@@ -1458,7 +1448,6 @@ impl IndexedChangeSet {
 		Ok(())
 	}
 }
-
 
 /// Verification operation utilities.
 pub mod check {

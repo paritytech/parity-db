@@ -84,11 +84,7 @@ impl BTree {
 		root.is_balanced(tables, 0)
 	}
 
-	pub fn get(
-		&self,
-		key: &[u8],
-		values: TablesRef,
-	) -> Result<Option<Vec<u8>>> {
+	pub fn get(&self, key: &[u8], values: TablesRef) -> Result<Option<Vec<u8>>> {
 		let root = BTree::fetch_root(self.root_index.unwrap_or(NULL_ADDRESS), values)?;
 		if let Some(address) = root.get(key, values)? {
 			let key_query = TableKeyQuery::Fetch(None);

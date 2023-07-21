@@ -90,8 +90,8 @@ impl Entry {
 	pub fn recover_key_prefix(&self, chunk: u64, id: TableId) -> Key {
 		let partial_key = self.partial_key(id.index_bits());
 		let k = 64 - Entry::address_bits(id.index_bits());
-		let index_key = (chunk << (64 - id.index_bits())) |
-			(partial_key << (64 - k - id.index_bits()));
+		let index_key =
+			(chunk << (64 - id.index_bits())) | (partial_key << (64 - k - id.index_bits()));
 		let mut key = Key::default();
 		key[0..8].copy_from_slice(&index_key.to_be_bytes());
 		key
@@ -470,11 +470,7 @@ impl IndexTable {
 		Ok(WriteOutcome::Skipped)
 	}
 
-	pub fn write_remove(
-		&self,
-		key: &Key,
-		sub_index: usize,
-	) -> Result<WriteOutcome> {
+	pub fn write_remove(&self, key: &Key, sub_index: usize) -> Result<WriteOutcome> {
 		log::trace!(target: "parity-db", "{}: Removing {}", self.id, hex(key));
 		let key_prefix = TableKey::index_from_partial(key);
 
@@ -488,7 +484,12 @@ impl IndexTable {
 		Ok(WriteOutcome::Skipped)
 	}
 
-	pub fn write_entry(&self, index: u64, sub_index: Option<usize>, entry: Entry) -> Result<WriteOutcome> {
+	pub fn write_entry(
+		&self,
+		index: u64,
+		sub_index: Option<usize>,
+		entry: Entry,
+	) -> Result<WriteOutcome> {
 		let mut map = self.map.upgradable_read();
 		if map.is_none() {
 			let mut wmap = RwLockUpgradableReadGuard::upgrade(map);
@@ -509,12 +510,13 @@ impl IndexTable {
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
 		// Nasty mutable pointer cast. We do ensure that all chunks that are being written are
 		// accessed through the overlay in other threads.
-		let ptr: *mut [u8; CHUNK_LEN] = unsafe { map.as_ptr().offset(offset as isize) as *mut [u8; CHUNK_LEN] };
+		let ptr: *mut [u8; CHUNK_LEN] =
+			unsafe { map.as_ptr().offset(offset as isize) as *mut [u8; CHUNK_LEN] };
 		let chunk: &mut [u8; CHUNK_LEN] = unsafe { ptr.as_mut().unwrap() };
 		if let Some(i) = sub_index {
 			Self::place_entry(&entry, i, chunk);
 			log::trace!(target: "parity-db", "{}: Replaced at {}.{}: {}", self.id, index, i, entry.address(self.id.index_bits()));
-            return Ok(WriteOutcome::Written)
+			return Ok(WriteOutcome::Written)
 		} else {
 			for i in 0..CHUNK_ENTRIES {
 				if Self::read_entry(chunk, i).is_empty() {

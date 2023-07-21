@@ -3,11 +3,13 @@
 
 use crate::{
 	column::ColId,
+	db::Commit,
 	error::{try_io, Error, Result},
 	index::TableId as IndexTableId,
 	options::Options,
 	parking_lot::{RwLock, RwLockWriteGuard},
-	table::TableId as ValueTableId, Operation, db::Commit,
+	table::TableId as ValueTableId,
+	Operation,
 };
 use std::{
 	cmp::min,
@@ -53,7 +55,6 @@ pub enum LogAction {
 	Dereference,
 }
 
-
 #[derive(Debug)]
 pub struct LogOverlays {
 	last_record_ids: Vec<u64>,
@@ -65,9 +66,7 @@ impl LogOverlays {
 	}
 
 	pub fn with_columns(count: usize) -> Self {
-		Self {
-			last_record_ids: (0..count).map(|_| 0).collect(),
-		}
+		Self { last_record_ids: (0..count).map(|_| 0).collect() }
 	}
 }
 
@@ -175,15 +174,9 @@ impl<'a> LogReader<'a> {
 				let count = u32::from_le_bytes(buf[0..4].try_into().unwrap());
 				Ok(LogAction::ColumnOps((col, count)))
 			},
-			SET => {
-				Ok(LogAction::Set)
-			},
-			REFERENCE => {
-				Ok(LogAction::Reference)
-			},
-			DEREFERENCE => {
-				Ok(LogAction::Dereference)
-			}
+			SET => Ok(LogAction::Set),
+			REFERENCE => Ok(LogAction::Reference),
+			DEREFERENCE => Ok(LogAction::Dereference),
 			_ => Err(Error::Corruption("Bad log entry type".into())),
 		}
 	}
@@ -208,7 +201,12 @@ impl<'a> LogReader<'a> {
 				remaining -= read_to.len();
 			}
 		} else {
-			try_io!(self.reading.as_mut().unwrap().file.seek(std::io::SeekFrom::Current(len as i64)));
+			try_io!(self
+				.reading
+				.as_mut()
+				.unwrap()
+				.file
+				.seek(std::io::SeekFrom::Current(len as i64)));
 		}
 		self.read_bytes += len as u64;
 		Ok(())
@@ -380,7 +378,7 @@ impl Log {
 		let bytes = Self::write_commit_to_file(&mut appending.file, commit)?;
 		let mut overlays = self.overlays.write();
 
-		for (c, _) in commit.changeset.btree_indexed.iter() {
+		for (c, _) in commit.changeset.btree.iter() {
 			overlays.last_record_ids[*c as usize] = commit.id;
 		}
 
@@ -395,7 +393,10 @@ impl Log {
 		Ok(bytes)
 	}
 
-	fn write_commit_to_file(file: &mut std::io::BufWriter<std::fs::File>, commit: &Commit) -> Result<u64> {
+	fn write_commit_to_file(
+		file: &mut std::io::BufWriter<std::fs::File>,
+		commit: &Commit,
+	) -> Result<u64> {
 		let mut crc32 = crc32fast::Hasher::new();
 		let mut bytes: u64 = 0;
 
@@ -409,7 +410,7 @@ impl Log {
 		write(&BEGIN_RECORD.to_le_bytes())?;
 		write(&commit.id.to_le_bytes())?;
 
-		for (col, changeset) in &commit.changeset.indexed {
+		for (col, changeset) in &commit.changeset.hash_table {
 			write(COLUMN_OPS.to_le_bytes().as_ref())?;
 			write(col.to_le_bytes().as_ref())?;
 			let count = changeset.changes.len() as u32;
@@ -434,7 +435,7 @@ impl Log {
 				}
 			}
 		}
-		for (col, changeset) in &commit.changeset.btree_indexed {
+		for (col, changeset) in &commit.changeset.btree {
 			write(COLUMN_OPS.to_le_bytes().as_ref())?;
 			write(col.to_le_bytes().as_ref())?;
 			let count = changeset.changes.len() as u32;
