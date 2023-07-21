@@ -204,7 +204,6 @@ impl BTreeTable {
 			return Ok(None)
 		}
 		let record_id = 0; // lifetime of Btree is the query, so no invalidate.
-				   // keeping log locked when parsing tree.
 		let tree = BTree::new(Some(btree_header.root), btree_header.depth, record_id);
 		tree.get(key, values)
 	}
@@ -297,11 +296,13 @@ impl BTreeTable {
 				_ => return Err(Error::Corruption("Unexpected action".into())),
 			}
 		}
-		changeset.write(self, log.record_id())?;
+		// Take an exclusive lock before writing anything. This is required for `get()` consistency.
 		let mut commit_overlay = commit_overlay.write();
+		changeset.write(self, log.record_id())?;
 		for c in changeset.changes {
 			commit_overlay.remove_btree_entry(c.key().as_ref(), log.record_id());
 		}
+		commit_overlay.set_last_btree_commit(log.record_id());
 
 		Ok(())
 	}

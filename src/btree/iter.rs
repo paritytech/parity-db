@@ -85,7 +85,8 @@ impl<'a> BTreeIterator<'a> {
 
 	pub fn seek(&mut self, key: &[u8]) -> Result<()> {
 		// seek require log do not change
-		let record_id = self.commit_overlay.read().last_btree_commit();
+		let commit_overlay = self.commit_overlay.read();
+		let record_id = commit_overlay.last_btree_commit();
 		self.last_key = LastKey::Seeked(key.to_vec());
 		self.pending_backend = None;
 		self.seek_backend(SeekTo::Include(key), record_id, self.table)
@@ -96,7 +97,8 @@ impl<'a> BTreeIterator<'a> {
 	}
 
 	pub fn seek_to_last(&mut self) -> Result<()> {
-		let record_id = self.commit_overlay.read().last_btree_commit();
+		let commit_overlay = self.commit_overlay.read();
+		let record_id = commit_overlay.last_btree_commit();
 		self.last_key = LastKey::End;
 		self.seek_backend_to_last(record_id, self.table)
 	}
@@ -120,7 +122,7 @@ impl<'a> BTreeIterator<'a> {
 			};
 			let record_id = commit_overlay.last_btree_commit();
 			// No consistency over iteration, allows dropping lock to overlay.
-			drop(commit_overlay);
+			//drop(commit_overlay);
 			if record_id != self.iter.1.record_id {
 				self.pending_backend = None;
 			}

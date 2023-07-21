@@ -369,7 +369,6 @@ impl DbInner {
 
 		for (c, iterset) in &commit.btree {
 			let mut commit_overlay = self.commit_overlay[*c as usize].write();
-			commit_overlay.last_btree_commit = record_id;
 			iterset.copy_to_overlay(
 				&mut commit_overlay.btree,
 				record_id,
@@ -1251,6 +1250,10 @@ impl CommitOverlay {
 
 	pub fn last_btree_commit(&self) -> u64 {
 		self.last_btree_commit
+	}
+
+	pub fn set_last_btree_commit(&mut self, id: u64) {
+		self.last_btree_commit = id;
 	}
 
 	pub fn remove_hash_entry(&mut self, key: &Key, record_id: u64) {
