@@ -293,9 +293,7 @@ impl DbInner {
 		match &self.columns[col as usize] {
 			Column::Hash(_column) =>
 				Err(Error::InvalidConfiguration("Not a hash column.".to_string())),
-			Column::Tree(column) => {
-				BTreeIterator::new(column, &self.commit_overlay[col as usize])
-			},
+			Column::Tree(column) => BTreeIterator::new(column, &self.commit_overlay[col as usize]),
 		}
 	}
 
@@ -1221,7 +1219,11 @@ pub struct CommitOverlay {
 
 impl CommitOverlay {
 	fn new() -> Self {
-		CommitOverlay { hash_table: Default::default(), btree: Default::default(), last_btree_commit: 0 }
+		CommitOverlay {
+			hash_table: Default::default(),
+			btree: Default::default(),
+			last_btree_commit: 0,
+		}
 	}
 
 	#[cfg(test)]

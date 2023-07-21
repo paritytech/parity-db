@@ -220,12 +220,7 @@ impl<'a> BTreeIterator<'a> {
 		iter.next(tree, col, direction)
 	}
 
-	fn seek_backend(
-		&mut self,
-		seek_to: SeekTo,
-		record_id: u64,
-		col: &BTreeTable,
-	) -> Result<()> {
+	fn seek_backend(&mut self, seek_to: SeekTo, record_id: u64, col: &BTreeTable) -> Result<()> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
 		if record_id != tree.record_id {
 			let new_tree = col.with_locked(|btree| BTree::open(btree, record_id))?;
@@ -235,11 +230,7 @@ impl<'a> BTreeIterator<'a> {
 		iter.seek(seek_to, tree, col)
 	}
 
-	fn seek_backend_to_last(
-		&mut self,
-		record_id: u64,
-		col: &BTreeTable,
-	) -> Result<()> {
+	fn seek_backend_to_last(&mut self, record_id: u64, col: &BTreeTable) -> Result<()> {
 		let BtreeIterBackend(tree, iter) = &mut self.iter;
 		if record_id != tree.record_id {
 			let new_tree = col.with_locked(|btree| BTree::open(btree, record_id))?;
@@ -375,12 +366,7 @@ impl BTreeIterState {
 		Ok(None)
 	}
 
-	pub fn seek(
-		&mut self,
-		seek_to: SeekTo,
-		btree: &mut BTree,
-		col: &BTreeTable,
-	) -> Result<()> {
+	pub fn seek(&mut self, seek_to: SeekTo, btree: &mut BTree, col: &BTreeTable) -> Result<()> {
 		self.state.clear();
 		col.with_locked(|b| {
 			let root = BTree::fetch_root(btree.root_index.unwrap_or(NULL_ADDRESS), b)?;
@@ -388,11 +374,7 @@ impl BTreeIterState {
 		})
 	}
 
-	pub fn seek_to_last(
-		&mut self,
-		btree: &mut BTree,
-		col: &BTreeTable,
-	) -> Result<()> {
+	pub fn seek_to_last(&mut self, btree: &mut BTree, col: &BTreeTable) -> Result<()> {
 		self.seek(SeekTo::Last, btree, col)
 	}
 }
