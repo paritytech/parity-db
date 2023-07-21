@@ -448,17 +448,11 @@ impl IndexTable {
 		self.insert_chunk(key_prefix, address, sub_index)
 	}
 
-	fn remove_chunk(
-		&self,
-		key_prefix: u64,
-		sub_index: usize,
-	) -> Result<WriteOutcome> {
+	fn remove_chunk(&self, key_prefix: u64, sub_index: usize) -> Result<WriteOutcome> {
 		let chunk_index = self.chunk_index(key_prefix);
-
-		let i = sub_index;
 		let new_entry = Entry::empty();
-		self.write_entry(chunk_index, Some(i), new_entry)?;
-		log::trace!(target: "parity-db", "{}: Removed at {}.{}", self.id, chunk_index, i);
+		self.write_entry(chunk_index, Some(sub_index), new_entry)?;
+		log::trace!(target: "parity-db", "{}: Removed at {}.{}", self.id, chunk_index, sub_index);
 		return Ok(WriteOutcome::Written)
 	}
 
