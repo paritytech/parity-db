@@ -510,8 +510,7 @@ impl IndexTable {
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
 		// Nasty mutable pointer cast. We do ensure that all chunks that are being written are
 		// accessed through the overlay in other threads.
-		let ptr: *mut [u8; CHUNK_LEN] =
-			unsafe { map.as_ptr().add(offset) as *mut [u8; CHUNK_LEN] };
+		let ptr: *mut [u8; CHUNK_LEN] = unsafe { map.as_ptr().add(offset) as *mut [u8; CHUNK_LEN] };
 		let chunk: &mut [u8; CHUNK_LEN] = unsafe { ptr.as_mut().unwrap() };
 		if let Some(i) = sub_index {
 			Self::place_entry(&entry, i, chunk);

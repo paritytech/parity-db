@@ -1304,16 +1304,19 @@ impl CommitOverlay {
 		match &last_key {
 			LastKey::End => self
 				.btree
-				.range::<Vec<u8>, _>(..).next_back()
+				.range::<Vec<u8>, _>(..)
+				.next_back()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Start => None,
 			LastKey::At(key) => self
 				.btree
-				.range::<Vec<u8>, _>(..key).next_back()
+				.range::<Vec<u8>, _>(..key)
+				.next_back()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Seeked(key) => self
 				.btree
-				.range::<Vec<u8>, _>(..=key).next_back()
+				.range::<Vec<u8>, _>(..=key)
+				.next_back()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 		}
 	}
@@ -1566,27 +1569,24 @@ mod tests {
 		}
 
 		fn check_empty_overlay(&self, db: &DbInner, col: ColId) -> bool {
-			match self {
-				EnableCommitPipelineStages::DbFile => {
-					if let Some(overlay) = db.commit_overlay.get(col as usize) {
-						if !overlay.read().is_empty() {
-							let mut replayed = 5;
-							while !overlay.read().is_empty() {
-								if replayed > 0 {
-									replayed -= 1;
-									// the signal is triggered just before cleaning the overlay, so
-									// we wait a bit.
-									// Warning this is still rather flaky and should be ignored
-									// or removed.
-									std::thread::sleep(std::time::Duration::from_millis(100));
-								} else {
-									return false
-								}
+			if let EnableCommitPipelineStages::DbFile = self {
+				if let Some(overlay) = db.commit_overlay.get(col as usize) {
+					if !overlay.read().is_empty() {
+						let mut replayed = 5;
+						while !overlay.read().is_empty() {
+							if replayed > 0 {
+								replayed -= 1;
+								// the signal is triggered just before cleaning the overlay, so
+								// we wait a bit.
+								// Warning this is still rather flaky and should be ignored
+								// or removed.
+								std::thread::sleep(std::time::Duration::from_millis(100));
+							} else {
+								return false
 							}
 						}
 					}
-				},
-				_ => (),
+				}
 			}
 			true
 		}

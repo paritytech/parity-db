@@ -622,6 +622,7 @@ impl HashColumn {
 		Ok((outcome, tables, reindex))
 	}
 
+	#[allow(clippy::uninit_vec)] // See https://rust-lang.github.io/rfcs/2930-read-buf.html
 	pub fn enact_ops(
 		&self,
 		count: u32,
