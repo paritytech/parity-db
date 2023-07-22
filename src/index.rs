@@ -377,9 +377,10 @@ impl IndexTable {
 		let key = TableKey::index_from_partial(key);
 		if let Some(e) = self.cache.write().get(&key) {
 			let hits = self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-			if hits % 1000 == 0 {
+			if hits != 0 && hits % 100000 == 0 {
 				let misses = self.misses.swap(0, std::sync::atomic::Ordering::Relaxed);
-				log::trace!(target: "parity-db", "{}: Cache hit rate: {}% {}/{}", self.id, hits * 100 / (hits + misses), hits, misses);
+				self.hits.store(0, std::sync::atomic::Ordering::Relaxed);
+				log::info!(target: "parity-db", "{}: Cache hit rate: {}% {}/{}", self.id, hits * 100 / (hits + misses), hits, misses);
 			}
 			if e.1 >= sub_index {
 				return Ok(*e)
@@ -399,7 +400,9 @@ impl IndexTable {
 			log::trace!(target: "parity-db", "{}: Querying chunk at {}", self.id, chunk_index);
 			let chunk = Self::chunk_at(chunk_index, map)?;
 			let entry =  self.find_entry(key, sub_index, chunk);
-			self.cache.write().insert(key, entry);
+			if !entry.0.is_empty() {
+				self.cache.write().insert(key, entry);
+			}
 			return Ok(entry)
 		}
 		Ok((Entry::empty(), 0))
