@@ -371,7 +371,9 @@ impl IndexTable {
 		log::trace!(target: "parity-db", "{}: Querying {}", self.id, hex(key));
 		let key = TableKey::index_from_partial(key);
 		if let Some(e) = self.cache.write().get(&key) {
-			return Ok(*e)
+			if e.1 >= sub_index {
+				return Ok(*e)
+			}
 		}
 		let chunk_index = self.chunk_index(key);
 
