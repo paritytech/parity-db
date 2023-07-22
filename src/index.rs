@@ -385,7 +385,9 @@ impl IndexTable {
 		if let Some(map) = &*self.map.read() {
 			log::trace!(target: "parity-db", "{}: Querying chunk at {}", self.id, chunk_index);
 			let chunk = Self::chunk_at(chunk_index, map)?;
-			return Ok(self.find_entry(key, sub_index, chunk))
+			let entry =  self.find_entry(key, sub_index, chunk);
+			self.cache.write().insert(key, entry);
+			return Ok(entry)
 		}
 		Ok((Entry::empty(), 0))
 	}
