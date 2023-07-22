@@ -129,6 +129,9 @@ pub struct IndexTable {
 	map: RwLock<Option<memmap2::MmapMut>>,
 	cache: RwLock<schnellru::LruMap<u64, (Entry, usize), schnellru::ByLength>>,
 	path: std::path::PathBuf,
+	hits: std::sync::atomic::AtomicU64,
+	misses: std::sync::atomic::AtomicU64,
+
 }
 
 fn total_entries(index_bits: u8) -> u64 {
@@ -211,6 +214,8 @@ impl IndexTable {
 			map: RwLock::new(None),
 			cache: RwLock::new(schnellru::LruMap::new(schnellru::ByLength::new(4194304))),
 			path,
+			hits: std::sync::atomic::AtomicU64::new(0),
+			misses: std::sync::atomic::AtomicU64::new(0),
 		}
 	}
 	pub fn open_existing(path: &std::path::Path, id: TableId) -> Result<Option<IndexTable>> {
@@ -371,10 +376,16 @@ impl IndexTable {
 		log::trace!(target: "parity-db", "{}: Querying {}", self.id, hex(key));
 		let key = TableKey::index_from_partial(key);
 		if let Some(e) = self.cache.write().get(&key) {
+			let hits = self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+			if hits % 1000 == 0 {
+				let misses = self.misses.swap(0, std::sync::atomic::Ordering::Relaxed);
+				log::trace!(target: "parity-db", "{}: Cache hit rate: {}% {}/{}", self.id, hits * 100 / (hits + misses), hits, misses);
+			}
 			if e.1 >= sub_index {
 				return Ok(*e)
 			}
 		}
+		self.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 		let chunk_index = self.chunk_index(key);
 
 		if let Some(entry) = log.with_index(self.id, chunk_index, |chunk| {
