@@ -130,7 +130,6 @@ struct CommitQueue {
 	commits: VecDeque<Commit>,
 }
 
-#[derive(Debug)]
 struct DbInner {
 	columns: Vec<Column>,
 	options: Options,

@@ -71,26 +71,22 @@ const SIZES: [u16; SIZE_TIERS - 1] = [
 	24265, 24936, 25626, 26335, 27064, 27812, 28582, 29372, 30185, 31020, 31878, 32760,
 ];
 
-#[derive(Debug)]
 struct Tables {
 	index: IndexTable,
 	value: Vec<ValueTable>,
 }
 
-#[derive(Debug)]
 struct Reindex {
 	queue: VecDeque<IndexTable>,
 	progress: AtomicU64,
 }
 
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug)]
 pub enum Column {
 	Hash(HashColumn),
 	Tree(BTreeTable),
 }
 
-#[derive(Debug)]
 pub struct HashColumn {
 	col: ColId,
 	tables: RwLock<Tables>,
@@ -485,7 +481,7 @@ impl HashColumn {
 		}
 		let mut outcome = PlanOutcome::Written;
 		while let PlanOutcome::NeedReindex =
-			tables.index.write_insert_plan(key, address, None, log)?
+			tables.index.write_insert_plan(key, address, None, log, false)?
 		{
 			log::debug!(target: "parity-db", "{}: Index chunk full {} when reindexing", tables.index.id, hex(key));
 			(tables, reindex) = Self::trigger_reindex(tables, reindex, self.path.as_path());
@@ -621,7 +617,7 @@ impl HashColumn {
 				// If it was found in an older index we just insert a new entry. Reindex won't
 				// overwrite it.
 				let sub_index = if index.id == tables.index.id { Some(sub_index) } else { None };
-				tables.index.write_insert_plan(key, value_address, sub_index, log)
+				tables.index.write_insert_plan(key, value_address, sub_index, log, true)
 			},
 			(None, None) => {
 				log::trace!(target: "parity-db", "{}: Removing from index {}", tables.index.id, hex(key));
@@ -654,7 +650,7 @@ impl HashColumn {
 		)?;
 		let mut outcome = PlanOutcome::Written;
 		while let PlanOutcome::NeedReindex =
-			tables.index.write_insert_plan(key, address, None, log)?
+			tables.index.write_insert_plan(key, address, None, log, true)?
 		{
 			log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
 			(tables, reindex) = Self::trigger_reindex(tables, reindex, self.path.as_path());

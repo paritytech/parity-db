@@ -124,10 +124,10 @@ pub enum PlanOutcome {
 	Skipped,
 }
 
-#[derive(Debug)]
 pub struct IndexTable {
 	pub id: TableId,
 	map: RwLock<Option<memmap2::MmapMut>>,
+	cache: RwLock<schnellru::LruMap<u64, (Entry, usize), schnellru::ByLength>>,
 	path: std::path::PathBuf,
 }
 
@@ -205,6 +205,14 @@ impl std::fmt::Display for TableId {
 }
 
 impl IndexTable {
+	pub fn new(id: TableId, path: std::path::PathBuf) -> Self {
+		IndexTable {
+			id,
+			map: RwLock::new(None),
+			cache: RwLock::new(schnellru::LruMap::new(schnellru::ByLength::new(4194304))),
+			path,
+		}
+	}
 	pub fn open_existing(path: &std::path::Path, id: TableId) -> Result<Option<IndexTable>> {
 		let mut path: std::path::PathBuf = path.into();
 		path.push(id.file_name());
@@ -219,13 +227,15 @@ impl IndexTable {
 		let mut map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
 		madvise_random(&mut map);
 		log::debug!(target: "parity-db", "Opened existing index {}", id);
-		Ok(Some(IndexTable { id, path, map: RwLock::new(Some(map)) }))
+		let mut index_table = IndexTable::new(id, path);
+		index_table.map = RwLock::new(Some(map));
+		Ok(Some(index_table))
 	}
 
 	pub fn create_new(path: &std::path::Path, id: TableId) -> IndexTable {
 		let mut path: std::path::PathBuf = path.into();
 		path.push(id.file_name());
-		IndexTable { id, path, map: RwLock::new(None) }
+		IndexTable::new(id, path)
 	}
 
 	pub fn load_stats(&self) -> Result<ColumnStats> {
@@ -360,6 +370,9 @@ impl IndexTable {
 	pub fn get(&self, key: &Key, sub_index: usize, log: &impl LogQuery) -> Result<(Entry, usize)> {
 		log::trace!(target: "parity-db", "{}: Querying {}", self.id, hex(key));
 		let key = TableKey::index_from_partial(key);
+		if let Some(e) = self.cache.write().get(&key) {
+			return Ok(*e)
+		}
 		let chunk_index = self.chunk_index(key);
 
 		if let Some(entry) = log.with_index(self.id, chunk_index, |chunk| {
@@ -447,6 +460,7 @@ impl IndexTable {
 		source: &[u8],
 		sub_index: Option<usize>,
 		log: &mut LogWriter,
+		cache: bool,
 	) -> Result<PlanOutcome> {
 		let chunk_index = self.chunk_index(key_prefix);
 		if address.as_u64() > Entry::last_address(self.id.index_bits()) {
@@ -467,6 +481,9 @@ impl IndexTable {
 			Self::write_entry(&new_entry, i, &mut chunk);
 			log::trace!(target: "parity-db", "{}: Replaced at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
 			log.insert_index(self.id, chunk_index, i as u8, &chunk);
+			if cache {
+				self.cache.write().insert(key_prefix, (new_entry, i));
+			}
 			return Ok(PlanOutcome::Written)
 		}
 		for i in 0..CHUNK_ENTRIES {
@@ -475,6 +492,9 @@ impl IndexTable {
 				Self::write_entry(&new_entry, i, &mut chunk);
 				log::trace!(target: "parity-db", "{}: Inserted at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
 				log.insert_index(self.id, chunk_index, i as u8, &chunk);
+				if cache {
+					self.cache.write().insert(key_prefix, (new_entry, i));
+				}
 				return Ok(PlanOutcome::Written)
 			}
 		}
@@ -488,22 +508,23 @@ impl IndexTable {
 		address: Address,
 		sub_index: Option<usize>,
 		log: &mut LogWriter,
+		cache: bool,
 	) -> Result<PlanOutcome> {
 		log::trace!(target: "parity-db", "{}: Inserting {} -> {}", self.id, hex(key), address);
 		let key_prefix = TableKey::index_from_partial(key);
 		let chunk_index = self.chunk_index(key_prefix);
 
 		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| *chunk) {
-			return self.plan_insert_chunk(key_prefix, address, &chunk, sub_index, log)
+			return self.plan_insert_chunk(key_prefix, address, &chunk, sub_index, log, cache)
 		}
 
 		if let Some(map) = &*self.map.read() {
 			let chunk = Self::chunk_at(chunk_index, map)?;
-			return self.plan_insert_chunk(key_prefix, address, chunk, sub_index, log)
+			return self.plan_insert_chunk(key_prefix, address, chunk, sub_index, log, cache)
 		}
 
 		let chunk = &EMPTY_CHUNK;
-		self.plan_insert_chunk(key_prefix, address, chunk, sub_index, log)
+		self.plan_insert_chunk(key_prefix, address, chunk, sub_index, log, cache)
 	}
 
 	fn plan_remove_chunk(
@@ -524,6 +545,7 @@ impl IndexTable {
 			let new_entry = Entry::empty();
 			Self::write_entry(&new_entry, i, &mut chunk);
 			log.insert_index(self.id, chunk_index, i as u8, &chunk);
+			self.cache.write().insert(key_prefix, (new_entry, i));
 			log::trace!(target: "parity-db", "{}: Removed at {}.{}", self.id, chunk_index, i);
 			return Ok(PlanOutcome::Written)
 		}
@@ -671,11 +693,7 @@ mod test {
 	fn test_find_entries() {
 		let partial_keys = [1, 1 << 10, 1 << 20];
 		for index_bits in [16, 18, 20, 22] {
-			let index_table = IndexTable {
-				id: TableId(index_bits.into()),
-				map: RwLock::new(None),
-				path: PathBuf::new(),
-			};
+			let index_table = IndexTable::new(TableId(index_bits.into()), PathBuf::new());
 
 			let data_address = Address::from_u64((1 << index_bits) - 1);
 
@@ -703,8 +721,7 @@ mod test {
 
 	#[test]
 	fn test_find_any_entry() {
-		let table =
-			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
+		let table = IndexTable::new(TableId(18), PathBuf::new());
 		let mut chunk = [0u8; CHUNK_LEN];
 		let mut entries = [Entry::empty(); CHUNK_ENTRIES];
 		let mut keys = [0u64; CHUNK_ENTRIES];
@@ -740,8 +757,7 @@ mod test {
 
 	#[test]
 	fn test_find_entry_same_value() {
-		let table =
-			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
+		let table = IndexTable::new(TableId(18), PathBuf::new());
 		let mut chunk = [0u8; CHUNK_LEN];
 		let key = 0x4242424242424242;
 		let partial_key = Entry::extract_key(key, 18);
@@ -763,8 +779,7 @@ mod test {
 
 	#[test]
 	fn test_find_entry_zero_pk() {
-		let table =
-			IndexTable { id: TableId(16), map: RwLock::new(None), path: Default::default() };
+		let table = IndexTable::new(TableId(16), PathBuf::new());
 		let mut chunk = [0u8; CHUNK_LEN];
 		let zero_key = 0x0000000000000000;
 		let entry = Entry::new(Address::new(1, 1), zero_key, 16);
