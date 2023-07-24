@@ -70,6 +70,10 @@ pub struct MultiTreeStress {
 	#[clap(long)]
 	pub append: bool,
 
+	/// Remove all trees on shutdown and wait for the database to be empty.
+	#[clap(long)]
+	pub empty_on_shutdown: bool,
+
 	/// Number of trees to keep (Older are removed). 0 means never remove. [default: 8]
 	#[clap(long)]
 	pub pruning: Option<u64>,
@@ -91,6 +95,7 @@ pub struct Args {
 	pub commits: usize,
 	pub seed: Option<u64>,
 	pub append: bool,
+	pub empty_on_shutdown: bool,
 	pub pruning: u64,
 	pub compress: bool,
 	pub commit_time: u64,
@@ -105,6 +110,7 @@ impl MultiTreeStress {
 			commits: self.commits.unwrap_or(100_000),
 			seed: self.seed,
 			append: self.append,
+			empty_on_shutdown: self.empty_on_shutdown,
 			pruning: self.pruning.unwrap_or(8),
 			compress: self.compress,
 			commit_time: self.commit_time.unwrap_or(0),
@@ -1127,22 +1133,28 @@ pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 		iterations
 	));
 
-	// Continue removing trees until they are all gone.
-	TARGET_NUM_REMOVED.store(args.commits, Ordering::SeqCst);
-	while NUM_REMOVED.load(Ordering::Relaxed) < args.commits {
-		thread::sleep(std::time::Duration::from_millis(50));
-	}
+	if args.empty_on_shutdown {
+		// Continue removing trees until they are all gone.
+		TARGET_NUM_REMOVED.store(args.commits, Ordering::SeqCst);
+		while NUM_REMOVED.load(Ordering::Relaxed) < args.commits {
+			thread::sleep(std::time::Duration::from_millis(50));
+		}
 
-	// Wait for all entries to actually be removed from Db.
-	while !shutdown_final.load(Ordering::Relaxed) {
-		thread::sleep(std::time::Duration::from_millis(50));
+		// Wait for all entries to actually be removed from Db.
+		while !shutdown_final.load(Ordering::Relaxed) {
+			thread::sleep(std::time::Duration::from_millis(50));
+		}
+	} else {
+		shutdown_final.store(true, Ordering::SeqCst);
 	}
 
 	for t in threads.into_iter() {
 		t.join().unwrap()?;
 	}
 
-	output_helper.write().println_final(format!("Removed all entries"));
+	if args.empty_on_shutdown {
+		output_helper.write().println_final(format!("Removed all entries"));
+	}
 
 	Ok(())
 }
