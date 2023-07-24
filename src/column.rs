@@ -718,7 +718,10 @@ impl HashColumn {
 		for child in children {
 			let address = match child {
 				NodeRef::New(node) => self.claim_node(node, tables, node_values)?,
-				NodeRef::Existing(address) => address,
+				NodeRef::Existing(address) => {
+					node_values.push(NodeChange::IncrementReference(address));
+					address
+				},
 			};
 			let mut data_buf = [0u8; 8];
 			data_buf.copy_from_slice(&address.to_le_bytes());
@@ -758,10 +761,13 @@ impl HashColumn {
 					tables.tables[target_tier].value_size(&table_key).unwrap() as usize
 		);
 
+		// Check it isn't multipart
+		//assert!(target_tier < (SIZE_TIERS - 1));
+
 		let offset = tables.tables[target_tier].claim_next_free()?;
 		let address = Address::new(offset, target_tier as u8);
 
-		node_values.push(NodeChange { address: address.as_u64(), val, cval, compressed });
+		node_values.push(NodeChange::NewValue(address.as_u64(), val, cval, compressed));
 
 		Ok(address.as_u64())
 	}
@@ -827,6 +833,41 @@ impl HashColumn {
 		}
 
 		Ok(PlanOutcome::Written)
+	}
+
+	pub fn write_address_inc_ref_plan(
+		&self,
+		address: u64,
+		log: &mut LogWriter,
+	) -> Result<PlanOutcome> {
+		let tables = self.tables.upgradable_read();
+		let tables = self.as_ref(&tables.value);
+		let address = Address::from_u64(address);
+		let target_tier = address.size_tier();
+		let offset = address.offset();
+		tables.tables[target_tier as usize].write_inc_ref(offset, log)?;
+
+		let stats = self.collect_stats.then_some(&self.stats);
+		if let Some(stats) = stats {
+			stats.reference_increase();
+		}
+
+		Ok(PlanOutcome::Written)
+	}
+
+	pub fn write_address_dec_ref_plan(
+		&self,
+		address: u64,
+		log: &mut LogWriter,
+	) -> Result<(bool, PlanOutcome)> {
+		let tables = self.tables.upgradable_read();
+		let tables = self.as_ref(&tables.value);
+		let address = Address::from_u64(address);
+		let target_tier = address.size_tier();
+		let offset = address.offset();
+		let remains = tables.tables[target_tier as usize].write_dec_ref(offset, log)?;
+
+		Ok((remains, PlanOutcome::Written))
 	}
 
 	pub fn enact_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
@@ -1258,6 +1299,15 @@ impl HashColumn {
 		}
 		log::debug!(target: "parity-db", "Dropped {}", id);
 		Ok(())
+	}
+
+	pub fn get_num_value_entries(&self) -> Result<u64> {
+		let tables = self.tables.read();
+		let mut num_entries = 0;
+		for value_table in &tables.value {
+			num_entries += value_table.get_num_entries()?;
+		}
+		Ok(num_entries)
 	}
 }
 

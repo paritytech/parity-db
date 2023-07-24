@@ -13,6 +13,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 use rand::{RngCore, SeedableRng};
 use std::{
 	collections::{BTreeMap, HashMap, HashSet},
+	io::Write,
 	ops::Deref,
 	sync::{
 		atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -24,14 +25,20 @@ use std::{
 static COMMITS: AtomicUsize = AtomicUsize::new(0);
 static NEXT_COMMIT: AtomicUsize = AtomicUsize::new(0);
 static NUM_REMOVED: AtomicUsize = AtomicUsize::new(0);
+static TARGET_NUM_REMOVED: AtomicUsize = AtomicUsize::new(0);
 static QUERIES: AtomicUsize = AtomicUsize::new(0);
 static ITERATIONS: AtomicUsize = AtomicUsize::new(0);
+static EXPECTED_NUM_ENTRIES: AtomicUsize = AtomicUsize::new(0);
 
 const TREE_COLUMN: u8 = 0;
 const INFO_COLUMN: u8 = 1;
 
 const KEY_LAST_COMMIT: Key = [1u8; 32];
 const KEY_NUM_REMOVED: Key = [2u8; 32];
+
+const THREAD_PRUNING: bool = true;
+const FORCE_NO_MULTIPART_VALUES: bool = true;
+const FIXED_TEXT_POSITION: bool = true;
 
 /// Stress tests (warning erase db first).
 #[derive(Debug, clap::Parser)]
@@ -101,6 +108,50 @@ impl MultiTreeStress {
 			pruning: self.pruning.unwrap_or(8),
 			compress: self.compress,
 			commit_time: self.commit_time.unwrap_or(0),
+		}
+	}
+}
+
+struct OutputHelper {
+	last_fixed: String,
+	stdout: std::io::Stdout,
+}
+
+impl OutputHelper {
+	fn new() -> OutputHelper {
+		println!("");
+		OutputHelper { last_fixed: "".to_string(), stdout: std::io::stdout() }
+	}
+
+	fn println(&mut self, text: String) {
+		if FIXED_TEXT_POSITION {
+			let overwrite = format!("{:<1$}", text, self.last_fixed.len());
+			println!("\r{}", overwrite);
+			print!("{}", self.last_fixed);
+			self.stdout.flush().unwrap();
+		} else {
+			println!("{}", text);
+		}
+	}
+
+	fn print_fixed(&mut self, text: String) {
+		if FIXED_TEXT_POSITION {
+			let overwrite = format!("{:<1$}", text, self.last_fixed.len());
+			print!("\r{}", overwrite);
+			self.last_fixed = text;
+			self.stdout.flush().unwrap();
+		} else {
+			println!("							{}", text);
+		}
+	}
+
+	fn println_final(&mut self, text: String) {
+		if FIXED_TEXT_POSITION {
+			println!("");
+			println!("{}", text);
+			self.stdout.flush().unwrap();
+		} else {
+			println!("{}", text);
 		}
 	}
 }
@@ -310,6 +361,9 @@ impl ChainGenerator {
 		let mut size = 4;
 		if num_children == 0 {
 			size = self.value_length_histogram.sample(rng.next_u64()) as usize;
+			if FORCE_NO_MULTIPART_VALUES {
+				size = std::cmp::min(size, 32760 - 64);
+			}
 		}
 		let mut v = Vec::new();
 
@@ -339,9 +393,39 @@ impl ChainGenerator {
 	}
 }
 
-fn informant(shutdown: Arc<AtomicBool>) -> Result<(), String> {
-	while !shutdown.load(Ordering::Relaxed) {
-		thread::sleep(std::time::Duration::from_secs(1));
+fn informant(
+	db: Arc<Db>,
+	shutdown: Arc<AtomicBool>,
+	shutdown_final: Arc<AtomicBool>,
+	output_helper: Arc<RwLock<OutputHelper>>,
+) -> Result<(), String> {
+	let mut num_expected_entries = 0;
+	let mut num_entries = 0;
+	while !shutdown_final.load(Ordering::Relaxed) {
+		if FIXED_TEXT_POSITION {
+			thread::sleep(std::time::Duration::from_millis(100));
+		} else {
+			thread::sleep(std::time::Duration::from_secs(1));
+		}
+
+		let new_num_expected_entries = EXPECTED_NUM_ENTRIES.load(Ordering::Relaxed);
+		let new_num_entries = db.get_num_column_value_entries(TREE_COLUMN).unwrap();
+
+		if new_num_expected_entries != num_expected_entries || new_num_entries != num_entries {
+			num_expected_entries = new_num_expected_entries;
+			num_entries = new_num_entries;
+
+			output_helper.write().print_fixed(format!(
+				"Entries, Created: {}, ValueTables: {}",
+				num_expected_entries, num_entries
+			));
+
+			if num_entries == 0 {
+				if shutdown.load(Ordering::Relaxed) {
+					shutdown_final.store(true, Ordering::SeqCst);
+				}
+			}
+		}
 	}
 	Ok(())
 }
@@ -575,7 +659,13 @@ fn read_value(
 				},
 			}
 		},
-		None => return Err("Tree not in database".to_string()),
+		None => {
+			// Is this expected?
+			let num_removed = NUM_REMOVED.load(Ordering::Relaxed);
+			if tree_index >= num_removed as u64 {
+				return Err("Tree not in database".to_string())
+			}
+		},
 	}
 
 	Ok(())
@@ -609,6 +699,7 @@ fn writer(
 	chain_generator: Arc<ChainGenerator>,
 	shutdown: Arc<AtomicBool>,
 	start_commit: usize,
+	output_helper: Arc<RwLock<OutputHelper>>,
 ) -> Result<(), String> {
 	let seed = args.seed.unwrap_or(0);
 	let mut commit = Vec::new();
@@ -633,7 +724,7 @@ fn writer(
 		for index in trees {
 			let seed = chain_generator.root_seed(index);
 			let key = chain_generator.key(seed);
-			match db.get_tree(0, &key).unwrap() {
+			match db.get_tree(TREE_COLUMN, &key).unwrap() {
 				Some(reader) => {
 					let reader_ref = TreeReaderRef { reader_ref: reader };
 					tree_refs.insert(key, reader_ref);
@@ -653,12 +744,14 @@ fn writer(
 			build_commit_tree(node_data, &db, &chain_generator, &tree_refs, &mut tree_guards)?;
 		let mut num_existing_nodes = 0;
 		let num_new_nodes = num_new_nodes(&root_node_ref, &mut num_existing_nodes);
-		println!(
-			"Commit tree {}, num new nodes: {}, num existing: {}",
-			tree_index, num_new_nodes, num_existing_nodes
-		);
 		if let NodeRef::New(node) = root_node_ref {
-			let key = chain_generator.key(root_seed);
+			let key: [u8; 32] = chain_generator.key(root_seed);
+
+			output_helper.write().println(format!(
+				"Commit tree {}, new: {}, existing: {}",
+				tree_index, num_new_nodes, num_existing_nodes
+			));
+
 			commit.push((TREE_COLUMN, Operation::InsertTree(key.to_vec(), node)));
 
 			commit.push((
@@ -668,12 +761,67 @@ fn writer(
 
 			db.commit_changes(commit.drain(..)).unwrap();
 			COMMITS.fetch_add(1, Ordering::Relaxed);
+			EXPECTED_NUM_ENTRIES.fetch_add(num_new_nodes as usize, Ordering::Relaxed);
 			commit.clear();
 
 			// Immediately read and check a random value from the tree
 			let mut rng = rand::rngs::SmallRng::seed_from_u64(seed + n as u64);
 			read_value(tree_index, &mut rng, &db, &chain_generator)?;
+
+			if args.pruning > 0 && !THREAD_PRUNING {
+				try_prune(&db, &args, &chain_generator, &mut commit, &output_helper)?;
+			}
+
+			if args.commit_time > 0 {
+				thread::sleep(std::time::Duration::from_millis(args.commit_time));
+			}
 		}
+	}
+
+	Ok(())
+}
+
+fn try_prune(
+	db: &Db,
+	args: &Args,
+	chain_generator: &ChainGenerator,
+	commit: &mut Vec<(u8, Operation<Vec<u8>, Vec<u8>>)>,
+	output_helper: &RwLock<OutputHelper>,
+) -> Result<(), String> {
+	let num_removed = NUM_REMOVED.load(Ordering::Relaxed);
+	let target_override = TARGET_NUM_REMOVED.load(Ordering::Relaxed);
+	let commits = COMMITS.load(Ordering::Relaxed);
+
+	let target_num_removed = if target_override > 0 {
+		target_override as u64
+	} else {
+		if commits as u64 > args.pruning {
+			commits as u64 - args.pruning
+		} else {
+			0
+		}
+	};
+
+	if target_num_removed > num_removed as u64 {
+		// Need to remove a tree
+		let tree_index = num_removed as u64;
+		let root_seed = chain_generator.root_seed(tree_index);
+		let key = chain_generator.key(root_seed);
+
+		output_helper.write().println(format!("Remove tree {}", tree_index));
+
+		commit.push((TREE_COLUMN, Operation::RemoveTree(key.to_vec())));
+		commit.push((
+			INFO_COLUMN,
+			Operation::Set(
+				KEY_NUM_REMOVED.to_vec(),
+				((num_removed + 1) as u64).to_be_bytes().to_vec(),
+			),
+		));
+
+		NUM_REMOVED.fetch_add(1, Ordering::Relaxed);
+		db.commit_changes(commit.drain(..)).unwrap();
+		commit.clear();
 	}
 
 	Ok(())
@@ -684,37 +832,12 @@ fn pruner(
 	args: Arc<Args>,
 	chain_generator: Arc<ChainGenerator>,
 	shutdown: Arc<AtomicBool>,
+	output_helper: Arc<RwLock<OutputHelper>>,
 ) -> Result<(), String> {
 	let mut commit = Vec::new();
 
 	while !shutdown.load(Ordering::Relaxed) {
-		let num_removed = NUM_REMOVED.load(Ordering::Relaxed);
-		let commits = COMMITS.load(Ordering::Relaxed);
-
-		let target_num_removed =
-			if commits as u64 > args.pruning { commits as u64 - args.pruning } else { 0 };
-
-		if target_num_removed > num_removed as u64 {
-			// Need to remove a tree
-			let tree_index = num_removed as u64;
-			let root_seed = chain_generator.root_seed(tree_index);
-			let key = chain_generator.key(root_seed);
-
-			println!("Remove tree {}", tree_index);
-
-			commit.push((TREE_COLUMN, Operation::RemoveTree(key.to_vec())));
-			commit.push((
-				INFO_COLUMN,
-				Operation::Set(
-					KEY_NUM_REMOVED.to_vec(),
-					((num_removed + 1) as u64).to_be_bytes().to_vec(),
-				),
-			));
-
-			db.commit_changes(commit.drain(..)).unwrap();
-			NUM_REMOVED.fetch_add(1, Ordering::Relaxed);
-			commit.clear();
-		}
+		try_prune(&db, &args, &chain_generator, &mut commit, &output_helper)?;
 	}
 
 	Ok(())
@@ -852,7 +975,13 @@ fn iter(
 					},
 				}
 			},
-			None => return Err("Tree not in database".to_string()),
+			None => {
+				// Is this expected?
+				let num_removed = NUM_REMOVED.load(Ordering::Relaxed);
+				if tree_index >= num_removed as u64 {
+					return Err("Tree not in database".to_string())
+				}
+			},
 		}
 	}
 
@@ -862,7 +991,9 @@ fn iter(
 pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 	let args = Arc::new(args);
 	let shutdown = Arc::new(AtomicBool::new(false));
+	let shutdown_final = Arc::new(AtomicBool::new(false));
 	let db = Arc::new(db);
+	let output_helper = Arc::new(RwLock::new(OutputHelper::new()));
 
 	let mut threads = Vec::new();
 
@@ -884,7 +1015,9 @@ pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 
 	let total_num_expected_tree_nodes: u32 =
 		data::DEPTH_CHILD_COUNT_HISTOGRAMS.iter().map(|x| x.1.iter().sum::<u32>()).sum();
-	println!("Total num expected tree nodes: {}", total_num_expected_tree_nodes);
+	output_helper
+		.write()
+		.println(format!("Expected average num tree nodes: {}", total_num_expected_tree_nodes));
 
 	let chain_generator = ChainGenerator::new(
 		data::DEPTH_CHILD_COUNT_HISTOGRAMS,
@@ -902,8 +1035,12 @@ pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 	NUM_REMOVED.store(num_removed, Ordering::SeqCst);
 
 	{
+		let db = db.clone();
 		let shutdown = shutdown.clone();
-		threads.push(thread::spawn(move || informant(shutdown)));
+		let shutdown_final = shutdown_final.clone();
+		let output_helper = output_helper.clone();
+
+		threads.push(thread::spawn(move || informant(db, shutdown, shutdown_final, output_helper)));
 	}
 
 	for i in 0..args.readers {
@@ -942,25 +1079,29 @@ pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 		let shutdown = shutdown.clone();
 		let args = args.clone();
 		let chain_generator = chain_generator.clone();
+		let output_helper = output_helper.clone();
 
 		threads.push(
 			thread::Builder::new()
 				.name(format!("writer {i}"))
-				.spawn(move || writer(db, args, chain_generator, shutdown, start_commit))
+				.spawn(move || {
+					writer(db, args, chain_generator, shutdown, start_commit, output_helper)
+				})
 				.unwrap(),
 		);
 	}
 
-	if args.pruning > 0 {
+	if args.pruning > 0 && THREAD_PRUNING {
 		let db = db.clone();
-		let shutdown = shutdown.clone();
+		let shutdown = shutdown_final.clone();
 		let args = args.clone();
 		let chain_generator = chain_generator.clone();
+		let output_helper = output_helper.clone();
 
 		threads.push(
 			thread::Builder::new()
 				.name(format!("pruner"))
-				.spawn(move || pruner(db, args, chain_generator, shutdown))
+				.spawn(move || pruner(db, args, chain_generator, shutdown, output_helper))
 				.unwrap(),
 		);
 	}
@@ -970,10 +1111,6 @@ pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 	}
 	shutdown.store(true, Ordering::SeqCst);
 
-	for t in threads.into_iter() {
-		t.join().unwrap()?;
-	}
-
 	let commits = COMMITS.load(Ordering::SeqCst);
 	let commits = commits - start_commit;
 	let elapsed_time = start_time.elapsed().as_secs_f64();
@@ -981,14 +1118,31 @@ pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 	let queries = QUERIES.load(Ordering::SeqCst);
 	let iterations = ITERATIONS.load(Ordering::SeqCst);
 
-	println!(
+	output_helper.write().println(format!(
 		"Completed {} commits in {} seconds. {} cps. {} queries, {} iterations",
 		commits,
 		elapsed_time,
 		commits as f64 / elapsed_time,
 		queries,
 		iterations
-	);
+	));
+
+	// Continue removing trees until they are all gone.
+	TARGET_NUM_REMOVED.store(args.commits, Ordering::SeqCst);
+	while NUM_REMOVED.load(Ordering::Relaxed) < args.commits {
+		thread::sleep(std::time::Duration::from_millis(50));
+	}
+
+	// Wait for all entries to actually be removed from Db.
+	while !shutdown_final.load(Ordering::Relaxed) {
+		thread::sleep(std::time::Duration::from_millis(50));
+	}
+
+	for t in threads.into_iter() {
+		t.join().unwrap()?;
+	}
+
+	output_helper.write().println_final(format!("Removed all entries"));
 
 	Ok(())
 }

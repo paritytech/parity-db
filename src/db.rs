@@ -20,14 +20,17 @@
 
 use crate::{
 	btree::{commit_overlay::BTreeChangeSet, BTreeIterator, BTreeTable},
-	column::{hash_key, unpack_node_data, ColId, Column, IterState, ReindexBatch, ValueIterState},
+	column::{
+		hash_key, unpack_node_data, ColId, Column, HashColumn, IterState, ReindexBatch,
+		ValueIterState,
+	},
 	error::{try_io, Error, Result},
 	hash::IdentityBuildHasher,
 	index::{Address, PlanOutcome},
 	log::{Log, LogAction},
 	multitree::{Children, NewNode, NodeAddress},
 	options::{Options, CURRENT_VERSION},
-	parking_lot::{Condvar, Mutex, RwLock, RwLockUpgradableReadGuard},
+	parking_lot::{Condvar, Mutex, RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 	stats::StatSummary,
 	ColumnOptions, Key,
 };
@@ -38,7 +41,7 @@ use std::{
 	ops::Bound,
 	sync::{
 		atomic::{AtomicBool, AtomicU64, Ordering},
-		Arc,
+		Arc, Weak,
 	},
 	thread,
 };
@@ -133,7 +136,7 @@ struct CommitQueue {
 
 #[derive(Debug)]
 struct Trees {
-	readers: HashMap<Key, Arc<RwLock<DbTreeReader>>, IdentityBuildHasher>,
+	readers: HashMap<Key, Weak<RwLock<DbTreeReader>>, IdentityBuildHasher>,
 }
 
 #[derive(Debug)]
@@ -337,30 +340,41 @@ impl DbInner {
 		db: &Arc<DbInner>,
 		col: ColId,
 		key: &[u8],
+		check_existence: bool,
 	) -> Result<Option<Arc<RwLock<dyn TreeReader>>>> {
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
-				let key = column.hash_key(key);
+				// Check if the tree actually exists. We can't return the data from this function as
+				// TreeReader is not locked. That is done by the client.
+				if check_existence {
+					let root = self.get(col, key).unwrap();
+					if root.is_none() {
+						return Ok(None)
+					}
+				}
+
+				let hash_key = column.hash_key(key);
 
 				let trees = self.trees.upgradable_read();
 
 				if let Some(column_trees) = trees.get(&col) {
-					if let Some(reader) = column_trees.readers.get(&key) {
-						let reader = reader.clone();
-						return Ok(Some(reader))
+					if let Some(reader) = column_trees.readers.get(&hash_key) {
+						let reader = reader.upgrade();
+						if let Some(reader) = reader {
+							return Ok(Some(reader))
+						}
 					}
 				}
-
-				// TODO: Check if the tree actually exists
 
 				let mut trees = RwLockUpgradableReadGuard::upgrade(trees);
 
 				let column_trees =
 					trees.entry(col).or_insert_with(|| Trees { readers: Default::default() });
 
-				let reader = Arc::new(RwLock::new(DbTreeReader { db: db.clone(), col, key }));
+				let reader =
+					Arc::new(RwLock::new(DbTreeReader { db: db.clone(), col, key: hash_key }));
 
-				column_trees.readers.insert(key, reader.clone());
+				column_trees.readers.insert(hash_key, Arc::downgrade(&reader));
 
 				Ok(Some(reader))
 			},
@@ -436,13 +450,31 @@ impl DbInner {
 									.push_node_change(node_change);
 							}
 						},
-						Operation::RemoveTree(..) => {
-							let root_operation = Operation::Dereference(change.key());
+						Operation::RemoveTree(key) => {
+							let root_operation = Operation::Dereference(&key);
 							commit
 								.indexed
 								.entry(col)
 								.or_insert_with(|| IndexedChangeSet::new(col))
 								.push(root_operation, &self.options, self.db_version)?;
+
+							let value = self.get(col, &key)?;
+							if let Some(data) = value {
+								let root_data = unpack_node_data(data)?;
+								let children = root_data.1;
+
+								let node_change = NodeChange::DereferenceChildren(key, children);
+
+								commit
+									.indexed
+									.entry(col)
+									.or_insert_with(|| IndexedChangeSet::new(col))
+									.push_node_change(node_change);
+							} else {
+								return Err(Error::InvalidConfiguration(
+									"No entry for tree root".to_string(),
+								))
+							}
 						},
 					},
 					Column::Tree(_) =>
@@ -517,7 +549,7 @@ impl DbInner {
 		Ok(())
 	}
 
-	fn process_commits(&self) -> Result<bool> {
+	fn process_commits(&self, db: &Arc<DbInner>) -> Result<bool> {
 		#[cfg(any(test, feature = "instrumentation"))]
 		let might_wait_because_the_queue_is_full = self.options.with_background_thread;
 		#[cfg(not(any(test, feature = "instrumentation")))]
@@ -569,6 +601,8 @@ impl DbInner {
 			let mut ops: u64 = 0;
 			for (c, key_values) in commit.changeset.indexed.iter() {
 				key_values.write_plan(
+					db,
+					*c,
 					&self.columns[*c as usize],
 					&mut writer,
 					&mut ops,
@@ -916,7 +950,7 @@ impl DbInner {
 		self.cleanup_worker_wait.signal();
 	}
 
-	fn kill_logs(&self) -> Result<()> {
+	fn kill_logs(&self, db: &Arc<DbInner>) -> Result<()> {
 		{
 			if let Some(err) = self.bg_err.lock().as_ref() {
 				// On error the log reader may be left in inconsistent state. So it is important
@@ -930,7 +964,7 @@ impl DbInner {
 		// Finish logged records and proceed to log and enact queued commits.
 		while self.enact_logs(false)? {}
 		self.flush_logs(0)?;
-		while self.process_commits()? {}
+		while self.process_commits(db)? {}
 		while self.enact_logs(false)? {}
 		self.flush_logs(0)?;
 		while self.enact_logs(false)? {}
@@ -1112,7 +1146,7 @@ impl Db {
 	}
 
 	pub fn get_tree(&self, col: ColId, key: &[u8]) -> Result<Option<Arc<RwLock<dyn TreeReader>>>> {
-		self.inner.get_tree(&self.inner, col, key)
+		self.inner.get_tree(&self.inner, col, key, true)
 	}
 
 	/// Commit a set of changes to the database.
@@ -1186,7 +1220,7 @@ impl Db {
 				db.log_worker_wait.wait();
 			}
 
-			more_commits = db.process_commits()?;
+			more_commits = db.process_commits(&db)?;
 			more_reindex = db.process_reindex()?;
 		}
 		log::debug!(target: "parity-db", "Log worker shutdown");
@@ -1246,6 +1280,17 @@ impl Db {
 	/// Get database statistics.
 	pub fn stats(&self) -> StatSummary {
 		self.inner.stats()
+	}
+
+	pub fn get_num_column_value_entries(&self, col: ColId) -> Result<u64> {
+		let column = &self.inner.columns[col as usize];
+		match column {
+			Column::Hash(column) => return column.get_num_value_entries(),
+			Column::Tree(..) =>
+				return Err(Error::InvalidConfiguration(
+					"get_num_column_value_entries not implemented for tree columns.".to_string(),
+				)),
+		}
 	}
 
 	// We open the DB before to check metadata validity and make sure there are no pending WAL
@@ -1372,7 +1417,7 @@ impl Db {
 				log::warn!(target: "parity-db", "Cleanup thread shutdown error: {:?}", e);
 			}
 		}
-		if let Err(e) = self.inner.kill_logs() {
+		if let Err(e) = self.inner.kill_logs(&self.inner) {
 			log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
 		}
 	}
@@ -1600,12 +1645,14 @@ impl<K: AsRef<[u8]>, Value> Operation<K, Value> {
 	}
 }
 
-#[derive(Debug)]
-pub struct NodeChange {
-	pub address: u64,
-	pub val: RcValue,
-	pub cval: RcValue,
-	pub compressed: bool,
+#[derive(Debug, PartialEq, Eq)]
+pub enum NodeChange {
+	/// (address, value, compressed value, compressed)
+	NewValue(u64, RcValue, RcValue, bool),
+	/// (address)
+	IncrementReference(u64),
+	/// Dereference and remove any of the children in the tree
+	DereferenceChildren(Vec<u8>, Children),
 }
 
 #[derive(Debug, Default)]
@@ -1695,13 +1742,17 @@ impl IndexedChangeSet {
 			}
 		}
 		for change in self.node_changes.iter() {
-			overlay.address.insert(change.address, (record_id, change.val.clone()));
+			if let NodeChange::NewValue(address, val, _cval, _compressed) = change {
+				overlay.address.insert(*address, (record_id, val.clone()));
+			}
 		}
 		Ok(())
 	}
 
 	fn write_plan(
 		&self,
+		db: &Arc<DbInner>,
+		col: ColId,
 		column: &Column,
 		writer: &mut crate::log::LogWriter,
 		ops: &mut u64,
@@ -1722,13 +1773,68 @@ impl IndexedChangeSet {
 			*ops += 1;
 		}
 		for change in self.node_changes.iter() {
-			column.write_address_value_plan(
-				change.address,
-				change.cval.clone(),
-				change.compressed,
-				change.val.value().len() as u32,
-				writer,
-			)?;
+			match change {
+				NodeChange::NewValue(address, val, cval, compressed) => {
+					column.write_address_value_plan(
+						*address,
+						cval.clone(),
+						*compressed,
+						val.value().len() as u32,
+						writer,
+					)?;
+				},
+				NodeChange::IncrementReference(address) => {
+					column.write_address_inc_ref_plan(*address, writer)?;
+				},
+				NodeChange::DereferenceChildren(key, children) => {
+					let tree = db.get_tree(db, col, key, false).unwrap();
+					if let Some(tree) = tree {
+						//println!("Locking tree {:?}", &key[0..3]);
+						let guard = tree.write();
+						let mut num_removed = 0;
+						//println!("Dereferencing tree {:?}", &key[0..3]);
+						self.write_dereference_children_plan(
+							column,
+							&guard,
+							children,
+							&mut num_removed,
+							writer,
+						)?;
+						//println!("Dereferenced tree {:?}, removed {}", &key[0..3], num_removed);
+					}
+					// TODO: Remove TreeReader from Db.
+				},
+			}
+		}
+		Ok(())
+	}
+
+	fn write_dereference_children_plan(
+		&self,
+		column: &HashColumn,
+		guard: &RwLockWriteGuard<'_, dyn TreeReader>,
+		children: &Vec<u64>,
+		num_removed: &mut u64,
+		writer: &mut crate::log::LogWriter,
+	) -> Result<()> {
+		for address in children {
+			let node = guard.get_node(*address)?;
+			let (remains, _outcome) = column.write_address_dec_ref_plan(*address, writer)?;
+			if !remains {
+				// Was removed
+				*num_removed += 1;
+				if let Some((_node_data, children)) = node {
+					self.write_dereference_children_plan(
+						column,
+						guard,
+						&children,
+						num_removed,
+						writer,
+					)?;
+				} else {
+					return Err(Error::InvalidConfiguration("Missing node data".to_string()))
+				}
+			}
 		}
 		Ok(())
 	}
@@ -1750,7 +1856,9 @@ impl IndexedChangeSet {
 			}
 		}
 		for change in self.node_changes.iter() {
-			overlay.address.remove(&change.address);
+			if let NodeChange::NewValue(address, _val, _cval, _compressed) = change {
+				overlay.address.remove(address);
+			}
 		}
 	}
 }
@@ -1865,7 +1973,7 @@ mod tests {
 			if *self == EnableCommitPipelineStages::DbFile ||
 				*self == EnableCommitPipelineStages::LogOverlay
 			{
-				while db.process_commits().unwrap() {}
+				while db.process_commits(db).unwrap() {}
 				while db.process_reindex().unwrap() {}
 			}
 			if *self == EnableCommitPipelineStages::DbFile {

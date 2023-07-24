@@ -447,7 +447,7 @@ impl ValueTable {
 			dirty_header: AtomicBool::new(false),
 			free_entries,
 			multipart,
-			ref_counted: options.ref_counted,
+			ref_counted: options.ref_counted || options.multitree,
 			db_version,
 		})
 	}
@@ -1176,6 +1176,25 @@ impl ValueTable {
 			len += 1;
 		}
 		Ok(len)
+	}
+
+	pub fn get_num_entries(&self) -> Result<u64> {
+		if let Some(free_entries) = &self.free_entries {
+			let filled = self.filled.load(Ordering::Relaxed);
+			let free_entries = free_entries.read();
+			let num_free = free_entries.stack.len();
+			let num = (filled - 1) - num_free as u64;
+			if num > 0 && self.multipart {
+				// TODO: Need to implement this.
+				return Err(crate::error::Error::InvalidConfiguration(format!(
+					"Unable to determine number of multipart entries"
+				)))
+			}
+			return Ok(num)
+		}
+		Err(crate::error::Error::InvalidConfiguration(format!(
+			"Unable to determine number of entries"
+		)))
 	}
 }
 

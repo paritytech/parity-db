@@ -156,8 +156,9 @@ pub fn run() -> Result<(), String> {
 
 			let info_column = &mut db_options.columns[1];
 			info_column.uniform = false;
-			info_column.ref_counted = false;
 			info_column.multitree = false;
+			info_column.ref_counted = false;
+			info_column.preimage = false;
 
 			let db = parity_db::Db::open_or_create(&db_options).unwrap();
 			multitree_bench::run_internal(args, db)?;
