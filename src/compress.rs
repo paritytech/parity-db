@@ -135,11 +135,11 @@ mod lz4 {
 		}
 
 		pub(super) fn compress(&self, buf: &[u8]) -> Vec<u8> {
-			lz4::block::compress(buf, Some(lz4::block::CompressionMode::DEFAULT), true).unwrap()
+			lz4_flex::block::compress_prepend_size(buf)
 		}
 
 		pub(super) fn decompress(&self, buf: &[u8]) -> Result<Vec<u8>> {
-			lz4::block::decompress(buf, None).map_err(|_| Error::Compression)
+			lz4_flex::block::decompress_size_prepended(buf).map_err(|_| Error::Compression)
 		}
 	}
 }

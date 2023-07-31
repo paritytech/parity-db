@@ -6,7 +6,7 @@
 //! guarantee db durability.
 
 #[cfg_attr(not(target_env = "msvc"), global_allocator)]
-#[cfg(not(target_env = "msvc"))]
+#[cfg(all(not(target_env = "msvc"), feature = "jemalloc"))]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 fn main() {
