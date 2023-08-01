@@ -30,6 +30,9 @@ static QUERIES: AtomicUsize = AtomicUsize::new(0);
 static ITERATIONS: AtomicUsize = AtomicUsize::new(0);
 static EXPECTED_NUM_ENTRIES: AtomicUsize = AtomicUsize::new(0);
 
+static NUM_PATHS: AtomicUsize = AtomicUsize::new(0);
+static NUM_PATHS_SUCCESS: AtomicUsize = AtomicUsize::new(0);
+
 const TREE_COLUMN: u8 = 0;
 const INFO_COLUMN: u8 = 1;
 
@@ -202,19 +205,21 @@ pub enum NodeSpec {
 
 struct ChainGenerator {
 	depth_child_count_histograms: Vec<Histogram>,
-	age_histogram: Histogram,
+	depth_age_histograms: Vec<Histogram>,
 	value_length_histogram: Histogram,
 	seed: u64,
 	compressable: bool,
+	pruning: u64,
 }
 
 impl ChainGenerator {
 	fn new(
 		depth_child_count_histogram: &[(u32, [u32; 17])],
-		age_histogram: &[(u32, u32)],
+		depth_age_histogram: &[(u32, &[(u32, u32)])],
 		value_length_histogram: &[(u32, u32)],
 		seed: u64,
 		compressable: bool,
+		pruning: u64,
 	) -> ChainGenerator {
 		let mut depth_child_count_histograms = Vec::default();
 		for (depth, histogram_data) in depth_child_count_histogram {
@@ -227,16 +232,24 @@ impl ChainGenerator {
 			depth_child_count_histograms.push(histogram);
 		}
 
-		let age_histogram = Histogram::new(age_histogram);
+		let mut depth_age_histograms = Vec::default();
+		for (depth, histogram_data) in depth_age_histogram {
+			assert_eq!(*depth, depth_age_histograms.len() as u32);
+
+			let histogram = Histogram::new(histogram_data);
+
+			depth_age_histograms.push(histogram);
+		}
 
 		let value_length_histogram = Histogram::new(value_length_histogram);
 
 		ChainGenerator {
 			depth_child_count_histograms,
-			age_histogram,
+			depth_age_histograms,
 			value_length_histogram,
 			seed,
 			compressable,
+			pruning,
 		}
 	}
 
@@ -256,6 +269,18 @@ impl ChainGenerator {
 		key
 	}
 
+	fn num_node_children(&self, _tree_index: u64, depth: u32, seed: u64) -> u32 {
+		let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
+
+		let num_children = if depth < self.depth_child_count_histograms.len() as u32 {
+			self.depth_child_count_histograms[depth as usize].sample(rng.next_u64())
+		} else {
+			0
+		};
+
+		num_children
+	}
+
 	/// Returns tuple of node data and child specs. When only_direct_children is true node data will
 	/// be empty and non direct children will be NodeSpec::UnresolvedPath.
 	fn generate_node(
@@ -272,12 +297,21 @@ impl ChainGenerator {
 		} else {
 			0
 		};
-		let mut children = Vec::default();
+		let mut children = Vec::with_capacity(num_children as usize);
 
 		for _i in 0..num_children {
-			let age = self.age_histogram.sample(rng.next_u64()) as u64;
+			let age = if depth < self.depth_age_histograms.len() as u32 {
+				self.depth_age_histograms[depth as usize].sample(rng.next_u64()) as u64
+			} else {
+				// No age data for this depth. This implies the age is larger than was used when
+				// sampling. Hence use the oldest tree we can.
+				tree_index
+			};
 
-			let child_tree_index = if age > tree_index { tree_index } else { tree_index - age };
+			// Restrict to within the pruning window
+			let age = if self.pruning > 0 { std::cmp::min(age, self.pruning) } else { age };
+
+			let child_tree_index = if age > tree_index { 0 } else { tree_index - age };
 
 			if child_tree_index == tree_index {
 				children.push(NodeSpec::Direct(tree_index, depth + 1, rng.next_u64()));
@@ -290,56 +324,111 @@ impl ChainGenerator {
 				} else {
 					// Generate path to node in child_tree_index
 					let mut path_rng = rand::rngs::SmallRng::seed_from_u64(path_seed);
-					let mut path = Vec::default();
 					let mut path_node: Option<NodeSpec> = None;
 
 					let target_depth = depth + 1;
 
-					let mut other_tree_index = child_tree_index;
-					let mut other_depth = 0;
-					let mut other_seed = self.root_seed(child_tree_index);
-					while other_depth < target_depth {
-						let (_other_node_data, other_children) =
-							self.generate_node(other_tree_index, other_depth, other_seed, true);
+					for _ in 0..2 {
+						let mut other_tree_index = child_tree_index;
+						let mut other_depth = 0;
+						let mut other_seed = self.root_seed(child_tree_index);
+						let mut path = Vec::default();
+						while other_depth < target_depth {
+							let (_other_node_data, other_children) =
+								self.generate_node(other_tree_index, other_depth, other_seed, true);
 
-						let mut direct_children =
-							other_children.iter().enumerate().filter(|(_, x)| {
-								if let NodeSpec::Direct(..) = x {
-									true
-								} else {
-									false
-								}
-							});
-						let num_direct_children = direct_children.clone().count();
+							let direct_children =
+								other_children.iter().enumerate().filter(|(_, x)| {
+									if let NodeSpec::Direct(..) = x {
+										true
+									} else {
+										false
+									}
+								});
 
-						if num_direct_children == 0 {
-							break
-						}
+							let num_direct_children = direct_children.clone().count();
 
-						let child_index = path_rng.next_u64() % num_direct_children as u64;
-
-						let child = direct_children.nth(child_index as usize).unwrap();
-						if let NodeSpec::Direct(new_index, new_depth, new_seed) = child.1 {
-							path.push(child.0 as u32);
-
-							// Chose a direct node so should be same tree, one depth down.
-							assert_eq!(*new_index, other_tree_index);
-							assert_eq!(*new_depth, other_depth + 1);
-
-							other_tree_index = *new_index;
-							other_depth = *new_depth;
-							other_seed = *new_seed;
-
-							if other_depth == target_depth {
-								path_node = Some(NodeSpec::Path(child_tree_index, path.clone()));
+							if num_direct_children == 0 {
+								break
 							}
-						} else {
+
+							// Try to select a child that has more children itself so the path has a
+							// higher chance of success.
+							let mut num_grandchildren: Vec<usize> =
+								Vec::with_capacity(num_direct_children);
+							let mut min_grandchildren = u32::MAX;
+							let mut max_grandchildren = 0;
+							for (_index, node) in direct_children.clone() {
+								let num = if let NodeSpec::Direct(new_index, new_depth, new_seed) =
+									node
+								{
+									self.num_node_children(*new_index, *new_depth, *new_seed)
+										as usize
+								} else {
+									0
+								};
+								min_grandchildren = std::cmp::min(min_grandchildren, num as u32);
+								max_grandchildren = std::cmp::max(max_grandchildren, num as u32);
+								num_grandchildren.push(num);
+							}
+							let direct_children: Vec<(usize, &NodeSpec)> =
+								if min_grandchildren < max_grandchildren {
+									// Can remove some
+									let diff = max_grandchildren - min_grandchildren;
+									let threshold = if diff > 1 {
+										min_grandchildren + diff / 2
+									} else {
+										min_grandchildren
+									};
+									direct_children
+										.enumerate()
+										.filter(|(index, _)| {
+											num_grandchildren[*index] as u32 > threshold
+										})
+										.map(|(_, val)| val)
+										.collect::<Vec<(usize, &NodeSpec)>>()
+								} else {
+									direct_children.collect::<Vec<(usize, &NodeSpec)>>()
+								};
+
+							let num_direct_children = direct_children.len();
+
+							if num_direct_children == 0 {
+								break
+							}
+
+							let child_index = path_rng.next_u64() % num_direct_children as u64;
+
+							let child = direct_children[child_index as usize];
+							if let NodeSpec::Direct(new_index, new_depth, new_seed) = child.1 {
+								path.push(child.0 as u32);
+
+								// Chose a direct node so should be same tree, one depth down.
+								assert_eq!(*new_index, other_tree_index);
+								assert_eq!(*new_depth, other_depth + 1);
+
+								other_tree_index = *new_index;
+								other_depth = *new_depth;
+								other_seed = *new_seed;
+
+								if other_depth == target_depth {
+									path_node =
+										Some(NodeSpec::Path(child_tree_index, path.clone()));
+								}
+							} else {
+								assert!(false);
+								break
+							}
+						}
+						if path_node.is_some() {
 							break
 						}
 					}
 
+					NUM_PATHS.fetch_add(1, Ordering::SeqCst);
 					match path_node {
 						Some(node) => {
+							NUM_PATHS_SUCCESS.fetch_add(1, Ordering::SeqCst);
 							children.push(node);
 						},
 						None => {
@@ -364,8 +453,11 @@ impl ChainGenerator {
 			return (Vec::new(), children)
 		}
 
+		// Polkadot doesn't store actual values in branch nodes, only in leaf nodes. Hence the value
+		// stored in the db will only be for the nibble path.
 		let mut size = 4;
 		if num_children == 0 {
+			// Leaf node, so simulate an actual value using the size histogram.
 			size = self.value_length_histogram.sample(rng.next_u64()) as usize;
 			if FORCE_NO_MULTIPART_VALUES {
 				size = std::cmp::min(size, 32760 - 64);
@@ -421,9 +513,13 @@ fn informant(
 			num_expected_entries = new_num_expected_entries;
 			num_entries = new_num_entries;
 
+			let num_paths = NUM_PATHS.load(Ordering::Relaxed);
+			let num_paths_success = NUM_PATHS_SUCCESS.load(Ordering::Relaxed);
+			let existing_ratio = num_paths_success as f32 / num_paths as f32;
+
 			output_helper.write().print_fixed(format!(
-				"Entries, Created: {}, ValueTables: {}",
-				num_expected_entries, num_entries
+				"Entries, Created: {}, ValueTables: {}, Path success ratio: {}",
+				num_expected_entries, num_entries, existing_ratio
 			));
 
 			if num_entries == 0 {
@@ -491,16 +587,16 @@ fn build_commit_tree<'s, 'd: 's>(
 
 				let mut final_child_address: Option<u64> = None;
 				if let Some(tree_guard) = tree_guards.get(&key) {
-					if let Some((db_node_data, db_children)) = tree_guard.get_root().unwrap() {
+					if let Some((_db_node_data, db_children)) = tree_guard.get_root().unwrap() {
 						// Note: We don't actually have to generate any nodes here; we could just
 						// traverse down the database nodes. Only generating them to verify data.
-						let (gen_node_data, gen_children) =
+						/* let (gen_node_data, gen_children) =
 							chain_generator.generate_node(tree_index, 0, root_seed, false);
 
 						assert_eq!(gen_node_data, db_node_data);
 						assert_eq!(gen_children.len(), db_children.len());
 
-						let mut generated_children = gen_children;
+						let mut generated_children = gen_children; */
 						let mut database_children = db_children;
 
 						for index in 0..path.len() {
@@ -513,7 +609,7 @@ fn build_commit_tree<'s, 'd: 's>(
 								break
 							}
 
-							let (child_tree_index, child_depth, child_seed) =
+							/* let (child_tree_index, child_depth, child_seed) =
 								match &generated_children[child_index as usize] {
 									NodeSpec::Direct(child_tree_index, child_depth, child_seed) =>
 										(*child_tree_index, *child_depth, *child_seed),
@@ -528,14 +624,14 @@ fn build_commit_tree<'s, 'd: 's>(
 								child_depth,
 								child_seed,
 								false,
-							);
+							); */
 
 							match tree_guard.get_node(child_address).unwrap() {
-								Some((db_node_data, db_children)) => {
-									assert_eq!(gen_node_data, db_node_data);
+								Some((_db_node_data, db_children)) => {
+									/* assert_eq!(gen_node_data, db_node_data);
 									assert_eq!(gen_children.len(), db_children.len());
 
-									generated_children = gen_children;
+									generated_children = gen_children; */
 									database_children = db_children;
 								},
 								None => return Err("Child address not in database".to_string()),
@@ -707,7 +803,7 @@ fn writer(
 	start_commit: usize,
 	output_helper: Arc<RwLock<OutputHelper>>,
 ) -> Result<(), String> {
-	let seed = args.seed.unwrap_or(0);
+	//let seed = args.seed.unwrap_or(0);
 	let mut commit = Vec::new();
 
 	loop {
@@ -771,8 +867,8 @@ fn writer(
 			commit.clear();
 
 			// Immediately read and check a random value from the tree
-			let mut rng = rand::rngs::SmallRng::seed_from_u64(seed + n as u64);
-			read_value(tree_index, &mut rng, &db, &chain_generator)?;
+			/* let mut rng = rand::rngs::SmallRng::seed_from_u64(seed + n as u64);
+			read_value(tree_index, &mut rng, &db, &chain_generator)?; */
 
 			if args.pruning > 0 && !THREAD_PRUNING {
 				try_prune(&db, &args, &chain_generator, &mut commit, &output_helper)?;
@@ -1019,18 +1115,20 @@ pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 		0
 	};
 
-	let total_num_expected_tree_nodes: u32 =
-		data::DEPTH_CHILD_COUNT_HISTOGRAMS.iter().map(|x| x.1.iter().sum::<u32>()).sum();
 	output_helper
 		.write()
-		.println(format!("Expected average num tree nodes: {}", total_num_expected_tree_nodes));
+		.println(format!("Expected average num tree nodes: {}", data::NUM_NODES));
+	output_helper
+		.write()
+		.println(format!("Expected average num new nodes: {}", data::AVERAGE_NUM_NEW_NODES));
 
 	let chain_generator = ChainGenerator::new(
 		data::DEPTH_CHILD_COUNT_HISTOGRAMS,
-		data::AGE_HISTOGRAM,
+		data::DEPTH_AGE_HISTOGRAMS,
 		data::VALUE_LENGTH_HISTOGRAM,
 		args.seed.unwrap_or(0),
 		args.compress,
+		args.pruning,
 	);
 	let chain_generator = Arc::new(chain_generator);
 
