@@ -762,9 +762,17 @@ impl ValueTable {
 		}
 	}
 
-	/* pub fn claim_contiguous_entries(&self, num: u64, min_span_length: u64) -> Vec<u64> {
-		Vec::new()
-	} */
+	pub fn claim_contiguous_entries(
+		&self,
+		num: usize,
+		_min_span_length: usize,
+	) -> Result<Vec<u64>> {
+		let mut entries: Vec<u64> = Default::default();
+		for _i in 0..num {
+			entries.push(self.claim_next_free()?);
+		}
+		Ok(entries)
+	}
 
 	fn overwrite_chain(
 		&self,
