@@ -298,18 +298,13 @@ impl DbInner {
 		}
 	}
 
-	/* fn get_root(&self, col: ColId, key: &[u8]) -> Result<Option<(Vec<u8>, Children)>> {
-		match &self.columns[col as usize] {
-			Column::Hash(column) => {
-				let value = self.get(col, key)?;
-				if let Some(data) = value {
-					return Ok(Some(unpack_node_data(data)?))
-				}
-				Ok(None)
-			},
-			Column::Tree(_) => Err(Error::InvalidConfiguration("Not a HashColumn.".to_string())),
+	fn get_root(&self, col: ColId, key: &[u8]) -> Result<Option<(Vec<u8>, Children)>> {
+		let value = self.get(col, key)?;
+		if let Some(data) = value {
+			return Ok(Some(unpack_node_data(data)?))
 		}
-	} */
+		Ok(None)
+	}
 
 	fn get_node(
 		&self,
@@ -1147,6 +1142,14 @@ impl Db {
 
 	pub fn get_tree(&self, col: ColId, key: &[u8]) -> Result<Option<Arc<RwLock<dyn TreeReader>>>> {
 		self.inner.get_tree(&self.inner, col, key, true)
+	}
+
+	pub fn get_root(&self, col: ColId, key: &[u8]) -> Result<Option<(Vec<u8>, Children)>> {
+		self.inner.get_root(col, key)
+	}
+
+	pub fn get_node(&self, col: ColId, node_address: NodeAddress) -> Result<Option<(Vec<u8>, Children)>> {
+		self.inner.get_node(col, node_address)
 	}
 
 	/// Commit a set of changes to the database.

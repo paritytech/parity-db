@@ -68,6 +68,8 @@ pub struct ColumnOptions {
 	/// Column supports Multitree operations. This allows committing and querying of tree
 	/// structures.
 	pub multitree: bool,
+	/// Column is append-only. Delete operations are ignored.
+	pub append_only: bool,
 }
 
 /// Database metadata.
@@ -84,13 +86,14 @@ pub struct Metadata {
 impl ColumnOptions {
 	fn as_string(&self) -> String {
 		format!(
-			"preimage: {}, uniform: {}, refc: {}, compression: {}, ordered: {}, multitree: {}",
+			"preimage: {}, uniform: {}, refc: {}, compression: {}, ordered: {}, multitree: {}, append_only: {}",
 			self.preimage,
 			self.uniform,
 			self.ref_counted,
 			self.compression as u8,
 			self.btree_index,
 			self.multitree,
+			self.append_only,
 		)
 	}
 
@@ -124,6 +127,7 @@ impl ColumnOptions {
 		let compression: u8 = vals.get("compression").and_then(|c| c.parse().ok()).unwrap_or(0);
 		let btree_index = vals.get("ordered").and_then(|c| c.parse().ok()).unwrap_or(false);
 		let multitree = vals.get("multitree").and_then(|c| c.parse().ok()).unwrap_or(false);
+		let append_only = vals.get("append_only").and_then(|c| c.parse().ok()).unwrap_or(false);
 
 		Some(ColumnOptions {
 			preimage,
@@ -132,6 +136,7 @@ impl ColumnOptions {
 			compression: compression.into(),
 			btree_index,
 			multitree,
+			append_only,
 		})
 	}
 }
@@ -145,6 +150,7 @@ impl Default for ColumnOptions {
 			compression: CompressionType::NoCompression,
 			btree_index: false,
 			multitree: false,
+			append_only: false,
 		}
 	}
 }

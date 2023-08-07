@@ -101,6 +101,7 @@ pub struct HashColumn {
 	uniform_keys: bool,
 	collect_stats: bool,
 	ref_counted: bool,
+	append_only: bool,
 	salt: Salt,
 	stats: ColumnStats,
 	compression: Compress,
@@ -428,6 +429,7 @@ impl HashColumn {
 			preimage: col_options.preimage,
 			uniform_keys: col_options.uniform,
 			ref_counted: col_options.ref_counted,
+			append_only: col_options.append_only,
 			collect_stats,
 			salt: metadata.salt,
 			stats,
@@ -784,7 +786,9 @@ impl HashColumn {
 				NodeRef::New(node) =>
 					self.claim_node(node, tables, tier_addresses, tier_index, node_values)?,
 				NodeRef::Existing(address) => {
-					node_values.push(NodeChange::IncrementReference(*address));
+					if !self.append_only {
+						node_values.push(NodeChange::IncrementReference(*address));
+					}
 					*address
 				},
 			};
