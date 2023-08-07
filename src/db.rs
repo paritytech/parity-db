@@ -259,7 +259,7 @@ impl DbInner {
 				}
 				// Go into tables and log overlay.
 				let log = self.log.overlays();
-				column.get(&key, log)
+				Ok(column.get(&key, log)?.map(|(v, _rc)| v))
 			},
 			Column::Tree(column) => {
 				let overlay = self.commit_overlay.read();
@@ -421,12 +421,17 @@ impl DbInner {
 			} else if self.options.columns[col as usize].multitree {
 				match &self.columns[col as usize] {
 					Column::Hash(column) => match change {
-						Operation::Set(..) |
-						Operation::Dereference(..) |
-						Operation::Reference(..) =>
+						Operation::Set(..) =>
 							return Err(Error::InvalidConfiguration(
 								"Invalid operation for multitree column".to_string(),
 							)),
+						Operation::Reference(..) => {
+							commit.indexed.entry(col).or_insert_with(|| IndexedChangeSet::new(col)).push(
+								change,
+								&self.options,
+								self.db_version,
+							)?
+						}
 						Operation::InsertTree(..) => {
 							let (root_data, node_values) = column.claim_tree_values(&change)?;
 
@@ -445,18 +450,13 @@ impl DbInner {
 									.push_node_change(node_change);
 							}
 						},
-						Operation::RemoveTree(key) => {
-							let root_operation = Operation::Dereference(&key);
-							commit
-								.indexed
-								.entry(col)
-								.or_insert_with(|| IndexedChangeSet::new(col))
-								.push(root_operation, &self.options, self.db_version)?;
-
+						Operation::RemoveTree(key) | Operation::Dereference(key) => {
 							let value = self.get(col, &key)?;
 							if let Some(data) = value {
 								let root_data = unpack_node_data(data)?;
 								let children = root_data.1;
+								let salt = self.options.salt.unwrap_or_default();
+								let key = hash_key(&key, &salt, self.options.columns[col as usize].uniform, self.db_version);
 
 								let node_change = NodeChange::DereferenceChildren(key, children);
 
@@ -1459,7 +1459,7 @@ impl TreeReader for DbTreeReader {
 				} else {
 					// Go into tables and log overlay.
 					let log = self.db.log.overlays();
-					column.get(&self.key, log)
+					Ok(column.get(&self.key, log)?.map(|(v, _rc)| v))
 				}?;
 
 				if let Some(data) = value {
@@ -1655,7 +1655,7 @@ pub enum NodeChange {
 	/// (address)
 	IncrementReference(u64),
 	/// Dereference and remove any of the children in the tree
-	DereferenceChildren(Vec<u8>, Children),
+	DereferenceChildren(Key, Children),
 }
 
 #[derive(Debug, Default)]
@@ -1790,20 +1790,26 @@ impl IndexedChangeSet {
 					column.write_address_inc_ref_plan(*address, writer)?;
 				},
 				NodeChange::DereferenceChildren(key, children) => {
-					let tree = db.get_tree(db, col, key, false).unwrap();
-					if let Some(tree) = tree {
-						//println!("Locking tree {:?}", &key[0..3]);
-						let guard = tree.write();
-						let mut num_removed = 0;
-						//println!("Dereferencing tree {:?}", &key[0..3]);
-						self.write_dereference_children_plan(
-							column,
-							&guard,
-							children,
-							&mut num_removed,
-							writer,
-						)?;
-						//println!("Dereferenced tree {:?}, removed {}", &key[0..3], num_removed);
+					if let Some((_root, rc)) = column.get(key, writer)? {
+						column.write_plan(&Operation::Dereference(*key), writer)?;
+						log::debug!(target: "parity-db", "Dereferencing root, rc={}", rc);
+						if rc == 1 {
+							let tree = db.get_tree(db, col, key, false).unwrap();
+							if let Some(tree) = tree {
+								//println!("Locking tree {:?}", &key[0..3]);
+								let guard = tree.write();
+								let mut num_removed = 0;
+								//println!("Dereferencing tree {:?}", &key[0..3]);
+								self.write_dereference_children_plan(
+									column,
+									&guard,
+									children,
+									&mut num_removed,
+									writer,
+								)?;
+								log::debug!(target: "parity-db", "Dereferenced tree {:?}, removed {}", &key[0..3], num_removed);
+							}
+						}
 					}
 					// TODO: Remove TreeReader from Db.
 				},

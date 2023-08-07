@@ -201,21 +201,21 @@ pub struct ReindexBatch {
 }
 
 impl HashColumn {
-	pub fn get(&self, key: &Key, log: &impl LogQuery) -> Result<Option<Value>> {
+	pub fn get(&self, key: &Key, log: &impl LogQuery) -> Result<Option<(Value, u32)>> {
 		let tables = self.tables.read();
 		let values = self.as_ref(&tables.value);
-		if let Some((tier, value)) = self.get_in_index(key, &tables.index, values, log)? {
+		if let Some((tier, rc, value)) = self.get_in_index(key, &tables.index, values, log)? {
 			if self.collect_stats {
 				self.stats.query_hit(tier);
 			}
-			return Ok(Some(value))
+			return Ok(Some((value, rc)))
 		}
 		for r in &self.reindex.read().queue {
-			if let Some((tier, value)) = self.get_in_index(key, r, values, log)? {
+			if let Some((tier, rc, value)) = self.get_in_index(key, r, values, log)? {
 				if self.collect_stats {
 					self.stats.query_hit(tier);
 				}
-				return Ok(Some(value))
+				return Ok(Some((value, rc)))
 			}
 		}
 		if self.collect_stats {
@@ -225,13 +225,13 @@ impl HashColumn {
 	}
 
 	pub fn get_size(&self, key: &Key, log: &RwLock<LogOverlays>) -> Result<Option<u32>> {
-		self.get(key, log).map(|v| v.map(|v| v.len() as u32))
+		Ok(self.get(key, log)?.map(|(v, _rc)| v.len() as u32))
 	}
 
 	pub fn get_value(&self, address: Address, log: &impl LogQuery) -> Result<Option<Value>> {
 		let tables = self.tables.read();
 		let values = self.as_ref(&tables.value);
-		if let Some((tier, value)) =
+		if let Some((tier, _rc, value)) =
 			Column::get_value(TableKeyQuery::Check(&TableKey::NoHash), address, values, log)?
 		{
 			if self.collect_stats {
@@ -251,7 +251,7 @@ impl HashColumn {
 		index: &IndexTable,
 		tables: TablesRef,
 		log: &impl LogQuery,
-	) -> Result<Option<(u8, Value)>> {
+	) -> Result<Option<(u8, u32, Value)>> {
 		let (mut entry, mut sub_index) = index.get(key, 0, log)?;
 		while !entry.is_empty() {
 			let address = entry.address(index.id.index_bits());
@@ -290,13 +290,13 @@ impl Column {
 		address: Address,
 		tables: TablesRef,
 		log: &impl LogQuery,
-	) -> Result<Option<(u8, Value)>> {
+	) -> Result<Option<(u8, u32, Value)>> {
 		let size_tier = address.size_tier() as usize;
-		if let Some((value, compressed, _rc)) =
+		if let Some((value, compressed, rc)) =
 			tables.tables[size_tier].query(&mut key, address.offset(), log)?
 		{
 			let value = if compressed { tables.compression.decompress(&value)? } else { value };
-			return Ok(Some((size_tier as u8, value)))
+			return Ok(Some((size_tier as u8, rc, value)))
 		}
 		Ok(None)
 	}
