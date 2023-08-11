@@ -456,9 +456,9 @@ impl DbInner {
 								let root_data = unpack_node_data(data)?;
 								let children = root_data.1;
 								let salt = self.options.salt.unwrap_or_default();
-								let key = hash_key(&key, &salt, self.options.columns[col as usize].uniform, self.db_version);
+								let hash = hash_key(&key, &salt, self.options.columns[col as usize].uniform, self.db_version);
 
-								let node_change = NodeChange::DereferenceChildren(key, children);
+								let node_change = NodeChange::DereferenceChildren(key, hash, children);
 
 								commit
 									.indexed
@@ -1655,7 +1655,7 @@ pub enum NodeChange {
 	/// (address)
 	IncrementReference(u64),
 	/// Dereference and remove any of the children in the tree
-	DereferenceChildren(Key, Children),
+	DereferenceChildren(Vec<u8>, Key, Children),
 }
 
 #[derive(Debug, Default)]
@@ -1789,9 +1789,9 @@ impl IndexedChangeSet {
 				NodeChange::IncrementReference(address) => {
 					column.write_address_inc_ref_plan(*address, writer)?;
 				},
-				NodeChange::DereferenceChildren(key, children) => {
-					if let Some((_root, rc)) = column.get(key, writer)? {
-						column.write_plan(&Operation::Dereference(*key), writer)?;
+				NodeChange::DereferenceChildren(key, hash, children) => {
+					if let Some((_root, rc)) = column.get(hash, writer)? {
+						column.write_plan(&Operation::Dereference(*hash), writer)?;
 						log::debug!(target: "parity-db", "Dereferencing root, rc={}", rc);
 						if rc == 1 {
 							let tree = db.get_tree(db, col, key, false).unwrap();
