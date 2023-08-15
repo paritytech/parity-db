@@ -134,10 +134,22 @@ mod lz4 {
 			Lz4
 		}
 
+		#[cfg(all(not(feature = "experimental-lz4"), feature = "lz4"))]
+		pub(super) fn compress(&self, buf: &[u8]) -> Vec<u8> {
+			lz4::block::compress(buf, Some(lz4::block::CompressionMode::DEFAULT), true).unwrap()
+		}
+
+		#[cfg(all(not(feature = "lz4"), feature = "experimental-lz4"))]
 		pub(super) fn compress(&self, buf: &[u8]) -> Vec<u8> {
 			lz4_flex::block::compress_prepend_size(buf)
 		}
 
+		#[cfg(all(not(feature = "experimental-lz4"), feature = "lz4"))]
+		pub(super) fn decompress(&self, buf: &[u8]) -> Result<Vec<u8>> {
+			lz4::block::decompress(buf, None).map_err(|_| Error::Compression)
+		}
+
+		#[cfg(all(not(feature = "lz4"), feature = "experimental-lz4"))]
 		pub(super) fn decompress(&self, buf: &[u8]) -> Result<Vec<u8>> {
 			lz4_flex::block::decompress_size_prepended(buf).map_err(|_| Error::Compression)
 		}

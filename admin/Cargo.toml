@@ -1,19 +1,22 @@
 [package]
 name = "parity-db-admin"
-version = "0.0.1"
+version = "0.0.2"
 authors = ["Parity Technologies <admin@parity.io>"]
 publish = false
 edition = "2018"
+
 [features]
-default = []
+default = ["jemalloc", "lz4"]
 jemalloc = ["dep:jemallocator"]
+lz4 = ["parity-db/lz4"]
+experimental-lz4 = ["parity-db/experimental-lz4"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.10.0"
 fdlimit = "0.2.1"
 log = "0.4.8"
-parity-db = { path = ".." }
+parity-db = { path = "..", default-features = false }
 rand = { version = "0.8.5", features = ["small_rng"] }
 blake2 = "0.10.4"
 
