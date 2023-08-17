@@ -151,7 +151,7 @@ struct DbInner {
 	next_reindex: AtomicU64,
 	bg_err: Mutex<Option<Arc<Error>>>,
 	db_version: u32,
-	_lock_file: std::fs::File,
+	lock_file: std::fs::File,
 }
 
 #[derive(Debug)]
@@ -233,7 +233,7 @@ impl DbInner {
 			last_enacted: AtomicU64::new(last_enacted),
 			bg_err: Mutex::new(None),
 			db_version: metadata.version,
-			_lock_file: lock_file,
+			lock_file,
 		})
 	}
 
@@ -1250,6 +1250,9 @@ impl Db {
 		}
 		if let Err(e) = self.inner.kill_logs() {
 			log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
+		}
+		if let Err(e) = self.inner.lock_file.unlock() {
+			log::debug!(target: "parity-db", "Error removing file lock: {:?}", e);
 		}
 	}
 }
