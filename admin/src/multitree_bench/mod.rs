@@ -692,6 +692,7 @@ fn read_value(
 	tree_index: u64,
 	rng: &mut rand::rngs::SmallRng,
 	db: &Db,
+	args: &Args,
 	chain_generator: &ChainGenerator,
 ) -> Result<(), String> {
 	let mut depth = 0;
@@ -746,26 +747,35 @@ fn read_value(
 								generated_children = gen_children;
 								database_children = db_children;
 							},
-							None => return Err("Child address not in database".to_string()),
+							None => panic!("Child address not in database"),
 						}
 					}
 
 					QUERIES.fetch_add(1, Ordering::SeqCst);
 				},
 				None => {
-					// Is this expected?
-					let num_removed = NUM_REMOVED.load(Ordering::Relaxed);
-					if tree_index >= num_removed as u64 {
-						return Err("Tree root not in database".to_string())
+					// Is this expected? If there are multiple writers then commits might happen out
+					// of order so this path can happen even when the tree hasn't been pruned.
+					if args.writers == 1 {
+						let num_removed = NUM_REMOVED.load(Ordering::Relaxed);
+						if tree_index >= num_removed as u64 {
+							panic!("Tree root not in database");
+						}
 					}
 				},
 			}
 		},
 		None => {
-			// Is this expected?
-			let num_removed = NUM_REMOVED.load(Ordering::Relaxed);
-			if tree_index >= num_removed as u64 {
-				return Err("Tree not in database".to_string())
+			// Is this expected? If there are multiple writers then commits might happen out of
+			// order so this path can happen even when the tree hasn't been pruned.
+			if args.writers == 1 {
+				let num_removed = NUM_REMOVED.load(Ordering::Relaxed);
+				if tree_index >= num_removed as u64 {
+					panic!(
+						"Tree not in database during read (index: {}, removed: {})",
+						tree_index, num_removed
+					);
+				}
 			}
 		},
 	}
@@ -849,11 +859,6 @@ fn writer(
 		if let NodeRef::New(node) = root_node_ref {
 			let key: [u8; 32] = chain_generator.key(root_seed);
 
-			output_helper.write().println(format!(
-				"Commit tree {}, new: {}, existing: {}",
-				tree_index, num_new_nodes, num_existing_nodes
-			));
-
 			commit.push((TREE_COLUMN, Operation::InsertTree(key.to_vec(), node)));
 
 			commit.push((
@@ -862,13 +867,19 @@ fn writer(
 			));
 
 			db.commit_changes(commit.drain(..)).unwrap();
-			COMMITS.fetch_add(1, Ordering::Relaxed);
-			EXPECTED_NUM_ENTRIES.fetch_add(num_new_nodes as usize, Ordering::Relaxed);
+
+			output_helper.write().println(format!(
+				"Commit tree {}, new: {}, existing: {}",
+				tree_index, num_new_nodes, num_existing_nodes
+			));
+
+			COMMITS.fetch_add(1, Ordering::SeqCst);
+			EXPECTED_NUM_ENTRIES.fetch_add(num_new_nodes as usize, Ordering::SeqCst);
 			commit.clear();
 
 			// Immediately read and check a random value from the tree
 			/* let mut rng = rand::rngs::SmallRng::seed_from_u64(seed + n as u64);
-			read_value(tree_index, &mut rng, &db, &chain_generator)?; */
+			read_value(tree_index, &mut rng, &db, &args, &chain_generator)?; */
 
 			if args.pruning > 0 && !THREAD_PRUNING {
 				try_prune(&db, &args, &chain_generator, &mut commit, &output_helper)?;
@@ -921,7 +932,7 @@ fn try_prune(
 			),
 		));
 
-		NUM_REMOVED.fetch_add(1, Ordering::Relaxed);
+		NUM_REMOVED.fetch_add(1, Ordering::SeqCst);
 		db.commit_changes(commit.drain(..)).unwrap();
 		commit.clear();
 	}
@@ -966,7 +977,7 @@ fn reader(
 		//let tree_index = rng.next_u64() % commits;
 		let tree_index = (rng.next_u64() % (commits - num_removed)) + num_removed;
 
-		read_value(tree_index, &mut rng, &db, &chain_generator)?;
+		read_value(tree_index, &mut rng, &db, &args, &chain_generator)?;
 	}
 
 	Ok(())
@@ -1011,7 +1022,7 @@ fn iter_children<'a>(
 					chain_generator,
 				)?;
 			},
-			None => return Err("Child address not in database".to_string()),
+			None => panic!("Child address not in database"),
 		}
 	}
 
@@ -1069,19 +1080,29 @@ fn iter(
 						ITERATIONS.fetch_add(1, Ordering::SeqCst);
 					},
 					None => {
-						// Is this expected?
-						let num_removed = NUM_REMOVED.load(Ordering::Relaxed);
-						if tree_index >= num_removed as u64 {
-							return Err("Tree root not in database".to_string())
+						// Is this expected? If there are multiple writers then commits might happen
+						// out of order so this path can happen even when the tree hasn't been
+						// pruned.
+						if args.writers == 1 {
+							let num_removed = NUM_REMOVED.load(Ordering::Relaxed);
+							if tree_index >= num_removed as u64 {
+								panic!("Tree root not in database");
+							}
 						}
 					},
 				}
 			},
 			None => {
-				// Is this expected?
-				let num_removed = NUM_REMOVED.load(Ordering::Relaxed);
-				if tree_index >= num_removed as u64 {
-					return Err("Tree not in database".to_string())
+				// Is this expected? If there are multiple writers then commits might happen out of
+				// order so this path can happen even when the tree hasn't been pruned.
+				if args.writers == 1 {
+					let num_removed = NUM_REMOVED.load(Ordering::Relaxed);
+					if tree_index >= num_removed as u64 {
+						panic!(
+							"Tree not in database during iterator (index: {}, removed: {})",
+							tree_index, num_removed
+						);
+					}
 				}
 			},
 		}
@@ -1231,7 +1252,7 @@ pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 		iterations
 	));
 
-	if args.empty_on_shutdown {
+	if args.empty_on_shutdown && args.pruning > 0 {
 		// Continue removing trees until they are all gone.
 		TARGET_NUM_REMOVED.store(args.commits, Ordering::SeqCst);
 		while NUM_REMOVED.load(Ordering::Relaxed) < args.commits {
@@ -1250,7 +1271,7 @@ pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 		t.join().unwrap()?;
 	}
 
-	if args.empty_on_shutdown {
+	if args.empty_on_shutdown && args.pruning > 0 {
 		output_helper.write().println_final(format!("Removed all entries"));
 	}
 

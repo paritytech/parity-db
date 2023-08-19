@@ -932,7 +932,9 @@ impl HashColumn {
 		let address = Address::from_u64(address);
 		let target_tier = address.size_tier();
 		let offset = address.offset();
-		tables.tables[target_tier as usize].write_inc_ref(offset, log)?;
+
+		let exists = tables.tables[target_tier as usize].change_ref(offset, 1, log)?;
+		assert!(exists);
 
 		let stats = self.collect_stats.then_some(&self.stats);
 		if let Some(stats) = stats {

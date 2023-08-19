@@ -447,7 +447,7 @@ impl ValueTable {
 			dirty_header: AtomicBool::new(false),
 			free_entries,
 			multipart,
-			ref_counted: options.ref_counted || options.multitree,
+			ref_counted: options.ref_counted || (options.multitree && !options.append_only),
 			db_version,
 		})
 	}
@@ -700,6 +700,12 @@ impl ValueTable {
 	}
 
 	pub fn next_free(&self, log: &mut LogWriter) -> Result<u64> {
+		let free_entries_guard = if let Some(free_entries) = &self.free_entries {
+			Some(free_entries.write())
+		} else {
+			None
+		};
+
 		let filled = self.filled.load(Ordering::Relaxed);
 		let last_removed = self.last_removed.load(Ordering::Relaxed);
 		let index = if last_removed != 0 {
@@ -711,8 +717,7 @@ impl ValueTable {
 				last_removed,
 			);
 			self.last_removed.store(next_removed, Ordering::Relaxed);
-			if let Some(free_entries) = &self.free_entries {
-				let mut free_entries = free_entries.write();
+			if let Some(mut free_entries) = free_entries_guard {
 				let last = free_entries.stack.pop().unwrap();
 				assert_eq!(last, last_removed);
 				free_entries.ordered.remove(&last_removed);
@@ -735,11 +740,11 @@ impl ValueTable {
 	pub fn claim_next_free(&self) -> Result<u64> {
 		match &self.free_entries {
 			Some(free_entries) => {
+				let mut free_entries = free_entries.write();
+
 				let filled = self.filled.load(Ordering::Relaxed);
 				let last_removed = self.last_removed.load(Ordering::Relaxed);
 				let index = if last_removed != 0 {
-					let mut free_entries = free_entries.write();
-
 					let last = free_entries.stack.pop().unwrap();
 					assert_eq!(last, last_removed);
 					free_entries.ordered.remove(&last_removed);
@@ -877,6 +882,12 @@ impl ValueTable {
 	}
 
 	fn clear_slot(&self, index: u64, log: &mut LogWriter) -> Result<()> {
+		let free_entries_guard = if let Some(free_entries) = &self.free_entries {
+			Some(free_entries.write())
+		} else {
+			None
+		};
+
 		let last_removed = self.last_removed.load(Ordering::Relaxed);
 		log::trace!(
 			target: "parity-db",
@@ -893,8 +904,7 @@ impl ValueTable {
 		self.last_removed.store(index, Ordering::Relaxed);
 		self.dirty_header.store(true, Ordering::Relaxed);
 
-		if let Some(free_entries) = &self.free_entries {
-			let mut free_entries = free_entries.write();
+		if let Some(mut free_entries) = free_entries_guard {
 			free_entries.stack.push(index);
 			free_entries.ordered.insert(index);
 		}
@@ -1066,6 +1076,11 @@ impl ValueTable {
 		if self.file.file.read().is_none() {
 			return Ok(())
 		}
+		let _free_entries_guard = if let Some(free_entries) = &self.free_entries {
+			Some(free_entries.write())
+		} else {
+			None
+		};
 		let mut header = Header::default();
 		self.file.read_at(&mut header.0, 0)?;
 		let last_removed = header.last_removed();
@@ -1079,6 +1094,11 @@ impl ValueTable {
 	}
 
 	pub fn complete_plan(&self, log: &mut LogWriter) -> Result<()> {
+		let _free_entries_guard = if let Some(free_entries) = &self.free_entries {
+			Some(free_entries.write())
+		} else {
+			None
+		};
 		if let Ok(true) =
 			self.dirty_header
 				.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
@@ -1167,6 +1187,11 @@ impl ValueTable {
 
 	/// Validate free records sequence.
 	pub fn check_free_refs(&self) -> Result<u64> {
+		let _free_entries_guard = if let Some(free_entries) = &self.free_entries {
+			Some(free_entries.read())
+		} else {
+			None
+		};
 		let filled = self.filled.load(Ordering::Relaxed);
 		let mut next = self.last_removed.load(Ordering::Relaxed);
 		let mut len = 0;
@@ -1188,8 +1213,8 @@ impl ValueTable {
 
 	pub fn get_num_entries(&self) -> Result<u64> {
 		if let Some(free_entries) = &self.free_entries {
-			let filled = self.filled.load(Ordering::Relaxed);
 			let free_entries = free_entries.read();
+			let filled = self.filled.load(Ordering::Relaxed);
 			let num_free = free_entries.stack.len();
 			let num = (filled - 1) - num_free as u64;
 			if num > 0 && self.multipart {

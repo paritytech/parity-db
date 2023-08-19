@@ -30,14 +30,16 @@ use crate::{
 	log::{Log, LogAction},
 	multitree::{Children, NewNode, NodeAddress},
 	options::{Options, CURRENT_VERSION},
-	parking_lot::{Condvar, Mutex, RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
+	parking_lot::{
+		Condvar, Mutex, MutexGuard, RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard,
+	},
 	stats::StatSummary,
 	ColumnOptions, Key,
 };
 use fs2::FileExt;
 use std::{
 	borrow::Borrow,
-	collections::{BTreeMap, HashMap, VecDeque},
+	collections::{BTreeMap, HashMap, HashSet, VecDeque},
 	ops::Bound,
 	sync::{
 		atomic::{AtomicBool, AtomicU64, Ordering},
@@ -137,6 +139,8 @@ struct CommitQueue {
 #[derive(Debug)]
 struct Trees {
 	readers: HashMap<Key, Weak<RwLock<DbTreeReader>>, IdentityBuildHasher>,
+	/// Number of queued dereferences for each tree
+	to_dereference: HashMap<Key, usize>,
 }
 
 #[derive(Debug)]
@@ -363,8 +367,10 @@ impl DbInner {
 
 				let mut trees = RwLockUpgradableReadGuard::upgrade(trees);
 
-				let column_trees =
-					trees.entry(col).or_insert_with(|| Trees { readers: Default::default() });
+				let column_trees = trees.entry(col).or_insert_with(|| Trees {
+					readers: Default::default(),
+					to_dereference: Default::default(),
+				});
 
 				let reader =
 					Arc::new(RwLock::new(DbTreeReader { db: db.clone(), col, key: hash_key }));
@@ -425,15 +431,40 @@ impl DbInner {
 							return Err(Error::InvalidConfiguration(
 								"Invalid operation for multitree column".to_string(),
 							)),
-						Operation::Reference(..) => {
-							commit.indexed.entry(col).or_insert_with(|| IndexedChangeSet::new(col)).push(
-								change,
-								&self.options,
-								self.db_version,
-							)?
-						}
+						Operation::Reference(..) => commit
+							.indexed
+							.entry(col)
+							.or_insert_with(|| IndexedChangeSet::new(col))
+							.push(change, &self.options, self.db_version)?,
 						Operation::InsertTree(..) => {
 							let (root_data, node_values) = column.claim_tree_values(&change)?;
+
+							let trees = self.trees.read();
+							if let Some(column_trees) = trees.get(&col) {
+								for (hash, count) in &column_trees.to_dereference {
+									assert!(*count > 0);
+
+									// Check if TreeReader is active for this tree
+									let mut tree_active = false;
+									if let Some(reader) = column_trees.readers.get(hash) {
+										let reader = reader.upgrade();
+										if let Some(reader) = reader {
+											if reader.is_locked() {
+												tree_active = true;
+											}
+										}
+									}
+									if tree_active {
+										commit
+											.indexed
+											.entry(col)
+											.or_insert_with(|| IndexedChangeSet::new(col))
+											.used_trees
+											.insert(*hash);
+									}
+								}
+							}
+							drop(trees);
 
 							let root_operation = Operation::Set(change.key(), root_data);
 							commit
@@ -456,9 +487,25 @@ impl DbInner {
 								let root_data = unpack_node_data(data)?;
 								let children = root_data.1;
 								let salt = self.options.salt.unwrap_or_default();
-								let hash = hash_key(&key, &salt, self.options.columns[col as usize].uniform, self.db_version);
+								let hash = hash_key(
+									&key,
+									&salt,
+									self.options.columns[col as usize].uniform,
+									self.db_version,
+								);
 
-								let node_change = NodeChange::DereferenceChildren(key, hash, children);
+								let mut trees = self.trees.write();
+								if let Some(column_trees) = trees.get_mut(&col) {
+									let count =
+										column_trees.to_dereference.get(&hash).unwrap_or(&0) + 1;
+									column_trees.to_dereference.insert(hash, count);
+								}
+								drop(trees);
+
+								commit.check_for_deferral = true;
+
+								let node_change =
+									NodeChange::DereferenceChildren(key, hash, children);
 
 								commit
 									.indexed
@@ -509,7 +556,7 @@ impl DbInner {
 		let mut overlay = self.commit_overlay.write();
 
 		queue.record_id += 1;
-		let record_id = queue.record_id + 1;
+		let record_id = queue.record_id;
 
 		let mut bytes = 0;
 		for (c, indexed) in &commit.indexed {
@@ -541,6 +588,72 @@ impl DbInner {
 		queue.commits.push_back(commit);
 		queue.bytes += bytes;
 		self.log_worker_wait.signal();
+		Ok(())
+	}
+
+	fn defer_commit(
+		&self,
+		mut queue: MutexGuard<CommitQueue>,
+		mut commit: CommitChangeSet,
+		old_bytes: usize,
+		old_id: u64,
+		new_id: Option<u64>,
+	) -> Result<()> {
+		let record_id = if let Some(id) = new_id {
+			id
+		} else {
+			queue.record_id += 1;
+			queue.record_id
+		};
+
+		let bytes = if record_id != old_id {
+			let mut overlay = self.commit_overlay.write();
+
+			let mut bytes = 0;
+
+			for (c, indexed) in &commit.indexed {
+				indexed.copy_to_overlay(
+					&mut overlay[*c as usize],
+					record_id,
+					&mut bytes,
+					&self.options,
+				)?;
+			}
+
+			for (c, iterset) in &commit.btree_indexed {
+				iterset.copy_to_overlay(
+					&mut overlay[*c as usize].btree_indexed,
+					record_id,
+					&mut bytes,
+					&self.options,
+				)?;
+			}
+
+			{
+				// Cleanup the commit overlay with old id.
+				for (c, key_values) in commit.indexed.iter() {
+					key_values.clean_overlay(&mut overlay[*c as usize], old_id);
+				}
+				for (c, iterset) in commit.btree_indexed.iter_mut() {
+					iterset.clean_overlay(&mut overlay[*c as usize].btree_indexed, old_id);
+				}
+			}
+
+			bytes
+		} else {
+			old_bytes
+		};
+
+		let commit = Commit { id: record_id, changeset: commit, bytes };
+
+		log::debug!(
+			target: "parity-db",
+			"Deferred commit, old id: {}, new id: {}",
+			old_id,
+			record_id,
+		);
+		queue.commits.push_back(commit);
+		queue.bytes += bytes;
 		Ok(())
 	}
 
@@ -584,6 +697,79 @@ impl DbInner {
 		};
 
 		if let Some(mut commit) = commit {
+			if commit.changeset.check_for_deferral {
+				let mut defer = false;
+				'outer: for (col, key_values) in commit.changeset.indexed.iter() {
+					for change in &key_values.node_changes {
+						if let NodeChange::DereferenceChildren(_key, hash, _children) = change {
+							// Check if there are currently any locks on the tree. Will need to
+							// defer if there are.
+							let trees = self.trees.read();
+							if let Some(column_trees) = trees.get(&col) {
+								let mut tree_active = false;
+								if let Some(reader) = column_trees.readers.get(hash) {
+									let reader = reader.upgrade();
+									if let Some(reader) = reader {
+										if reader.is_locked() {
+											tree_active = true;
+										}
+									}
+								}
+								if tree_active {
+									defer = true;
+									break 'outer
+								}
+							}
+							drop(trees);
+
+							// Also check if there are any later commits in the queue that use this
+							// tree. Will need to defer if there are.
+							let queue = self.commit_queue.lock();
+							for commit in &queue.commits {
+								for (_col, change_set) in &commit.changeset.indexed {
+									for tree in &change_set.used_trees {
+										if tree == hash {
+											defer = true;
+											break 'outer
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+				if defer {
+					let queue = self.commit_queue.lock();
+					let new_id = if queue.commits.len() > 0 {
+						// Generate a new id
+						None
+					} else {
+						// Nothing else in the queue so can reuse same id
+						Some(commit.id)
+					};
+					self.defer_commit(queue, commit.changeset, commit.bytes, commit.id, new_id)?;
+
+					return Ok(true)
+				} else {
+					for (col, key_values) in commit.changeset.indexed.iter() {
+						for change in &key_values.node_changes {
+							if let NodeChange::DereferenceChildren(_key, hash, _children) = change {
+								let mut trees = self.trees.write();
+								if let Some(column_trees) = trees.get_mut(&col) {
+									let count = column_trees.to_dereference.get(hash).unwrap_or(&0);
+									assert!(*count > 0);
+									if *count == 1 {
+										column_trees.to_dereference.remove(hash);
+									} else {
+										column_trees.to_dereference.insert(*hash, count - 1);
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+
 			let mut reindex = false;
 			let mut writer = self.log.begin_record();
 			log::debug!(
@@ -1148,7 +1334,11 @@ impl Db {
 		self.inner.get_root(col, key)
 	}
 
-	pub fn get_node(&self, col: ColId, node_address: NodeAddress) -> Result<Option<(Vec<u8>, Children)>> {
+	pub fn get_node(
+		&self,
+		col: ColId,
+		node_address: NodeAddress,
+	) -> Result<Option<(Vec<u8>, Children)>> {
 		self.inner.get_node(col, node_address)
 	}
 
@@ -1662,6 +1852,7 @@ pub enum NodeChange {
 pub struct CommitChangeSet {
 	pub indexed: HashMap<ColId, IndexedChangeSet>,
 	pub btree_indexed: HashMap<ColId, BTreeChangeSet>,
+	pub check_for_deferral: bool,
 }
 
 #[derive(Debug)]
@@ -1669,11 +1860,17 @@ pub struct IndexedChangeSet {
 	pub col: ColId,
 	pub changes: Vec<Operation<Key, RcValue>>,
 	pub node_changes: Vec<NodeChange>,
+	pub used_trees: HashSet<Key>,
 }
 
 impl IndexedChangeSet {
 	pub fn new(col: ColId) -> Self {
-		IndexedChangeSet { col, changes: Default::default(), node_changes: Default::default() }
+		IndexedChangeSet {
+			col,
+			changes: Default::default(),
+			node_changes: Default::default(),
+			used_trees: Default::default(),
+		}
 	}
 
 	fn push<K: AsRef<[u8]>>(
