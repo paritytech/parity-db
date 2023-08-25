@@ -923,7 +923,7 @@ fn try_prune(
 
 		output_helper.write().println(format!("Remove tree {}", tree_index));
 
-		commit.push((TREE_COLUMN, Operation::RemoveTree(key.to_vec())));
+		commit.push((TREE_COLUMN, Operation::DereferenceTree(key.to_vec())));
 		commit.push((
 			INFO_COLUMN,
 			Operation::Set(

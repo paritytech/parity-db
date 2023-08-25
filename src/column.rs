@@ -638,7 +638,9 @@ impl HashColumn {
 					}
 					Ok(PlanOutcome::Skipped)
 				},
-				Operation::InsertTree(..) | Operation::RemoveTree(..) =>
+				Operation::InsertTree(..) |
+				Operation::ReferenceTree(..) |
+				Operation::DereferenceTree(..) =>
 					Err(Error::InvalidConfiguration("Unsupported operation on hash column".into())),
 			}
 		}
@@ -881,9 +883,9 @@ impl HashColumn {
 
 				return Ok((data, node_values))
 			},
-			Operation::RemoveTree(_key) =>
+			Operation::ReferenceTree(..) | Operation::DereferenceTree(..) =>
 				return Err(Error::InvalidInput(format!(
-					"claim_tree_values should not be called with RemoveTree"
+					"claim_tree_values should not be called from ReferenceTree or DereferenceTree"
 				))),
 			_ =>
 				return Err(Error::InvalidInput(format!(
@@ -1510,7 +1512,9 @@ impl Column {
 					Ok((Some(PlanOutcome::Written), None))
 				}
 			},
-			Operation::InsertTree(..) | Operation::RemoveTree(..) =>
+			Operation::InsertTree(..) |
+			Operation::ReferenceTree(..) |
+			Operation::DereferenceTree(..) =>
 				Err(Error::InvalidInput(format!("Invalid operation for column {}", tables.col))),
 		}
 	}

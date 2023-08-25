@@ -427,15 +427,12 @@ impl DbInner {
 			} else if self.options.columns[col as usize].multitree {
 				match &self.columns[col as usize] {
 					Column::Hash(column) => match change {
-						Operation::Set(..) =>
+						Operation::Set(..) |
+						Operation::Reference(..) |
+						Operation::Dereference(..) =>
 							return Err(Error::InvalidConfiguration(
 								"Invalid operation for multitree column".to_string(),
 							)),
-						Operation::Reference(..) => commit
-							.indexed
-							.entry(col)
-							.or_insert_with(|| IndexedChangeSet::new(col))
-							.push(change, &self.options, self.db_version)?,
 						Operation::InsertTree(..) => {
 							let (root_data, node_values) = column.claim_tree_values(&change)?;
 
@@ -481,7 +478,15 @@ impl DbInner {
 									.push_node_change(node_change);
 							}
 						},
-						Operation::RemoveTree(key) | Operation::Dereference(key) => {
+						Operation::ReferenceTree(..) => {
+							let root_operation = Operation::Reference(change.key());
+							commit
+								.indexed
+								.entry(col)
+								.or_insert_with(|| IndexedChangeSet::new(col))
+								.push(root_operation, &self.options, self.db_version)?;
+						},
+						Operation::DereferenceTree(key) => {
 							let value = self.get(col, &key)?;
 							if let Some(data) = value {
 								let root_data = unpack_node_data(data)?;
@@ -1788,8 +1793,12 @@ pub enum Operation<Key, Value> {
 	/// Insert a new tree into a MultiTree column using root key and node structure.
 	InsertTree(Key, NewNode),
 
-	/// Remove an existing tree (at root Key) from a MultiTree column.
-	RemoveTree(Key),
+	/// Increment the reference count of a tree (at root Key) from a MultiTree column.
+	ReferenceTree(Key),
+
+	/// Dereference an existing tree (at root Key) from a MultiTree column, resulting in either
+	/// removal of the tree or decrement of its reference count.
+	DereferenceTree(Key),
 }
 
 impl<Key: Ord, Value: Eq> PartialOrd<Self> for Operation<Key, Value> {
@@ -1811,7 +1820,8 @@ impl<Key, Value> Operation<Key, Value> {
 			Operation::Dereference(k) |
 			Operation::Reference(k) |
 			Operation::InsertTree(k, _) |
-			Operation::RemoveTree(k) => k,
+			Operation::ReferenceTree(k) |
+			Operation::DereferenceTree(k) => k,
 		}
 	}
 
@@ -1821,7 +1831,8 @@ impl<Key, Value> Operation<Key, Value> {
 			Operation::Dereference(k) |
 			Operation::Reference(k) |
 			Operation::InsertTree(k, _) |
-			Operation::RemoveTree(k) => k,
+			Operation::ReferenceTree(k) |
+			Operation::DereferenceTree(k) => k,
 		}
 	}
 }
@@ -1833,7 +1844,8 @@ impl<K: AsRef<[u8]>, Value> Operation<K, Value> {
 			Operation::Dereference(k) => Operation::Dereference(k.as_ref().to_vec()),
 			Operation::Reference(k) => Operation::Reference(k.as_ref().to_vec()),
 			Operation::InsertTree(k, n) => Operation::InsertTree(k.as_ref().to_vec(), n),
-			Operation::RemoveTree(k) => Operation::RemoveTree(k.as_ref().to_vec()),
+			Operation::ReferenceTree(k) => Operation::ReferenceTree(k.as_ref().to_vec()),
+			Operation::DereferenceTree(k) => Operation::DereferenceTree(k.as_ref().to_vec()),
 		}
 	}
 }
@@ -1888,7 +1900,9 @@ impl IndexedChangeSet {
 			Operation::Set(k, v) => Operation::Set(hash_key(k.as_ref()), v.into()),
 			Operation::Dereference(k) => Operation::Dereference(hash_key(k.as_ref())),
 			Operation::Reference(k) => Operation::Reference(hash_key(k.as_ref())),
-			Operation::InsertTree(..) | Operation::RemoveTree(..) =>
+			Operation::InsertTree(..) |
+			Operation::ReferenceTree(..) |
+			Operation::DereferenceTree(..) =>
 				return Err(Error::InvalidInput(format!(
 					"Invalid operation for column {}",
 					self.col
@@ -1934,7 +1948,9 @@ impl IndexedChangeSet {
 						return Err(Error::InvalidInput(format!("No Rc for column {}", self.col)))
 					}
 				},
-				Operation::InsertTree(..) | Operation::RemoveTree(..) =>
+				Operation::InsertTree(..) |
+				Operation::ReferenceTree(..) |
+				Operation::DereferenceTree(..) =>
 					return Err(Error::InvalidInput(format!(
 						"Invalid operation for column {}",
 						self.col
@@ -2058,7 +2074,8 @@ impl IndexedChangeSet {
 				},
 				Operation::Reference(..) |
 				Operation::InsertTree(..) |
-				Operation::RemoveTree(..) => (),
+				Operation::ReferenceTree(..) |
+				Operation::DereferenceTree(..) => (),
 			}
 		}
 		for change in self.node_changes.iter() {

@@ -389,7 +389,9 @@ pub mod commit_overlay {
 				Operation::Set(k, v) => Operation::Set(k.into(), v.into()),
 				Operation::Dereference(k) => Operation::Dereference(k.into()),
 				Operation::Reference(k) => Operation::Reference(k.into()),
-				Operation::InsertTree(..) | Operation::RemoveTree(..) =>
+				Operation::InsertTree(..) |
+				Operation::ReferenceTree(..) |
+				Operation::DereferenceTree(..) =>
 					return Err(Error::InvalidInput(format!(
 						"Invalid operation for column {}",
 						self.col
@@ -432,7 +434,9 @@ pub mod commit_overlay {
 							)))
 						}
 					},
-					Operation::InsertTree(..) | Operation::RemoveTree(..) =>
+					Operation::InsertTree(..) |
+					Operation::ReferenceTree(..) |
+					Operation::DereferenceTree(..) =>
 						return Err(Error::InvalidInput(format!(
 							"Invalid operation for column {}",
 							self.col
