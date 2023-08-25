@@ -252,7 +252,12 @@ impl DbInner {
 		})
 	}
 
-	fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
+	fn get(&self, col: ColId, key: &[u8], external_call: bool) -> Result<Option<Value>> {
+		if self.options.columns[col as usize].multitree && external_call {
+			return Err(Error::InvalidConfiguration(
+				"get not supported for multitree columns.".to_string(),
+			))
+		}
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
 				let key = column.hash_key(key);
@@ -278,6 +283,11 @@ impl DbInner {
 	}
 
 	fn get_size(&self, col: ColId, key: &[u8]) -> Result<Option<u32>> {
+		if self.options.columns[col as usize].multitree {
+			return Err(Error::InvalidConfiguration(
+				"get_size not supported for multitree columns.".to_string(),
+			))
+		}
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
 				let key = column.hash_key(key);
@@ -303,7 +313,15 @@ impl DbInner {
 	}
 
 	fn get_root(&self, col: ColId, key: &[u8]) -> Result<Option<(Vec<u8>, Children)>> {
-		let value = self.get(col, key)?;
+		if !self.options.columns[col as usize].multitree {
+			return Err(Error::InvalidConfiguration("Not a multitree column.".to_string()))
+		}
+		if !self.options.columns[col as usize].append_only {
+			return Err(Error::InvalidConfiguration(
+				"get_root can only be called on a column with append_only option.".to_string(),
+			))
+		}
+		let value = self.get(col, key, false)?;
 		if let Some(data) = value {
 			return Ok(Some(unpack_node_data(data)?))
 		}
@@ -314,7 +332,16 @@ impl DbInner {
 		&self,
 		col: ColId,
 		node_address: NodeAddress,
+		external_call: bool,
 	) -> Result<Option<(Vec<u8>, Children)>> {
+		if !self.options.columns[col as usize].multitree {
+			return Err(Error::InvalidConfiguration("Not a multitree column.".to_string()))
+		}
+		if !self.options.columns[col as usize].append_only && external_call {
+			return Err(Error::InvalidConfiguration(
+				"get_node can only be called on a column with append_only option.".to_string(),
+			))
+		}
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
 				let overlay = self.commit_overlay.read();
@@ -341,12 +368,15 @@ impl DbInner {
 		key: &[u8],
 		check_existence: bool,
 	) -> Result<Option<Arc<RwLock<dyn TreeReader>>>> {
+		if !self.options.columns[col as usize].multitree {
+			return Err(Error::InvalidConfiguration("Not a multitree column.".to_string()))
+		}
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
 				// Check if the tree actually exists. We can't return the data from this function as
 				// TreeReader is not locked. That is done by the client.
 				if check_existence {
-					let root = self.get(col, key).unwrap();
+					let root = self.get(col, key, false).unwrap();
 					if root.is_none() {
 						return Ok(None)
 					}
@@ -426,104 +456,111 @@ impl DbInner {
 					.push(change)?
 			} else if self.options.columns[col as usize].multitree {
 				match &self.columns[col as usize] {
-					Column::Hash(column) => match change {
-						Operation::Set(..) |
-						Operation::Reference(..) |
-						Operation::Dereference(..) =>
-							return Err(Error::InvalidConfiguration(
-								"Invalid operation for multitree column".to_string(),
-							)),
-						Operation::InsertTree(..) => {
-							let (root_data, node_values) = column.claim_tree_values(&change)?;
+					Column::Hash(column) =>
+						match change {
+							Operation::Set(..) |
+							Operation::Reference(..) |
+							Operation::Dereference(..) =>
+								return Err(Error::InvalidConfiguration(
+									"Invalid operation for multitree column".to_string(),
+								)),
+							Operation::InsertTree(..) => {
+								let (root_data, node_values) = column.claim_tree_values(&change)?;
 
-							let trees = self.trees.read();
-							if let Some(column_trees) = trees.get(&col) {
-								for (hash, count) in &column_trees.to_dereference {
-									assert!(*count > 0);
+								let trees = self.trees.read();
+								if let Some(column_trees) = trees.get(&col) {
+									for (hash, count) in &column_trees.to_dereference {
+										assert!(*count > 0);
 
-									// Check if TreeReader is active for this tree
-									let mut tree_active = false;
-									if let Some(reader) = column_trees.readers.get(hash) {
-										let reader = reader.upgrade();
-										if let Some(reader) = reader {
-											if reader.is_locked() {
-												tree_active = true;
+										// Check if TreeReader is active for this tree
+										let mut tree_active = false;
+										if let Some(reader) = column_trees.readers.get(hash) {
+											let reader = reader.upgrade();
+											if let Some(reader) = reader {
+												if reader.is_locked() {
+													tree_active = true;
+												}
 											}
 										}
+										if tree_active {
+											commit
+												.indexed
+												.entry(col)
+												.or_insert_with(|| IndexedChangeSet::new(col))
+												.used_trees
+												.insert(*hash);
+										}
 									}
-									if tree_active {
-										commit
-											.indexed
-											.entry(col)
-											.or_insert_with(|| IndexedChangeSet::new(col))
-											.used_trees
-											.insert(*hash);
-									}
-								}
-							}
-							drop(trees);
-
-							let root_operation = Operation::Set(change.key(), root_data);
-							commit
-								.indexed
-								.entry(col)
-								.or_insert_with(|| IndexedChangeSet::new(col))
-								.push(root_operation, &self.options, self.db_version)?;
-
-							for node_change in node_values {
-								commit
-									.indexed
-									.entry(col)
-									.or_insert_with(|| IndexedChangeSet::new(col))
-									.push_node_change(node_change);
-							}
-						},
-						Operation::ReferenceTree(..) => {
-							let root_operation = Operation::Reference(change.key());
-							commit
-								.indexed
-								.entry(col)
-								.or_insert_with(|| IndexedChangeSet::new(col))
-								.push(root_operation, &self.options, self.db_version)?;
-						},
-						Operation::DereferenceTree(key) => {
-							let value = self.get(col, &key)?;
-							if let Some(data) = value {
-								let root_data = unpack_node_data(data)?;
-								let children = root_data.1;
-								let salt = self.options.salt.unwrap_or_default();
-								let hash = hash_key(
-									&key,
-									&salt,
-									self.options.columns[col as usize].uniform,
-									self.db_version,
-								);
-
-								let mut trees = self.trees.write();
-								if let Some(column_trees) = trees.get_mut(&col) {
-									let count =
-										column_trees.to_dereference.get(&hash).unwrap_or(&0) + 1;
-									column_trees.to_dereference.insert(hash, count);
 								}
 								drop(trees);
 
-								commit.check_for_deferral = true;
-
-								let node_change =
-									NodeChange::DereferenceChildren(key, hash, children);
-
+								let root_operation = Operation::Set(change.key(), root_data);
 								commit
 									.indexed
 									.entry(col)
 									.or_insert_with(|| IndexedChangeSet::new(col))
-									.push_node_change(node_change);
-							} else {
-								return Err(Error::InvalidConfiguration(
-									"No entry for tree root".to_string(),
-								))
-							}
+									.push(root_operation, &self.options, self.db_version)?;
+
+								for node_change in node_values {
+									commit
+										.indexed
+										.entry(col)
+										.or_insert_with(|| IndexedChangeSet::new(col))
+										.push_node_change(node_change);
+								}
+							},
+							Operation::ReferenceTree(..) => {
+								if !self.options.columns[col as usize].append_only {
+									let root_operation = Operation::Reference(change.key());
+									commit
+										.indexed
+										.entry(col)
+										.or_insert_with(|| IndexedChangeSet::new(col))
+										.push(root_operation, &self.options, self.db_version)?;
+								}
+							},
+							Operation::DereferenceTree(key) => {
+								if self.options.columns[col as usize].append_only {
+									return Err(Error::InvalidConfiguration("Attempting to dereference a tree from an append_only column.".to_string()))
+								}
+								let value = self.get(col, &key, false)?;
+								if let Some(data) = value {
+									let root_data = unpack_node_data(data)?;
+									let children = root_data.1;
+									let salt = self.options.salt.unwrap_or_default();
+									let hash = hash_key(
+										&key,
+										&salt,
+										self.options.columns[col as usize].uniform,
+										self.db_version,
+									);
+
+									let mut trees = self.trees.write();
+									if let Some(column_trees) = trees.get_mut(&col) {
+										let count =
+											column_trees.to_dereference.get(&hash).unwrap_or(&0) +
+												1;
+										column_trees.to_dereference.insert(hash, count);
+									}
+									drop(trees);
+
+									commit.check_for_deferral = true;
+
+									let node_change =
+										NodeChange::DereferenceChildren(key, hash, children);
+
+									commit
+										.indexed
+										.entry(col)
+										.or_insert_with(|| IndexedChangeSet::new(col))
+										.push_node_change(node_change);
+								} else {
+									return Err(Error::InvalidConfiguration(
+										"No entry for tree root".to_string(),
+									))
+								}
+							},
 						},
-					},
 					Column::Tree(_) =>
 						return Err(Error::InvalidConfiguration("Not a HashColumn".to_string())),
 				}
@@ -1317,7 +1354,7 @@ impl Db {
 
 	/// Get a value in a specified column by key. Returns `None` if the key does not exist.
 	pub fn get(&self, col: ColId, key: &[u8]) -> Result<Option<Value>> {
-		self.inner.get(col, key)
+		self.inner.get(col, key, true)
 	}
 
 	/// Get value size by key. Returns `None` if the key does not exist.
@@ -1344,7 +1381,7 @@ impl Db {
 		col: ColId,
 		node_address: NodeAddress,
 	) -> Result<Option<(Vec<u8>, Children)>> {
-		self.inner.get_node(col, node_address)
+		self.inner.get_node(col, node_address, true)
 	}
 
 	/// Commit a set of changes to the database.
@@ -1669,7 +1706,7 @@ impl TreeReader for DbTreeReader {
 	}
 
 	fn get_node(&self, node_address: NodeAddress) -> Result<Option<(Vec<u8>, Children)>> {
-		self.db.get_node(self.col, node_address)
+		self.db.get_node(self.col, node_address, false)
 	}
 }
 
