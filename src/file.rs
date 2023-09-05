@@ -51,7 +51,7 @@ pub fn madvise_random(map: &mut memmap2::MmapMut) {
 }
 
 #[cfg(not(unix))]
-pub fn madvise_random(_id: TableId, _map: &mut memmap2::MmapMut) {}
+pub fn madvise_random(_map: &mut memmap2::MmapMut) {}
 
 const GROW_SIZE_BYTES: u64 = 256 * 1024;
 
