@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog].
 
 ## [Unreleased]
 
+## [v0.4.11] - 2023-09-13
+
+- Make `madvise_random` compatible with non-Unix OS [`#221`](https://github.com/paritytech/parity-db/pull/221)
+- Explicit `funlock` [`#218`](https://github.com/paritytech/parity-db/pull/218)
+
 ## [v0.4.10] - 2023-07-21
 
 - Use mmap IO for value tables [`#214`](https://github.com/paritytech/parity-db/pull/214)
