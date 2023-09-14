@@ -10,13 +10,6 @@ use crate::{
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(not(test))]
-const RESERVE_ADDRESS_SPACE: usize = 1024 * 1024 * 1024; // 1 Gb
-
-// Use different value for tests to work around docker limits on the test machine.
-#[cfg(test)]
-const RESERVE_ADDRESS_SPACE: usize = 64 * 1024 * 1024; // 64 Mb
-
 #[cfg(target_os = "linux")]
 fn disable_read_ahead(file: &std::fs::File) -> std::io::Result<()> {
 	use std::os::unix::io::AsRawFd;
@@ -53,23 +46,23 @@ pub fn madvise_random(map: &mut memmap2::MmapMut) {
 #[cfg(not(unix))]
 pub fn madvise_random(_map: &mut memmap2::MmapMut) {}
 
-
 #[cfg(not(windows))]
 fn mmap(file: &std::fs::File, len: usize) -> Result<memmap2::MmapMut> {
+	#[cfg(not(test))]
+	const RESERVE_ADDRESS_SPACE: usize = 1024 * 1024 * 1024; // 1 Gb
+														 // Use different value for tests to work around docker limits on the test machine.
+	#[cfg(test)]
+	const RESERVE_ADDRESS_SPACE: usize = 64 * 1024 * 1024; // 64 Mb
+
 	let map_len = len + RESERVE_ADDRESS_SPACE;
-	let mut map = try_io!(unsafe {
-		memmap2::MmapOptions::new().len(map_len).map_mut(file)
-	});
+	let mut map = try_io!(unsafe { memmap2::MmapOptions::new().len(map_len).map_mut(file) });
 	madvise_random(&mut map);
 	Ok(map)
 }
 
 #[cfg(windows)]
 fn mmap(file: &std::fs::File, _len: usize) -> Result<memmap2::MmapMut> {
-	let mut map = try_io!(unsafe {
-		memmap2::MmapOptions::new().map_mut(file)
-	});
-	Ok(map)
+	Ok(try_io!(unsafe { memmap2::MmapOptions::new().map_mut(file) }))
 }
 
 const GROW_SIZE_BYTES: u64 = 256 * 1024;
