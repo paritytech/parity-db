@@ -93,7 +93,6 @@ impl TableFile {
 				capacity = len / entry_size as u64;
 			}
 			let mut map = mmap(&file, len as usize)?;
-			madvise_random(&mut map);
 			Some((map, file))
 		} else {
 			None
