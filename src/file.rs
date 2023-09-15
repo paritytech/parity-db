@@ -10,13 +10,6 @@ use crate::{
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(not(test))]
-const RESERVE_ADDRESS_SPACE: usize = 1024 * 1024 * 1024; // 1 Gb
-
-// Use different value for tests to work around docker limits on the test machine.
-#[cfg(test)]
-const RESERVE_ADDRESS_SPACE: usize = 64 * 1024 * 1024; // 64 Mb
-
 #[cfg(target_os = "linux")]
 fn disable_read_ahead(file: &std::fs::File) -> std::io::Result<()> {
 	use std::os::unix::io::AsRawFd;
@@ -53,6 +46,25 @@ pub fn madvise_random(map: &mut memmap2::MmapMut) {
 #[cfg(not(unix))]
 pub fn madvise_random(_map: &mut memmap2::MmapMut) {}
 
+#[cfg(not(windows))]
+fn mmap(file: &std::fs::File, len: usize) -> Result<memmap2::MmapMut> {
+	#[cfg(not(test))]
+	const RESERVE_ADDRESS_SPACE: usize = 1024 * 1024 * 1024; // 1 Gb
+														 // Use different value for tests to work around docker limits on the test machine.
+	#[cfg(test)]
+	const RESERVE_ADDRESS_SPACE: usize = 64 * 1024 * 1024; // 64 Mb
+
+	let map_len = len + RESERVE_ADDRESS_SPACE;
+	let mut map = try_io!(unsafe { memmap2::MmapOptions::new().len(map_len).map_mut(file) });
+	madvise_random(&mut map);
+	Ok(map)
+}
+
+#[cfg(windows)]
+fn mmap(file: &std::fs::File, _len: usize) -> Result<memmap2::MmapMut> {
+	Ok(try_io!(unsafe { memmap2::MmapOptions::new().map_mut(file) }))
+}
+
 const GROW_SIZE_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug)]
@@ -61,10 +73,6 @@ pub struct TableFile {
 	pub path: std::path::PathBuf,
 	pub capacity: AtomicU64,
 	pub id: TableId,
-}
-
-fn map_len(file_len: u64) -> usize {
-	file_len as usize + RESERVE_ADDRESS_SPACE
 }
 
 impl TableFile {
@@ -84,9 +92,7 @@ impl TableFile {
 			} else {
 				capacity = len / entry_size as u64;
 			}
-			let mut map =
-				try_io!(unsafe { memmap2::MmapOptions::new().len(map_len(len)).map_mut(&file) });
-			madvise_random(&mut map);
+			let mut map = mmap(&file, len as usize)?;
 			Some((map, file))
 		} else {
 			None
@@ -152,10 +158,7 @@ impl TableFile {
 				let file = self.create_file()?;
 				let len = GROW_SIZE_BYTES;
 				try_io!(file.set_len(len));
-				let mut map = try_io!(unsafe {
-					memmap2::MmapOptions::new().len(RESERVE_ADDRESS_SPACE).map_mut(&file)
-				});
-				madvise_random(&mut map);
+				let map = mmap(&file, 0)?;
 				*map_and_file = Some((map, file));
 				len
 			},
@@ -163,10 +166,7 @@ impl TableFile {
 				let new_len = try_io!(file.metadata()).len() + GROW_SIZE_BYTES;
 				try_io!(file.set_len(new_len));
 				if map.len() < new_len as usize {
-					let mut new_map = try_io!(unsafe {
-						memmap2::MmapOptions::new().len(map_len(new_len)).map_mut(&*file)
-					});
-					madvise_random(&mut new_map);
+					let new_map = mmap(&file, new_len as usize)?;
 					let old_map = std::mem::replace(map, new_map);
 					try_io!(old_map.flush());
 					// Leak the old mapping as there might be concurrent readers.
