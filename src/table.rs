@@ -1013,7 +1013,12 @@ impl ValueTable {
 		Ok(true)
 	}
 
-	pub fn change_ref_return(&self, index: u64, delta: i32, log: &mut LogWriter) -> Result<(bool, u32)> {
+	pub fn change_ref_return(
+		&self,
+		index: u64,
+		delta: i32,
+		log: &mut LogWriter,
+	) -> Result<(bool, u32)> {
 		let mut buf = FullEntry::new_uninit_full_entry();
 		let buf = if log.value(self.id, index, buf.as_mut()) {
 			&mut buf
@@ -1057,7 +1062,6 @@ impl ValueTable {
 		log.insert_value(self.id, index, buf[0..size].to_vec());
 		Ok((true, counter))
 	}
-
 
 	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
 		while index >= self.file.capacity.load(Ordering::Relaxed) {

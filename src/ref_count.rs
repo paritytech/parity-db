@@ -125,7 +125,10 @@ impl std::fmt::Display for RefCountTableId {
 }
 
 impl RefCountTable {
-	pub fn open_existing(path: &std::path::Path, id: RefCountTableId) -> Result<Option<RefCountTable>> {
+	pub fn open_existing(
+		path: &std::path::Path,
+		id: RefCountTableId,
+	) -> Result<Option<RefCountTable>> {
 		let mut path: std::path::PathBuf = path.into();
 		path.push(id.file_name());
 
@@ -153,19 +156,11 @@ impl RefCountTable {
 		Ok(try_io!(Ok(ptr)))
 	}
 
-	fn find_entry(
-		&self,
-		address: u64,
-		chunk: &[u8; CHUNK_LEN],
-	) -> Option<(Entry, usize)> {
+	fn find_entry(&self, address: u64, chunk: &[u8; CHUNK_LEN]) -> Option<(Entry, usize)> {
 		self.find_entry_base(address, chunk)
 	}
 
-	fn find_entry_base(
-		&self,
-		address: u64,
-		chunk: &[u8; CHUNK_LEN],
-	) -> Option<(Entry, usize)> {
+	fn find_entry_base(&self, address: u64, chunk: &[u8; CHUNK_LEN]) -> Option<(Entry, usize)> {
 		for i in 0..CHUNK_ENTRIES {
 			let entry = Self::read_entry(chunk, i);
 			if entry.address().as_u64() == address && !entry.is_empty() {
@@ -189,7 +184,9 @@ impl RefCountTable {
 		if let Some(map) = &*self.map.read() {
 			log::trace!(target: "parity-db", "{}: Querying ref count chunk at {}", self.id, chunk_index);
 			let chunk = Self::chunk_at(chunk_index, map)?;
-			return Ok(self.find_entry(address.as_u64(), chunk).map(|(e, sub_index)| (e.ref_count(), sub_index)))
+			return Ok(self
+				.find_entry(address.as_u64(), chunk)
+				.map(|(e, sub_index)| (e.ref_count(), sub_index)))
 		}
 		Ok(None)
 	}
@@ -223,12 +220,15 @@ impl RefCountTable {
 
 	#[inline(always)]
 	fn write_entry(entry: &Entry, at: usize, chunk: &mut [u8; CHUNK_LEN]) {
-		chunk[at * ENTRY_BYTES..at * ENTRY_BYTES + ENTRY_BYTES].copy_from_slice(&entry.as_u128().to_le_bytes());
+		chunk[at * ENTRY_BYTES..at * ENTRY_BYTES + ENTRY_BYTES]
+			.copy_from_slice(&entry.as_u128().to_le_bytes());
 	}
 
 	#[inline(always)]
 	fn read_entry(chunk: &[u8; CHUNK_LEN], at: usize) -> Entry {
-		Entry::from_u128(u128::from_le_bytes(chunk[at * ENTRY_BYTES..at * ENTRY_BYTES + ENTRY_BYTES].try_into().unwrap()))
+		Entry::from_u128(u128::from_le_bytes(
+			chunk[at * ENTRY_BYTES..at * ENTRY_BYTES + ENTRY_BYTES].try_into().unwrap(),
+		))
 	}
 
 	#[inline(always)]
@@ -254,10 +254,7 @@ impl RefCountTable {
 		let new_entry = Entry::new(address, ref_count);
 		if let Some(i) = sub_index {
 			let entry = Self::read_entry(&chunk, i);
-			assert_eq!(
-				entry.address(),
-				new_entry.address()
-			);
+			assert_eq!(entry.address(), new_entry.address());
 			Self::write_entry(&new_entry, i, &mut chunk);
 			log::trace!(target: "parity-db", "{}: Replaced ref count at {}.{}: {}", self.id, chunk_index, i, new_entry.address());
 			log.insert_ref_count(self.id, chunk_index, i as u8, &chunk);

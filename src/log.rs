@@ -4,10 +4,10 @@
 use crate::{
 	column::ColId,
 	error::{try_io, Error, Result},
-	ref_count::{Chunk as RefCountChunk, RefCountTableId, ENTRY_BYTES as REF_COUNT_ENTRY_BYTES},
 	index::{Chunk as IndexChunk, TableId as IndexTableId, ENTRY_BYTES},
 	options::Options,
 	parking_lot::{RwLock, RwLockWriteGuard},
+	ref_count::{Chunk as RefCountChunk, RefCountTableId, ENTRY_BYTES as REF_COUNT_ENTRY_BYTES},
 	table::TableId as ValueTableId,
 };
 use std::{
@@ -364,7 +364,10 @@ impl LogChange {
 				while mask != 0 {
 					let i = mask.trailing_zeros();
 					mask &= !(1 << i);
-					write(&chunk[i as usize * REF_COUNT_ENTRY_BYTES..(i as usize + 1) * REF_COUNT_ENTRY_BYTES])?;
+					write(
+						&chunk[i as usize * REF_COUNT_ENTRY_BYTES..
+							(i as usize + 1) * REF_COUNT_ENTRY_BYTES],
+					)?;
 				}
 			}
 		}
@@ -383,7 +386,12 @@ impl LogChange {
 		try_io!(file.write_all(&checksum.to_le_bytes()));
 		bytes += 4;
 		try_io!(file.flush());
-		Ok(FlushedLog { index: self.local_index, values: self.local_values, ref_count: self.local_ref_count, bytes })
+		Ok(FlushedLog {
+			index: self.local_index,
+			values: self.local_values,
+			ref_count: self.local_ref_count,
+			bytes,
+		})
 	}
 }
 
@@ -430,7 +438,13 @@ impl<'a> LogWriter<'a> {
 			.insert(index, (self.log.record_id, data));
 	}
 
-	pub fn insert_ref_count(&mut self, table: RefCountTableId, index: u64, sub: u8, data: &RefCountChunk) {
+	pub fn insert_ref_count(
+		&mut self,
+		table: RefCountTableId,
+		index: u64,
+		sub: u8,
+		data: &RefCountChunk,
+	) {
 		match self.log.local_ref_count.entry(table).or_default().map.entry(index) {
 			std::collections::hash_map::Entry::Occupied(mut entry) => {
 				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), *data);
@@ -726,7 +740,8 @@ impl Log {
 			*appending = Some(Appending { size: 0, file: std::io::BufWriter::new(file), id });
 		}
 		let appending = appending.as_mut().unwrap();
-		let FlushedLog { index, values, ref_count, bytes } = log.flush_to_file(&mut appending.file)?;
+		let FlushedLog { index, values, ref_count, bytes } =
+			log.flush_to_file(&mut appending.file)?;
 		let mut overlays = self.overlays.write();
 		let mut total_index = 0;
 		for (id, overlay) in index.into_iter() {

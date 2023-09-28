@@ -902,9 +902,19 @@ impl DbInner {
 		// Process any pending reindexes
 		for column in self.columns.iter() {
 			let column = if let Column::Hash(c) = column { c } else { continue };
-			let ReindexBatch { drop_index, batch, drop_ref_count, ref_count_batch, ref_count_batch_source } = column.reindex(&self.log)?;
+			let ReindexBatch {
+				drop_index,
+				batch,
+				drop_ref_count,
+				ref_count_batch,
+				ref_count_batch_source,
+			} = column.reindex(&self.log)?;
 			if !batch.is_empty() || drop_index.is_some() {
-				assert!(ref_count_batch.is_empty() && ref_count_batch_source.is_none() && drop_ref_count.is_none());
+				assert!(
+					ref_count_batch.is_empty() &&
+						ref_count_batch_source.is_none() &&
+						drop_ref_count.is_none()
+				);
 				let mut next_reindex = false;
 				let mut writer = self.log.begin_record();
 				log::debug!(
@@ -952,9 +962,12 @@ impl DbInner {
 					writer.record_id(),
 				);
 				for (address, ref_count) in ref_count_batch.into_iter() {
-					if let PlanOutcome::NeedReindex =
-						column.write_ref_count_reindex_plan(address, ref_count, ref_count_source, &mut writer)?
-					{
+					if let PlanOutcome::NeedReindex = column.write_ref_count_reindex_plan(
+						address,
+						ref_count,
+						ref_count_source,
+						&mut writer,
+					)? {
 						next_reindex = true
 					}
 				}
@@ -2113,7 +2126,9 @@ impl IndexedChangeSet {
 					)?;
 				},
 				NodeChange::IncrementReference(address) => {
-					if let PlanOutcome::NeedReindex = column.write_address_inc_ref_plan(*address, writer)? {
+					if let PlanOutcome::NeedReindex =
+						column.write_address_inc_ref_plan(*address, writer)?
+					{
 						*reindex = true;
 					}
 				},

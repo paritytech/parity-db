@@ -17,9 +17,9 @@ mod migration;
 mod multitree;
 mod options;
 mod parking_lot;
+mod ref_count;
 mod stats;
 mod table;
-mod ref_count;
 
 pub use btree::BTreeIterator;
 pub use column::{ColId, ValueIterState};
