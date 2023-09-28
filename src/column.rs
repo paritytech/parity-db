@@ -12,6 +12,7 @@ use crate::{
 	multitree::{Children, NewNode, NodeAddress, NodeRef},
 	options::{ColumnOptions, Metadata, Options, DEFAULT_COMPRESSION_THRESHOLD},
 	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
+	ref_count::{RefCountTable, RefCountTableId},
 	stats::{ColumnStatSummary, ColumnStats},
 	table::{
 		key::{TableKey, TableKeyQuery},
@@ -29,6 +30,7 @@ use std::{
 };
 
 const MIN_INDEX_BITS: u8 = 16;
+const MIN_REF_COUNT_BITS: u8 = 11;
 // Measured in index entries
 const MAX_REINDEX_BATCH: usize = 8192;
 
@@ -76,11 +78,18 @@ const SIZES: [u16; SIZE_TIERS - 1] = [
 struct Tables {
 	index: IndexTable,
 	value: Vec<ValueTable>,
+	ref_count: RefCountTable,
+}
+
+#[derive(Debug)]
+enum ReindexEntry {
+	Index(IndexTable),
+	RefCount(RefCountTable),
 }
 
 #[derive(Debug)]
 struct Reindex {
-	queue: VecDeque<IndexTable>,
+	queue: VecDeque<ReindexEntry>,
 	progress: AtomicU64,
 }
 
@@ -198,6 +207,9 @@ pub fn hash_key(key: &[u8], salt: &Salt, uniform: bool, db_version: u32) -> Key 
 pub struct ReindexBatch {
 	pub drop_index: Option<IndexTableId>,
 	pub batch: Vec<(Key, Address)>,
+	pub drop_ref_count: Option<RefCountTableId>,
+	pub ref_count_batch: Vec<(Address, u64)>,
+	pub ref_count_batch_source: Option<RefCountTableId>,
 }
 
 impl HashColumn {
@@ -210,12 +222,14 @@ impl HashColumn {
 			}
 			return Ok(Some((value, rc)))
 		}
-		for r in &self.reindex.read().queue {
-			if let Some((tier, rc, value)) = self.get_in_index(key, r, values, log)? {
-				if self.collect_stats {
-					self.stats.query_hit(tier);
+		for entry in &self.reindex.read().queue {
+			if let ReindexEntry::Index(r) = entry {
+				if let Some((tier, rc, value)) = self.get_in_index(key, r, values, log)? {
+					if self.collect_stats {
+						self.stats.query_hit(tier);
+					}
+					return Ok(Some((value, rc)))
 				}
-				return Ok(Some((value, rc)))
 			}
 		}
 		if self.collect_stats {
@@ -364,7 +378,8 @@ impl Column {
 			let entry = try_io!(entry);
 			if let Some(file) = entry.path().file_name().and_then(|f| f.to_str()) {
 				if crate::index::TableId::is_file_name(column, file) ||
-					crate::table::TableId::is_file_name(column, file)
+					crate::table::TableId::is_file_name(column, file) ||
+					crate::ref_count::RefCountTableId::is_file_name(column, file)
 				{
 					to_delete.push(PathBuf::from(file));
 				}
@@ -416,14 +431,15 @@ impl HashColumn {
 		options: &Options,
 		metadata: &Metadata,
 	) -> Result<HashColumn> {
-		let (index, reindexing, stats) = Self::open_index(&options.path, col)?;
+		let (index, mut reindexing, stats) = Self::open_index(&options.path, col)?;
+		let ref_count = Self::open_ref_count(&options.path, col, &mut reindexing)?;
 		let collect_stats = options.stats;
 		let path = &options.path;
 		let col_options = &metadata.columns[col as usize];
 		let db_version = metadata.version;
 		Ok(HashColumn {
 			col,
-			tables: RwLock::new(Tables { index, value }),
+			tables: RwLock::new(Tables { index, value, ref_count }),
 			reindex: RwLock::new(Reindex { queue: reindexing, progress: AtomicU64::new(0) }),
 			path: path.into(),
 			preimage: col_options.preimage,
@@ -455,13 +471,14 @@ impl HashColumn {
 		for t in tables.value.iter() {
 			t.flush()?;
 		}
+		tables.ref_count.flush()?;
 		Ok(())
 	}
 
 	fn open_index(
 		path: &std::path::Path,
 		col: ColId,
-	) -> Result<(IndexTable, VecDeque<IndexTable>, ColumnStats)> {
+	) -> Result<(IndexTable, VecDeque<ReindexEntry>, ColumnStats)> {
 		let mut reindexing = VecDeque::new();
 		let mut top = None;
 		let mut stats = ColumnStats::empty();
@@ -474,7 +491,7 @@ impl HashColumn {
 					top = Some(table);
 				} else {
 					log::trace!(target: "parity-db", "Opened stale index {}", table.id);
-					reindexing.push_front(table);
+					reindexing.push_front(ReindexEntry::Index(table));
 				}
 			}
 		}
@@ -483,6 +500,31 @@ impl HashColumn {
 			None => IndexTable::create_new(path, IndexTableId::new(col, MIN_INDEX_BITS)),
 		};
 		Ok((table, reindexing, stats))
+	}
+
+	fn open_ref_count(
+		path: &std::path::Path,
+		col: ColId,
+		reindexing: &mut VecDeque<ReindexEntry>,
+	) -> Result<RefCountTable> {
+		let mut top = None;
+		for bits in (MIN_REF_COUNT_BITS..65).rev() {
+			let id = RefCountTableId::new(col, bits);
+			if let Some(table) = RefCountTable::open_existing(path, id)? {
+				if top.is_none() {
+					log::trace!(target: "parity-db", "Opened main ref count {}", table.id);
+					top = Some(table);
+				} else {
+					log::trace!(target: "parity-db", "Opened stale ref count {}", table.id);
+					reindexing.push_front(ReindexEntry::RefCount(table));
+				}
+			}
+		}
+		let table = match top {
+			Some(table) => table,
+			None => RefCountTable::create_new(path, RefCountTableId::new(col, MIN_REF_COUNT_BITS)),
+		};
+		Ok(table)
 	}
 
 	fn trigger_reindex<'a, 'b>(
@@ -502,7 +544,7 @@ impl HashColumn {
 			IndexTableId::new(tables.index.id.col(), tables.index.id.index_bits() + 1);
 		let new_table = IndexTable::create_new(path, new_index_id);
 		let old_table = std::mem::replace(&mut tables.index, new_table);
-		reindex.queue.push_back(old_table);
+		reindex.queue.push_back(ReindexEntry::Index(old_table));
 		(
 			RwLockWriteGuard::downgrade_to_upgradable(tables),
 			RwLockWriteGuard::downgrade_to_upgradable(reindex),
@@ -599,9 +641,11 @@ impl HashColumn {
 		}
 		// Check old indexes
 		// TODO: don't search if index precedes reindex progress
-		for index in &reindex.queue {
-			if let Some(r) = Self::search_index(key, index, tables, log)? {
-				return Ok(Some(r))
+		for entry in &reindex.queue {
+			if let ReindexEntry::Index(index) = entry {
+				if let Some(r) = Self::search_index(key, index, tables, log)? {
+					return Ok(Some(r))
+				}
 			}
 		}
 		Ok(None)
@@ -713,6 +757,173 @@ impl HashColumn {
 			(tables, reindex) = Self::trigger_reindex(tables, reindex, self.path.as_path());
 			outcome = PlanOutcome::NeedReindex;
 		}
+		Ok((outcome, tables, reindex))
+	}
+
+	fn trigger_ref_count_reindex<'a, 'b>(
+		tables: RwLockUpgradableReadGuard<'a, Tables>,
+		reindex: RwLockUpgradableReadGuard<'b, Reindex>,
+		path: &std::path::Path,
+	) -> (RwLockUpgradableReadGuard<'a, Tables>, RwLockUpgradableReadGuard<'b, Reindex>) {
+		let mut tables = RwLockUpgradableReadGuard::upgrade(tables);
+		let mut reindex = RwLockUpgradableReadGuard::upgrade(reindex);
+		log::info!(
+			target: "parity-db",
+			"Started reindex for ref count {}",
+			tables.ref_count.id,
+		);
+		// Start reindex
+		let new_id =
+			RefCountTableId::new(tables.ref_count.id.col(), tables.ref_count.id.index_bits() + 1);
+		let new_table = RefCountTable::create_new(path, new_id);
+		let old_table = std::mem::replace(&mut tables.ref_count, new_table);
+		reindex.queue.push_back(ReindexEntry::RefCount(old_table));
+		(
+			RwLockWriteGuard::downgrade_to_upgradable(tables),
+			RwLockWriteGuard::downgrade_to_upgradable(reindex),
+		)
+	}
+
+	pub fn write_ref_count_reindex_plan(
+		&self,
+		address: Address,
+		ref_count: u64,
+		source: RefCountTableId,
+		log: &mut LogWriter,
+	) -> Result<PlanOutcome> {
+		let tables = self.tables.upgradable_read();
+		let reindex = self.reindex.upgradable_read();
+		self.write_ref_count_reindex_plan_locked(tables, reindex, address, ref_count, source, log)
+	}
+
+	fn write_ref_count_reindex_plan_locked(
+		&self,
+		mut tables: RwLockUpgradableReadGuard<Tables>,
+		mut reindex: RwLockUpgradableReadGuard<Reindex>,
+		address: Address,
+		ref_count: u64,
+		source: RefCountTableId,
+		log: &mut LogWriter,
+	) -> Result<PlanOutcome> {
+		if let Some((_ref_count, _sub_index)) = tables.ref_count.get(address, log)? {
+			log::trace!(target: "parity-db", "{}: Skipped ref count reindex entry {} when reindexing", tables.ref_count.id, address);
+			return Ok(PlanOutcome::Skipped)
+		}
+		// An intermediate reindex table might contain a more recent value for the ref count so need to check for this and skip.
+		for entry in reindex.queue.iter().rev() {
+			if let ReindexEntry::RefCount(ref_count_table) = entry {
+				if ref_count_table.id == source {
+					break
+				}
+				if let Some(_r) = Self::search_ref_count(address, ref_count_table, log)? {
+					log::trace!(target: "parity-db", "{}: Skipped ref count reindex entry {} when reindexing", ref_count_table.id, address);
+					return Ok(PlanOutcome::Skipped)
+				}
+			}
+		}
+		let mut outcome = PlanOutcome::Written;
+		while let PlanOutcome::NeedReindex =
+			tables.ref_count.write_insert_plan(address, ref_count, None, log)?
+		{
+			log::debug!(target: "parity-db", "{}: Ref count chunk full {} when reindexing", tables.ref_count.id, address);
+			(tables, reindex) = Self::trigger_ref_count_reindex(tables, reindex, self.path.as_path());
+			outcome = PlanOutcome::NeedReindex;
+		}
+		Ok(outcome)
+	}
+
+	fn search_ref_count<'a>(
+		address: Address,
+		ref_count_table: &'a RefCountTable,
+		log: &LogWriter,
+	) -> Result<Option<(&'a RefCountTable, usize, u64)>> {
+		if let Some((ref_count, sub_index)) = ref_count_table.get(address, log)? {
+			return Ok(Some((ref_count_table, sub_index, ref_count)))
+		}
+		Ok(None)
+	}
+
+	fn search_all_ref_count<'a>(
+		address: Address,
+		tables: &'a Tables,
+		reindex: &'a Reindex,
+		log: &LogWriter,
+	) -> Result<Option<(&'a RefCountTable, usize, u64)>> {
+		if let Some(r) = Self::search_ref_count(address, &tables.ref_count, log)? {
+			return Ok(Some(r))
+		}
+		// Check old tables
+		// TODO: don't search if table precedes reindex progress
+		for entry in reindex.queue.iter().rev() {
+			if let ReindexEntry::RefCount(ref_count_table) = entry {
+				if let Some(r) = Self::search_ref_count(address, ref_count_table, log)? {
+					return Ok(Some(r))
+				}
+			}
+		}
+		Ok(None)
+	}
+
+	fn write_ref_count_plan_existing<'a>(
+		&self,
+		tables: &Tables,
+		reindex: &'a Reindex,
+		change: (Address, Option<u64>),
+		log: &mut LogWriter,
+		ref_count_table: &RefCountTable,
+		sub_index: usize,
+	) -> Result<PlanOutcome> {
+		let (address, ref_count) = change;
+		if let Some(ref_count) = ref_count {
+			// Replacing
+			assert!(ref_count_table.id == tables.ref_count.id);
+			tables.ref_count.write_insert_plan(address, ref_count, Some(sub_index), log)
+		} else {
+			// Removing
+			let result = ref_count_table.write_remove_plan(address, sub_index, log);
+			// Need to remove from all old tables in reindex otherwise it will appear that this entry still exists and it might get reintroduced during reindex.
+			{
+				if ref_count_table.id != tables.ref_count.id {
+					if let Some((table, sub_index, _ref_count)) = Self::search_ref_count(address, &tables.ref_count, log)? {
+						table.write_remove_plan(address, sub_index, log)?;
+					}
+				}
+				for entry in &reindex.queue {
+					if let ReindexEntry::RefCount(table) = entry {
+						if table.id != ref_count_table.id {
+							if let Some((table, sub_index, _ref_count)) = Self::search_ref_count(address, table, log)? {
+								table.write_remove_plan(address, sub_index, log)?;
+							}
+						}
+					}
+				}
+			}
+			result
+		}
+	}
+
+	fn write_ref_count_plan_new<'a, 'b>(
+		&self,
+		mut tables: RwLockUpgradableReadGuard<'a, Tables>,
+		mut reindex: RwLockUpgradableReadGuard<'b, Reindex>,
+		address: Address,
+		ref_count: u64,
+		log: &mut LogWriter,
+	) -> Result<(
+		PlanOutcome,
+		RwLockUpgradableReadGuard<'a, Tables>,
+		RwLockUpgradableReadGuard<'b, Reindex>,
+	)> {
+		let mut outcome = PlanOutcome::Written;
+		while let PlanOutcome::NeedReindex =
+			tables.ref_count.write_insert_plan(address, ref_count, None, log)?
+		{
+			log::debug!(target: "parity-db", "{}: Ref count chunk full {}", tables.ref_count.id, address);
+			(tables, reindex) = Self::trigger_ref_count_reindex(tables, reindex, self.path.as_path());
+			outcome = PlanOutcome::NeedReindex;
+		}
+		let (test_ref_count, _test_sub_index) = tables.ref_count.get(address, log)?.unwrap();
+		assert!(test_ref_count == ref_count);
 		Ok((outcome, tables, reindex))
 	}
 
@@ -930,20 +1141,43 @@ impl HashColumn {
 		log: &mut LogWriter,
 	) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
-		let tables = self.as_ref(&tables.value);
 		let address = Address::from_u64(address);
-		let target_tier = address.size_tier();
-		let offset = address.offset();
-
-		let exists = tables.tables[target_tier as usize].change_ref(offset, 1, log)?;
-		assert!(exists);
-
-		let stats = self.collect_stats.then_some(&self.stats);
-		if let Some(stats) = stats {
-			stats.reference_increase();
+		let table_ref_count = {
+			let tables = self.as_ref(&tables.value);
+			let target_tier = address.size_tier();
+			let offset = address.offset();
+			let (exists, ref_count) = tables.tables[target_tier as usize].change_ref_return(offset, 1, log)?;
+			assert!(exists);
+			ref_count
+		};
+		let reindex = self.reindex.upgradable_read();
+		let existing: Option<(&RefCountTable, usize, u64)> = Self::search_all_ref_count(address, &tables, &reindex, log)?;
+		if let Some((table, sub_index, ref_count)) = existing {
+			assert!(ref_count > 1);
+			let new_ref_count = ref_count + 1;
+			if table_ref_count as u64 != new_ref_count {
+				log::info!(target: "parity-db", "Ref count mismatch, value: {}, {}: {}", table_ref_count, table.id, new_ref_count);
+				for entry in reindex.queue.iter().rev() {
+					if let ReindexEntry::RefCount(ref_count_table) = entry {
+						if let Some(r) = Self::search_ref_count(address, ref_count_table, log)? {
+							log::info!(target: "parity-db", "Ref count mismatch, value: {}, {}: {}", table_ref_count, r.0.id, r.2);
+						}
+					}
+				}
+			}
+			assert!(table_ref_count as u64 == new_ref_count);
+			if table.id == tables.ref_count.id {
+				self.write_ref_count_plan_existing(&tables, &reindex, (address, Some(new_ref_count)), log, table, sub_index)
+			} else {
+				let (r, _, _) = self.write_ref_count_plan_new(tables, reindex, address, new_ref_count, log)?;
+				Ok(r)
+			}
+		} else {
+			// inc ref is only called on addresses that already exist, so we know they must have only 1 reference.
+			assert!(table_ref_count == 2);
+			let (r, _, _) = self.write_ref_count_plan_new(tables, reindex, address, 2, log)?;
+			Ok(r)
 		}
-
-		Ok(PlanOutcome::Written)
 	}
 
 	pub fn write_address_dec_ref_plan(
@@ -952,13 +1186,44 @@ impl HashColumn {
 		log: &mut LogWriter,
 	) -> Result<(bool, PlanOutcome)> {
 		let tables = self.tables.upgradable_read();
-		let tables = self.as_ref(&tables.value);
 		let address = Address::from_u64(address);
-		let target_tier = address.size_tier();
-		let offset = address.offset();
-		let remains = tables.tables[target_tier as usize].write_dec_ref(offset, log)?;
-
-		Ok((remains, PlanOutcome::Written))
+		let (value_table_remains, table_ref_count) = {
+			let tables = self.as_ref(&tables.value);
+			let target_tier = address.size_tier();
+			let offset = address.offset();
+			tables.tables[target_tier as usize].change_ref_return(offset, -1, log)?
+		};
+		let reindex = self.reindex.upgradable_read();
+		let existing: Option<(&RefCountTable, usize, u64)> = Self::search_all_ref_count(address, &tables, &reindex, log)?;
+		if let Some((table, sub_index, ref_count)) = existing {
+			assert!(ref_count > 1);
+			let new_ref_count = ref_count - 1;
+			assert!(table_ref_count as u64 == new_ref_count);
+			assert!(value_table_remains);
+			let new_ref_count = if new_ref_count > 1 {
+				Some(new_ref_count)
+			} else {
+				None
+			};
+			let outcome = if new_ref_count.is_some() && table.id != tables.ref_count.id {
+				let (r, _, _) = self.write_ref_count_plan_new(tables, reindex, address, new_ref_count.unwrap(), log)?;
+				r
+			} else {
+				self.write_ref_count_plan_existing(&tables, &reindex, (address, new_ref_count), log, table, sub_index)?
+			};
+			Ok((true, outcome))
+		} else {
+			// dec ref is only called on addresses that already exist, so we know they must have only 1 reference.
+			assert!(table_ref_count == 0);
+			assert!(!value_table_remains);
+			{
+				let tables = self.as_ref(&tables.value);
+				let target_tier = address.size_tier();
+				let offset = address.offset();
+				tables.tables[target_tier as usize].write_remove_plan(offset, log)?;
+			}
+			Ok((false, PlanOutcome::Written))
+		}
 	}
 
 	pub fn enact_plan(&self, action: LogAction, log: &mut LogReader) -> Result<()> {
@@ -968,10 +1233,10 @@ impl HashColumn {
 			LogAction::InsertIndex(record) => {
 				if tables.index.id == record.table {
 					tables.index.enact_plan(record.index, log)?;
-				} else if let Some(table) = reindex.queue.iter().find(|r| r.id == record.table) {
+				} else if let Some(table) = reindex.queue.iter().filter_map(|s| if let ReindexEntry::Index(t) = s { Some(t) } else { None }).find(|r| r.id == record.table) {
 					table.enact_plan(record.index, log)?;
 				} else {
-					// This may happen when removal is planed for an old index when reindexing.
+					// This may happen when removal is planned for an old index when reindexing.
 					// We can safely skip the removal since the new index does not have the entry
 					// anyway and the old index is already dropped.
 					log::debug!(
@@ -984,6 +1249,23 @@ impl HashColumn {
 			},
 			LogAction::InsertValue(record) => {
 				tables.value[record.table.size_tier() as usize].enact_plan(record.index, log)?;
+			},
+			LogAction::InsertRefCount(record) => {
+				if tables.ref_count.id == record.table {
+					tables.ref_count.enact_plan(record.index, log)?;
+				} else if let Some(table) = reindex.queue.iter().filter_map(|s| if let ReindexEntry::RefCount(t) = s { Some(t) } else { None }).find(|r| r.id == record.table) {
+					table.enact_plan(record.index, log)?;
+				} else {
+					// This may happen when removal is planned for an old ref count when reindexing.
+					// We can safely skip the removal since the new ref count does not have the entry
+					// anyway and the old ref count is already dropped.
+					log::debug!(
+						target: "parity-db",
+						"Missing ref count {}. Skipped",
+						record.table,
+					);
+					RefCountTable::skip_plan(log)?;
+				}
 			},
 			// This should never happen, unless something has modified the log file while the
 			// database is running. Existing logs should be validated with `validate_plan` on
@@ -1000,7 +1282,7 @@ impl HashColumn {
 			LogAction::InsertIndex(record) => {
 				if tables.index.id == record.table {
 					tables.index.validate_plan(record.index, log)?;
-				} else if let Some(table) = reindex.queue.iter().find(|r| r.id == record.table) {
+				} else if let Some(table) = reindex.queue.iter().filter_map(|s| if let ReindexEntry::Index(t) = s { Some(t) } else { None }).find(|r| r.id == record.table) {
 					table.validate_plan(record.index, log)?;
 				} else {
 					if record.table.index_bits() < tables.index.id.index_bits() {
@@ -1022,6 +1304,29 @@ impl HashColumn {
 			},
 			LogAction::InsertValue(record) => {
 				tables.value[record.table.size_tier() as usize].validate_plan(record.index, log)?;
+			},
+			LogAction::InsertRefCount(record) => {
+				if tables.ref_count.id == record.table {
+					tables.ref_count.validate_plan(record.index, log)?;
+				} else if let Some(table) = reindex.queue.iter().filter_map(|s| if let ReindexEntry::RefCount(t) = s { Some(t) } else { None }).find(|r| r.id == record.table) {
+					table.validate_plan(record.index, log)?;
+				} else {
+					if record.table.index_bits() < tables.ref_count.id.index_bits() {
+						// Insertion into a previously dropped ref count.
+						log::warn!( target: "parity-db", "Ref count {} is too old. Current is {}", record.table, tables.ref_count.id);
+						return Err(Error::Corruption("Unexpected log ref count id".to_string()))
+					}
+					// Re-launch previously started reindex
+					// TODO: add explicit log records for reindexing events.
+					log::warn!(
+						target: "parity-db",
+						"Missing ref count {}, starting reindex",
+						record.table,
+					);
+					let lock = Self::trigger_ref_count_reindex(tables, reindex, self.path.as_path());
+					std::mem::drop(lock);
+					return self.validate_plan(LogAction::InsertRefCount(record), log)
+				}
 			},
 			_ => {
 				log::error!(target: "parity-db", "Unexpected log action");
@@ -1345,50 +1650,101 @@ impl HashColumn {
 		let reindex = self.reindex.read();
 		let mut plan = Vec::new();
 		let mut drop_index = None;
+		let mut ref_count_plan = Vec::new();
+		let mut ref_count_source = None;
+		let mut drop_ref_count = None;
 		if let Some(source) = reindex.queue.front() {
 			let progress = reindex.progress.load(Ordering::Relaxed);
-			if progress != source.id.total_chunks() {
-				let mut source_index = progress;
-				if source_index % 500 == 0 {
-					log::debug!(target: "parity-db", "{}: Reindexing at {}/{}", tables.index.id, source_index, source.id.total_chunks());
-				}
-				log::debug!(target: "parity-db", "{}: Continue reindex at {}/{}", tables.index.id, source_index, source.id.total_chunks());
-				while source_index < source.id.total_chunks() && plan.len() < MAX_REINDEX_BATCH {
-					log::trace!(target: "parity-db", "{}: Reindexing {}", source.id, source_index);
-					let entries = source.entries(source_index, log.overlays())?;
-					for entry in entries.iter() {
-						if entry.is_empty() {
-							continue
+			match source {
+				ReindexEntry::Index(source) => {
+					if progress != source.id.total_chunks() {
+						let mut source_index = progress;
+						if source_index % 500 == 0 {
+							log::debug!(target: "parity-db", "{}: Reindexing at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 						}
-						// We only need key prefix to reindex.
-						let key = source.recover_key_prefix(source_index, *entry);
-						plan.push((key, entry.address(source.id.index_bits())))
+						log::debug!(target: "parity-db", "{}: Continue reindex at {}/{}", tables.index.id, source_index, source.id.total_chunks());
+						while source_index < source.id.total_chunks() && plan.len() < MAX_REINDEX_BATCH {
+							log::trace!(target: "parity-db", "{}: Reindexing {}", source.id, source_index);
+							let entries = source.entries(source_index, log.overlays())?;
+							for entry in entries.iter() {
+								if entry.is_empty() {
+									continue
+								}
+								// We only need key prefix to reindex.
+								let key = source.recover_key_prefix(source_index, *entry);
+								plan.push((key, entry.address(source.id.index_bits())))
+							}
+							source_index += 1;
+						}
+						log::trace!(target: "parity-db", "{}: End reindex batch {} ({})", tables.index.id, source_index, plan.len());
+						reindex.progress.store(source_index, Ordering::Relaxed);
+						if source_index == source.id.total_chunks() {
+							log::info!(target: "parity-db", "Completed reindex {} into {}", source.id, tables.index.id);
+							drop_index = Some(source.id);
+						}
 					}
-					source_index += 1;
-				}
-				log::trace!(target: "parity-db", "{}: End reindex batch {} ({})", tables.index.id, source_index, plan.len());
-				reindex.progress.store(source_index, Ordering::Relaxed);
-				if source_index == source.id.total_chunks() {
-					log::info!(target: "parity-db", "Completed reindex {} into {}", source.id, tables.index.id);
-					drop_index = Some(source.id);
+				},
+				ReindexEntry::RefCount(source) => {
+					if progress != source.id.total_chunks() {
+						let mut source_index = progress;
+						if source_index % 500 == 0 {
+							log::debug!(target: "parity-db", "{}: Reindexing ref count at {}/{}", tables.ref_count.id, source_index, source.id.total_chunks());
+						}
+						ref_count_source = Some(source.id);
+						log::debug!(target: "parity-db", "{}: Continue reindex ref count at {}/{}", tables.ref_count.id, source_index, source.id.total_chunks());
+						while source_index < source.id.total_chunks() && ref_count_plan.len() < MAX_REINDEX_BATCH {
+							log::trace!(target: "parity-db", "{}: Reindexing ref count {}", source.id, source_index);
+							let entries = source.entries(source_index, log.overlays())?;
+							for entry in entries.iter() {
+								if entry.is_empty() {
+									continue
+								}
+								ref_count_plan.push((entry.address(), entry.ref_count()));
+							}
+							source_index += 1;
+						}
+						log::trace!(target: "parity-db", "{}: End reindex ref count batch {} ({})", tables.ref_count.id, source_index, ref_count_plan.len());
+						reindex.progress.store(source_index, Ordering::Relaxed);
+						if source_index == source.id.total_chunks() {
+							log::info!(target: "parity-db", "Completed reindex ref count {} into {}", source.id, tables.ref_count.id);
+							drop_ref_count = Some(source.id);
+						}
+					}		
 				}
 			}
 		}
-		Ok(ReindexBatch { drop_index, batch: plan })
+		Ok(ReindexBatch { drop_index, batch: plan, drop_ref_count, ref_count_batch: ref_count_plan, ref_count_batch_source: ref_count_source })
 	}
 
 	pub fn drop_index(&self, id: IndexTableId) -> Result<()> {
 		log::debug!(target: "parity-db", "Dropping {}", id);
 		let mut reindex = self.reindex.write();
-		if reindex.queue.front_mut().map_or(false, |index| index.id == id) {
-			let table = reindex.queue.pop_front();
+		if reindex.queue.front_mut().map_or(false, |e| if let ReindexEntry::Index(t) = e { t.id == id } else { false }) {
 			reindex.progress.store(0, Ordering::Relaxed);
-			table.unwrap().drop_file()?;
+			let table = reindex.queue.pop_front().unwrap();
+			let table = if let ReindexEntry::Index(table) = table { table } else { return Err(Error::Corruption(format!("Incorrect reindex type"))) };
+			table.drop_file()?;
 		} else {
 			log::warn!(target: "parity-db", "Dropping invalid index {}", id);
 			return Ok(())
 		}
 		log::debug!(target: "parity-db", "Dropped {}", id);
+		Ok(())
+	}
+
+	pub fn drop_ref_count(&self, id: RefCountTableId) -> Result<()> {
+		log::debug!(target: "parity-db", "Dropping ref count {}", id);
+		let mut reindex = self.reindex.write();
+		if reindex.queue.front_mut().map_or(false, |e| if let ReindexEntry::RefCount(t) = e { t.id == id } else { false }) {
+			reindex.progress.store(0, Ordering::Relaxed);
+			let table = reindex.queue.pop_front().unwrap();
+			let table = if let ReindexEntry::RefCount(table) = table { table } else { return Err(Error::Corruption(format!("Incorrect reindex type"))) };
+			table.drop_file()?;
+		} else {
+			log::warn!(target: "parity-db", "Dropping invalid ref count {}", id);
+			return Ok(())
+		}
+		log::debug!(target: "parity-db", "Dropped ref count {}", id);
 		Ok(())
 	}
 

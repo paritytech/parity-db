@@ -902,8 +902,9 @@ impl DbInner {
 		// Process any pending reindexes
 		for column in self.columns.iter() {
 			let column = if let Column::Hash(c) = column { c } else { continue };
-			let ReindexBatch { drop_index, batch } = column.reindex(&self.log)?;
+			let ReindexBatch { drop_index, batch, drop_ref_count, ref_count_batch, ref_count_batch_source } = column.reindex(&self.log)?;
 			if !batch.is_empty() || drop_index.is_some() {
+				assert!(ref_count_batch.is_empty() && ref_count_batch_source.is_none() && drop_ref_count.is_none());
 				let mut next_reindex = false;
 				let mut writer = self.log.begin_record();
 				log::debug!(
@@ -929,6 +930,45 @@ impl DbInner {
 				log::debug!(
 					target: "parity-db",
 					"Created reindex record {}, {} bytes",
+					record_id,
+					bytes,
+				);
+				*logged_bytes += bytes as i64;
+				if next_reindex {
+					self.start_reindex(record_id);
+				}
+				self.flush_worker_wait.signal();
+				return Ok(true)
+			}
+			if !ref_count_batch.is_empty() || drop_ref_count.is_some() {
+				assert!(batch.is_empty() && drop_index.is_none());
+				assert!(ref_count_batch_source.is_some());
+				let ref_count_source = ref_count_batch_source.unwrap();
+				let mut next_reindex = false;
+				let mut writer = self.log.begin_record();
+				log::debug!(
+					target: "parity-db",
+					"Creating ref count reindex record {}",
+					writer.record_id(),
+				);
+				for (address, ref_count) in ref_count_batch.into_iter() {
+					if let PlanOutcome::NeedReindex =
+						column.write_ref_count_reindex_plan(address, ref_count, ref_count_source, &mut writer)?
+					{
+						next_reindex = true
+					}
+				}
+				if let Some(table) = drop_ref_count {
+					writer.drop_ref_count_table(table);
+				}
+				let record_id = writer.record_id();
+				let l = writer.drain();
+
+				let mut logged_bytes = self.log_queue_wait.work.lock();
+				let bytes = self.log.end_record(l)?;
+				log::debug!(
+					target: "parity-db",
+					"Created ref count reindex record {}, {} bytes",
 					record_id,
 					bytes,
 				);
@@ -1024,7 +1064,24 @@ impl DbInner {
 									return Ok(false)
 								}
 							},
-							LogAction::DropTable(_) => continue,
+							LogAction::InsertRefCount(insertion) => {
+								let col = insertion.table.col() as usize;
+								if let Err(e) = self.columns.get(col).map_or_else(
+									|| Err(Error::Corruption(format!("Invalid column id {col}"))),
+									|col| {
+										col.validate_plan(
+											LogAction::InsertRefCount(insertion),
+											&mut reader,
+										)
+									},
+								) {
+									log::warn!(target: "parity-db", "Error validating log: {:?}.", e);
+									drop(reader);
+									self.log.clear_replay_logs();
+									return Ok(false)
+								}
+							},
+							LogAction::DropTable(_) | LogAction::DropRefCountTable(_) => continue,
 						}
 					}
 					reader.reset()?;
@@ -1043,6 +1100,10 @@ impl DbInner {
 							self.columns[insertion.table.col() as usize]
 								.enact_plan(LogAction::InsertValue(insertion), &mut reader)?;
 						},
+						LogAction::InsertRefCount(insertion) => {
+							self.columns[insertion.table.col() as usize]
+								.enact_plan(LogAction::InsertRefCount(insertion), &mut reader)?;
+						},
 						LogAction::DropTable(id) => {
 							log::debug!(
 								target: "parity-db",
@@ -1052,6 +1113,21 @@ impl DbInner {
 							match &self.columns[id.col() as usize] {
 								Column::Hash(col) => {
 									col.drop_index(id)?;
+									// Check if there's another reindex on the next iteration
+									self.start_reindex(reader.record_id());
+								},
+								Column::Tree(_) => (),
+							}
+						},
+						LogAction::DropRefCountTable(id) => {
+							log::debug!(
+								target: "parity-db",
+								"Dropping ref count {}",
+								id,
+							);
+							match &self.columns[id.col() as usize] {
+								Column::Hash(col) => {
+									col.drop_ref_count(id)?;
 									// Check if there's another reindex on the next iteration
 									self.start_reindex(reader.record_id());
 								},
@@ -2037,7 +2113,9 @@ impl IndexedChangeSet {
 					)?;
 				},
 				NodeChange::IncrementReference(address) => {
-					column.write_address_inc_ref_plan(*address, writer)?;
+					if let PlanOutcome::NeedReindex = column.write_address_inc_ref_plan(*address, writer)? {
+						*reindex = true;
+					}
 				},
 				NodeChange::DereferenceChildren(key, hash, children) => {
 					if let Some((_root, rc)) = column.get(hash, writer)? {
