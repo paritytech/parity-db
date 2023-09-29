@@ -447,7 +447,7 @@ impl ValueTable {
 			dirty_header: AtomicBool::new(false),
 			free_entries,
 			multipart,
-			ref_counted: options.ref_counted || (options.multitree && !options.append_only),
+			ref_counted: options.ref_counted,
 			db_version,
 		})
 	}
@@ -1011,56 +1011,6 @@ impl ValueTable {
 		// TODO: optimize actual buf size
 		log.insert_value(self.id, index, buf[0..size].to_vec());
 		Ok(true)
-	}
-
-	pub fn change_ref_return(
-		&self,
-		index: u64,
-		delta: i32,
-		log: &mut LogWriter,
-	) -> Result<(bool, u32)> {
-		let mut buf = FullEntry::new_uninit_full_entry();
-		let buf = if log.value(self.id, index, buf.as_mut()) {
-			&mut buf
-		} else {
-			self.file
-				.read_at(&mut buf[0..self.entry_size as usize], index * self.entry_size as u64)?;
-			&mut buf
-		};
-
-		if buf.is_tombstone() {
-			return Ok((false, 0))
-		}
-
-		let size = if self.multipart && buf.is_multi(self.db_version) {
-			buf.skip_size();
-			buf.skip_next();
-			self.entry_size as usize
-		} else {
-			let (size, _compressed) = buf.read_size();
-			buf.offset() + size as usize
-		};
-
-		let rc_offset = buf.offset();
-		let mut counter = buf.read_rc();
-		if delta > 0 {
-			if counter >= LOCKED_REF - delta as u32 {
-				counter = LOCKED_REF
-			} else {
-				counter += delta as u32;
-			}
-		} else if counter != LOCKED_REF {
-			counter = counter.saturating_sub(-delta as u32);
-			if counter == 0 {
-				return Ok((false, 0))
-			}
-		}
-
-		buf.set_offset(rc_offset);
-		buf.write_rc(counter);
-		// TODO: optimize actual buf size
-		log.insert_value(self.id, index, buf[0..size].to_vec());
-		Ok((true, counter))
 	}
 
 	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {

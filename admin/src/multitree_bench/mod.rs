@@ -1272,7 +1272,10 @@ pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 	}
 
 	if args.empty_on_shutdown && args.pruning > 0 {
-		output_helper.write().println_final(format!("Removed all entries"));
+		let elapsed_time = start_time.elapsed().as_secs_f64();
+		output_helper
+			.write()
+			.println_final(format!("Removed all entries. Total time: {}", elapsed_time));
 	}
 
 	Ok(())

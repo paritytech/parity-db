@@ -1149,33 +1149,13 @@ impl HashColumn {
 		log: &mut LogWriter,
 	) -> Result<PlanOutcome> {
 		let tables = self.tables.upgradable_read();
-		let address = Address::from_u64(address);
-		let table_ref_count = {
-			let tables = self.as_ref(&tables.value);
-			let target_tier = address.size_tier();
-			let offset = address.offset();
-			let (exists, ref_count) =
-				tables.tables[target_tier as usize].change_ref_return(offset, 1, log)?;
-			assert!(exists);
-			ref_count
-		};
 		let reindex = self.reindex.upgradable_read();
+		let address = Address::from_u64(address);
 		let existing: Option<(&RefCountTable, usize, u64)> =
 			Self::search_all_ref_count(address, &tables, &reindex, log)?;
 		if let Some((table, sub_index, ref_count)) = existing {
 			assert!(ref_count > 1);
 			let new_ref_count = ref_count + 1;
-			if table_ref_count as u64 != new_ref_count {
-				log::info!(target: "parity-db", "Ref count mismatch, value: {}, {}: {}", table_ref_count, table.id, new_ref_count);
-				for entry in reindex.queue.iter().rev() {
-					if let ReindexEntry::RefCount(ref_count_table) = entry {
-						if let Some(r) = Self::search_ref_count(address, ref_count_table, log)? {
-							log::info!(target: "parity-db", "Ref count mismatch, value: {}, {}: {}", table_ref_count, r.0.id, r.2);
-						}
-					}
-				}
-			}
-			assert!(table_ref_count as u64 == new_ref_count);
 			if table.id == tables.ref_count.id {
 				self.write_ref_count_plan_existing(
 					&tables,
@@ -1193,7 +1173,6 @@ impl HashColumn {
 		} else {
 			// inc ref is only called on addresses that already exist, so we know they must have
 			// only 1 reference.
-			assert!(table_ref_count == 2);
 			let (r, _, _) = self.write_ref_count_plan_new(tables, reindex, address, 2, log)?;
 			Ok(r)
 		}
@@ -1205,21 +1184,13 @@ impl HashColumn {
 		log: &mut LogWriter,
 	) -> Result<(bool, PlanOutcome)> {
 		let tables = self.tables.upgradable_read();
-		let address = Address::from_u64(address);
-		let (value_table_remains, table_ref_count) = {
-			let tables = self.as_ref(&tables.value);
-			let target_tier = address.size_tier();
-			let offset = address.offset();
-			tables.tables[target_tier as usize].change_ref_return(offset, -1, log)?
-		};
 		let reindex = self.reindex.upgradable_read();
+		let address = Address::from_u64(address);
 		let existing: Option<(&RefCountTable, usize, u64)> =
 			Self::search_all_ref_count(address, &tables, &reindex, log)?;
 		if let Some((table, sub_index, ref_count)) = existing {
 			assert!(ref_count > 1);
 			let new_ref_count = ref_count - 1;
-			assert!(table_ref_count as u64 == new_ref_count);
-			assert!(value_table_remains);
 			let new_ref_count = if new_ref_count > 1 { Some(new_ref_count) } else { None };
 			let outcome = if new_ref_count.is_some() && table.id != tables.ref_count.id {
 				let (r, _, _) = self.write_ref_count_plan_new(
@@ -1244,14 +1215,10 @@ impl HashColumn {
 		} else {
 			// dec ref is only called on addresses that already exist, so we know they must have
 			// only 1 reference.
-			assert!(table_ref_count == 0);
-			assert!(!value_table_remains);
-			{
-				let tables = self.as_ref(&tables.value);
-				let target_tier = address.size_tier();
-				let offset = address.offset();
-				tables.tables[target_tier as usize].write_remove_plan(offset, log)?;
-			}
+			let tables = self.as_ref(&tables.value);
+			let target_tier = address.size_tier();
+			let offset = address.offset();
+			tables.tables[target_tier as usize].write_remove_plan(offset, log)?;
 			Ok((false, PlanOutcome::Written))
 		}
 	}

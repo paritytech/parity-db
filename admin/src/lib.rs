@@ -141,10 +141,7 @@ pub fn run() -> Result<(), String> {
 
 			for c in &mut db_options.columns {
 				c.multitree = true;
-				if args.pruning > 0 {
-					c.ref_counted = true;
-					c.preimage = true;
-				} else {
+				if args.pruning == 0 {
 					c.append_only = true;
 				}
 			}
