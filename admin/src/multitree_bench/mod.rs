@@ -1254,8 +1254,8 @@ pub fn run_internal(args: Args, db: Db) -> Result<(), String> {
 
 	if args.empty_on_shutdown && args.pruning > 0 {
 		// Continue removing trees until they are all gone.
-		TARGET_NUM_REMOVED.store(args.commits, Ordering::SeqCst);
-		while NUM_REMOVED.load(Ordering::Relaxed) < args.commits {
+		TARGET_NUM_REMOVED.store(start_commit + args.commits, Ordering::SeqCst);
+		while NUM_REMOVED.load(Ordering::Relaxed) < start_commit + args.commits {
 			thread::sleep(std::time::Duration::from_millis(50));
 		}
 
