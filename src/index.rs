@@ -287,7 +287,6 @@ impl IndexTable {
 			return self.find_entry_base(key_prefix, sub_index, chunk)
 		}
 		unsafe {
-			let chunk = &chunk.0;
 			let target = _mm_set1_epi32(pk as i32);
 			let shift_mask = _mm_set_epi64x(0, shift.into());
 			let mut i = (sub_index >> 2) << 2; // We keep an alignment of 4
@@ -297,11 +296,11 @@ impl IndexTable {
 				// Then we remove the address by shifting such that the partial key is in the low
 				// part
 				let first_two = _mm_shuffle_epi32::<0b11011000>(_mm_srl_epi64(
-					_mm_loadu_si128(chunk[i * 8..].as_ptr() as *const __m128i),
+					_mm_loadu_si128(chunk.0[i * 8..].as_ptr() as *const __m128i),
 					shift_mask,
 				));
 				let last_two = _mm_shuffle_epi32::<0b11011000>(_mm_srl_epi64(
-					_mm_loadu_si128(chunk[(i + 2) * 8..].as_ptr() as *const __m128i),
+					_mm_loadu_si128(chunk.0[(i + 2) * 8..].as_ptr() as *const __m128i),
 					shift_mask,
 				));
 				// We set into current the input low parts
