@@ -357,7 +357,7 @@ impl LogChange {
 				while mask != 0 {
 					let i = mask.trailing_zeros();
 					mask &= !(1 << i);
-					write(&chunk[i as usize * ENTRY_BYTES..(i as usize + 1) * ENTRY_BYTES])?;
+					write(&chunk.0[i as usize * ENTRY_BYTES..(i as usize + 1) * ENTRY_BYTES])?;
 				}
 			}
 		}
