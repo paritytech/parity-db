@@ -357,7 +357,7 @@ impl LogChange {
 				while mask != 0 {
 					let i = mask.trailing_zeros();
 					mask &= !(1 << i);
-					write(&chunk[i as usize * ENTRY_BYTES..(i as usize + 1) * ENTRY_BYTES])?;
+					write(&chunk.0[i as usize * ENTRY_BYTES..(i as usize + 1) * ENTRY_BYTES])?;
 				}
 			}
 		}
@@ -405,13 +405,13 @@ impl<'a> LogWriter<'a> {
 		self.log.record_id
 	}
 
-	pub fn insert_index(&mut self, table: IndexTableId, index: u64, sub: u8, data: &IndexChunk) {
+	pub fn insert_index(&mut self, table: IndexTableId, index: u64, sub: u8, data: IndexChunk) {
 		match self.log.local_index.entry(table).or_default().map.entry(index) {
 			std::collections::hash_map::Entry::Occupied(mut entry) => {
-				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), *data);
+				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), data);
 			},
 			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert((self.log.record_id, 1 << sub, *data));
+				entry.insert((self.log.record_id, 1 << sub, data));
 			},
 		}
 	}

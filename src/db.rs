@@ -87,7 +87,7 @@ impl Borrow<[u8]> for RcValue {
 
 impl Borrow<Vec<u8>> for RcValue {
 	fn borrow(&self) -> &Vec<u8> {
-		self.value().borrow()
+		self.value()
 	}
 }
 
