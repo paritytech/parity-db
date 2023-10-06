@@ -28,7 +28,7 @@ loom = { version = "0.5.1", optional = true }
 siphasher = "0.3.10"
 
 [dev-dependencies]
-env_logger = "0.10.0"
+env_logger = { version = "0.10.0", default-features = false, features = ["auto-color", "humantime"] }
 fdlimit = "0.2.1"
 rand = { version = "0.8.2", features = ["small_rng"] }
 tempfile = "3.2"
