@@ -274,8 +274,7 @@ impl IndexTable {
 
 	#[cfg(target_arch = "x86_64")]
 	fn find_entry_sse2(&self, key_prefix: u64, sub_index: usize, chunk: &Chunk) -> (Entry, usize) {
-		let chunk = &chunk.0;
-		assert!(chunk.len() >= CHUNK_ENTRIES * 8); // Bound checking (not done by SIMD instructions)
+		assert!(chunk.0.len() >= CHUNK_ENTRIES * 8); // Bound checking (not done by SIMD instructions)
 		const _: () = assert!(
 			CHUNK_ENTRIES % 4 == 0,
 			"We assume here we got buffer with a number of elements that is a multiple of 4"
@@ -288,6 +287,7 @@ impl IndexTable {
 			return self.find_entry_base(key_prefix, sub_index, chunk)
 		}
 		unsafe {
+			let chunk = &chunk.0;
 			let target = _mm_set1_epi32(pk as i32);
 			let shift_mask = _mm_set_epi64x(0, shift.into());
 			let mut i = (sub_index >> 2) << 2; // We keep an alignment of 4
