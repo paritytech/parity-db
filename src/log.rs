@@ -405,13 +405,13 @@ impl<'a> LogWriter<'a> {
 		self.log.record_id
 	}
 
-	pub fn insert_index(&mut self, table: IndexTableId, index: u64, sub: u8, data: &IndexChunk) {
+	pub fn insert_index(&mut self, table: IndexTableId, index: u64, sub: u8, data: IndexChunk) {
 		match self.log.local_index.entry(table).or_default().map.entry(index) {
 			std::collections::hash_map::Entry::Occupied(mut entry) => {
-				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), *data);
+				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), data);
 			},
 			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert((self.log.record_id, 1 << sub, *data));
+				entry.insert((self.log.record_id, 1 << sub, data));
 			},
 		}
 	}

@@ -31,7 +31,7 @@ const EMPTY_CHUNK: Chunk = Chunk([0u8; CHUNK_LEN]);
 const EMPTY_ENTRIES: [Entry; CHUNK_ENTRIES] = [Entry::empty(); CHUNK_ENTRIES];
 
 #[repr(C, align(8))]
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Chunk(pub [u8; CHUNK_LEN]);
 
 #[allow(clippy::assertions_on_constants)]
@@ -362,13 +362,13 @@ impl IndexTable {
 
 	pub fn entries(&self, chunk_index: u64, log: &impl LogQuery) -> Result<[Entry; CHUNK_ENTRIES]> {
 		if let Some(entry) =
-			log.with_index(self.id, chunk_index, |chunk| Self::transmute_chunk(*chunk))
+			log.with_index(self.id, chunk_index, |chunk| *Self::transmute_chunk(chunk))
 		{
 			return Ok(entry)
 		}
 		if let Some(map) = &*self.map.read() {
-			let chunk = *Self::chunk_at(chunk_index, map)?;
-			return Ok(Self::transmute_chunk(chunk))
+			let chunk = Self::chunk_at(chunk_index, map)?;
+			return Ok(*Self::transmute_chunk(chunk))
 		}
 		Ok(EMPTY_ENTRIES)
 	}
@@ -396,14 +396,8 @@ impl IndexTable {
 	}
 
 	#[inline(always)]
-	fn transmute_chunk(chunk: Chunk) -> [Entry; CHUNK_ENTRIES] {
-		let mut result: [Entry; CHUNK_ENTRIES] = unsafe { std::mem::transmute(chunk) };
-		if !cfg!(target_endian = "little") {
-			for item in result.iter_mut() {
-				*item = Entry::from_u64(u64::from_le(item.0));
-			}
-		}
-		result
+	fn transmute_chunk(chunk: &Chunk) -> &[Entry; CHUNK_ENTRIES] {
+		unsafe { std::mem::transmute(chunk) }
 	}
 
 	#[inline(always)]
@@ -445,7 +439,7 @@ impl IndexTable {
 			);
 			Self::write_entry(&new_entry, i, &mut chunk);
 			log::trace!(target: "parity-db", "{}: Replaced at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
-			log.insert_index(self.id, chunk_index, i as u8, &chunk);
+			log.insert_index(self.id, chunk_index, i as u8, chunk);
 			return Ok(PlanOutcome::Written)
 		}
 		for i in 0..CHUNK_ENTRIES {
@@ -453,7 +447,7 @@ impl IndexTable {
 			if entry.is_empty() {
 				Self::write_entry(&new_entry, i, &mut chunk);
 				log::trace!(target: "parity-db", "{}: Inserted at {}.{}: {}", self.id, chunk_index, i, new_entry.address(self.id.index_bits()));
-				log.insert_index(self.id, chunk_index, i as u8, &chunk);
+				log.insert_index(self.id, chunk_index, i as u8, chunk);
 				return Ok(PlanOutcome::Written)
 			}
 		}
@@ -472,16 +466,16 @@ impl IndexTable {
 		let key_prefix = TableKey::index_from_partial(key);
 		let chunk_index = self.chunk_index(key_prefix);
 
-		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| *chunk) {
+		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| chunk.clone()) {
 			return self.plan_insert_chunk(key_prefix, address, chunk, sub_index, log)
 		}
 
 		if let Some(map) = &*self.map.read() {
-			let chunk = *Self::chunk_at(chunk_index, map)?;
+			let chunk = Self::chunk_at(chunk_index, map)?.clone();
 			return self.plan_insert_chunk(key_prefix, address, chunk, sub_index, log)
 		}
 
-		let chunk = EMPTY_CHUNK;
+		let chunk = EMPTY_CHUNK.clone();
 		self.plan_insert_chunk(key_prefix, address, chunk, sub_index, log)
 	}
 
@@ -500,7 +494,7 @@ impl IndexTable {
 		if !entry.is_empty() && entry.partial_key(self.id.index_bits()) == partial_key {
 			let new_entry = Entry::empty();
 			Self::write_entry(&new_entry, i, &mut chunk);
-			log.insert_index(self.id, chunk_index, i as u8, &chunk);
+			log.insert_index(self.id, chunk_index, i as u8, chunk);
 			log::trace!(target: "parity-db", "{}: Removed at {}.{}", self.id, chunk_index, i);
 			return Ok(PlanOutcome::Written)
 		}
@@ -518,12 +512,12 @@ impl IndexTable {
 
 		let chunk_index = self.chunk_index(key_prefix);
 
-		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| *chunk) {
+		if let Some(chunk) = log.with_index(self.id, chunk_index, |chunk| chunk.clone()) {
 			return self.plan_remove_chunk(key_prefix, chunk, sub_index, log)
 		}
 
 		if let Some(map) = &*self.map.read() {
-			let chunk = *Self::chunk_at(chunk_index, map)?;
+			let chunk = Self::chunk_at(chunk_index, map)?.clone();
 			return self.plan_remove_chunk(key_prefix, chunk, sub_index, log)
 		}
 
@@ -626,7 +620,7 @@ mod test {
 
 	#[test]
 	fn test_entries() {
-		let mut chunk = IndexTable::transmute_chunk(EMPTY_CHUNK);
+		let mut chunk = IndexTable::transmute_chunk(&EMPTY_CHUNK).clone();
 		let mut chunk2 = EMPTY_CHUNK;
 		for (i, chunk) in chunk.iter_mut().enumerate().take(CHUNK_ENTRIES) {
 			use std::{
@@ -641,7 +635,7 @@ mod test {
 			*chunk = entry;
 		}
 
-		assert!(IndexTable::transmute_chunk(chunk2) == chunk);
+		assert!(IndexTable::transmute_chunk(&chunk2) == &chunk);
 	}
 
 	#[test]
