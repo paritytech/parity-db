@@ -471,6 +471,14 @@ impl HashColumn {
 		})
 	}
 
+	pub fn init_table_data(&mut self) -> Result<()> {
+		let mut tables = self.tables.write();
+		for table in &mut tables.value {
+			table.init_table_data()?;
+		}
+		Ok(())
+	}
+
 	pub fn hash_key(&self, key: &[u8]) -> Key {
 		hash_key(key, &self.salt, self.uniform_keys, self.db_version)
 	}
@@ -1977,6 +1985,13 @@ impl Column {
 		match self {
 			Column::Hash(column) => column.enact_plan(action, log),
 			Column::Tree(column) => column.enact_plan(action, log),
+		}
+	}
+
+	pub fn init_table_data(&mut self) -> Result<()> {
+		match self {
+			Column::Hash(column) => column.init_table_data(),
+			Column::Tree(_column) => Ok(()),
 		}
 	}
 

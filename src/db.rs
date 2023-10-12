@@ -252,6 +252,13 @@ impl DbInner {
 		})
 	}
 
+	fn init_table_data(&mut self) -> Result<()> {
+		for column in &mut self.columns {
+			column.init_table_data()?;
+		}
+		Ok(())
+	}
+
 	fn get(&self, col: ColId, key: &[u8], external_call: bool) -> Result<Option<Value>> {
 		if self.options.columns[col as usize].multitree && external_call {
 			return Err(Error::InvalidConfiguration(
@@ -1386,7 +1393,7 @@ impl Db {
 
 	fn open_inner(options: &Options, opening_mode: OpeningMode) -> Result<Db> {
 		assert!(options.is_valid());
-		let db = DbInner::open(options, opening_mode)?;
+		let mut db = DbInner::open(options, opening_mode)?;
 		// This needs to be call before log thread: so first reindexing
 		// will run in correct state.
 		if let Err(e) = db.replay_all_logs() {
@@ -1397,6 +1404,7 @@ impl Db {
 			db.clean_all_logs()?;
 			db.log.kill_logs()?;
 		}
+		db.init_table_data()?;
 		let db = Arc::new(db);
 		#[cfg(any(test, feature = "instrumentation"))]
 		let start_threads = opening_mode != OpeningMode::ReadOnly && options.with_background_thread;

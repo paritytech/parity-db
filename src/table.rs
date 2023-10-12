@@ -140,6 +140,7 @@ pub struct ValueTable {
 	filled: AtomicU64,
 	last_removed: AtomicU64,
 	dirty_header: AtomicBool,
+	needs_free_entries: bool,
 	free_entries: Option<RwLock<FreeEntries>>,
 	multipart: bool,
 	ref_counted: bool,
@@ -411,9 +412,28 @@ impl ValueTable {
 			log::debug!(target: "parity-db", "Opened value table {} with {} entries, entry_size={}, removed={}", id, filled, entry_size, last_removed);
 		}
 
-		let free_entries = if options.multitree {
+		Ok(ValueTable {
+			id,
+			entry_size,
+			file,
+			filled: AtomicU64::new(filled),
+			last_removed: AtomicU64::new(last_removed),
+			dirty_header: AtomicBool::new(false),
+			needs_free_entries: options.multitree,
+			free_entries: None,
+			multipart,
+			ref_counted: options.ref_counted,
+			db_version,
+		})
+	}
+
+	pub fn init_table_data(&mut self) -> Result<()> {
+		let free_entries = if self.needs_free_entries {
 			let mut stack: Vec<u64> = Default::default();
 			let mut ordered: BTreeSet<u64> = Default::default();
+
+			let filled = self.filled.load(Ordering::Relaxed);
+			let last_removed = self.last_removed.load(Ordering::Relaxed);
 
 			let mut next = last_removed;
 			while next != 0 {
@@ -428,7 +448,7 @@ impl ValueTable {
 				ordered.insert(next);
 
 				let mut buf = PartialEntry::new_uninit();
-				file.read_at(buf.as_mut(), next * entry_size as u64)?;
+				self.file.read_at(buf.as_mut(), next * self.entry_size as u64)?;
 				buf.skip_size();
 				next = buf.read_next();
 			}
@@ -437,19 +457,8 @@ impl ValueTable {
 		} else {
 			None
 		};
-
-		Ok(ValueTable {
-			id,
-			entry_size,
-			file,
-			filled: AtomicU64::new(filled),
-			last_removed: AtomicU64::new(last_removed),
-			dirty_header: AtomicBool::new(false),
-			free_entries,
-			multipart,
-			ref_counted: options.ref_counted,
-			db_version,
-		})
+		self.free_entries = free_entries;
+		Ok(())
 	}
 
 	pub fn value_size(&self, key: &TableKey) -> Option<u16> {
