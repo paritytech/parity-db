@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog].
 
 ## [Unreleased]
 
+## [v0.4.12] - 2023-10-12
+
+- CI for windows and macos. Also fixes access denied error on windows [`#222`](https://github.com/paritytech/parity-db/pull/222)
+- Force alignment for all chunk buffers [`#225`](https://github.com/paritytech/parity-db/pull/225)
+
 ## [v0.4.11] - 2023-09-13
 
 - Make `madvise_random` compatible with non-Unix OS [`#221`](https://github.com/paritytech/parity-db/pull/221)
