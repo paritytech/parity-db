@@ -143,7 +143,7 @@ pub struct ValueTable {
 	pub id: TableId,
 	pub entry_size: u16,
 	file: crate::file::TableFile,
-	filled: AtomicU64, // Number of entries from the POV of the log overlay.
+	filled: AtomicU64,  // Number of entries from the POV of the log overlay.
 	written: AtomicU64, // Actual number of entries on disk.
 	last_removed: AtomicU64,
 	dirty_header: AtomicBool,
