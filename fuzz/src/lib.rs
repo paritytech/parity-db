@@ -332,11 +332,10 @@ pub trait DbSimulator {
 						);
 					}
 				},
-				Action::IterValues => {
+				Action::IterValues =>
 					if db.iter.is_none() {
 						db.db.iter_column_while(0, |_| true).unwrap();
-					}
-				},
+					},
 			}
 			retry_operation(|| Self::check_db_and_model_are_equals(&db.db, &layers)).unwrap();
 		}
