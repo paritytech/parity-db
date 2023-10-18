@@ -46,6 +46,7 @@ pub enum Action<O: Debug> {
 	Restart,
 	IterPrev,
 	IterNext,
+	IterValues,
 }
 
 #[derive(Clone)]
@@ -329,6 +330,11 @@ pub trait DbSimulator {
 							new_key_value
 								.map_or(IterPosition::End, |(k, _)| IterPosition::Value(k[0])),
 						);
+					}
+				},
+				Action::IterValues => {
+					if db.iter.is_none() {
+						db.db.iter_column_while(0, |_| true).unwrap();
 					}
 				},
 			}
