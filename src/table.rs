@@ -143,7 +143,8 @@ pub struct ValueTable {
 	pub id: TableId,
 	pub entry_size: u16,
 	file: crate::file::TableFile,
-	filled: AtomicU64,
+	filled: AtomicU64,  // Number of entries from the POV of the log overlay.
+	written: AtomicU64, // Actual number of entries on disk.
 	last_removed: AtomicU64,
 	dirty_header: AtomicBool,
 	multipart: bool,
@@ -423,6 +424,7 @@ impl ValueTable {
 			entry_size,
 			file,
 			filled: AtomicU64::new(filled),
+			written: AtomicU64::new(filled),
 			last_removed: AtomicU64::new(last_removed),
 			dirty_header: AtomicBool::new(false),
 			multipart,
@@ -928,6 +930,7 @@ impl ValueTable {
 			let mut header = Header::default();
 			log.read(&mut header.0)?;
 			self.file.write_at(&header.0, 0)?;
+			self.written.store(header.filled(), Ordering::Relaxed);
 			log::trace!(target: "parity-db", "{}: Enacted header, {} filled", self.id, header.filled());
 			return Ok(())
 		}
@@ -992,6 +995,7 @@ impl ValueTable {
 		}
 		self.last_removed.store(last_removed, Ordering::Relaxed);
 		self.filled.store(filled, Ordering::Relaxed);
+		self.written.store(filled, Ordering::Relaxed);
 		Ok(())
 	}
 
@@ -1028,8 +1032,8 @@ impl ValueTable {
 		log: &impl LogQuery,
 		mut f: impl FnMut(u64, u32, Vec<u8>, bool) -> bool,
 	) -> Result<()> {
-		let filled = self.filled.load(Ordering::Relaxed);
-		for index in 1..filled {
+		let written = self.written.load(Ordering::Relaxed);
+		for index in 1..written {
 			let mut result = Vec::new();
 			// expect only indexed key.
 			let mut _fetch_key = Default::default();
@@ -1084,14 +1088,14 @@ impl ValueTable {
 
 	/// Validate free records sequence.
 	pub fn check_free_refs(&self) -> Result<u64> {
-		let filled = self.filled.load(Ordering::Relaxed);
+		let written = self.written.load(Ordering::Relaxed);
 		let mut next = self.last_removed.load(Ordering::Relaxed);
 		let mut len = 0;
 		while next != 0 {
-			if next >= filled {
+			if next >= written {
 				return Err(crate::error::Error::Corruption(format!(
 					"Bad removed ref {} out of {}",
-					next, filled
+					next, written
 				)))
 			}
 			let mut buf = PartialEntry::new_uninit();
@@ -1491,6 +1495,7 @@ mod test {
 					for (k, v) in &entries {
 						table.write_insert_plan(k, &v, writer, compressed).unwrap();
 					}
+					table.complete_plan(writer).unwrap();
 				});
 
 				let mut res = Vec::new();
