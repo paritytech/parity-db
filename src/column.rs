@@ -1214,13 +1214,13 @@ impl HashColumn {
 			.ref_count_cache
 			.as_ref()
 			.map_or(None, |c| c.read().get(&address.as_u64()).cloned());
-		let existing: Option<(&RefCountTable, usize, u64)> =
-			Self::search_all_ref_count(address, &tables, &reindex, log)?;
-		if let Some((table, sub_index, ref_count)) = existing {
-			assert!(ref_count > 1);
-			assert!(cached.is_some());
-			assert!(ref_count == cached.unwrap());
-			let new_ref_count = ref_count + 1;
+		if let Some(cached_ref_count) = cached {
+			let existing: Option<(&RefCountTable, usize, u64)> =
+				Self::search_all_ref_count(address, &tables, &reindex, log)?;
+			let (table, sub_index, table_ref_count) = existing.unwrap();
+			assert!(cached_ref_count > 1);
+			assert!(table_ref_count == cached_ref_count);
+			let new_ref_count = cached_ref_count + 1;
 			self.ref_count_cache
 				.as_ref()
 				.map(|c| c.write().insert(address.as_u64(), new_ref_count));
@@ -1241,7 +1241,6 @@ impl HashColumn {
 		} else {
 			// inc ref is only called on addresses that already exist, so we know they must have
 			// only 1 reference.
-			assert!(cached.is_none());
 			self.ref_count_cache.as_ref().map(|c| c.write().insert(address.as_u64(), 2));
 			let (r, _, _) = self.write_ref_count_plan_new(tables, reindex, address, 2, log)?;
 			Ok(r)
@@ -1260,13 +1259,13 @@ impl HashColumn {
 			.ref_count_cache
 			.as_ref()
 			.map_or(None, |c| c.read().get(&address.as_u64()).cloned());
-		let existing: Option<(&RefCountTable, usize, u64)> =
-			Self::search_all_ref_count(address, &tables, &reindex, log)?;
-		if let Some((table, sub_index, ref_count)) = existing {
-			assert!(ref_count > 1);
-			assert!(cached.is_some());
-			assert!(ref_count == cached.unwrap());
-			let new_ref_count = ref_count - 1;
+		if let Some(cached_ref_count) = cached {
+			let existing: Option<(&RefCountTable, usize, u64)> =
+				Self::search_all_ref_count(address, &tables, &reindex, log)?;
+			let (table, sub_index, table_ref_count) = existing.unwrap();
+			assert!(cached_ref_count > 1);
+			assert!(table_ref_count == cached_ref_count);
+			let new_ref_count = cached_ref_count - 1;
 			self.ref_count_cache.as_ref().map(|c| {
 				if new_ref_count > 1 {
 					c.write().insert(address.as_u64(), new_ref_count);
