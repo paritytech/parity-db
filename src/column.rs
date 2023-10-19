@@ -111,6 +111,7 @@ pub struct HashColumn {
 	col: ColId,
 	tables: RwLock<Tables>,
 	reindex: RwLock<Reindex>,
+	ref_count_cache: Option<RwLock<HashMap<u64, u64>>>,
 	path: PathBuf,
 	preimage: bool,
 	uniform_keys: bool,
@@ -442,15 +443,19 @@ impl HashColumn {
 		let path = &options.path;
 		let col_options = &metadata.columns[col as usize];
 		let db_version = metadata.version;
-		let ref_count = if col_options.multitree && !col_options.append_only {
-			Some(Self::open_ref_count(&options.path, col, &mut reindexing)?)
+		let (ref_count, ref_count_cache) = if col_options.multitree && !col_options.append_only {
+			(
+				Some(Self::open_ref_count(&options.path, col, &mut reindexing)?),
+				Some(RwLock::new(Default::default())),
+			)
 		} else {
-			None
+			(None, None)
 		};
 		Ok(HashColumn {
 			col,
 			tables: RwLock::new(Tables { index, value, ref_count }),
 			reindex: RwLock::new(Reindex { queue: reindexing, progress: AtomicU64::new(0) }),
+			ref_count_cache,
 			path: path.into(),
 			preimage: col_options.preimage,
 			uniform_keys: col_options.uniform,
@@ -476,6 +481,36 @@ impl HashColumn {
 		for table in &mut tables.value {
 			table.init_table_data()?;
 		}
+
+		if let Some(cache) = &self.ref_count_cache {
+			let mut cache = cache.write();
+
+			for entry in &self.reindex.read().queue {
+				if let ReindexEntry::RefCount(table) = entry {
+					for index in 0..table.id.total_chunks() {
+						let entries = table.table_entries(index)?;
+						for entry in entries.iter() {
+							if !entry.is_empty() {
+								cache.insert(entry.address().as_u64(), entry.ref_count());
+							}
+						}
+					}
+				}
+			}
+
+			let table = &tables.ref_count;
+			if let Some(table) = table {
+				for index in 0..table.id.total_chunks() {
+					let entries = table.table_entries(index)?;
+					for entry in entries.iter() {
+						if !entry.is_empty() {
+							cache.insert(entry.address().as_u64(), entry.ref_count());
+						}
+					}
+				}
+			}
+		}
+
 		Ok(())
 	}
 
@@ -1175,11 +1210,20 @@ impl HashColumn {
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
 		let address = Address::from_u64(address);
+		let cached = self
+			.ref_count_cache
+			.as_ref()
+			.map_or(None, |c| c.read().get(&address.as_u64()).cloned());
 		let existing: Option<(&RefCountTable, usize, u64)> =
 			Self::search_all_ref_count(address, &tables, &reindex, log)?;
 		if let Some((table, sub_index, ref_count)) = existing {
 			assert!(ref_count > 1);
+			assert!(cached.is_some());
+			assert!(ref_count == cached.unwrap());
 			let new_ref_count = ref_count + 1;
+			self.ref_count_cache
+				.as_ref()
+				.map(|c| c.write().insert(address.as_u64(), new_ref_count));
 			if table.id == tables.get_ref_count().id {
 				self.write_ref_count_plan_existing(
 					&tables,
@@ -1197,6 +1241,8 @@ impl HashColumn {
 		} else {
 			// inc ref is only called on addresses that already exist, so we know they must have
 			// only 1 reference.
+			assert!(cached.is_none());
+			self.ref_count_cache.as_ref().map(|c| c.write().insert(address.as_u64(), 2));
 			let (r, _, _) = self.write_ref_count_plan_new(tables, reindex, address, 2, log)?;
 			Ok(r)
 		}
@@ -1210,11 +1256,24 @@ impl HashColumn {
 		let tables = self.tables.upgradable_read();
 		let reindex = self.reindex.upgradable_read();
 		let address = Address::from_u64(address);
+		let cached = self
+			.ref_count_cache
+			.as_ref()
+			.map_or(None, |c| c.read().get(&address.as_u64()).cloned());
 		let existing: Option<(&RefCountTable, usize, u64)> =
 			Self::search_all_ref_count(address, &tables, &reindex, log)?;
 		if let Some((table, sub_index, ref_count)) = existing {
 			assert!(ref_count > 1);
+			assert!(cached.is_some());
+			assert!(ref_count == cached.unwrap());
 			let new_ref_count = ref_count - 1;
+			self.ref_count_cache.as_ref().map(|c| {
+				if new_ref_count > 1 {
+					c.write().insert(address.as_u64(), new_ref_count);
+				} else {
+					c.write().remove(&address.as_u64());
+				}
+			});
 			let new_ref_count = if new_ref_count > 1 { Some(new_ref_count) } else { None };
 			let outcome = if new_ref_count.is_some() && table.id != tables.get_ref_count().id {
 				let (r, _, _) = self.write_ref_count_plan_new(

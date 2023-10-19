@@ -206,6 +206,16 @@ impl RefCountTable {
 		Ok(Self::transmute_chunk(EMPTY_CHUNK))
 	}
 
+	pub fn table_entries(&self, chunk_index: u64) -> Result<[Entry; CHUNK_ENTRIES]> {
+		let mut chunk = [0; CHUNK_LEN];
+		if let Some(map) = &*self.map.read() {
+			let source = Self::chunk_at(chunk_index, map)?;
+			chunk.copy_from_slice(source);
+			return Ok(Self::transmute_chunk(chunk))
+		}
+		Ok(Self::transmute_chunk(EMPTY_CHUNK))
+	}
+
 	#[inline(always)]
 	fn transmute_chunk(chunk: [u8; CHUNK_LEN]) -> [Entry; CHUNK_ENTRIES] {
 		let mut result: [Entry; CHUNK_ENTRIES] = unsafe { std::mem::transmute(chunk) };
