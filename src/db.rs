@@ -93,7 +93,7 @@ impl Borrow<[u8]> for RcValue {
 
 impl Borrow<Vec<u8>> for RcValue {
 	fn borrow(&self) -> &Vec<u8> {
-		self.value().borrow()
+		self.value()
 	}
 }
 
@@ -161,11 +161,12 @@ struct DbInner {
 	flush_worker_wait: Arc<WaitCondvar<bool>>,
 	cleanup_worker_wait: WaitCondvar<bool>,
 	cleanup_queue_wait: WaitCondvar<bool>,
+	iteration_lock: Mutex<()>,
 	last_enacted: AtomicU64,
 	next_reindex: AtomicU64,
 	bg_err: Mutex<Option<Arc<Error>>>,
 	db_version: u32,
-	_lock_file: std::fs::File,
+	lock_file: std::fs::File,
 }
 
 #[derive(Debug)]
@@ -244,11 +245,12 @@ impl DbInner {
 			flush_worker_wait: Arc::new(WaitCondvar::new()),
 			cleanup_worker_wait: WaitCondvar::new(),
 			cleanup_queue_wait: WaitCondvar::new(),
+			iteration_lock: Mutex::new(()),
 			next_reindex: AtomicU64::new(1),
 			last_enacted: AtomicU64::new(last_enacted),
 			bg_err: Mutex::new(None),
 			db_version: metadata.version,
-			_lock_file: lock_file,
+			lock_file,
 		})
 	}
 
@@ -1005,6 +1007,7 @@ impl DbInner {
 	}
 
 	fn enact_logs(&self, validation_mode: bool) -> Result<bool> {
+		let _iteration_lock = self.iteration_lock.lock();
 		let cleared = {
 			let reader = match self.log.read_next(validation_mode) {
 				Ok(reader) => reader,
@@ -1344,6 +1347,7 @@ impl DbInner {
 	}
 
 	fn iter_column_while(&self, c: ColId, f: impl FnMut(ValueIterState) -> bool) -> Result<()> {
+		let _lock = self.iteration_lock.lock();
 		match &self.columns[c as usize] {
 			Column::Hash(column) => column.iter_values(&self.log, f),
 			Column::Tree(_) => unimplemented!(),
@@ -1351,6 +1355,7 @@ impl DbInner {
 	}
 
 	fn iter_column_index_while(&self, c: ColId, f: impl FnMut(IterState) -> bool) -> Result<()> {
+		let _lock = self.iteration_lock.lock();
 		match &self.columns[c as usize] {
 			Column::Hash(column) => column.iter_index(&self.log, f),
 			Column::Tree(_) => unimplemented!(),
@@ -1751,6 +1756,9 @@ impl Db {
 		}
 		if let Err(e) = self.inner.kill_logs(&self.inner) {
 			log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
+		}
+		if let Err(e) = self.inner.lock_file.unlock() {
+			log::debug!(target: "parity-db", "Error removing file lock: {:?}", e);
 		}
 	}
 }

@@ -27,6 +27,13 @@ const END_RECORD: u8 = 5;
 const DROP_TABLE: u8 = 6;
 const DROP_REF_COUNT_TABLE: u8 = 7;
 
+// Once index overly uses less than 1/10 of its capacity, it will be reclaimed.
+const INDEX_OVERLAY_RECLAIM_FACTOR: usize = 10;
+// Once value overly uses less than 1/10 of its capacity, it will be reclaimed.
+const VALUE_OVERLAY_RECLAIM_FACTOR: usize = 10;
+// Min number of value items to initiate reclaim. Each item is around 40 bytes.
+const VALUE_OVERLAY_MIN_RECLAIM_ITEMS: usize = 10240;
+
 #[derive(Debug)]
 pub struct InsertIndexAction {
 	pub table: IndexTableId,
@@ -57,6 +64,10 @@ pub enum LogAction {
 }
 
 pub trait LogQuery {
+	type ValueRef<'a>: std::ops::Deref<Target = [u8]>
+	where
+		Self: 'a;
+
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
 		&self,
 		table: IndexTableId,
@@ -64,6 +75,8 @@ pub trait LogQuery {
 		f: F,
 	) -> Option<R>;
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool;
+	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>>;
+
 	fn ref_count<R, F: FnOnce(&RefCountChunk) -> R>(
 		&self,
 		table: RefCountTableId,
@@ -72,32 +85,85 @@ pub trait LogQuery {
 	) -> Option<R>;
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct LogOverlays {
-	index: HashMap<IndexTableId, IndexLogOverlay>,
-	value: HashMap<ValueTableId, ValueLogOverlay>,
+	index: Vec<IndexLogOverlay>,
+	value: Vec<ValueLogOverlay>,
 	ref_count: HashMap<RefCountTableId, RefCountLogOverlay>,
-	last_record_id: HashMap<ColId, u64>,
+	last_record_ids: Vec<u64>,
 }
 
 impl LogOverlays {
 	pub fn last_record_id(&self, col: ColId) -> u64 {
-		self.last_record_id.get(&col).cloned().unwrap_or(u64::MAX)
+		self.last_record_ids.get(col as usize).cloned().unwrap_or(u64::MAX)
+	}
+
+	pub fn with_columns(count: usize) -> Self {
+		Self {
+			index: (0..IndexTableId::max_log_indicies(count))
+				.map(|_| IndexLogOverlay::default())
+				.collect(),
+			value: (0..ValueTableId::max_log_tables(count))
+				.map(|_| ValueLogOverlay::default())
+				.collect(),
+			ref_count: Default::default(),
+			last_record_ids: (0..count).map(|_| 0).collect(),
+		}
 	}
 }
 
+// Loom is missing support for guard projection, so we copy the data as a workaround.
+#[cfg(feature = "loom")]
+pub struct MappedBytesGuard<'a> {
+	_phantom: std::marker::PhantomData<&'a ()>,
+	data: Vec<u8>,
+}
+
+#[cfg(feature = "loom")]
+impl<'a> MappedBytesGuard<'a> {
+	fn new(data: Vec<u8>) -> Self {
+		Self { _phantom: std::marker::PhantomData, data }
+	}
+}
+
+#[cfg(feature = "loom")]
+impl<'a> std::ops::Deref for MappedBytesGuard<'a> {
+	type Target = [u8];
+
+	fn deref(&self) -> &Self::Target {
+		self.data.as_slice()
+	}
+}
+
+#[cfg(not(feature = "loom"))]
+type MappedBytesGuard<'a> = parking_lot::MappedRwLockReadGuard<'a, [u8]>;
+
 impl LogQuery for RwLock<LogOverlays> {
+	type ValueRef<'a> = MappedBytesGuard<'a>;
+
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
 		&self,
 		table: IndexTableId,
 		index: u64,
 		f: F,
 	) -> Option<R> {
-		self.read().with_index(table, index, f)
+		(&*self.read()).with_index(table, index, f)
 	}
 
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool {
-		self.read().value(table, index, dest)
+		(&*self.read()).value(table, index, dest)
+	}
+
+	#[cfg(not(feature = "loom"))]
+	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>> {
+		let lock =
+			parking_lot::RwLockReadGuard::try_map(self.read(), |o| o.value_ref(table, index));
+		lock.ok()
+	}
+
+	#[cfg(feature = "loom")]
+	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>> {
+		self.read().value_ref(table, index).map(|o| MappedBytesGuard::new(o.to_vec()))
 	}
 
 	fn ref_count<R, F: FnOnce(&RefCountChunk) -> R>(
@@ -111,6 +177,7 @@ impl LogQuery for RwLock<LogOverlays> {
 }
 
 impl LogQuery for LogOverlays {
+	type ValueRef<'a> = &'a [u8];
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
 		&self,
 		table: IndexTableId,
@@ -118,13 +185,16 @@ impl LogQuery for LogOverlays {
 		f: F,
 	) -> Option<R> {
 		self.index
-			.get(&table)
+			.get(table.log_index())
 			.and_then(|o| o.map.get(&index).map(|(_id, _mask, data)| f(data)))
 	}
 
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool {
 		let s = self;
-		if let Some(d) = s.value.get(&table).and_then(|o| o.map.get(&index).map(|(_id, data)| data))
+		if let Some(d) = s
+			.value
+			.get(table.log_index())
+			.and_then(|o| o.map.get(&index).map(|(_id, data)| data))
 		{
 			let len = dest.len().min(d.len());
 			dest[0..len].copy_from_slice(&d[0..len]);
@@ -132,6 +202,11 @@ impl LogQuery for LogOverlays {
 		} else {
 			false
 		}
+	}
+	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>> {
+		self.value
+			.get(table.log_index())
+			.and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_slice()))
 	}
 
 	fn ref_count<R, F: FnOnce(&RefCountChunk) -> R>(
@@ -295,7 +370,7 @@ impl<'a> LogReader<'a> {
 #[derive(Debug)]
 pub struct LogChange {
 	local_index: HashMap<IndexTableId, IndexLogOverlay>,
-	local_values: HashMap<ValueTableId, ValueLogOverlay>,
+	local_values: HashMap<ValueTableId, ValueLogOverlayLocal>,
 	local_ref_count: HashMap<RefCountTableId, RefCountLogOverlay>,
 	record_id: u64,
 	dropped_tables: Vec<IndexTableId>,
@@ -314,7 +389,7 @@ impl LogChange {
 		}
 	}
 
-	pub fn local_values_changes(&self, id: ValueTableId) -> Option<&ValueLogOverlay> {
+	pub fn local_values_changes(&self, id: ValueTableId) -> Option<&ValueLogOverlayLocal> {
 		self.local_values.get(&id)
 	}
 
@@ -342,7 +417,7 @@ impl LogChange {
 				while mask != 0 {
 					let i = mask.trailing_zeros();
 					mask &= !(1 << i);
-					write(&chunk[i as usize * ENTRY_BYTES..(i as usize + 1) * ENTRY_BYTES])?;
+					write(&chunk.0[i as usize * ENTRY_BYTES..(i as usize + 1) * ENTRY_BYTES])?;
 				}
 			}
 		}
@@ -398,7 +473,7 @@ impl LogChange {
 #[derive(Debug)]
 struct FlushedLog {
 	index: HashMap<IndexTableId, IndexLogOverlay>,
-	values: HashMap<ValueTableId, ValueLogOverlay>,
+	values: HashMap<ValueTableId, ValueLogOverlayLocal>,
 	ref_count: HashMap<RefCountTableId, RefCountLogOverlay>,
 	bytes: u64,
 }
@@ -418,13 +493,13 @@ impl<'a> LogWriter<'a> {
 		self.log.record_id
 	}
 
-	pub fn insert_index(&mut self, table: IndexTableId, index: u64, sub: u8, data: &IndexChunk) {
+	pub fn insert_index(&mut self, table: IndexTableId, index: u64, sub: u8, data: IndexChunk) {
 		match self.log.local_index.entry(table).or_default().map.entry(index) {
 			std::collections::hash_map::Entry::Occupied(mut entry) => {
-				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), *data);
+				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), data);
 			},
 			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert((self.log.record_id, 1 << sub, *data));
+				entry.insert((self.log.record_id, 1 << sub, data));
 			},
 		}
 	}
@@ -468,7 +543,23 @@ impl<'a> LogWriter<'a> {
 	}
 }
 
-impl<'a> LogQuery for LogWriter<'a> {
+pub enum LogWriterValueGuard<'a> {
+	Local(&'a [u8]),
+	Overlay(MappedBytesGuard<'a>),
+}
+
+impl std::ops::Deref for LogWriterValueGuard<'_> {
+	type Target = [u8];
+	fn deref(&self) -> &[u8] {
+		match self {
+			LogWriterValueGuard::Local(data) => data,
+			LogWriterValueGuard::Overlay(data) => data.deref(),
+		}
+	}
+}
+
+impl<'q> LogQuery for LogWriter<'q> {
+	type ValueRef<'a> = LogWriterValueGuard<'a> where Self: 'a;
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
 		&self,
 		table: IndexTableId,
@@ -499,6 +590,19 @@ impl<'a> LogQuery for LogWriter<'a> {
 		} else {
 			self.overlays.value(table, index, dest)
 		}
+	}
+	fn value_ref<'v>(&'v self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'v>> {
+		self.log
+			.local_values
+			.get(&table)
+			.and_then(|o| {
+				o.map.get(&index).map(|(_id, data)| LogWriterValueGuard::Local(data.as_slice()))
+			})
+			.or_else(|| {
+				self.overlays
+					.value_ref(table, index)
+					.map(|data| LogWriterValueGuard::Overlay(data))
+			})
 	}
 
 	fn ref_count<R, F: FnOnce(&RefCountChunk) -> R>(
@@ -571,6 +675,10 @@ pub struct IndexLogOverlay {
 // We use identity hash for value overlay/log records so that writes to value tables are in order.
 #[derive(Debug, Default)]
 pub struct ValueLogOverlay {
+	pub map: HashMap<u64, (u64, Vec<u8>)>, // index -> (record_id, entry)
+}
+#[derive(Debug, Default)]
+pub struct ValueLogOverlayLocal {
 	pub map: HashMap<u64, (u64, Vec<u8>), BuildIdHash>, // index -> (record_id, entry)
 }
 
@@ -639,7 +747,7 @@ impl Log {
 		let next_log_id = if logs.is_empty() { 0 } else { max_log_id + 1 };
 
 		Ok(Log {
-			overlays: Default::default(),
+			overlays: RwLock::new(LogOverlays::with_columns(options.columns.len())),
 			appending: RwLock::new(None),
 			reading: RwLock::new(None),
 			read_queue: RwLock::default(),
@@ -704,10 +812,16 @@ impl Log {
 			self.cleanup_queue.write().push_back((id, file));
 		}
 		let mut overlays = self.overlays.write();
-		overlays.index.clear();
-		overlays.value.clear();
+		for o in overlays.index.iter_mut() {
+			o.map.clear();
+		}
+		for o in overlays.value.iter_mut() {
+			o.map.clear();
+		}
 		overlays.ref_count.clear();
-		overlays.last_record_id.clear();
+		for r in overlays.last_record_ids.iter_mut() {
+			*r = 0;
+		}
 		self.dirty.store(false, Ordering::Relaxed);
 	}
 
@@ -746,13 +860,13 @@ impl Log {
 		let mut total_index = 0;
 		for (id, overlay) in index.into_iter() {
 			total_index += overlay.map.len();
-			overlays.index.entry(id).or_default().map.extend(overlay.map.into_iter());
+			overlays.index[id.log_index()].map.extend(overlay.map.into_iter());
 		}
 		let mut total_value = 0;
 		for (id, overlay) in values.into_iter() {
 			total_value += overlay.map.len();
-			overlays.last_record_id.insert(id.col(), record_id);
-			overlays.value.entry(id).or_default().map.extend(overlay.map.into_iter());
+			overlays.last_record_ids[id.col() as usize] = record_id;
+			overlays.value[id.log_index()].map.extend(overlay.map.into_iter());
 		}
 		let mut total_ref_count = 0;
 		for (id, overlay) in ref_count.into_iter() {
@@ -779,7 +893,7 @@ impl Log {
 		}
 		let mut overlays = self.overlays.write();
 		for (table, index) in cleared.index.into_iter() {
-			if let Some(ref mut overlay) = overlays.index.get_mut(&table) {
+			if let Some(ref mut overlay) = overlays.index.get_mut(table.log_index()) {
 				if let std::collections::hash_map::Entry::Occupied(e) = overlay.map.entry(index) {
 					if e.get().0 == record_id {
 						e.remove_entry();
@@ -788,7 +902,7 @@ impl Log {
 			}
 		}
 		for (table, index) in cleared.values.into_iter() {
-			if let Some(ref mut overlay) = overlays.value.get_mut(&table) {
+			if let Some(ref mut overlay) = overlays.value.get_mut(table.log_index()) {
 				if let std::collections::hash_map::Entry::Occupied(e) = overlay.map.entry(index) {
 					if e.get().0 == record_id {
 						e.remove_entry();
@@ -805,8 +919,31 @@ impl Log {
 				}
 			}
 		}
-		// Cleanup index overlays
-		overlays.index.retain(|_, overlay| !overlay.map.is_empty());
+		// Reclaim overlay memory
+		for (i, o) in overlays.index.iter_mut().enumerate() {
+			if o.map.capacity() > o.map.len() * INDEX_OVERLAY_RECLAIM_FACTOR {
+				log::trace!(
+					"Schrinking index overlay {}: {}/{}",
+					IndexTableId::from_log_index(i),
+					o.map.len(),
+					o.map.capacity(),
+				);
+				o.map.shrink_to_fit();
+			}
+		}
+		for (i, o) in overlays.value.iter_mut().enumerate() {
+			if o.map.capacity() > VALUE_OVERLAY_MIN_RECLAIM_ITEMS &&
+				o.map.capacity() > o.map.len() * VALUE_OVERLAY_RECLAIM_FACTOR
+			{
+				log::trace!(
+					"Schrinking value overlay {}: {}/{}",
+					ValueTableId::from_log_index(i),
+					o.map.len(),
+					o.map.capacity(),
+				);
+				o.map.shrink_to_fit();
+			}
+		}
 		// Cleanup ref count overlays
 		overlays.ref_count.retain(|_, overlay| !overlay.map.is_empty());
 	}

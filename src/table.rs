@@ -47,8 +47,8 @@
 use crate::{
 	column::ColId,
 	display::hex,
-	error::{try_io, Result},
-	log::{LogQuery, LogReader, LogWriter},
+	error::Result,
+	log::{LogOverlays, LogQuery, LogReader, LogWriter},
 	options::ColumnOptions as Options,
 	parking_lot::RwLock,
 	table::key::{TableKey, TableKeyQuery, PARTIAL_SIZE},
@@ -56,7 +56,6 @@ use crate::{
 use std::{
 	collections::BTreeSet,
 	convert::TryInto,
-	io::Read,
 	mem::MaybeUninit,
 	sync::{
 		atomic::{AtomicBool, AtomicU64, Ordering},
@@ -118,6 +117,20 @@ impl TableId {
 	pub fn as_u16(&self) -> u16 {
 		self.0
 	}
+
+	pub fn log_index(&self) -> usize {
+		self.col() as usize * SIZE_TIERS + self.size_tier() as usize
+	}
+
+	pub const fn max_log_tables(num_columns: usize) -> usize {
+		SIZE_TIERS * num_columns
+	}
+
+	pub fn from_log_index(i: usize) -> Self {
+		let col = i / SIZE_TIERS;
+		let tier = i % SIZE_TIERS;
+		Self::new(col as ColId, tier as u8)
+	}
 }
 
 impl std::fmt::Display for TableId {
@@ -137,7 +150,8 @@ pub struct ValueTable {
 	pub id: TableId,
 	pub entry_size: u16,
 	file: crate::file::TableFile,
-	filled: AtomicU64,
+	filled: AtomicU64,  // Number of entries from the POV of the log overlay.
+	written: AtomicU64, // Actual number of entries on disk.
 	last_removed: AtomicU64,
 	dirty_header: AtomicBool,
 	needs_free_entries: bool,
@@ -165,11 +179,12 @@ impl Header {
 	}
 }
 
-pub struct Entry<B: AsRef<[u8]> + AsMut<[u8]>>(usize, B);
+pub struct Entry<B: AsRef<[u8]>>(usize, B);
 #[cfg(feature = "loom")]
 pub type FullEntry = Entry<Vec<u8>>;
 #[cfg(not(feature = "loom"))]
 pub type FullEntry = Entry<[u8; MAX_ENTRY_BUF_SIZE]>;
+pub type EntryRef<'a> = Entry<&'a [u8]>;
 type PartialEntry = Entry<[u8; 10]>;
 type PartialKeyEntry = Entry<[u8; 40]>; // 2 + 4 + 26 + 8
 
@@ -195,7 +210,7 @@ impl Entry<[u8; MAX_ENTRY_BUF_SIZE]> {
 	}
 }
 
-impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
+impl<B: AsRef<[u8]>> Entry<B> {
 	#[inline(always)]
 	pub fn check_remaining_len(
 		&self,
@@ -221,12 +236,6 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 		self.0
 	}
 
-	pub fn write_slice(&mut self, buf: &[u8]) {
-		let start = self.0;
-		self.0 += buf.len();
-		self.1.as_mut()[start..self.0].copy_from_slice(buf);
-	}
-
 	pub fn read_slice(&mut self, size: usize) -> &[u8] {
 		let start = self.0;
 		self.0 += size;
@@ -237,20 +246,12 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 		&self.1.as_ref()[0..SIZE_SIZE] == TOMBSTONE
 	}
 
-	fn write_tombstone(&mut self) {
-		self.write_slice(TOMBSTONE);
-	}
-
 	fn is_multipart(&self) -> bool {
 		&self.1.as_ref()[0..SIZE_SIZE] == MULTIPART
 	}
 
 	fn is_multipart_v4(&self) -> bool {
 		&self.1.as_ref()[0..SIZE_SIZE] == MULTIPART_V4
-	}
-
-	fn write_multipart(&mut self) {
-		self.write_slice(MULTIPART);
 	}
 
 	fn is_multihead_compressed(&self) -> bool {
@@ -263,14 +264,6 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 
 	fn is_multihead_v4(&self) -> bool {
 		&self.1.as_ref()[0..SIZE_SIZE] == MULTIHEAD_V4
-	}
-
-	fn write_multihead(&mut self) {
-		self.write_slice(MULTIHEAD);
-	}
-
-	fn write_multihead_compressed(&mut self) {
-		self.write_slice(MULTIHEAD_COMPRESSED);
 	}
 
 	fn is_multi(&self, db_version: u32) -> bool {
@@ -289,13 +282,6 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 		self.0 += SIZE_SIZE;
 	}
 
-	fn write_size(&mut self, mut size: u16, compressed: bool) {
-		if compressed {
-			size |= COMPRESSED_MASK;
-		}
-		self.write_slice(&size.to_le_bytes());
-	}
-
 	pub fn read_u64(&mut self) -> u64 {
 		u64::from_le_bytes(self.read_slice(8).try_into().unwrap())
 	}
@@ -312,28 +298,12 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 		self.skip_u64()
 	}
 
-	pub fn write_u64(&mut self, next_index: u64) {
-		self.write_slice(&next_index.to_le_bytes());
-	}
-
-	fn write_next(&mut self, next_index: u64) {
-		self.write_u64(next_index)
-	}
-
 	pub fn read_u32(&mut self) -> u32 {
 		u32::from_le_bytes(self.read_slice(REFS_SIZE).try_into().unwrap())
 	}
 
-	pub fn write_u32(&mut self, next_index: u32) {
-		self.write_slice(&next_index.to_le_bytes());
-	}
-
 	fn read_rc(&mut self) -> u32 {
 		self.read_u32()
-	}
-
-	fn write_rc(&mut self, rc: u32) {
-		self.write_slice(&rc.to_le_bytes());
 	}
 
 	fn read_partial(&mut self) -> &[u8] {
@@ -342,6 +312,52 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
 
 	fn remaining_to(&self, end: usize) -> &[u8] {
 		&self.1.as_ref()[self.0..end]
+	}
+}
+
+impl<B: AsRef<[u8]> + AsMut<[u8]>> Entry<B> {
+	pub fn write_slice(&mut self, buf: &[u8]) {
+		let start = self.0;
+		self.0 += buf.len();
+		self.1.as_mut()[start..self.0].copy_from_slice(buf);
+	}
+
+	fn write_tombstone(&mut self) {
+		self.write_slice(TOMBSTONE);
+	}
+
+	fn write_multipart(&mut self) {
+		self.write_slice(MULTIPART);
+	}
+
+	fn write_multihead(&mut self) {
+		self.write_slice(MULTIHEAD);
+	}
+
+	fn write_multihead_compressed(&mut self) {
+		self.write_slice(MULTIHEAD_COMPRESSED);
+	}
+
+	fn write_size(&mut self, mut size: u16, compressed: bool) {
+		if compressed {
+			size |= COMPRESSED_MASK;
+		}
+		self.write_slice(&size.to_le_bytes());
+	}
+	pub fn write_u64(&mut self, next_index: u64) {
+		self.write_slice(&next_index.to_le_bytes());
+	}
+
+	fn write_next(&mut self, next_index: u64) {
+		self.write_u64(next_index)
+	}
+
+	pub fn write_u32(&mut self, next_index: u32) {
+		self.write_slice(&next_index.to_le_bytes());
+	}
+
+	fn write_rc(&mut self, rc: u32) {
+		self.write_slice(&rc.to_le_bytes());
 	}
 
 	pub fn inner_mut(&mut self) -> &mut B {
@@ -355,7 +371,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> AsMut<[u8]> for Entry<B> {
 	}
 }
 
-impl<B: AsRef<[u8]> + AsMut<[u8]>> AsRef<[u8]> for Entry<B> {
+impl<B: AsRef<[u8]>> AsRef<[u8]> for Entry<B> {
 	fn as_ref(&self) -> &[u8] {
 		self.1.as_ref()
 	}
@@ -395,9 +411,9 @@ impl ValueTable {
 		let file = crate::file::TableFile::open(filepath, entry_size, id)?;
 		let mut filled = 1;
 		let mut last_removed = 0;
-		if let Some(file) = &mut *file.file.write() {
+		if file.map.read().is_some() {
 			let mut header = Header::default();
-			try_io!(file.read_exact(&mut header.0));
+			file.read_at(&mut header.0, 0)?;
 			last_removed = header.last_removed();
 			filled = header.filled();
 			if filled == 0 {
@@ -417,6 +433,7 @@ impl ValueTable {
 			entry_size,
 			file,
 			filled: AtomicU64::new(filled),
+			written: AtomicU64::new(filled),
 			last_removed: AtomicU64::new(last_removed),
 			dirty_header: AtomicBool::new(false),
 			needs_free_entries: options.multitree,
@@ -480,14 +497,20 @@ impl ValueTable {
 		log: &impl LogQuery,
 		mut f: impl FnMut(&[u8]) -> bool,
 	) -> Result<(u32, bool)> {
-		let mut buf = FullEntry::new_uninit_full_entry();
 		let mut part = 0;
 		let mut compressed = false;
 		let mut rc = 1;
 		let entry_size = self.entry_size as usize;
 		loop {
-			let buf = if log.value(self.id, index, buf.as_mut()) {
-				&mut buf
+			let vbuf = log.value_ref(self.id, index);
+			let buf: &[u8] = if let Some(buf) = vbuf.as_deref() {
+				log::trace!(
+					target: "parity-db",
+					"{}: Found in overlay {}",
+					self.id,
+					index,
+				);
+				buf
 			} else {
 				log::trace!(
 					target: "parity-db",
@@ -495,9 +518,9 @@ impl ValueTable {
 					self.id,
 					index,
 				);
-				self.file.read_at(&mut buf[0..entry_size], index * self.entry_size as u64)?;
-				&mut buf
+				self.file.slice_at(index * self.entry_size as u64, entry_size)
 			};
+			let mut buf = EntryRef::new(buf);
 
 			buf.set_offset(0);
 
@@ -531,11 +554,11 @@ impl ValueTable {
 				}
 				match key {
 					TableKeyQuery::Fetch(Some(to_fetch)) => {
-						**to_fetch = TableKey::fetch_partial(buf)?;
+						**to_fetch = TableKey::fetch_partial(&mut buf)?;
 					},
 					TableKeyQuery::Fetch(None) => (),
 					TableKeyQuery::Check(k) => {
-						let to_fetch = k.fetch(buf)?;
+						let to_fetch = k.fetch(&mut buf)?;
 						if !k.compare(&to_fetch) {
 							log::debug!(
 								target: "parity-db",
@@ -1030,6 +1053,7 @@ impl ValueTable {
 			let mut header = Header::default();
 			log.read(&mut header.0)?;
 			self.file.write_at(&header.0, 0)?;
+			self.written.store(header.filled(), Ordering::Relaxed);
 			log::trace!(target: "parity-db", "{}: Enacted header, {} filled", self.id, header.filled());
 			return Ok(())
 		}
@@ -1082,7 +1106,7 @@ impl ValueTable {
 	}
 
 	pub fn refresh_metadata(&self) -> Result<()> {
-		if self.file.file.read().is_none() {
+		if self.file.map.read().is_none() {
 			return Ok(())
 		}
 		let _free_entries_guard = if let Some(free_entries) = &self.free_entries {
@@ -1099,6 +1123,7 @@ impl ValueTable {
 		}
 		self.last_removed.store(last_removed, Ordering::Relaxed);
 		self.filled.store(filled, Ordering::Relaxed);
+		self.written.store(filled, Ordering::Relaxed);
 		Ok(())
 	}
 
@@ -1140,8 +1165,8 @@ impl ValueTable {
 		log: &impl LogQuery,
 		mut f: impl FnMut(u64, u32, Vec<u8>, bool) -> bool,
 	) -> Result<()> {
-		let filled = self.filled.load(Ordering::Relaxed);
-		for index in 1..filled {
+		let written = self.written.load(Ordering::Relaxed);
+		for index in 1..written {
 			let mut result = Vec::new();
 			// expect only indexed key.
 			let mut _fetch_key = Default::default();
@@ -1166,7 +1191,7 @@ impl ValueTable {
 	}
 
 	pub fn is_init(&self) -> bool {
-		self.file.file.read().is_some()
+		self.file.map.read().is_some()
 	}
 
 	pub fn init_with_entry(&self, entry: &[u8]) -> Result<()> {
@@ -1181,7 +1206,7 @@ impl ValueTable {
 	fn do_init_with_entry(&self, entry: &[u8]) -> Result<()> {
 		self.file.grow(self.entry_size)?;
 
-		let empty_overlays = RwLock::new(Default::default());
+		let empty_overlays = RwLock::new(LogOverlays::with_columns(0));
 		let mut log = LogWriter::new(&empty_overlays, 0);
 		let at = self.overwrite_chain(&TableKey::NoHash, entry, &mut log, None, false, false)?;
 		self.complete_plan(&mut log)?;
@@ -1201,14 +1226,14 @@ impl ValueTable {
 		} else {
 			None
 		};
-		let filled = self.filled.load(Ordering::Relaxed);
+		let written = self.written.load(Ordering::Relaxed);
 		let mut next = self.last_removed.load(Ordering::Relaxed);
 		let mut len = 0;
 		while next != 0 {
-			if next >= filled {
+			if next >= written {
 				return Err(crate::error::Error::Corruption(format!(
 					"Bad removed ref {} out of {}",
-					next, filled
+					next, written
 				)))
 			}
 			let mut buf = PartialEntry::new_uninit();
@@ -1241,7 +1266,7 @@ impl ValueTable {
 }
 
 pub mod key {
-	use super::FullEntry;
+	use super::{EntryRef, FullEntry};
 	use crate::{Key, Result};
 
 	pub const PARTIAL_SIZE: usize = 26;
@@ -1275,7 +1300,7 @@ pub mod key {
 			}
 		}
 
-		pub fn fetch_partial(buf: &mut FullEntry) -> Result<[u8; PARTIAL_SIZE]> {
+		pub fn fetch_partial<'a>(buf: &mut EntryRef<'a>) -> Result<[u8; PARTIAL_SIZE]> {
 			let mut result = [0u8; PARTIAL_SIZE];
 			if buf.1.len() >= PARTIAL_SIZE {
 				let pks = buf.read_partial();
@@ -1285,7 +1310,7 @@ pub mod key {
 			Err(crate::error::Error::InvalidValueData)
 		}
 
-		pub fn fetch(&self, buf: &mut FullEntry) -> Result<Option<[u8; PARTIAL_SIZE]>> {
+		pub fn fetch<'a>(&self, buf: &mut EntryRef<'a>) -> Result<Option<[u8; PARTIAL_SIZE]>> {
 			match self {
 				TableKey::Partial(_k) => Ok(Some(Self::fetch_partial(buf)?)),
 				TableKey::NoHash => Ok(None),
@@ -1629,6 +1654,7 @@ mod test {
 					for (k, v) in &entries {
 						table.write_insert_plan(k, &v, writer, compressed).unwrap();
 					}
+					table.complete_plan(writer).unwrap();
 				});
 
 				let mut res = Vec::new();
