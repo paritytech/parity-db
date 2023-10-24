@@ -2155,10 +2155,8 @@ impl IndexedChangeSet {
 						if rc == 1 {
 							let tree = db.get_tree(db, col, key, false).unwrap();
 							if let Some(tree) = tree {
-								//println!("Locking tree {:?}", &key[0..3]);
 								let guard = tree.write();
 								let mut num_removed = 0;
-								//println!("Dereferencing tree {:?}", &key[0..3]);
 								self.write_dereference_children_plan(
 									column,
 									&guard,
