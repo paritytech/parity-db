@@ -799,11 +799,7 @@ impl ValueTable {
 		}
 	}
 
-	pub fn claim_contiguous_entries(
-		&self,
-		num: usize,
-		_min_span_length: usize,
-	) -> Result<Vec<u64>> {
+	pub fn claim_entries(&self, num: usize) -> Result<Vec<u64>> {
 		let mut entries: Vec<u64> = Default::default();
 		for _i in 0..num {
 			entries.push(self.claim_next_free()?);

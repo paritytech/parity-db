@@ -1139,7 +1139,7 @@ impl HashColumn {
 				let mut tier_addresses: HashMap<usize, Vec<u64>> = Default::default();
 				let mut tier_index: HashMap<usize, usize> = Default::default();
 				for (tier, count) in tier_count {
-					let offsets = values.tables[tier].claim_contiguous_entries(count, 8)?;
+					let offsets = values.tables[tier].claim_entries(count)?;
 					tier_addresses.insert(tier, offsets);
 					tier_index.insert(tier, 0);
 				}
