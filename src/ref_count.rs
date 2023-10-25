@@ -4,6 +4,7 @@
 use crate::{
 	column::ColId,
 	error::{try_io, Error, Result},
+	file::madvise_random,
 	index::{Address, PlanOutcome},
 	log::{LogQuery, LogReader, LogWriter},
 	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
@@ -139,7 +140,8 @@ impl RefCountTable {
 		};
 
 		try_io!(file.set_len(file_size(id.index_bits())));
-		let map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
+		let mut map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
+		madvise_random(&mut map);
 		log::debug!(target: "parity-db", "Opened existing refcount table {}", id);
 		Ok(Some(RefCountTable { id, path, map: RwLock::new(Some(map)) }))
 	}
@@ -362,10 +364,9 @@ impl RefCountTable {
 				.create_new(true)
 				.open(self.path.as_path()));
 			log::debug!(target: "parity-db", "Created new ref count {}", self.id);
-			//TODO: check for potential overflows on 32-bit platforms
 			try_io!(file.set_len(file_size(self.id.index_bits())));
 			let mut mmap = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
-			self.madvise_random(&mut mmap);
+			madvise_random(&mut mmap);
 			*wmap = Some(mmap);
 			map = RwLockWriteGuard::downgrade_to_upgradable(wmap);
 		}
@@ -439,20 +440,6 @@ impl RefCountTable {
 		}
 		Ok(())
 	}
-
-	#[cfg(unix)]
-	fn madvise_random(&self, map: &mut memmap2::MmapMut) {
-		unsafe {
-			libc::madvise(
-				map.as_mut_ptr() as _,
-				file_size(self.id.index_bits()) as usize,
-				libc::MADV_RANDOM,
-			);
-		}
-	}
-
-	#[cfg(not(unix))]
-	fn madvise_random(&self, _map: &mut memmap2::MmapMut) {}
 }
 
 #[cfg(test)]
