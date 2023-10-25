@@ -2,7 +2,7 @@
 // This file is dual-licensed as Apache-2.0 or MIT.
 
 use crate::{
-	column::ColId,
+	column::{ColId, MIN_REF_COUNT_BITS},
 	error::{try_io, Error, Result},
 	file::madvise_random,
 	index::{Address, PlanOutcome},
@@ -116,6 +116,20 @@ impl RefCountTableId {
 
 	pub fn total_chunks(&self) -> u64 {
 		total_chunks(self.index_bits())
+	}
+
+	pub fn log_index(&self) -> usize {
+		self.col() as usize * (64 - MIN_REF_COUNT_BITS) as usize + self.index_bits() as usize
+	}
+
+	pub fn from_log_index(i: usize) -> Self {
+		let col = i / (64 - MIN_REF_COUNT_BITS) as usize;
+		let bits = i % (64 - MIN_REF_COUNT_BITS) as usize;
+		RefCountTableId::new(col as ColId, bits as u8)
+	}
+
+	pub const fn max_log_indicies(num_columns: usize) -> usize {
+		(64 - MIN_REF_COUNT_BITS) as usize * num_columns
 	}
 }
 

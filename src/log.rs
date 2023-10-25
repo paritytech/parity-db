@@ -33,6 +33,8 @@ const INDEX_OVERLAY_RECLAIM_FACTOR: usize = 10;
 const VALUE_OVERLAY_RECLAIM_FACTOR: usize = 10;
 // Min number of value items to initiate reclaim. Each item is around 40 bytes.
 const VALUE_OVERLAY_MIN_RECLAIM_ITEMS: usize = 10240;
+// Once ref count overly uses less than 1/10 of its capacity, it will be reclaimed.
+const REF_COUNT_OVERLAY_RECLAIM_FACTOR: usize = 10;
 
 #[derive(Debug)]
 pub struct InsertIndexAction {
@@ -89,7 +91,7 @@ pub trait LogQuery {
 pub struct LogOverlays {
 	index: Vec<IndexLogOverlay>,
 	value: Vec<ValueLogOverlay>,
-	ref_count: HashMap<RefCountTableId, RefCountLogOverlay>,
+	ref_count: Vec<RefCountLogOverlay>,
 	last_record_ids: Vec<u64>,
 }
 
@@ -106,7 +108,9 @@ impl LogOverlays {
 			value: (0..ValueTableId::max_log_tables(count))
 				.map(|_| ValueLogOverlay::default())
 				.collect(),
-			ref_count: Default::default(),
+			ref_count: (0..RefCountTableId::max_log_indicies(count))
+				.map(|_| RefCountLogOverlay::default())
+				.collect(),
 			last_record_ids: (0..count).map(|_| 0).collect(),
 		}
 	}
@@ -172,7 +176,7 @@ impl LogQuery for RwLock<LogOverlays> {
 		index: u64,
 		f: F,
 	) -> Option<R> {
-		self.read().ref_count(table, index, f)
+		(&*self.read()).ref_count(table, index, f)
 	}
 }
 
@@ -216,7 +220,7 @@ impl LogQuery for LogOverlays {
 		f: F,
 	) -> Option<R> {
 		self.ref_count
-			.get(&table)
+			.get(table.log_index())
 			.and_then(|o| o.map.get(&index).map(|(_id, _mask, data)| f(data)))
 	}
 }
@@ -818,7 +822,9 @@ impl Log {
 		for o in overlays.value.iter_mut() {
 			o.map.clear();
 		}
-		overlays.ref_count.clear();
+		for o in overlays.ref_count.iter_mut() {
+			o.map.clear();
+		}
 		for r in overlays.last_record_ids.iter_mut() {
 			*r = 0;
 		}
@@ -871,7 +877,7 @@ impl Log {
 		let mut total_ref_count = 0;
 		for (id, overlay) in ref_count.into_iter() {
 			total_ref_count += overlay.map.len();
-			overlays.ref_count.entry(id).or_default().map.extend(overlay.map.into_iter());
+			overlays.ref_count[id.log_index()].map.extend(overlay.map.into_iter());
 		}
 
 		log::debug!(
@@ -911,7 +917,7 @@ impl Log {
 			}
 		}
 		for (table, index) in cleared.ref_count.into_iter() {
-			if let Some(ref mut overlay) = overlays.ref_count.get_mut(&table) {
+			if let Some(ref mut overlay) = overlays.ref_count.get_mut(table.log_index()) {
 				if let std::collections::hash_map::Entry::Occupied(e) = overlay.map.entry(index) {
 					if e.get().0 == record_id {
 						e.remove_entry();
@@ -944,8 +950,17 @@ impl Log {
 				o.map.shrink_to_fit();
 			}
 		}
-		// Cleanup ref count overlays
-		overlays.ref_count.retain(|_, overlay| !overlay.map.is_empty());
+		for (i, o) in overlays.ref_count.iter_mut().enumerate() {
+			if o.map.capacity() > o.map.len() * REF_COUNT_OVERLAY_RECLAIM_FACTOR {
+				log::trace!(
+					"Schrinking ref count overlay {}: {}/{}",
+					RefCountTableId::from_log_index(i),
+					o.map.len(),
+					o.map.capacity(),
+				);
+				o.map.shrink_to_fit();
+			}
+		}
 	}
 
 	pub fn flush_one(&self, min_size: u64) -> Result<bool> {

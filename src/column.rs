@@ -30,7 +30,7 @@ use std::{
 };
 
 pub const MIN_INDEX_BITS: u8 = 16;
-const MIN_REF_COUNT_BITS: u8 = 11;
+pub const MIN_REF_COUNT_BITS: u8 = 11;
 // Measured in index entries
 const MAX_REINDEX_BATCH: usize = 8192;
 
