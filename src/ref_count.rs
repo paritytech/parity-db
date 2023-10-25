@@ -22,9 +22,12 @@ const META_SIZE: usize = 0;
 const ENTRY_BITS: u8 = 128;
 pub const ENTRY_BYTES: usize = ENTRY_BITS as usize / 8;
 
-const EMPTY_CHUNK: Chunk = [0u8; CHUNK_LEN];
+const EMPTY_CHUNK: Chunk = Chunk([0u8; CHUNK_LEN]);
+const EMPTY_ENTRIES: [Entry; CHUNK_ENTRIES] = [Entry::empty(); CHUNK_ENTRIES];
 
-pub type Chunk = [u8; CHUNK_LEN];
+#[repr(C, align(8))]
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct Chunk(pub [u8; CHUNK_LEN]);
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct Entry(u64, u64);
@@ -54,7 +57,7 @@ impl Entry {
 		self.0 as u128 | (self.1 as u128) << 64
 	}
 
-	fn empty() -> Self {
+	const fn empty() -> Self {
 		Entry(0, 0)
 	}
 
@@ -166,17 +169,17 @@ impl RefCountTable {
 		RefCountTable { id, path, map: RwLock::new(None) }
 	}
 
-	fn chunk_at(index: u64, map: &memmap2::MmapMut) -> Result<&[u8; CHUNK_LEN]> {
+	fn chunk_at(index: u64, map: &memmap2::MmapMut) -> Result<&Chunk> {
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
-		let ptr = unsafe { &*(map[offset..offset + CHUNK_LEN].as_ptr() as *const [u8; CHUNK_LEN]) };
+		let ptr = unsafe { &*(map[offset..offset + CHUNK_LEN].as_ptr() as *const Chunk) };
 		Ok(try_io!(Ok(ptr)))
 	}
 
-	fn find_entry(&self, address: u64, chunk: &[u8; CHUNK_LEN]) -> Option<(Entry, usize)> {
+	fn find_entry(&self, address: u64, chunk: &Chunk) -> Option<(Entry, usize)> {
 		self.find_entry_base(address, chunk)
 	}
 
-	fn find_entry_base(&self, address: u64, chunk: &[u8; CHUNK_LEN]) -> Option<(Entry, usize)> {
+	fn find_entry_base(&self, address: u64, chunk: &Chunk) -> Option<(Entry, usize)> {
 		for i in 0..CHUNK_ENTRIES {
 			let entry = Self::read_entry(chunk, i);
 			if entry.address().as_u64() == address && !entry.is_empty() {
@@ -208,52 +211,41 @@ impl RefCountTable {
 	}
 
 	pub fn entries(&self, chunk_index: u64, log: &impl LogQuery) -> Result<[Entry; CHUNK_ENTRIES]> {
-		let mut chunk = [0; CHUNK_LEN];
 		if let Some(entry) =
-			log.ref_count(self.id, chunk_index, |chunk| Self::transmute_chunk(*chunk))
+			log.ref_count(self.id, chunk_index, |chunk| *Self::transmute_chunk(chunk))
 		{
 			return Ok(entry)
 		}
 		if let Some(map) = &*self.map.read() {
-			let source = Self::chunk_at(chunk_index, map)?;
-			chunk.copy_from_slice(source);
-			return Ok(Self::transmute_chunk(chunk))
+			let chunk = Self::chunk_at(chunk_index, map)?;
+			return Ok(*Self::transmute_chunk(chunk))
 		}
-		Ok(Self::transmute_chunk(EMPTY_CHUNK))
+		Ok(EMPTY_ENTRIES)
 	}
 
 	pub fn table_entries(&self, chunk_index: u64) -> Result<[Entry; CHUNK_ENTRIES]> {
-		let mut chunk = [0; CHUNK_LEN];
 		if let Some(map) = &*self.map.read() {
-			let source = Self::chunk_at(chunk_index, map)?;
-			chunk.copy_from_slice(source);
-			return Ok(Self::transmute_chunk(chunk))
+			let chunk = Self::chunk_at(chunk_index, map)?;
+			return Ok(*Self::transmute_chunk(chunk))
 		}
-		Ok(Self::transmute_chunk(EMPTY_CHUNK))
+		Ok(EMPTY_ENTRIES)
 	}
 
 	#[inline(always)]
-	fn transmute_chunk(chunk: [u8; CHUNK_LEN]) -> [Entry; CHUNK_ENTRIES] {
-		let mut result: [Entry; CHUNK_ENTRIES] = unsafe { std::mem::transmute(chunk) };
-		if !cfg!(target_endian = "little") {
-			for item in result.iter_mut() {
-				// TODO: Confirm this is correct
-				*item = Entry::from_u128(u128::from_le(item.as_u128()));
-			}
-		}
-		result
+	fn transmute_chunk(chunk: &Chunk) -> &[Entry; CHUNK_ENTRIES] {
+		unsafe { std::mem::transmute(chunk) }
 	}
 
 	#[inline(always)]
-	fn write_entry(entry: &Entry, at: usize, chunk: &mut [u8; CHUNK_LEN]) {
-		chunk[at * ENTRY_BYTES..at * ENTRY_BYTES + ENTRY_BYTES]
+	fn write_entry(entry: &Entry, at: usize, chunk: &mut Chunk) {
+		chunk.0[at * ENTRY_BYTES..at * ENTRY_BYTES + ENTRY_BYTES]
 			.copy_from_slice(&entry.as_u128().to_le_bytes());
 	}
 
 	#[inline(always)]
-	fn read_entry(chunk: &[u8; CHUNK_LEN], at: usize) -> Entry {
+	fn read_entry(chunk: &Chunk, at: usize) -> Entry {
 		Entry::from_u128(u128::from_le_bytes(
-			chunk[at * ENTRY_BYTES..at * ENTRY_BYTES + ENTRY_BYTES].try_into().unwrap(),
+			chunk.0[at * ENTRY_BYTES..at * ENTRY_BYTES + ENTRY_BYTES].try_into().unwrap(),
 		))
 	}
 
@@ -270,20 +262,18 @@ impl RefCountTable {
 		&self,
 		address: Address,
 		ref_count: u64,
-		source: &[u8],
+		mut chunk: Chunk,
 		sub_index: Option<usize>,
 		log: &mut LogWriter,
 	) -> Result<PlanOutcome> {
 		let chunk_index = self.chunk_index(address);
-		let mut chunk = [0; CHUNK_LEN];
-		chunk.copy_from_slice(source);
 		let new_entry = Entry::new(address, ref_count);
 		if let Some(i) = sub_index {
 			let entry = Self::read_entry(&chunk, i);
 			assert_eq!(entry.address(), new_entry.address());
 			Self::write_entry(&new_entry, i, &mut chunk);
 			log::trace!(target: "parity-db", "{}: Replaced ref count at {}.{}: {}", self.id, chunk_index, i, new_entry.address());
-			log.insert_ref_count(self.id, chunk_index, i as u8, &chunk);
+			log.insert_ref_count(self.id, chunk_index, i as u8, chunk);
 			return Ok(PlanOutcome::Written)
 		}
 		for i in 0..CHUNK_ENTRIES {
@@ -291,7 +281,7 @@ impl RefCountTable {
 			if entry.is_empty() {
 				Self::write_entry(&new_entry, i, &mut chunk);
 				log::trace!(target: "parity-db", "{}: Inserted ref count at {}.{}: {}", self.id, chunk_index, i, new_entry.address());
-				log.insert_ref_count(self.id, chunk_index, i as u8, &chunk);
+				log.insert_ref_count(self.id, chunk_index, i as u8, chunk);
 				return Ok(PlanOutcome::Written)
 			}
 		}
@@ -309,28 +299,26 @@ impl RefCountTable {
 		log::trace!(target: "parity-db", "{}: Inserting ref count {} -> {}", self.id, address, ref_count);
 		let chunk_index = self.chunk_index(address);
 
-		if let Some(chunk) = log.ref_count(self.id, chunk_index, |chunk| *chunk) {
-			return self.plan_insert_chunk(address, ref_count, &chunk, sub_index, log)
-		}
-
-		if let Some(map) = &*self.map.read() {
-			let chunk = Self::chunk_at(chunk_index, map)?;
+		if let Some(chunk) = log.ref_count(self.id, chunk_index, |chunk| chunk.clone()) {
 			return self.plan_insert_chunk(address, ref_count, chunk, sub_index, log)
 		}
 
-		let chunk = &EMPTY_CHUNK;
+		if let Some(map) = &*self.map.read() {
+			let chunk = Self::chunk_at(chunk_index, map)?.clone();
+			return self.plan_insert_chunk(address, ref_count, chunk, sub_index, log)
+		}
+
+		let chunk = EMPTY_CHUNK.clone();
 		self.plan_insert_chunk(address, ref_count, chunk, sub_index, log)
 	}
 
 	fn plan_remove_chunk(
 		&self,
 		address: Address,
-		source: &[u8],
+		mut chunk: Chunk,
 		sub_index: usize,
 		log: &mut LogWriter,
 	) -> Result<PlanOutcome> {
-		let mut chunk = [0; CHUNK_LEN];
-		chunk.copy_from_slice(source);
 		let chunk_index = self.chunk_index(address);
 
 		let i = sub_index;
@@ -338,7 +326,7 @@ impl RefCountTable {
 		if !entry.is_empty() && entry.address() == address {
 			let new_entry = Entry::empty();
 			Self::write_entry(&new_entry, i, &mut chunk);
-			log.insert_ref_count(self.id, chunk_index, i as u8, &chunk);
+			log.insert_ref_count(self.id, chunk_index, i as u8, chunk);
 			log::trace!(target: "parity-db", "{}: Removed ref count at {}.{}", self.id, chunk_index, i);
 			return Ok(PlanOutcome::Written)
 		}
@@ -355,12 +343,12 @@ impl RefCountTable {
 		log::trace!(target: "parity-db", "{}: Removing ref count {}", self.id, address);
 		let chunk_index = self.chunk_index(address);
 
-		if let Some(chunk) = log.ref_count(self.id, chunk_index, |chunk| *chunk) {
-			return self.plan_remove_chunk(address, &chunk, sub_index, log)
+		if let Some(chunk) = log.ref_count(self.id, chunk_index, |chunk| chunk.clone()) {
+			return self.plan_remove_chunk(address, chunk, sub_index, log)
 		}
 
 		if let Some(map) = &*self.map.read() {
-			let chunk = Self::chunk_at(chunk_index, map)?;
+			let chunk = Self::chunk_at(chunk_index, map)?.clone();
 			return self.plan_remove_chunk(address, chunk, sub_index, log)
 		}
 

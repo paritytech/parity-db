@@ -444,7 +444,7 @@ impl LogChange {
 					let i = mask.trailing_zeros();
 					mask &= !(1 << i);
 					write(
-						&chunk[i as usize * REF_COUNT_ENTRY_BYTES..
+						&chunk.0[i as usize * REF_COUNT_ENTRY_BYTES..
 							(i as usize + 1) * REF_COUNT_ENTRY_BYTES],
 					)?;
 				}
@@ -522,14 +522,14 @@ impl<'a> LogWriter<'a> {
 		table: RefCountTableId,
 		index: u64,
 		sub: u8,
-		data: &RefCountChunk,
+		data: RefCountChunk,
 	) {
 		match self.log.local_ref_count.entry(table).or_default().map.entry(index) {
 			std::collections::hash_map::Entry::Occupied(mut entry) => {
-				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), *data);
+				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), data);
 			},
 			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert((self.log.record_id, 1 << sub, *data));
+				entry.insert((self.log.record_id, 1 << sub, data));
 			},
 		}
 	}
