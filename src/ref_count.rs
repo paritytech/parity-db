@@ -9,10 +9,6 @@ use crate::{
 	log::{LogQuery, LogReader, LogWriter},
 	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 };
-#[cfg(target_arch = "x86")]
-use std::arch::x86::*;
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
 use std::convert::TryInto;
 
 const CHUNK_LEN: usize = CHUNK_ENTRIES * ENTRY_BYTES;
