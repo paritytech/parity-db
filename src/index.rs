@@ -593,10 +593,8 @@ impl IndexTable {
 	}
 
 	pub fn drop_file(self) -> Result<()> {
-		if self.map.read().is_some() {
-			try_io!(std::fs::remove_file(self.path.as_path()));
-		}
 		drop(self.map);
+		try_io!(std::fs::remove_file(self.path.as_path()));
 		log::debug!(target: "parity-db", "{}: Dropped table", self.id);
 		Ok(())
 	}
