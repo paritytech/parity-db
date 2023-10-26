@@ -1702,7 +1702,7 @@ impl Db {
 
 	#[cfg(feature = "instrumentation")]
 	pub fn process_commits(&self) -> Result<()> {
-		self.inner.process_commits()?;
+		self.inner.process_commits(&self.inner)?;
 		Ok(())
 	}
 
