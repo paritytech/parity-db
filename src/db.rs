@@ -138,7 +138,7 @@ struct CommitQueue {
 
 #[derive(Debug)]
 struct Trees {
-	readers: HashMap<Key, Weak<RwLock<DbTreeReader>>, IdentityBuildHasher>,
+	readers: HashMap<Key, Weak<RwLock<Box<dyn TreeReader + Send + Sync>>>, IdentityBuildHasher>,
 	/// Number of queued dereferences for each tree
 	to_dereference: HashMap<Key, usize>,
 }
@@ -376,7 +376,7 @@ impl DbInner {
 		col: ColId,
 		key: &[u8],
 		check_existence: bool,
-	) -> Result<Option<Arc<RwLock<dyn TreeReader>>>> {
+	) -> Result<Option<Arc<RwLock<Box<dyn TreeReader + Send + Sync>>>>> {
 		if !self.options.columns[col as usize].multitree {
 			return Err(Error::InvalidConfiguration("Not a multitree column.".to_string()))
 		}
@@ -411,8 +411,9 @@ impl DbInner {
 					to_dereference: Default::default(),
 				});
 
-				let reader =
-					Arc::new(RwLock::new(DbTreeReader { db: db.clone(), col, key: hash_key }));
+				let reader: Box<dyn TreeReader + Send + Sync> =
+					Box::new(DbTreeReader { db: db.clone(), col, key: hash_key });
+				let reader = Arc::new(RwLock::new(reader));
 
 				column_trees.readers.insert(hash_key, Arc::downgrade(&reader));
 
@@ -1470,7 +1471,11 @@ impl Db {
 		self.inner.btree_iter(col)
 	}
 
-	pub fn get_tree(&self, col: ColId, key: &[u8]) -> Result<Option<Arc<RwLock<dyn TreeReader>>>> {
+	pub fn get_tree(
+		&self,
+		col: ColId,
+		key: &[u8],
+	) -> Result<Option<Arc<RwLock<Box<dyn TreeReader + Send + Sync>>>>> {
 		self.inner.get_tree(&self.inner, col, key, true)
 	}
 
@@ -2178,7 +2183,7 @@ impl IndexedChangeSet {
 	fn write_dereference_children_plan(
 		&self,
 		column: &HashColumn,
-		guard: &RwLockWriteGuard<'_, dyn TreeReader>,
+		guard: &RwLockWriteGuard<'_, Box<dyn TreeReader + Send + Sync>>,
 		children: &Vec<u64>,
 		num_removed: &mut u64,
 		writer: &mut crate::log::LogWriter,

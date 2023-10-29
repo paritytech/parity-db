@@ -784,7 +784,7 @@ fn read_value(
 }
 
 struct TreeReaderRef<'d> {
-	reader_ref: Arc<RwLock<dyn TreeReader + 'd>>,
+	reader_ref: Arc<RwLock<Box<dyn TreeReader + Send + Sync + 'd>>>,
 }
 
 impl<'d> TreeReaderRef<'d> {
@@ -794,11 +794,11 @@ impl<'d> TreeReaderRef<'d> {
 }
 
 struct TreeReaderGuard<'s, 'd: 's> {
-	lock_guard: RwLockReadGuard<'s, dyn TreeReader + 'd>,
+	lock_guard: RwLockReadGuard<'s, Box<dyn TreeReader + Send + Sync + 'd>>,
 }
 
 impl<'s, 'd: 's> Deref for TreeReaderGuard<'s, 'd> {
-	type Target = dyn TreeReader + 'd;
+	type Target = Box<dyn TreeReader + Send + Sync + 'd>;
 
 	fn deref(&self) -> &Self::Target {
 		self.lock_guard.deref()
@@ -987,7 +987,7 @@ fn iter_children<'a>(
 	depth: u32,
 	generated_children: &mut Vec<NodeSpec>,
 	database_children: &mut Vec<u64>,
-	reader: &RwLockReadGuard<'a, dyn TreeReader>,
+	reader: &RwLockReadGuard<'a, Box<dyn TreeReader + Send + Sync>>,
 	chain_generator: &ChainGenerator,
 ) -> Result<(), String> {
 	for i in 0..generated_children.len() {
