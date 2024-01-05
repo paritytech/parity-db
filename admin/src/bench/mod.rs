@@ -5,7 +5,7 @@ use super::*;
 
 mod sizes;
 
-pub use parity_db::{CompressionType, Db, Key, Value};
+pub use parity_db::{Db, Key};
 
 use rand::{RngCore, SeedableRng};
 use std::{

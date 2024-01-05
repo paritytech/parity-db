@@ -4,6 +4,7 @@
 use crate::{
 	column::ColId,
 	error::{try_io, Error, Result},
+	file::MappedBytesGuard,
 	index::{Chunk as IndexChunk, TableId as IndexTableId, ENTRY_BYTES},
 	options::Options,
 	parking_lot::{RwLock, RwLockWriteGuard},
@@ -91,32 +92,6 @@ impl LogOverlays {
 		}
 	}
 }
-
-// Loom is missing support for guard projection, so we copy the data as a workaround.
-#[cfg(feature = "loom")]
-pub struct MappedBytesGuard<'a> {
-	_phantom: std::marker::PhantomData<&'a ()>,
-	data: Vec<u8>,
-}
-
-#[cfg(feature = "loom")]
-impl<'a> MappedBytesGuard<'a> {
-	fn new(data: Vec<u8>) -> Self {
-		Self { _phantom: std::marker::PhantomData, data }
-	}
-}
-
-#[cfg(feature = "loom")]
-impl<'a> std::ops::Deref for MappedBytesGuard<'a> {
-	type Target = [u8];
-
-	fn deref(&self) -> &Self::Target {
-		self.data.as_slice()
-	}
-}
-
-#[cfg(not(feature = "loom"))]
-type MappedBytesGuard<'a> = parking_lot::MappedRwLockReadGuard<'a, [u8]>;
 
 impl LogQuery for RwLock<LogOverlays> {
 	type ValueRef<'a> = MappedBytesGuard<'a>;
