@@ -16,7 +16,7 @@ use crate::{
 	},
 	Operation,
 };
-pub use iter::{BTreeIterator, LastIndex, LastKey};
+pub use iter::{BTreeIterator, LastKey};
 use node::SeparatorInner;
 
 #[allow(clippy::module_inception)]

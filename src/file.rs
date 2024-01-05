@@ -144,15 +144,22 @@ impl TableFile {
 		Ok(())
 	}
 
-	pub fn slice_at(&self, offset: u64, len: usize) -> &[u8] {
+	#[cfg(not(feature = "loom"))]
+	pub fn slice_at(&self, offset: u64, len: usize) -> MappedBytesGuard {
+		let offset = offset as usize;
+		let map = self.map.read();
+		parking_lot::RwLockReadGuard::map(map, |map| {
+			let (map, _) = map.as_ref().unwrap();
+			&map[offset..offset + len]
+		})
+	}
+
+	#[cfg(feature = "loom")]
+	pub fn slice_at(&self, offset: u64, len: usize) -> MappedBytesGuard {
 		let offset = offset as usize;
 		let map = self.map.read();
 		let (map, _) = map.as_ref().unwrap();
-		let data: &[u8] = unsafe {
-			let ptr = map.as_ptr().add(offset);
-			std::slice::from_raw_parts(ptr, len)
-		};
-		data
+		MappedBytesGuard::new(map[offset..offset + len].to_vec())
 	}
 
 	pub fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
@@ -189,8 +196,6 @@ impl TableFile {
 					let new_map = mmap(&file, new_len as usize)?;
 					let old_map = std::mem::replace(map, new_map);
 					try_io!(old_map.flush());
-					// Leak the old mapping as there might be concurrent readers.
-					std::mem::forget(old_map);
 				}
 				new_len
 			},
@@ -217,3 +222,29 @@ impl TableFile {
 		Ok(())
 	}
 }
+
+// Loom is missing support for guard projection, so we copy the data as a workaround.
+#[cfg(feature = "loom")]
+pub struct MappedBytesGuard<'a> {
+	_phantom: std::marker::PhantomData<&'a ()>,
+	data: Vec<u8>,
+}
+
+#[cfg(feature = "loom")]
+impl<'a> MappedBytesGuard<'a> {
+	pub fn new(data: Vec<u8>) -> Self {
+		Self { _phantom: std::marker::PhantomData, data }
+	}
+}
+
+#[cfg(feature = "loom")]
+impl<'a> std::ops::Deref for MappedBytesGuard<'a> {
+	type Target = [u8];
+
+	fn deref(&self) -> &Self::Target {
+		self.data.as_slice()
+	}
+}
+
+#[cfg(not(feature = "loom"))]
+pub type MappedBytesGuard<'a> = parking_lot::MappedRwLockReadGuard<'a, [u8]>;

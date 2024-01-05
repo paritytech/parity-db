@@ -382,6 +382,20 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> std::ops::IndexMut<std::ops::Range<usize>> fo
 	}
 }
 
+enum LockedSlice<O: std::ops::Deref<Target = [u8]>, F: std::ops::Deref<Target = [u8]>> {
+	FromOverlay(O),
+	FromFile(F),
+}
+
+impl<O: std::ops::Deref<Target = [u8]>, F: std::ops::Deref<Target = [u8]>> LockedSlice<O, F> {
+	fn as_slice(&self) -> &[u8] {
+		match self {
+			LockedSlice::FromOverlay(slice) => &*slice,
+			LockedSlice::FromFile(slice) => &*slice,
+		}
+	}
+}
+
 impl ValueTable {
 	pub fn open(
 		path: Arc<std::path::PathBuf>,
@@ -458,14 +472,14 @@ impl ValueTable {
 		let entry_size = self.entry_size as usize;
 		loop {
 			let vbuf = log.value_ref(self.id, index);
-			let buf: &[u8] = if let Some(buf) = vbuf.as_deref() {
+			let buf: LockedSlice<_, _> = if let Some(buf) = vbuf.as_deref() {
 				log::trace!(
 					target: "parity-db",
 					"{}: Found in overlay {}",
 					self.id,
 					index,
 				);
-				buf
+				LockedSlice::FromOverlay(buf)
 			} else {
 				log::trace!(
 					target: "parity-db",
@@ -473,11 +487,10 @@ impl ValueTable {
 					self.id,
 					index,
 				);
-				self.file.slice_at(index * self.entry_size as u64, entry_size)
+				let vbuf = self.file.slice_at(index * self.entry_size as u64, entry_size);
+				LockedSlice::FromFile(vbuf)
 			};
-			let mut buf = EntryRef::new(buf);
-
-			buf.set_offset(0);
+			let mut buf = EntryRef::new(buf.as_slice());
 
 			if buf.is_tombstone() {
 				return Ok((0, false))
