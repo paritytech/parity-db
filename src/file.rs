@@ -128,7 +128,7 @@ impl TableFile {
 	pub fn slice_at(&self, offset: u64, len: usize) -> MappedBytesGuard {
 		let offset = offset as usize;
 		let map = self.map.read();
-		RwLockReadGuard::map(map, |map| {
+		parking_lot::RwLockReadGuard::map(map, |map| {
 			let (map, _) = map.as_ref().unwrap();
 			&map[offset..offset + len]
 		})
