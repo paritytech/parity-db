@@ -8,7 +8,6 @@ use crate::{
 	parking_lot::RwLock,
 	table::TableId,
 };
-use parking_lot::RwLockReadGuard;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(target_os = "linux")]
@@ -125,6 +124,7 @@ impl TableFile {
 		Ok(())
 	}
 
+	#[cfg(not(feature = "loom"))]
 	pub fn slice_at(&self, offset: u64, len: usize) -> MappedBytesGuard {
 		let offset = offset as usize;
 		let map = self.map.read();
@@ -132,6 +132,14 @@ impl TableFile {
 			let (map, _) = map.as_ref().unwrap();
 			&map[offset..offset + len]
 		})
+	}
+
+	#[cfg(feature = "loom")]
+	pub fn slice_at(&self, offset: u64, len: usize) -> MappedBytesGuard {
+		let offset = offset as usize;
+		let map = self.map.read();
+		let (map, _) = map.as_ref().unwrap();
+		MappedBytesGuard::new(map[offset..offset + len].to_vec())
 	}
 
 	pub fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
@@ -204,7 +212,7 @@ pub struct MappedBytesGuard<'a> {
 
 #[cfg(feature = "loom")]
 impl<'a> MappedBytesGuard<'a> {
-	fn new(data: Vec<u8>) -> Self {
+	pub fn new(data: Vec<u8>) -> Self {
 		Self { _phantom: std::marker::PhantomData, data }
 	}
 }
