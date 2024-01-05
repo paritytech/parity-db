@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog].
 
 ## [Unreleased]
 
+## [v0.4.13] - 2024-01-05
+
+- Lock memory map when reading from file [`#234`](https://github.com/paritytech/parity-db/pull/234)
+- Disable read-ahead on Windows [`#235`](https://github.com/paritytech/parity-db/pull/235)
+
 ## [v0.4.12] - 2023-10-12
 
 - CI for windows and macos. Also fixes access denied error on windows [`#222`](https://github.com/paritytech/parity-db/pull/222)
