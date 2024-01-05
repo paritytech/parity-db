@@ -10,6 +10,24 @@ use crate::{
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
+trait OpenOptionsExt {
+	fn disable_read_ahead(&mut self) -> &mut Self;
+}
+
+impl OpenOptionsExt for std::fs::OpenOptions {
+	#[cfg(not(windows))]
+	fn disable_read_ahead(&mut self) -> &mut Self {
+		// Not supported
+		self
+	}
+
+	#[cfg(windows)]
+	fn disable_read_ahead(&mut self) -> &mut Self {
+		use std::os::windows::fs::OpenOptionsExt;
+		self.custom_flags(winapi::um::winbase::FILE_FLAG_RANDOM_ACCESS)
+	}
+}
+
 #[cfg(target_os = "linux")]
 fn disable_read_ahead(file: &std::fs::File) -> std::io::Result<()> {
 	use std::os::unix::io::AsRawFd;
@@ -82,6 +100,7 @@ impl TableFile {
 			let file = try_io!(std::fs::OpenOptions::new()
 				.read(true)
 				.write(true)
+				.disable_read_ahead()
 				.open(filepath.as_path()));
 			try_io!(disable_read_ahead(&file));
 			let len = try_io!(file.metadata()).len();
@@ -111,6 +130,7 @@ impl TableFile {
 			.create(true)
 			.read(true)
 			.write(true)
+			.disable_read_ahead()
 			.open(self.path.as_path()));
 		try_io!(disable_read_ahead(&file));
 		Ok(file)
