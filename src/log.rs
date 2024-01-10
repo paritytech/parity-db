@@ -22,9 +22,9 @@ const MAX_LOG_POOL_SIZE: usize = 16;
 const BEGIN_RECORD: u8 = 1;
 const INSERT_INDEX: u8 = 2;
 const INSERT_VALUE: u8 = 3;
-const INSERT_REF_COUNT: u8 = 4;
-const END_RECORD: u8 = 5;
-const DROP_TABLE: u8 = 6;
+const END_RECORD: u8 = 4;
+const DROP_TABLE: u8 = 5;
+const INSERT_REF_COUNT: u8 = 6;
 const DROP_REF_COUNT_TABLE: u8 = 7;
 
 // Once index overly uses less than 1/10 of its capacity, it will be reclaimed.
