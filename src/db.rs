@@ -920,7 +920,7 @@ impl DbInner {
 				ref_count_batch_source,
 			} = column.reindex(&self.log)?;
 			if !batch.is_empty() || drop_index.is_some() {
-				assert!(
+				debug_assert!(
 					ref_count_batch.is_empty() &&
 						ref_count_batch_source.is_none() &&
 						drop_ref_count.is_none()
@@ -961,8 +961,8 @@ impl DbInner {
 				return Ok(true)
 			}
 			if !ref_count_batch.is_empty() || drop_ref_count.is_some() {
-				assert!(batch.is_empty() && drop_index.is_none());
-				assert!(ref_count_batch_source.is_some());
+				debug_assert!(batch.is_empty() && drop_index.is_none());
+				debug_assert!(ref_count_batch_source.is_some());
 				let ref_count_source = ref_count_batch_source.unwrap();
 				let mut next_reindex = false;
 				let mut writer = self.log.begin_record();

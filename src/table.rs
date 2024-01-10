@@ -751,7 +751,7 @@ impl ValueTable {
 			self.last_removed.store(next_removed, Ordering::Relaxed);
 			if let Some(mut free_entries) = free_entries_guard {
 				let last = free_entries.stack.pop().unwrap();
-				assert_eq!(last, last_removed);
+				debug_assert_eq!(last, last_removed);
 				free_entries.ordered.remove(&last_removed);
 			}
 			last_removed
@@ -778,7 +778,7 @@ impl ValueTable {
 				let last_removed = self.last_removed.load(Ordering::Relaxed);
 				let index = if last_removed != 0 {
 					let last = free_entries.stack.pop().unwrap();
-					assert_eq!(last, last_removed);
+					debug_assert_eq!(last, last_removed);
 					free_entries.ordered.remove(&last_removed);
 
 					let next_removed = *free_entries.stack.last().unwrap_or(&0u64);
