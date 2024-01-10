@@ -157,7 +157,7 @@ pub fn run() -> Result<(), String> {
 				db_options.columns.push(info_column);
 			}
 
-			let info_column = &mut db_options.columns[1];
+			let info_column = &mut db_options.columns[multitree_bench::INFO_COLUMN as usize];
 			info_column.uniform = false;
 			info_column.multitree = false;
 			info_column.ref_counted = false;

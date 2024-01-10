@@ -33,8 +33,8 @@ static EXPECTED_NUM_ENTRIES: AtomicUsize = AtomicUsize::new(0);
 static NUM_PATHS: AtomicUsize = AtomicUsize::new(0);
 static NUM_PATHS_SUCCESS: AtomicUsize = AtomicUsize::new(0);
 
-const TREE_COLUMN: u8 = 0;
-const INFO_COLUMN: u8 = 1;
+pub const TREE_COLUMN: u8 = 0;
+pub const INFO_COLUMN: u8 = 1;
 
 const KEY_LAST_COMMIT: Key = [1u8; 32];
 const KEY_NUM_REMOVED: Key = [2u8; 32];
