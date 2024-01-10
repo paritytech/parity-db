@@ -33,7 +33,7 @@ const INDEX_OVERLAY_RECLAIM_FACTOR: usize = 10;
 const VALUE_OVERLAY_RECLAIM_FACTOR: usize = 10;
 // Min number of value items to initiate reclaim. Each item is around 40 bytes.
 const VALUE_OVERLAY_MIN_RECLAIM_ITEMS: usize = 10240;
-// Once ref count overly uses less than 1/10 of its capacity, it will be reclaimed.
+// Once ref count overlay uses less than 1/10 of its capacity, it will be reclaimed.
 const REF_COUNT_OVERLAY_RECLAIM_FACTOR: usize = 10;
 
 #[derive(Debug)]
