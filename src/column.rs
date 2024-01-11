@@ -1072,9 +1072,7 @@ impl HashColumn {
 					*address
 				},
 			};
-			let mut data_buf = [0u8; 8];
-			data_buf.copy_from_slice(&address.to_le_bytes());
-			data.append(&mut data_buf.to_vec());
+			data.extend_from_slice(&address.to_le_bytes());
 		}
 		Ok(data)
 	}
