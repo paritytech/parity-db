@@ -54,7 +54,6 @@ use crate::{
 	table::key::{TableKey, TableKeyQuery, PARTIAL_SIZE},
 };
 use std::{
-	collections::BTreeSet,
 	convert::TryInto,
 	mem::MaybeUninit,
 	sync::{
@@ -142,7 +141,6 @@ impl std::fmt::Display for TableId {
 #[derive(Debug)]
 struct FreeEntries {
 	stack: Vec<u64>,
-	ordered: BTreeSet<u64>,
 }
 
 #[derive(Debug)]
@@ -447,7 +445,6 @@ impl ValueTable {
 	pub fn init_table_data(&mut self) -> Result<()> {
 		let free_entries = if self.needs_free_entries {
 			let mut stack: Vec<u64> = Default::default();
-			let mut ordered: BTreeSet<u64> = Default::default();
 
 			let filled = self.filled.load(Ordering::Relaxed);
 			let last_removed = self.last_removed.load(Ordering::Relaxed);
@@ -462,7 +459,6 @@ impl ValueTable {
 				}
 
 				stack.insert(0, next);
-				ordered.insert(next);
 
 				let mut buf = PartialEntry::new_uninit();
 				self.file.read_at(buf.as_mut(), next * self.entry_size as u64)?;
@@ -470,7 +466,7 @@ impl ValueTable {
 				next = buf.read_next();
 			}
 
-			Some(RwLock::new(FreeEntries { stack, ordered }))
+			Some(RwLock::new(FreeEntries { stack }))
 		} else {
 			None
 		};
@@ -752,7 +748,6 @@ impl ValueTable {
 			if let Some(mut free_entries) = free_entries_guard {
 				let last = free_entries.stack.pop().unwrap();
 				debug_assert_eq!(last, last_removed);
-				free_entries.ordered.remove(&last_removed);
 			}
 			last_removed
 		} else {
@@ -779,7 +774,6 @@ impl ValueTable {
 				let index = if last_removed != 0 {
 					let last = free_entries.stack.pop().unwrap();
 					debug_assert_eq!(last, last_removed);
-					free_entries.ordered.remove(&last_removed);
 
 					let next_removed = *free_entries.stack.last().unwrap_or(&0u64);
 
@@ -934,7 +928,6 @@ impl ValueTable {
 
 		if let Some(mut free_entries) = free_entries_guard {
 			free_entries.stack.push(index);
-			free_entries.ordered.insert(index);
 		}
 
 		Ok(())
