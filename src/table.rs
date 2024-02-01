@@ -1116,7 +1116,7 @@ impl ValueTable {
 
 	pub fn complete_plan(&self, log: &mut LogWriter) -> Result<()> {
 		let _free_entries_guard = if let Some(free_entries) = &self.free_entries {
-			Some(free_entries.write())
+			Some(free_entries.read())
 		} else {
 			None
 		};
