@@ -169,7 +169,7 @@ impl BTreeTable {
 		let mut depth = 0;
 		let key_query = TableKeyQuery::Fetch(None);
 		if let Some(encoded) = Column::get_value(key_query, HEADER_ADDRESS, values, log)? {
-			let mut buf: ValueTableEntry<Vec<u8>> = ValueTableEntry::new(encoded.1);
+			let mut buf: ValueTableEntry<Vec<u8>> = ValueTableEntry::new(encoded.2);
 			buf.check_remaining_len(8 + 4, || Error::Corruption("Invalid header length.".into()))?;
 			root = Address::from_u64(buf.read_u64());
 			depth = buf.read_u32();
@@ -185,7 +185,7 @@ impl BTreeTable {
 	) -> Result<Option<(u8, Value)>> {
 		let tables = self.tables.read();
 		let btree = self.locked(&tables);
-		Column::get_value(key, address, btree, log)
+		Ok(Column::get_value(key, address, btree, log)?.map(|(tier, _rc, value)| (tier, value)))
 	}
 
 	pub fn flush(&self) -> Result<()> {
@@ -209,7 +209,7 @@ impl BTreeTable {
 
 	fn get_encoded_entry(at: Address, log: &impl LogQuery, tables: TablesRef) -> Result<Vec<u8>> {
 		let key_query = TableKeyQuery::Check(&TableKey::NoHash);
-		if let Some((_tier, value)) = Column::get_value(key_query, at, tables, log)? {
+		if let Some((_tier, _rc, value)) = Column::get_value(key_query, at, tables, log)? {
 			Ok(value)
 		} else {
 			Err(Error::Corruption(format!("Missing btree entry at {at}")))
@@ -383,13 +383,21 @@ pub mod commit_overlay {
 			BTreeChangeSet { col, changes: Default::default() }
 		}
 
-		pub fn push(&mut self, change: Operation<Value, Value>) {
+		pub fn push(&mut self, change: Operation<Value, Value>) -> Result<()> {
 			// No key hashing
 			self.changes.push(match change {
 				Operation::Set(k, v) => Operation::Set(k.into(), v.into()),
 				Operation::Dereference(k) => Operation::Dereference(k.into()),
 				Operation::Reference(k) => Operation::Reference(k.into()),
+				Operation::InsertTree(..) |
+				Operation::ReferenceTree(..) |
+				Operation::DereferenceTree(..) =>
+					return Err(Error::InvalidInput(format!(
+						"Invalid operation for column {}",
+						self.col
+					))),
 			});
+			Ok(())
 		}
 
 		pub fn copy_to_overlay(
@@ -426,6 +434,13 @@ pub mod commit_overlay {
 							)))
 						}
 					},
+					Operation::InsertTree(..) |
+					Operation::ReferenceTree(..) |
+					Operation::DereferenceTree(..) =>
+						return Err(Error::InvalidInput(format!(
+							"Invalid operation for column {}",
+							self.col
+						))),
 				}
 			}
 			Ok(())

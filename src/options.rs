@@ -65,6 +65,11 @@ pub struct ColumnOptions {
 	/// Column is configured to use Btree storage. Btree columns allow for ordered key iteration
 	/// and key retrieval, but are significantly less performant and require more disk space.
 	pub btree_index: bool,
+	/// Column supports Multitree operations. This allows committing and querying of tree
+	/// structures.
+	pub multitree: bool,
+	/// Column is append-only. Delete operations are ignored.
+	pub append_only: bool,
 }
 
 /// Database metadata.
@@ -81,14 +86,28 @@ pub struct Metadata {
 impl ColumnOptions {
 	fn as_string(&self) -> String {
 		format!(
-			"preimage: {}, uniform: {}, refc: {}, compression: {}, ordered: {}",
-			self.preimage, self.uniform, self.ref_counted, self.compression as u8, self.btree_index,
+			"preimage: {}, uniform: {}, refc: {}, compression: {}, ordered: {}, multitree: {}, append_only: {}",
+			self.preimage,
+			self.uniform,
+			self.ref_counted,
+			self.compression as u8,
+			self.btree_index,
+			self.multitree,
+			self.append_only,
 		)
 	}
 
 	pub fn is_valid(&self) -> bool {
 		if self.ref_counted && !self.preimage {
 			log::error!(target: "parity-db", "Using `ref_counted` option without `preimage` enabled is not supported");
+			return false
+		}
+		if self.ref_counted && self.append_only {
+			log::error!(target: "parity-db", "`ref_counted` option is redundant when `append_only` is enabled");
+			return false
+		}
+		if self.multitree && self.compression != CompressionType::NoCompression {
+			log::error!(target: "parity-db", "Compression is not currently supported with multitree columns");
 			return false
 		}
 		true
@@ -111,6 +130,8 @@ impl ColumnOptions {
 		let ref_counted = vals.get("refc")?.parse().ok()?;
 		let compression: u8 = vals.get("compression").and_then(|c| c.parse().ok()).unwrap_or(0);
 		let btree_index = vals.get("ordered").and_then(|c| c.parse().ok()).unwrap_or(false);
+		let multitree = vals.get("multitree").and_then(|c| c.parse().ok()).unwrap_or(false);
+		let append_only = vals.get("append_only").and_then(|c| c.parse().ok()).unwrap_or(false);
 
 		Some(ColumnOptions {
 			preimage,
@@ -118,6 +139,8 @@ impl ColumnOptions {
 			ref_counted,
 			compression: compression.into(),
 			btree_index,
+			multitree,
+			append_only,
 		})
 	}
 }
@@ -130,6 +153,8 @@ impl Default for ColumnOptions {
 			ref_counted: false,
 			compression: CompressionType::NoCompression,
 			btree_index: false,
+			multitree: false,
+			append_only: false,
 		}
 	}
 }
