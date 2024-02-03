@@ -83,7 +83,7 @@ fn mmap(file: &std::fs::File, _len: usize) -> Result<memmap2::MmapMut> {
 	Ok(try_io!(unsafe { memmap2::MmapOptions::new().map_mut(file) }))
 }
 
-const GROW_SIZE_BYTES: u64 = 256 * 1024;
+const GROW_SIZE_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct TableFile {

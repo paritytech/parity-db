@@ -7,7 +7,10 @@ edition = "2018"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-env_logger = { version = "0.10.0", default-features = false, features = ["auto-color", "humantime"] }
+env_logger = { version = "0.10.0", default-features = false, features = [
+    "auto-color",
+    "humantime",
+] }
 fdlimit = "0.2.1"
 log = "0.4.8"
 parity-db = { path = ".." }
@@ -15,6 +18,11 @@ parking_lot = "0.12.0"
 rand = { version = "0.8.5", features = ["small_rng"] }
 blake2 = "0.10.4"
 siphasher = "0.3.10"
+trie-db = { git = "https://github.com/cheme/trie", branch = "cheme/new-trie", features = [
+    "test_utils",
+] }
+hash256-std-hasher = { git = "https://github.com/cheme/trie", branch = "cheme/new-trie" }
+reference-trie = { git = "https://github.com/cheme/trie", branch = "cheme/new-trie" }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 jemallocator = "0.5.0"

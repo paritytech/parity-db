@@ -38,8 +38,8 @@ tempfile = "3.2"
 
 [profile.release]
 panic = "abort"
-#codegen-units = 1
-#lto = "fat"
+codegen-units = 1
+lto = "fat"
 debug = true
 
 [workspace]

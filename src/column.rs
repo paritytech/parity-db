@@ -187,7 +187,7 @@ pub fn hash_key(key: &[u8], salt: &Salt, uniform: bool, db_version: u32) -> Key 
 			// Used for forcing collisions in tests.
 			if salt == &Salt::default() {
 				k.copy_from_slice(&key);
-				return k
+				return k;
 			}
 			// siphash 1-3 first 128 bits of the key
 			use siphasher::sip128::Hasher128;
@@ -227,7 +227,7 @@ impl HashColumn {
 			if self.collect_stats {
 				self.stats.query_hit(tier);
 			}
-			return Ok(Some((value, rc)))
+			return Ok(Some((value, rc)));
 		}
 		for entry in &self.reindex.read().queue {
 			if let ReindexEntry::Index(r) = entry {
@@ -235,7 +235,7 @@ impl HashColumn {
 					if self.collect_stats {
 						self.stats.query_hit(tier);
 					}
-					return Ok(Some((value, rc)))
+					return Ok(Some((value, rc)));
 				}
 			}
 		}
@@ -258,7 +258,7 @@ impl HashColumn {
 			if self.collect_stats {
 				self.stats.query_hit(tier);
 			}
-			return Ok(Some(value))
+			return Ok(Some(value));
 		}
 		if self.collect_stats {
 			self.stats.query_miss();
@@ -317,7 +317,7 @@ impl Column {
 			tables.tables[size_tier].query(&mut key, address.offset(), log)?
 		{
 			let value = if compressed { tables.compression.decompress(&value)? } else { value };
-			return Ok(Some((size_tier as u8, rc, value)))
+			return Ok(Some((size_tier as u8, rc, value)));
 		}
 		Ok(None)
 	}
@@ -384,9 +384,9 @@ impl Column {
 		for entry in try_io!(std::fs::read_dir(&path)) {
 			let entry = try_io!(entry);
 			if let Some(file) = entry.path().file_name().and_then(|f| f.to_str()) {
-				if crate::index::TableId::is_file_name(column, file) ||
-					crate::table::TableId::is_file_name(column, file) ||
-					crate::ref_count::RefCountTableId::is_file_name(column, file)
+				if crate::index::TableId::is_file_name(column, file)
+					|| crate::table::TableId::is_file_name(column, file)
+					|| crate::ref_count::RefCountTableId::is_file_name(column, file)
 				{
 					to_delete.push(PathBuf::from(file));
 				}
@@ -406,23 +406,23 @@ pub fn packed_node_size(data: &Vec<u8>, num_children: u8) -> usize {
 	data.len() + num_children as usize * 8 + 1
 }
 
-pub fn unpack_node_data(data: Vec<u8>) -> Result<(Vec<u8>, Children)> {
+pub fn unpack_node_data(mut data: Vec<u8>) -> Result<(Vec<u8>, Children)> {
 	if data.len() == 0 {
-		return Err(Error::InvalidValueData)
+		return Err(Error::InvalidValueData);
 	}
 	let num_children = data[data.len() - 1] as usize;
 	let child_buf_len = num_children * 8;
 	if data.len() < (child_buf_len + 1) {
-		return Err(Error::InvalidValueData)
+		return Err(Error::InvalidValueData);
 	}
 	let data_len = data.len() - (child_buf_len + 1);
-	let mut children = Children::new();
+	let mut children = Children::with_capacity(num_children);
 	for i in 0..num_children {
 		let node_address =
 			u64::from_le_bytes(data[data_len + i * 8..data_len + (i + 1) * 8].try_into().unwrap());
 		children.push(node_address);
 	}
-	let data = data.split_at(data_len).0.to_vec();
+	data.truncate(data_len);
 	Ok((data, children))
 }
 
@@ -622,7 +622,7 @@ impl HashColumn {
 	) -> Result<PlanOutcome> {
 		if Self::contains_partial_key_with_address(key, address, &tables.index, log)? {
 			log::trace!(target: "parity-db", "{}: Skipped reindex entry {} when reindexing", tables.index.id, hex(key));
-			return Ok(PlanOutcome::Skipped)
+			return Ok(PlanOutcome::Skipped);
 		}
 		let mut outcome = PlanOutcome::Written;
 		while let PlanOutcome::NeedReindex =
@@ -651,7 +651,7 @@ impl HashColumn {
 				&table_key,
 				log,
 			)? {
-				return Ok(Some((index, sub_index, existing_address)))
+				return Ok(Some((index, sub_index, existing_address)));
 			}
 
 			let (next_entry, next_index) = index.get(key, sub_index + 1, log)?;
@@ -671,7 +671,7 @@ impl HashColumn {
 		while !existing_entry.is_empty() {
 			let existing_address = existing_entry.address(index.id.index_bits());
 			if existing_address == address {
-				return Ok(true)
+				return Ok(true);
 			}
 			let (next_entry, next_index) = index.get(key, sub_index + 1, log)?;
 			existing_entry = next_entry;
@@ -687,14 +687,14 @@ impl HashColumn {
 		log: &LogWriter,
 	) -> Result<Option<(&'a IndexTable, usize, Address)>> {
 		if let Some(r) = Self::search_index(key, &tables.index, tables, log)? {
-			return Ok(Some(r))
+			return Ok(Some(r));
 		}
 		// Check old indexes
 		// TODO: don't search if index precedes reindex progress
 		for entry in &reindex.queue {
 			if let ReindexEntry::Index(index) = entry {
 				if let Some(r) = Self::search_index(key, index, tables, log)? {
-					return Ok(Some(r))
+					return Ok(Some(r));
 				}
 			}
 		}
@@ -732,10 +732,11 @@ impl HashColumn {
 					}
 					Ok(PlanOutcome::Skipped)
 				},
-				Operation::InsertTree(..) |
-				Operation::ReferenceTree(..) |
-				Operation::DereferenceTree(..) =>
-					Err(Error::InvalidConfiguration("Unsupported operation on hash column".into())),
+				Operation::InsertTree(..)
+				| Operation::ReferenceTree(..)
+				| Operation::DereferenceTree(..) => {
+					Err(Error::InvalidConfiguration("Unsupported operation on hash column".into()))
+				},
 			}
 		}
 	}
@@ -859,18 +860,18 @@ impl HashColumn {
 	) -> Result<PlanOutcome> {
 		if let Some((_ref_count, _sub_index)) = tables.get_ref_count().get(address, log)? {
 			log::trace!(target: "parity-db", "{}: Skipped ref count reindex entry {} when reindexing", tables.get_ref_count().id, address);
-			return Ok(PlanOutcome::Skipped)
+			return Ok(PlanOutcome::Skipped);
 		}
 		// An intermediate reindex table might contain a more recent value for the ref count so need
 		// to check for this and skip.
 		for entry in reindex.queue.iter().rev() {
 			if let ReindexEntry::RefCount(ref_count_table) = entry {
 				if ref_count_table.id == source {
-					break
+					break;
 				}
 				if let Some(_r) = Self::search_ref_count(address, ref_count_table, log)? {
 					log::trace!(target: "parity-db", "{}: Skipped ref count reindex entry {} when reindexing", ref_count_table.id, address);
-					return Ok(PlanOutcome::Skipped)
+					return Ok(PlanOutcome::Skipped);
 				}
 			}
 		}
@@ -892,7 +893,7 @@ impl HashColumn {
 		log: &LogWriter,
 	) -> Result<Option<(&'a RefCountTable, usize, u64)>> {
 		if let Some((ref_count, sub_index)) = ref_count_table.get(address, log)? {
-			return Ok(Some((ref_count_table, sub_index, ref_count)))
+			return Ok(Some((ref_count_table, sub_index, ref_count)));
 		}
 		Ok(None)
 	}
@@ -904,14 +905,14 @@ impl HashColumn {
 		log: &LogWriter,
 	) -> Result<Option<(&'a RefCountTable, usize, u64)>> {
 		if let Some(r) = Self::search_ref_count(address, tables.get_ref_count(), log)? {
-			return Ok(Some(r))
+			return Ok(Some(r));
 		}
 		// Check old tables
 		// TODO: don't search if table precedes reindex progress
 		for entry in reindex.queue.iter().rev() {
 			if let ReindexEntry::RefCount(ref_count_table) = entry {
 				if let Some(r) = Self::search_ref_count(address, ref_count_table, log)? {
-					return Ok(Some(r))
+					return Ok(Some(r));
 				}
 			}
 		}
@@ -1049,7 +1050,7 @@ impl HashColumn {
 
 	fn claim_children_to_data(
 		&self,
-		children: &Vec<NodeRef>,
+		children: Vec<NodeRef>,
 		tables: TablesRef,
 		tier_addresses: &HashMap<usize, Vec<u64>>,
 		tier_index: &mut HashMap<usize, usize>,
@@ -1058,13 +1059,14 @@ impl HashColumn {
 	) -> Result<()> {
 		for child in children {
 			let address = match child {
-				NodeRef::New(node) =>
-					self.claim_node(node, tables, tier_addresses, tier_index, node_values)?,
+				NodeRef::New(node) => {
+					self.claim_node(node, tables, tier_addresses, tier_index, node_values)?
+				},
 				NodeRef::Existing(address) => {
 					if !self.append_only {
-						node_values.push(NodeChange::IncrementReference(*address));
+						node_values.push(NodeChange::IncrementReference(address));
 					}
-					*address
+					address
 				},
 			};
 			data.extend_from_slice(&address.to_le_bytes());
@@ -1074,7 +1076,7 @@ impl HashColumn {
 
 	fn claim_node(
 		&self,
-		node: &NewNode,
+		node: NewNode,
 		tables: TablesRef,
 		tier_addresses: &HashMap<usize, Vec<u64>>,
 		tier_index: &mut HashMap<usize, usize>,
@@ -1097,10 +1099,9 @@ impl HashColumn {
 
 		let offset = tier_addresses.get(&target_tier).unwrap()[index];
 
-		let mut data: Vec<u8> = Vec::with_capacity(data_size);
-		data.extend_from_slice(&node.data);
+		let mut data = node.data;
 		self.claim_children_to_data(
-			&node.children,
+			node.children,
 			tables,
 			tier_addresses,
 			tier_index,
@@ -1124,7 +1125,7 @@ impl HashColumn {
 	/// returns value for the root node and vector of NodeChange for nodes.
 	pub fn claim_tree_values(
 		&self,
-		change: &Operation<Value, Value>,
+		change: Operation<Value, Value>,
 	) -> Result<(Vec<u8>, Vec<NodeChange>)> {
 		match change {
 			Operation::InsertTree(_key, node) => {
@@ -1147,10 +1148,10 @@ impl HashColumn {
 
 				let num_children = node.children.len();
 				let data_size = packed_node_size(&node.data, num_children as u8);
-				let mut data: Vec<u8> = Vec::with_capacity(data_size);
-				data.extend_from_slice(&node.data);
+				let mut data = node.data;
+				data.reserve(data_size - data.len());
 				self.claim_children_to_data(
-					&node.children,
+					node.children,
 					values,
 					&tier_addresses,
 					&mut tier_index,
@@ -1159,17 +1160,19 @@ impl HashColumn {
 				)?;
 				data.push(num_children as u8);
 
-				return Ok((data, node_values))
+				return Ok((data, node_values));
 			},
-			Operation::ReferenceTree(..) | Operation::DereferenceTree(..) =>
+			Operation::ReferenceTree(..) | Operation::DereferenceTree(..) => {
 				return Err(Error::InvalidInput(format!(
 					"claim_tree_values should not be called from ReferenceTree or DereferenceTree"
-				))),
-			_ =>
+				)))
+			},
+			_ => {
 				return Err(Error::InvalidInput(format!(
 					"Invalid operation for column {}",
 					self.col
-				))),
+				)))
+			},
 		}
 	}
 
@@ -1382,7 +1385,7 @@ impl HashColumn {
 					if record.table.index_bits() < tables.index.id.index_bits() {
 						// Insertion into a previously dropped index.
 						log::warn!( target: "parity-db", "Index {} is too old. Current is {}", record.table, tables.index.id);
-						return Err(Error::Corruption("Unexpected log index id".to_string()))
+						return Err(Error::Corruption("Unexpected log index id".to_string()));
 					}
 					// Re-launch previously started reindex
 					// TODO: add explicit log records for reindexing events.
@@ -1393,7 +1396,7 @@ impl HashColumn {
 					);
 					let lock = Self::trigger_reindex(tables, reindex, self.path.as_path());
 					std::mem::drop(lock);
-					return self.validate_plan(LogAction::InsertIndex(record), log)
+					return self.validate_plan(LogAction::InsertIndex(record), log);
 				}
 			},
 			LogAction::InsertValue(record) => {
@@ -1413,7 +1416,7 @@ impl HashColumn {
 					if record.table.index_bits() < tables.get_ref_count().id.index_bits() {
 						// Insertion into a previously dropped ref count.
 						log::warn!( target: "parity-db", "Ref count {} is too old. Current is {}", record.table, tables.get_ref_count().id);
-						return Err(Error::Corruption("Unexpected log ref count id".to_string()))
+						return Err(Error::Corruption("Unexpected log ref count id".to_string()));
 					}
 					// Re-launch previously started reindex
 					// TODO: add explicit log records for reindexing events.
@@ -1425,12 +1428,12 @@ impl HashColumn {
 					let lock =
 						Self::trigger_ref_count_reindex(tables, reindex, self.path.as_path());
 					std::mem::drop(lock);
-					return self.validate_plan(LogAction::InsertRefCount(record), log)
+					return self.validate_plan(LogAction::InsertRefCount(record), log);
 				}
 			},
 			_ => {
 				log::error!(target: "parity-db", "Unexpected log action");
-				return Err(Error::Corruption("Unexpected log action".to_string()))
+				return Err(Error::Corruption("Unexpected log action".to_string()));
 			},
 		}
 		Ok(())
@@ -1480,7 +1483,7 @@ impl HashColumn {
 					if let Ok(value) = self.compression.decompress(&value) {
 						value
 					} else {
-						return false
+						return false;
 					}
 				} else {
 					value
@@ -1496,8 +1499,9 @@ impl HashColumn {
 	pub fn iter_index(&self, log: &Log, mut f: impl FnMut(IterState) -> bool) -> Result<()> {
 		let action = |state| match state {
 			IterStateOrCorrupted::Item(item) => Ok(f(item)),
-			IterStateOrCorrupted::Corrupted(..) =>
-				Err(Error::Corruption("Missing indexed value".into())),
+			IterStateOrCorrupted::Corrupted(..) => {
+				Err(Error::Corruption("Missing indexed value".into()))
+			},
 		};
 		self.iter_index_internal(log, action, 0)
 	}
@@ -1516,7 +1520,7 @@ impl HashColumn {
 			let entries = source.entries(c, log.overlays())?;
 			for (sub_index, entry) in entries.iter().enumerate() {
 				if entry.is_empty() {
-					continue
+					continue;
 				}
 				let (size_tier, offset) = {
 					let address = entry.address(source.id.index_bits());
@@ -1535,9 +1539,9 @@ impl HashColumn {
 							entry: *entry,
 							error: None,
 						}))? {
-							return Ok(())
+							return Ok(());
 						}
-						continue
+						continue;
 					},
 					Err(e) => {
 						let value_entry = if let Error::Corruption(_) = &e {
@@ -1552,9 +1556,9 @@ impl HashColumn {
 							entry: *entry,
 							error: Some(e),
 						}))? {
-							return Ok(())
+							return Ok(());
 						}
-						continue
+						continue;
 					},
 				};
 				let mut key = source.recover_key_prefix(c, *entry);
@@ -1577,7 +1581,7 @@ impl HashColumn {
 					value,
 				});
 				if !f(state)? {
-					return Ok(())
+					return Ok(());
 				}
 			}
 		}
@@ -1613,9 +1617,9 @@ impl HashColumn {
 						entry,
 						error: None,
 					}))? {
-						return Ok(())
+						return Ok(());
 					}
-					continue
+					continue;
 				},
 				Err(e) => {
 					let value_entry = if let Error::Corruption(_) = &e {
@@ -1630,9 +1634,9 @@ impl HashColumn {
 						entry,
 						error: Some(e),
 					}))? {
-						return Ok(())
+						return Ok(());
 					}
-					continue
+					continue;
 				},
 			};
 			let value = if compressed { self.compression.decompress(&value)? } else { value };
@@ -1652,7 +1656,7 @@ impl HashColumn {
 				value,
 			});
 			if !f(state)? {
-				return Ok(())
+				return Ok(());
 			}
 		}
 		Ok(())
@@ -1682,7 +1686,7 @@ impl HashColumn {
 					value,
 				}) => {
 					if Some(item_index) == end_chunk {
-						return Ok(false)
+						return Ok(false);
 					}
 					if item_index >= next_info_at {
 						next_info_at += step;
@@ -1763,14 +1767,14 @@ impl HashColumn {
 							log::debug!(target: "parity-db", "{}: Reindexing at {}/{}", tables.index.id, source_index, source.id.total_chunks());
 						}
 						log::debug!(target: "parity-db", "{}: Continue reindex at {}/{}", tables.index.id, source_index, source.id.total_chunks());
-						while source_index < source.id.total_chunks() &&
-							plan.len() < MAX_REINDEX_BATCH
+						while source_index < source.id.total_chunks()
+							&& plan.len() < MAX_REINDEX_BATCH
 						{
 							log::trace!(target: "parity-db", "{}: Reindexing {}", source.id, source_index);
 							let entries = source.entries(source_index, log.overlays())?;
 							for entry in entries.iter() {
 								if entry.is_empty() {
-									continue
+									continue;
 								}
 								// We only need key prefix to reindex.
 								let key = source.recover_key_prefix(source_index, *entry);
@@ -1786,7 +1790,7 @@ impl HashColumn {
 						}
 					}
 				},
-				ReindexEntry::RefCount(source) =>
+				ReindexEntry::RefCount(source) => {
 					if progress != source.id.total_chunks() {
 						let mut source_index = progress;
 						if source_index % 500 == 0 {
@@ -1794,14 +1798,14 @@ impl HashColumn {
 						}
 						ref_count_source = Some(source.id);
 						log::debug!(target: "parity-db", "{}: Continue reindex ref count at {}/{}", tables.get_ref_count().id, source_index, source.id.total_chunks());
-						while source_index < source.id.total_chunks() &&
-							ref_count_plan.len() < MAX_REINDEX_BATCH
+						while source_index < source.id.total_chunks()
+							&& ref_count_plan.len() < MAX_REINDEX_BATCH
 						{
 							log::trace!(target: "parity-db", "{}: Reindexing ref count {}", source.id, source_index);
 							let entries = source.entries(source_index, log.overlays())?;
 							for entry in entries.iter() {
 								if entry.is_empty() {
-									continue
+									continue;
 								}
 								ref_count_plan.push((entry.address(), entry.ref_count()));
 							}
@@ -1813,7 +1817,8 @@ impl HashColumn {
 							log::info!(target: "parity-db", "Completed reindex ref count {} into {}", source.id, tables.get_ref_count().id);
 							drop_ref_count = Some(source.id);
 						}
-					},
+					}
+				},
 			}
 		}
 		Ok(ReindexBatch {
@@ -1840,12 +1845,12 @@ impl HashColumn {
 			let table = if let ReindexEntry::Index(table) = table {
 				table
 			} else {
-				return Err(Error::Corruption(format!("Incorrect reindex type")))
+				return Err(Error::Corruption(format!("Incorrect reindex type")));
 			};
 			table.drop_file()?;
 		} else {
 			log::warn!(target: "parity-db", "Dropping invalid index {}", id);
-			return Ok(())
+			return Ok(());
 		}
 		log::debug!(target: "parity-db", "Dropped {}", id);
 		Ok(())
@@ -1866,12 +1871,12 @@ impl HashColumn {
 			let table = if let ReindexEntry::RefCount(table) = table {
 				table
 			} else {
-				return Err(Error::Corruption(format!("Incorrect reindex type")))
+				return Err(Error::Corruption(format!("Incorrect reindex type")));
 			};
 			table.drop_file()?;
 		} else {
 			log::warn!(target: "parity-db", "Dropping invalid ref count {}", id);
-			return Ok(())
+			return Ok(());
 		}
 		log::debug!(target: "parity-db", "Dropped ref count {}", id);
 		Ok(())
@@ -1917,7 +1922,7 @@ impl Column {
 		};
 
 		match change {
-			Operation::Reference(_) =>
+			Operation::Reference(_) => {
 				if ref_counted {
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.col, key);
 					tables.tables[tier].write_inc_ref(address.offset(), log)?;
@@ -1927,16 +1932,17 @@ impl Column {
 					Ok((Some(PlanOutcome::Written), None))
 				} else {
 					Ok((Some(PlanOutcome::Skipped), None))
-				},
+				}
+			},
 			Operation::Set(_, val) => {
 				if ref_counted {
 					log::trace!(target: "parity-db", "{}: Increment ref {}", tables.col, key);
 					tables.tables[tier].write_inc_ref(address.offset(), log)?;
-					return Ok((Some(PlanOutcome::Written), None))
+					return Ok((Some(PlanOutcome::Written), None));
 				}
 				if tables.preimage {
 					// Replace is not supported
-					return Ok((Some(PlanOutcome::Skipped), None))
+					return Ok((Some(PlanOutcome::Skipped), None));
 				}
 
 				let (cval, target_tier) =
@@ -1997,10 +2003,11 @@ impl Column {
 					Ok((Some(PlanOutcome::Written), None))
 				}
 			},
-			Operation::InsertTree(..) |
-			Operation::ReferenceTree(..) |
-			Operation::DereferenceTree(..) =>
-				Err(Error::InvalidInput(format!("Invalid operation for column {}", tables.col))),
+			Operation::InsertTree(..)
+			| Operation::ReferenceTree(..)
+			| Operation::DereferenceTree(..) => {
+				Err(Error::InvalidInput(format!("Invalid operation for column {}", tables.col)))
+			},
 		}
 	}
 
