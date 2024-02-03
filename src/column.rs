@@ -403,32 +403,27 @@ impl Column {
 }
 
 pub fn packed_node_size(data: &Vec<u8>, num_children: u8) -> usize {
-	1 + data.len() + num_children as usize * 8
-}
-
-pub fn pack_node_data(data: Vec<u8>, child_data: Vec<u8>, num_children: u8) -> Vec<u8> {
-	[vec![num_children], data, child_data].concat()
+	data.len() + num_children as usize * 8 + 1
 }
 
 pub fn unpack_node_data(data: Vec<u8>) -> Result<(Vec<u8>, Children)> {
 	if data.len() == 0 {
 		return Err(Error::InvalidValueData)
 	}
-	let num_children = data[0] as usize;
-	let (_, data) = data.split_at(1);
+	let num_children = data[data.len() - 1] as usize;
 	let child_buf_len = num_children * 8;
-	if data.len() < child_buf_len {
+	if data.len() < (child_buf_len + 1) {
 		return Err(Error::InvalidValueData)
 	}
-	let (data, child_buf) = data.split_at(data.len() - child_buf_len);
-
+	let data_len = data.len() - (child_buf_len + 1);
 	let mut children = Children::new();
 	for i in 0..num_children {
-		let node_address = u64::from_le_bytes(child_buf[i * 8..(i + 1) * 8].try_into().unwrap());
+		let node_address =
+			u64::from_le_bytes(data[data_len + i * 8..data_len + (i + 1) * 8].try_into().unwrap());
 		children.push(node_address);
 	}
-
-	Ok((data.to_vec(), children))
+	let data = data.split_at(data_len).0.to_vec();
+	Ok((data, children))
 }
 
 impl HashColumn {
@@ -1052,15 +1047,15 @@ impl HashColumn {
 		Ok(())
 	}
 
-	fn claim_children(
+	fn claim_children_to_data(
 		&self,
 		children: &Vec<NodeRef>,
 		tables: TablesRef,
 		tier_addresses: &HashMap<usize, Vec<u64>>,
 		tier_index: &mut HashMap<usize, usize>,
 		node_values: &mut Vec<NodeChange>,
-	) -> Result<Vec<u8>> {
-		let mut data = Vec::new();
+		data: &mut Vec<u8>,
+	) -> Result<()> {
 		for child in children {
 			let address = match child {
 				NodeRef::New(node) =>
@@ -1074,7 +1069,7 @@ impl HashColumn {
 			};
 			data.extend_from_slice(&address.to_le_bytes());
 		}
-		Ok(data)
+		Ok(())
 	}
 
 	fn claim_node(
@@ -1102,11 +1097,17 @@ impl HashColumn {
 
 		let offset = tier_addresses.get(&target_tier).unwrap()[index];
 
-		let data = pack_node_data(
-			node.data.clone(),
-			self.claim_children(&node.children, tables, tier_addresses, tier_index, node_values)?,
-			num_children as u8,
-		);
+		let mut data: Vec<u8> = Vec::with_capacity(data_size);
+		data.extend_from_slice(&node.data);
+		self.claim_children_to_data(
+			&node.children,
+			tables,
+			tier_addresses,
+			tier_index,
+			node_values,
+			&mut data,
+		)?;
+		data.push(num_children as u8);
 
 		// Can't support compression as we need to know the size earlier to get the tier.
 		let val: RcValue = data.into();
@@ -1145,17 +1146,18 @@ impl HashColumn {
 				let mut node_values: Vec<NodeChange> = Default::default();
 
 				let num_children = node.children.len();
-				let data = pack_node_data(
-					node.data.clone(),
-					self.claim_children(
-						&node.children,
-						values,
-						&tier_addresses,
-						&mut tier_index,
-						&mut node_values,
-					)?,
-					num_children as u8,
-				);
+				let data_size = packed_node_size(&node.data, num_children as u8);
+				let mut data: Vec<u8> = Vec::with_capacity(data_size);
+				data.extend_from_slice(&node.data);
+				self.claim_children_to_data(
+					&node.children,
+					values,
+					&tier_addresses,
+					&mut tier_index,
+					&mut node_values,
+					&mut data,
+				)?;
+				data.push(num_children as u8);
 
 				return Ok((data, node_values))
 			},
