@@ -245,7 +245,7 @@ impl HashColumn {
 		Ok(None)
 	}
 
-	pub fn get_size(&self, key: &Key, log: &RwLock<LogOverlays>) -> Result<Option<u32>> {
+	pub fn get_size(&self, key: &Key, log: &LogOverlays) -> Result<Option<u32>> {
 		Ok(self.get(key, log)?.map(|(v, _rc)| v.len() as u32))
 	}
 

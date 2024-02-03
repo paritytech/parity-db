@@ -4,7 +4,6 @@
 use crate::{
 	column::ColId,
 	error::{try_io, Error, Result},
-	file::MappedBytesGuard,
 	index::{Chunk as IndexChunk, TableId as IndexTableId, ENTRY_BYTES},
 	options::Options,
 	parking_lot::{RwLock, RwLockWriteGuard},
@@ -93,12 +92,15 @@ pub struct LogOverlays {
 	index: Vec<IndexLogOverlay>,
 	value: Vec<ValueLogOverlay>,
 	ref_count: Vec<RefCountLogOverlay>,
-	last_record_ids: Vec<u64>,
+	last_record_ids: Vec<AtomicU64>,
 }
 
 impl LogOverlays {
 	pub fn last_record_id(&self, col: ColId) -> u64 {
-		self.last_record_ids.get(col as usize).cloned().unwrap_or(u64::MAX)
+		self.last_record_ids
+			.get(col as usize)
+			.map(|r| r.load(Ordering::Relaxed))
+			.unwrap_or(u64::MAX)
 	}
 
 	pub fn with_columns(count: usize) -> Self {
@@ -112,80 +114,43 @@ impl LogOverlays {
 			ref_count: (0..RefCountTableId::max_log_indicies(count))
 				.map(|_| RefCountLogOverlay::default())
 				.collect(),
-			last_record_ids: (0..count).map(|_| 0).collect(),
+			last_record_ids: (0..count).map(|_| AtomicU64::new(0)).collect(),
 		}
-	}
-}
-
-impl LogQuery for RwLock<LogOverlays> {
-	type ValueRef<'a> = MappedBytesGuard<'a>;
-
-	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
-		&self,
-		table: IndexTableId,
-		index: u64,
-		f: F,
-	) -> Option<R> {
-		(&*self.read()).with_index(table, index, f)
-	}
-
-	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool {
-		(&*self.read()).value(table, index, dest)
-	}
-
-	#[cfg(not(feature = "loom"))]
-	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>> {
-		let lock =
-			parking_lot::RwLockReadGuard::try_map(self.read(), |o| o.value_ref(table, index));
-		lock.ok()
-	}
-
-	#[cfg(feature = "loom")]
-	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>> {
-		self.read().value_ref(table, index).map(|o| MappedBytesGuard::new(o.to_vec()))
-	}
-
-	fn ref_count<R, F: FnOnce(&RefCountChunk) -> R>(
-		&self,
-		table: RefCountTableId,
-		index: u64,
-		f: F,
-	) -> Option<R> {
-		(&*self.read()).ref_count(table, index, f)
 	}
 }
 
 impl LogQuery for LogOverlays {
-	type ValueRef<'a> = &'a [u8];
+	type ValueRef<'a> = LogWriterValueGuard<'a> where Self: 'a;
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
 		&self,
 		table: IndexTableId,
 		index: u64,
 		f: F,
 	) -> Option<R> {
-		self.index
-			.get(table.log_index())
-			.and_then(|o| o.map.get(&index).map(|(_id, _mask, data)| f(data)))
+		self.index.get(table.log_index()).and_then(|o| {
+			o.map.get(&index).map(|e| {
+				let (_id, _mask, data) = e.get();
+				f(data)
+			})
+		})
 	}
 
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool {
 		let s = self;
-		if let Some(d) = s
-			.value
-			.get(table.log_index())
-			.and_then(|o| o.map.get(&index).map(|(_id, data)| data))
-		{
-			let len = dest.len().min(d.len());
-			dest[0..len].copy_from_slice(&d[0..len]);
-			true
-		} else {
-			false
+		if let Some(d) = s.value.get(table.log_index()) {
+			if let Some(o) = d.map.get(&index) {
+				let (_id, data) = o.get();
+				let len = dest.len().min(data.len());
+				dest[0..len].copy_from_slice(&data[0..len]);
+				return true;
+			}
 		}
+		false
 	}
 	fn value_ref<'a>(&'a self, table: ValueTableId, index: u64) -> Option<Self::ValueRef<'a>> {
 		self.value
 			.get(table.log_index())
-			.and_then(|o| o.map.get(&index).map(|(_id, data)| data.as_slice()))
+			.and_then(|o| o.map.get(&index).map(|e| LogWriterValueGuard(e)))
 	}
 
 	fn ref_count<R, F: FnOnce(&RefCountChunk) -> R>(
@@ -196,7 +161,7 @@ impl LogQuery for LogOverlays {
 	) -> Option<R> {
 		self.ref_count
 			.get(table.log_index())
-			.and_then(|o| o.map.get(&index).map(|(_id, _mask, data)| f(data)))
+			.and_then(|o| o.map.get(&index).map(|e| f(&e.get().2)))
 	}
 }
 
@@ -305,7 +270,7 @@ impl<'a> LogReader<'a> {
 						expected,
 					);
 					if checksum != expected {
-						return Err(Error::Corruption("Log record CRC-32 mismatch".into()))
+						return Err(Error::Corruption("Log record CRC-32 mismatch".into()));
 					}
 				} else {
 					log::trace!(target: "parity-db", "Read end of record");
@@ -387,43 +352,45 @@ impl LogChange {
 		write(&self.record_id.to_le_bytes())?;
 
 		for (id, overlay) in self.local_index.iter() {
-			for (index, (_, modified_entries_mask, chunk)) in overlay.map.iter() {
-				write(INSERT_INDEX.to_le_bytes().as_ref())?;
-				write(&id.as_u16().to_le_bytes())?;
-				write(&index.to_le_bytes())?;
-				write(&modified_entries_mask.to_le_bytes())?;
+			overlay.map.scan(|index, (_, modified_entries_mask, chunk)| {
+				write(INSERT_INDEX.to_le_bytes().as_ref()).unwrap();
+				write(&id.as_u16().to_le_bytes()).unwrap();
+				write(&index.to_le_bytes()).unwrap();
+				write(&modified_entries_mask.to_le_bytes()).unwrap();
 				let mut mask = *modified_entries_mask;
 				while mask != 0 {
 					let i = mask.trailing_zeros();
 					mask &= !(1 << i);
-					write(&chunk.0[i as usize * ENTRY_BYTES..(i as usize + 1) * ENTRY_BYTES])?;
+					write(&chunk.0[i as usize * ENTRY_BYTES..(i as usize + 1) * ENTRY_BYTES])
+						.unwrap();
 				}
-			}
+			});
 		}
 		for (id, overlay) in self.local_values.iter() {
-			for (index, (_, value)) in overlay.map.iter() {
-				write(INSERT_VALUE.to_le_bytes().as_ref())?;
-				write(&id.as_u16().to_le_bytes())?;
-				write(&index.to_le_bytes())?;
-				write(value)?;
-			}
+			overlay.map.scan(|index, (_, value)| {
+				write(INSERT_VALUE.to_le_bytes().as_ref()).unwrap();
+				write(&id.as_u16().to_le_bytes()).unwrap();
+				write(&index.to_le_bytes()).unwrap();
+				write(value).unwrap();
+			});
 		}
 		for (id, overlay) in self.local_ref_count.iter() {
-			for (index, (_, modified_entries_mask, chunk)) in overlay.map.iter() {
-				write(INSERT_REF_COUNT.to_le_bytes().as_ref())?;
-				write(&id.as_u16().to_le_bytes())?;
-				write(&index.to_le_bytes())?;
-				write(&modified_entries_mask.to_le_bytes())?;
+			overlay.map.scan(|index, (_, modified_entries_mask, chunk)| {
+				write(INSERT_REF_COUNT.to_le_bytes().as_ref()).unwrap();
+				write(&id.as_u16().to_le_bytes()).unwrap();
+				write(&index.to_le_bytes()).unwrap();
+				write(&modified_entries_mask.to_le_bytes()).unwrap();
 				let mut mask = *modified_entries_mask;
 				while mask != 0 {
 					let i = mask.trailing_zeros();
 					mask &= !(1 << i);
 					write(
-						&chunk.0[i as usize * REF_COUNT_ENTRY_BYTES..
-							(i as usize + 1) * REF_COUNT_ENTRY_BYTES],
-					)?;
+						&chunk.0[i as usize * REF_COUNT_ENTRY_BYTES
+							..(i as usize + 1) * REF_COUNT_ENTRY_BYTES],
+					)
+					.unwrap();
 				}
-			}
+			});
 		}
 		for id in self.dropped_tables.iter() {
 			log::debug!(target: "parity-db", "Finalizing drop {}", id);
@@ -459,12 +426,12 @@ struct FlushedLog {
 
 #[derive(Debug)]
 pub struct LogWriter<'a> {
-	overlays: &'a RwLock<LogOverlays>,
+	overlays: &'a LogOverlays,
 	log: LogChange,
 }
 
 impl<'a> LogWriter<'a> {
-	pub fn new(overlays: &'a RwLock<LogOverlays>, record_id: u64) -> LogWriter<'a> {
+	pub fn new(overlays: &'a LogOverlays, record_id: u64) -> LogWriter<'a> {
 		LogWriter { overlays, log: LogChange::new(record_id) }
 	}
 
@@ -474,22 +441,24 @@ impl<'a> LogWriter<'a> {
 
 	pub fn insert_index(&mut self, table: IndexTableId, index: u64, sub: u8, data: IndexChunk) {
 		match self.log.local_index.entry(table).or_default().map.entry(index) {
-			std::collections::hash_map::Entry::Occupied(mut entry) => {
+			scc::hash_map::Entry::Occupied(mut entry) => {
 				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), data);
 			},
-			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert((self.log.record_id, 1 << sub, data));
+			scc::hash_map::Entry::Vacant(entry) => {
+				entry.insert_entry((self.log.record_id, 1 << sub, data));
 			},
 		}
 	}
 
 	pub fn insert_value(&mut self, table: ValueTableId, index: u64, data: Vec<u8>) {
-		self.log
-			.local_values
-			.entry(table)
-			.or_default()
-			.map
-			.insert(index, (self.log.record_id, data));
+		match self.log.local_values.entry(table).or_default().map.entry(index) {
+			scc::hash_map::Entry::Occupied(mut entry) => {
+				*entry.get_mut() = (self.log.record_id, data);
+			},
+			scc::hash_map::Entry::Vacant(entry) => {
+				entry.insert_entry((self.log.record_id, data));
+			},
+		}
 	}
 
 	pub fn insert_ref_count(
@@ -500,11 +469,11 @@ impl<'a> LogWriter<'a> {
 		data: RefCountChunk,
 	) {
 		match self.log.local_ref_count.entry(table).or_default().map.entry(index) {
-			std::collections::hash_map::Entry::Occupied(mut entry) => {
+			scc::hash_map::Entry::Occupied(mut entry) => {
 				*entry.get_mut() = (self.log.record_id, entry.get().1 | (1 << sub), data);
 			},
-			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert((self.log.record_id, 1 << sub, data));
+			scc::hash_map::Entry::Vacant(entry) => {
+				entry.insert_entry((self.log.record_id, 1 << sub, data));
 			},
 		}
 	}
@@ -522,18 +491,12 @@ impl<'a> LogWriter<'a> {
 	}
 }
 
-pub enum LogWriterValueGuard<'a> {
-	Local(&'a [u8]),
-	Overlay(MappedBytesGuard<'a>),
-}
+pub struct LogWriterValueGuard<'a>(scc::hash_map::OccupiedEntry<'a, u64, (u64, Vec<u8>)>);
 
 impl std::ops::Deref for LogWriterValueGuard<'_> {
 	type Target = [u8];
 	fn deref(&self) -> &[u8] {
-		match self {
-			LogWriterValueGuard::Local(data) => data,
-			LogWriterValueGuard::Overlay(data) => data.deref(),
-		}
+		&self.0.get().1
 	}
 }
 
@@ -545,24 +508,15 @@ impl<'q> LogQuery for LogWriter<'q> {
 		index: u64,
 		f: F,
 	) -> Option<R> {
-		match self
-			.log
-			.local_index
-			.get(&table)
-			.and_then(|o| o.map.get(&index).map(|(_id, _mask, data)| data))
-		{
-			Some(data) => Some(f(data)),
+		match self.log.local_index.get(&table).and_then(|o| o.map.get(&index)) {
+			Some(data) => Some(f(&data.get().2)),
 			None => self.overlays.with_index(table, index, f),
 		}
 	}
 
 	fn value(&self, table: ValueTableId, index: u64, dest: &mut [u8]) -> bool {
-		if let Some(d) = self
-			.log
-			.local_values
-			.get(&table)
-			.and_then(|o| o.map.get(&index).map(|(_id, data)| data))
-		{
+		if let Some(d) = self.log.local_values.get(&table).and_then(|o| o.map.get(&index)) {
+			let d = &d.get().1;
 			let len = dest.len().min(d.len());
 			dest[0..len].copy_from_slice(&d[0..len]);
 			true
@@ -574,14 +528,8 @@ impl<'q> LogQuery for LogWriter<'q> {
 		self.log
 			.local_values
 			.get(&table)
-			.and_then(|o| {
-				o.map.get(&index).map(|(_id, data)| LogWriterValueGuard::Local(data.as_slice()))
-			})
-			.or_else(|| {
-				self.overlays
-					.value_ref(table, index)
-					.map(|data| LogWriterValueGuard::Overlay(data))
-			})
+			.and_then(|o| o.map.get(&index).map(|e| LogWriterValueGuard(e)))
+			.or_else(|| self.overlays.value_ref(table, index))
 	}
 
 	fn ref_count<R, F: FnOnce(&RefCountChunk) -> R>(
@@ -590,13 +538,11 @@ impl<'q> LogQuery for LogWriter<'q> {
 		index: u64,
 		f: F,
 	) -> Option<R> {
-		match self
-			.log
-			.local_ref_count
-			.get(&table)
-			.and_then(|o| o.map.get(&index).map(|(_id, _mask, data)| data))
-		{
-			Some(data) => Some(f(data)),
+		match self.log.local_ref_count.get(&table).and_then(|o| o.map.get(&index)) {
+			Some(data) => {
+				let data = &data.get().2;
+				Some(f(data))
+			},
 			None => self.overlays.ref_count(table, index, f),
 		}
 	}
@@ -605,7 +551,7 @@ impl<'q> LogQuery for LogWriter<'q> {
 // Identity hash.
 #[derive(Debug, Default, Clone)]
 pub struct IdentityHash(u64);
-pub type BuildIdHash = std::hash::BuildHasherDefault<IdentityHash>;
+//pub type BuildIdHash = std::hash::BuildHasherDefault<IdentityHash>;
 
 impl std::hash::Hasher for IdentityHash {
 	fn write(&mut self, _: &[u8]) {
@@ -648,22 +594,22 @@ impl std::hash::Hasher for IdentityHash {
 
 #[derive(Debug, Default)]
 pub struct IndexLogOverlay {
-	pub map: HashMap<u64, (u64, u64, IndexChunk)>, // index -> (record_id, modified_mask, entry)
+	pub map: scc::HashMap<u64, (u64, u64, IndexChunk)>, // index -> (record_id, modified_mask, entry)
 }
 
 // We use identity hash for value overlay/log records so that writes to value tables are in order.
 #[derive(Debug, Default)]
 pub struct ValueLogOverlay {
-	pub map: HashMap<u64, (u64, Vec<u8>)>, // index -> (record_id, entry)
+	pub map: scc::HashMap<u64, (u64, Vec<u8>)>, // index -> (record_id, entry)
 }
 #[derive(Debug, Default)]
 pub struct ValueLogOverlayLocal {
-	pub map: HashMap<u64, (u64, Vec<u8>), BuildIdHash>, // index -> (record_id, entry)
+	pub map: scc::HashMap<u64, (u64, Vec<u8>)>, // index -> (record_id, entry)
 }
 
 #[derive(Debug, Default)]
 pub struct RefCountLogOverlay {
-	pub map: HashMap<u64, (u64, u64, RefCountChunk)>, // index -> (record_id, modified_mask, entry)
+	pub map: scc::HashMap<u64, (u64, u64, RefCountChunk)>, // index -> (record_id, modified_mask, entry)
 }
 
 #[derive(Debug)]
@@ -681,7 +627,7 @@ struct Reading {
 
 #[derive(Debug)]
 pub struct Log {
-	overlays: RwLock<LogOverlays>,
+	overlays: LogOverlays,
 	appending: RwLock<Option<Appending>>,
 	reading: RwLock<Option<Reading>>,
 	read_queue: RwLock<VecDeque<(u32, std::fs::File)>>,
@@ -726,7 +672,7 @@ impl Log {
 		let next_log_id = if logs.is_empty() { 0 } else { max_log_id + 1 };
 
 		Ok(Log {
-			overlays: RwLock::new(LogOverlays::with_columns(options.columns.len())),
+			overlays: LogOverlays::with_columns(options.columns.len()),
 			appending: RwLock::new(None),
 			reading: RwLock::new(None),
 			read_queue: RwLock::default(),
@@ -754,7 +700,7 @@ impl Log {
 	pub fn open_log_file(path: &std::path::Path) -> Result<(std::fs::File, Option<u64>)> {
 		let mut file = try_io!(std::fs::OpenOptions::new().read(true).write(true).open(path));
 		if try_io!(file.metadata()).len() == 0 {
-			return Ok((file, None))
+			return Ok((file, None));
 		}
 		match Self::read_first_record_id(&mut file) {
 			Err(Error::Io(e)) if e.kind() == ErrorKind::UnexpectedEof => {
@@ -790,18 +736,18 @@ impl Log {
 		for (id, _, file) in self.replay_queue.write().drain(0..) {
 			self.cleanup_queue.write().push_back((id, file));
 		}
-		let mut overlays = self.overlays.write();
-		for o in overlays.index.iter_mut() {
+		let overlays = self.overlays();
+		for o in overlays.index.iter() {
 			o.map.clear();
 		}
-		for o in overlays.value.iter_mut() {
+		for o in overlays.value.iter() {
 			o.map.clear();
 		}
-		for o in overlays.ref_count.iter_mut() {
+		for o in overlays.ref_count.iter() {
 			o.map.clear();
 		}
-		for r in overlays.last_record_ids.iter_mut() {
-			*r = 0;
+		for r in overlays.last_record_ids.iter() {
+			r.store(0, Ordering::Relaxed);
 		}
 		self.dirty.store(false, Ordering::Relaxed);
 	}
@@ -837,22 +783,52 @@ impl Log {
 		let appending = appending.as_mut().unwrap();
 		let FlushedLog { index, values, ref_count, bytes } =
 			log.flush_to_file(&mut appending.file)?;
-		let mut overlays = self.overlays.write();
+		let overlays = self.overlays();
 		let mut total_index = 0;
 		for (id, overlay) in index.into_iter() {
 			total_index += overlay.map.len();
-			overlays.index[id.log_index()].map.extend(overlay.map.into_iter());
+			overlay.map.prune(|k, v| {
+				match overlays.index[id.log_index()].map.entry(*k) {
+					scc::hash_map::Entry::Occupied(mut e) => {
+						*e.get_mut() = v;
+					},
+					scc::hash_map::Entry::Vacant(e) => {
+						e.insert_entry(v);
+					},
+				}
+				None
+			});
 		}
 		let mut total_value = 0;
 		for (id, overlay) in values.into_iter() {
 			total_value += overlay.map.len();
-			overlays.last_record_ids[id.col() as usize] = record_id;
-			overlays.value[id.log_index()].map.extend(overlay.map.into_iter());
+			overlays.last_record_ids[id.col() as usize].store(record_id, Ordering::Relaxed);
+			overlay.map.prune(|k, v| {
+				match overlays.value[id.log_index()].map.entry(*k) {
+					scc::hash_map::Entry::Occupied(mut e) => {
+						*e.get_mut() = v;
+					},
+					scc::hash_map::Entry::Vacant(e) => {
+						e.insert_entry(v);
+					},
+				}
+				None
+			});
 		}
 		let mut total_ref_count = 0;
 		for (id, overlay) in ref_count.into_iter() {
 			total_ref_count += overlay.map.len();
-			overlays.ref_count[id.log_index()].map.extend(overlay.map.into_iter());
+			overlay.map.prune(|k, v| {
+				match overlays.ref_count[id.log_index()].map.entry(*k) {
+					scc::hash_map::Entry::Occupied(mut e) => {
+						*e.get_mut() = v;
+					},
+					scc::hash_map::Entry::Vacant(e) => {
+						e.insert_entry(v);
+					},
+				}
+				None
+			});
 		}
 
 		log::debug!(
@@ -872,68 +848,68 @@ impl Log {
 		if record_id >= self.next_record_id.load(Ordering::Relaxed) {
 			self.next_record_id.store(record_id + 1, Ordering::Relaxed);
 		}
-		let mut overlays = self.overlays.write();
+		let overlays = self.overlays();
 		for (table, index) in cleared.index.into_iter() {
-			if let Some(ref mut overlay) = overlays.index.get_mut(table.log_index()) {
-				if let std::collections::hash_map::Entry::Occupied(e) = overlay.map.entry(index) {
+			if let Some(ref mut overlay) = overlays.index.get(table.log_index()) {
+				if let scc::hash_map::Entry::Occupied(e) = overlay.map.entry(index) {
 					if e.get().0 == record_id {
-						e.remove_entry();
+						let _ = e.remove_entry();
 					}
 				}
 			}
 		}
 		for (table, index) in cleared.values.into_iter() {
-			if let Some(ref mut overlay) = overlays.value.get_mut(table.log_index()) {
-				if let std::collections::hash_map::Entry::Occupied(e) = overlay.map.entry(index) {
+			if let Some(ref mut overlay) = overlays.value.get(table.log_index()) {
+				if let scc::hash_map::Entry::Occupied(e) = overlay.map.entry(index) {
 					if e.get().0 == record_id {
-						e.remove_entry();
+						let _ = e.remove_entry();
 					}
 				}
 			}
 		}
 		for (table, index) in cleared.ref_count.into_iter() {
-			if let Some(ref mut overlay) = overlays.ref_count.get_mut(table.log_index()) {
-				if let std::collections::hash_map::Entry::Occupied(e) = overlay.map.entry(index) {
+			if let Some(ref mut overlay) = overlays.ref_count.get(table.log_index()) {
+				if let scc::hash_map::Entry::Occupied(e) = overlay.map.entry(index) {
 					if e.get().0 == record_id {
-						e.remove_entry();
+						let _ = e.remove_entry();
 					}
 				}
 			}
 		}
 		// Reclaim overlay memory
-		for (i, o) in overlays.index.iter_mut().enumerate() {
+		for (i, o) in overlays.index.iter().enumerate() {
 			if o.map.capacity() > o.map.len() * INDEX_OVERLAY_RECLAIM_FACTOR {
 				log::trace!(
-					"Schrinking index overlay {}: {}/{}",
+					"Shrinking index overlay {}: {}/{}",
 					IndexTableId::from_log_index(i),
 					o.map.len(),
 					o.map.capacity(),
 				);
-				o.map.shrink_to_fit();
+				//o.map.shrink_to_fit();
 			}
 		}
-		for (i, o) in overlays.value.iter_mut().enumerate() {
-			if o.map.capacity() > VALUE_OVERLAY_MIN_RECLAIM_ITEMS &&
-				o.map.capacity() > o.map.len() * VALUE_OVERLAY_RECLAIM_FACTOR
+		for (i, o) in overlays.value.iter().enumerate() {
+			if o.map.capacity() > VALUE_OVERLAY_MIN_RECLAIM_ITEMS
+				&& o.map.capacity() > o.map.len() * VALUE_OVERLAY_RECLAIM_FACTOR
 			{
 				log::trace!(
-					"Schrinking value overlay {}: {}/{}",
+					"Shrinking value overlay {}: {}/{}",
 					ValueTableId::from_log_index(i),
 					o.map.len(),
 					o.map.capacity(),
 				);
-				o.map.shrink_to_fit();
+				//o.map.shrink_to_fit();
 			}
 		}
-		for (i, o) in overlays.ref_count.iter_mut().enumerate() {
+		for (i, o) in overlays.ref_count.iter().enumerate() {
 			if o.map.capacity() > o.map.len() * REF_COUNT_OVERLAY_RECLAIM_FACTOR {
 				log::trace!(
-					"Schrinking ref count overlay {}: {}/{}",
+					"Shrinking ref count overlay {}: {}/{}",
 					RefCountTableId::from_log_index(i),
 					o.map.len(),
 					o.map.capacity(),
 				);
-				o.map.shrink_to_fit();
+				//o.map.shrink_to_fit();
 			}
 		}
 	}
@@ -951,7 +927,7 @@ impl Log {
 				}
 				self.read_queue.write().push_back((to_flush.id, file));
 			}
-			return Ok(true)
+			return Ok(true);
 		}
 		Ok(false)
 	}
@@ -1013,7 +989,7 @@ impl Log {
 				*reading = Some(Reading { id, file: std::io::BufReader::new(file) });
 			} else {
 				log::trace!(target: "parity-db", "No active reader");
-				return Ok(None)
+				return Ok(None);
 			}
 		}
 		let mut reader = LogReader::new(reading, validate);
@@ -1032,7 +1008,7 @@ impl Log {
 		}
 	}
 
-	pub fn overlays(&self) -> &RwLock<LogOverlays> {
+	pub fn overlays(&self) -> &LogOverlays {
 		&self.overlays
 	}
 

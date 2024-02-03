@@ -154,7 +154,7 @@ struct DbInner {
 	log_worker_wait: WaitCondvar<bool>,
 	commit_worker_wait: Arc<WaitCondvar<bool>>,
 	// Overlay of most recent values in the commit queue.
-	commit_overlay: RwLock<Vec<CommitOverlay>>,
+	commit_overlay: Vec<CommitOverlay>,
 	trees: RwLock<HashMap<ColId, Trees>>,
 	// This may underflow occasionally, but is bound for 0 eventually.
 	log_queue_wait: WaitCondvar<i64>,
@@ -239,7 +239,7 @@ impl DbInner {
 			commit_queue_full_cv: Condvar::new(),
 			log_worker_wait: WaitCondvar::new(),
 			commit_worker_wait: Arc::new(WaitCondvar::new()),
-			commit_overlay: RwLock::new(commit_overlay),
+			commit_overlay,
 			trees: RwLock::new(Default::default()),
 			log_queue_wait: WaitCondvar::new(),
 			flush_worker_wait: Arc::new(WaitCondvar::new()),
@@ -270,7 +270,7 @@ impl DbInner {
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
 				let key = column.hash_key(key);
-				let overlay = self.commit_overlay.read();
+				let overlay = &self.commit_overlay;
 				// Check commit overlay first
 				if let Some(v) = overlay.get(col as usize).and_then(|o| o.get(&key)) {
 					return Ok(v.map(|i| i.value().clone()));
@@ -280,13 +280,13 @@ impl DbInner {
 				Ok(column.get(&key, log)?.map(|(v, _rc)| v))
 			},
 			Column::Tree(column) => {
-				let overlay = self.commit_overlay.read();
+				let overlay = &self.commit_overlay;
 				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
 					return Ok(l.map(|i| i.value().clone()));
 				}
 				// We lock log, if btree structure changed while reading that would be an issue.
-				let log = self.log.overlays().read();
-				column.with_locked(|btree| BTreeTable::get(key, &*log, btree))
+				let log = self.log.overlays();
+				column.with_locked(|btree| BTreeTable::get(key, log, btree))
 			},
 		}
 	}
@@ -300,7 +300,7 @@ impl DbInner {
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
 				let key = column.hash_key(key);
-				let overlay = self.commit_overlay.read();
+				let overlay = &self.commit_overlay;
 				// Check commit overlay first
 				if let Some(l) = overlay.get(col as usize).and_then(|o| o.get_size(&key)) {
 					return Ok(l);
@@ -310,11 +310,11 @@ impl DbInner {
 				column.get_size(&key, log)
 			},
 			Column::Tree(column) => {
-				let overlay = self.commit_overlay.read();
+				let overlay = &self.commit_overlay;
 				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
 					return Ok(l.map(|v| v.value().len() as u32));
 				}
-				let log = self.log.overlays().read();
+				let log = self.log.overlays();
 				let l = column.with_locked(|btree| BTreeTable::get(key, &*log, btree))?;
 				Ok(l.map(|v| v.len() as u32))
 			},
@@ -353,7 +353,7 @@ impl DbInner {
 		}
 		match &self.columns[col as usize] {
 			Column::Hash(column) => {
-				let overlay = self.commit_overlay.read();
+				let overlay = &self.commit_overlay;
 				// Check commit overlay first
 				if let Some(v) = overlay.get(col as usize).and_then(|o| o.get_address(node_address))
 				{
@@ -610,24 +610,19 @@ impl DbInner {
 			}
 		}
 
-		let mut overlay = self.commit_overlay.write();
+		let overlay = &self.commit_overlay;
 
 		queue.record_id += 1;
 		let record_id = queue.record_id;
 
 		let mut bytes = 0;
 		for (c, indexed) in &commit.indexed {
-			indexed.copy_to_overlay(
-				&mut overlay[*c as usize],
-				record_id,
-				&mut bytes,
-				&self.options,
-			)?;
+			indexed.copy_to_overlay(&overlay[*c as usize], record_id, &mut bytes, &self.options)?;
 		}
 
 		for (c, iterset) in &commit.btree_indexed {
 			iterset.copy_to_overlay(
-				&mut overlay[*c as usize].btree_indexed,
+				&mut overlay[*c as usize].btree_indexed.write(),
 				record_id,
 				&mut bytes,
 				&self.options,
@@ -664,13 +659,13 @@ impl DbInner {
 		};
 
 		let bytes = if record_id != old_id {
-			let mut overlay = self.commit_overlay.write();
+			let overlay = &self.commit_overlay;
 
 			let mut bytes = 0;
 
 			for (c, indexed) in &commit.indexed {
 				indexed.copy_to_overlay(
-					&mut overlay[*c as usize],
+					&overlay[*c as usize],
 					record_id,
 					&mut bytes,
 					&self.options,
@@ -679,7 +674,7 @@ impl DbInner {
 
 			for (c, iterset) in &commit.btree_indexed {
 				iterset.copy_to_overlay(
-					&mut overlay[*c as usize].btree_indexed,
+					&mut overlay[*c as usize].btree_indexed.write(),
 					record_id,
 					&mut bytes,
 					&self.options,
@@ -689,10 +684,10 @@ impl DbInner {
 			{
 				// Cleanup the commit overlay with old id.
 				for (c, key_values) in commit.indexed.iter() {
-					key_values.clean_overlay(&mut overlay[*c as usize], old_id);
+					key_values.clean_overlay(&overlay[*c as usize], old_id);
 				}
 				for (c, iterset) in commit.btree_indexed.iter_mut() {
-					iterset.clean_overlay(&mut overlay[*c as usize].btree_indexed, old_id);
+					iterset.clean_overlay(&mut *overlay[*c as usize].btree_indexed.write(), old_id);
 				}
 			}
 
@@ -878,12 +873,13 @@ impl DbInner {
 
 			{
 				// Cleanup the commit overlay.
-				let mut overlay = self.commit_overlay.write();
+				let overlay = &self.commit_overlay;
 				for (c, key_values) in commit.changeset.indexed.iter() {
-					key_values.clean_overlay(&mut overlay[*c as usize], commit.id);
+					key_values.clean_overlay(&overlay[*c as usize], commit.id);
 				}
 				for (c, iterset) in commit.changeset.btree_indexed.iter_mut() {
-					iterset.clean_overlay(&mut overlay[*c as usize].btree_indexed, commit.id);
+					iterset
+						.clean_overlay(&mut *overlay[*c as usize].btree_indexed.write(), commit.id);
 				}
 			}
 
@@ -1800,7 +1796,7 @@ impl TreeReader for DbTreeReader {
 
 		match &self.db.columns[self.col as usize] {
 			Column::Hash(column) => {
-				let overlay = self.db.commit_overlay.read();
+				let overlay = &self.db.commit_overlay;
 				// Check commit overlay first
 				let value = if let Some(v) =
 					overlay.get(self.col as usize).and_then(|o| o.get(&self.key))
@@ -1829,15 +1825,15 @@ impl TreeReader for DbTreeReader {
 	}
 }
 
-pub type IndexedCommitOverlay = HashMap<Key, (u64, Option<RcValue>), IdentityBuildHasher>;
-pub type AddressCommitOverlay = HashMap<u64, (u64, RcValue)>;
+pub type IndexedCommitOverlay = scc::HashMap<Key, (u64, Option<RcValue>), IdentityBuildHasher>;
+pub type AddressCommitOverlay = scc::HashMap<u64, (u64, RcValue)>;
 pub type BTreeCommitOverlay = BTreeMap<RcValue, (u64, Option<RcValue>)>;
 
 #[derive(Debug)]
 pub struct CommitOverlay {
 	indexed: IndexedCommitOverlay,
 	address: AddressCommitOverlay,
-	btree_indexed: BTreeCommitOverlay,
+	btree_indexed: RwLock<BTreeCommitOverlay>,
 }
 
 impl CommitOverlay {
@@ -1851,29 +1847,27 @@ impl CommitOverlay {
 
 	#[cfg(test)]
 	fn is_empty(&self) -> bool {
-		self.indexed.is_empty() && self.address.is_empty() && self.btree_indexed.is_empty()
+		self.indexed.is_empty() && self.address.is_empty() && self.btree_indexed.read().is_empty()
 	}
 }
 
 impl CommitOverlay {
-	fn get_ref(&self, key: &[u8]) -> Option<Option<&RcValue>> {
-		self.indexed.get(key).map(|(_, v)| v.as_ref())
-	}
-
 	fn get(&self, key: &[u8]) -> Option<Option<RcValue>> {
-		self.get_ref(key).map(|v| v.cloned())
+		self.indexed.get(key).map(|e| e.get().1.clone())
 	}
 
 	fn get_size(&self, key: &[u8]) -> Option<Option<u32>> {
-		self.get_ref(key).map(|res| res.as_ref().map(|b| b.value().len() as u32))
+		self.indexed
+			.get(key)
+			.map(|e| e.get().1.as_ref().map(|v| v.value().len() as u32))
 	}
 
 	fn get_address(&self, address: u64) -> Option<RcValue> {
-		self.address.get(&address).map(|(_, v)| v.clone())
+		self.address.get(&address).map(|e| e.get().1.clone())
 	}
 
-	fn btree_get(&self, key: &[u8]) -> Option<Option<&RcValue>> {
-		self.btree_indexed.get(key).map(|(_, v)| v.as_ref())
+	fn btree_get(&self, key: &[u8]) -> Option<Option<RcValue>> {
+		self.btree_indexed.read().get(key).map(|(_, v)| v.clone())
 	}
 
 	pub fn btree_next(
@@ -1884,17 +1878,20 @@ impl CommitOverlay {
 		match &last_key {
 			LastKey::Start => self
 				.btree_indexed
+				.read()
 				.range::<Vec<u8>, _>(..)
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::End => None,
 			LastKey::At(key) => self
 				.btree_indexed
+				.read()
 				.range::<Vec<u8>, _>((Bound::Excluded(key), Bound::Unbounded))
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Seeked(key) => self
 				.btree_indexed
+				.read()
 				.range::<Value, _>(key..)
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
@@ -1909,6 +1906,7 @@ impl CommitOverlay {
 		match &last_key {
 			LastKey::End => self
 				.btree_indexed
+				.read()
 				.range::<Vec<u8>, _>(..)
 				.rev()
 				.next()
@@ -1916,12 +1914,14 @@ impl CommitOverlay {
 			LastKey::Start => None,
 			LastKey::At(key) => self
 				.btree_indexed
+				.read()
 				.range::<Vec<u8>, _>(..key)
 				.rev()
 				.next()
 				.map(|(k, (_, v))| (k.clone(), v.clone())),
 			LastKey::Seeked(key) => self
 				.btree_indexed
+				.read()
 				.range::<Vec<u8>, _>(..=key)
 				.rev()
 				.next()
@@ -2079,7 +2079,7 @@ impl IndexedChangeSet {
 
 	fn copy_to_overlay(
 		&self,
-		overlay: &mut CommitOverlay,
+		overlay: &CommitOverlay,
 		record_id: u64,
 		bytes: &mut usize,
 		options: &Options,
@@ -2090,12 +2090,12 @@ impl IndexedChangeSet {
 				Operation::Set(k, v) => {
 					*bytes += k.len();
 					*bytes += v.value().len();
-					overlay.indexed.insert(*k, (record_id, Some(v.clone())));
+					overlay.indexed.insert(*k, (record_id, Some(v.clone()))).unwrap();
 				},
 				Operation::Dereference(k) => {
 					// Don't add removed ref-counted values to overlay.
 					if !ref_counted {
-						overlay.indexed.insert(*k, (record_id, None));
+						overlay.indexed.insert(*k, (record_id, None)).unwrap();
 					}
 				},
 				Operation::Reference(..) => {
@@ -2117,7 +2117,7 @@ impl IndexedChangeSet {
 		}
 		for change in self.node_changes.iter() {
 			if let NodeChange::NewValue(address, val, _cval, _compressed) = change {
-				overlay.address.insert(*address, (record_id, val.clone()));
+				overlay.address.insert(*address, (record_id, val.clone())).unwrap();
 			}
 		}
 		Ok(())
@@ -2221,14 +2221,13 @@ impl IndexedChangeSet {
 		Ok(())
 	}
 
-	fn clean_overlay(&self, overlay: &mut CommitOverlay, record_id: u64) {
-		use std::collections::hash_map::Entry;
+	fn clean_overlay(&self, overlay: &CommitOverlay, record_id: u64) {
 		for change in self.changes.iter() {
 			match change {
 				Operation::Set(k, _) | Operation::Dereference(k) => {
-					if let Entry::Occupied(e) = overlay.indexed.entry(*k) {
+					if let scc::hash_map::Entry::Occupied(e) = overlay.indexed.entry(*k) {
 						if e.get().0 == record_id {
-							e.remove_entry();
+							let _ = e.remove_entry();
 						}
 					}
 				},
@@ -2369,7 +2368,7 @@ mod tests {
 		fn check_empty_overlay(&self, db: &DbInner, col: ColId) -> bool {
 			match self {
 				EnableCommitPipelineStages::DbFile | EnableCommitPipelineStages::LogOverlay => {
-					if let Some(overlay) = db.commit_overlay.read().get(col as usize) {
+					if let Some(overlay) = db.commit_overlay.get(col as usize) {
 						if !overlay.is_empty() {
 							let mut replayed = 5;
 							while !overlay.is_empty() {

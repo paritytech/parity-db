@@ -3,6 +3,8 @@
 
 //! Utilities for db file.
 
+use parking_lot::lock_api::RwLockUpgradableReadGuard;
+
 use crate::{
 	error::{try_io, Result},
 	parking_lot::RwLock,
@@ -179,7 +181,12 @@ impl TableFile {
 	}
 
 	pub fn grow(&self, entry_size: u16) -> Result<()> {
-		let mut map_and_file = self.map.write();
+		let map_and_file = self.map.upgradable_read();
+		if let Some((_map, file)) = map_and_file.as_ref() {
+			let new_len = try_io!(file.metadata()).len() + GROW_SIZE_BYTES;
+			try_io!(file.set_len(new_len));
+		}
+		let mut map_and_file = RwLockUpgradableReadGuard::upgrade(map_and_file);
 		let new_len = match map_and_file.as_mut() {
 			None => {
 				let file = self.create_file()?;
@@ -190,12 +197,12 @@ impl TableFile {
 				len
 			},
 			Some((map, file)) => {
-				let new_len = try_io!(file.metadata()).len() + GROW_SIZE_BYTES;
+				let new_len = try_io!(file.metadata()).len();
 				try_io!(file.set_len(new_len));
 				if map.len() < new_len as usize {
 					let new_map = mmap(&file, new_len as usize)?;
-					let old_map = std::mem::replace(map, new_map);
-					try_io!(old_map.flush());
+					let _old_map = std::mem::replace(map, new_map);
+					//try_io!(old_map.flush());
 				}
 				new_len
 			},

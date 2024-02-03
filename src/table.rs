@@ -216,7 +216,7 @@ impl<B: AsRef<[u8]>> Entry<B> {
 		error: impl Fn() -> crate::error::Error,
 	) -> Result<()> {
 		if self.0 + len > self.1.as_ref().len() {
-			return Err(error())
+			return Err(error());
 		}
 		Ok(())
 	}
@@ -265,9 +265,9 @@ impl<B: AsRef<[u8]>> Entry<B> {
 	}
 
 	fn is_multi(&self, db_version: u32) -> bool {
-		self.is_multipart() ||
-			self.is_multihead() ||
-			(db_version <= 4 && (self.is_multipart_v4() || self.is_multihead_v4()))
+		self.is_multipart()
+			|| self.is_multihead()
+			|| (db_version <= 4 && (self.is_multipart_v4() || self.is_multihead_v4()))
 	}
 
 	fn read_size(&mut self) -> (u16, bool) {
@@ -435,7 +435,7 @@ impl ValueTable {
 				return Err(crate::error::Error::Corruption(format!(
 					"Bad removed ref {} out of {}",
 					last_removed, filled
-				)))
+				)));
 			}
 			log::debug!(target: "parity-db", "Opened value table {} with {} entries, entry_size={}, removed={}", id, filled, entry_size, last_removed);
 		}
@@ -469,7 +469,7 @@ impl ValueTable {
 					return Err(crate::error::Error::Corruption(format!(
 						"Bad removed ref {} out of {}",
 						next, filled
-					)))
+					)));
 				}
 
 				stack.insert(0, next);
@@ -534,12 +534,12 @@ impl ValueTable {
 			let mut buf = EntryRef::new(buf.as_slice());
 
 			if buf.is_tombstone() {
-				return Ok((0, false))
+				return Ok((0, false));
 			}
 
 			if self.multipart && part == 0 && !buf.is_multihead() {
 				// This may only happen during value iteration.
-				return Ok((0, false))
+				return Ok((0, false));
 			}
 
 			let (entry_end, next) = if self.multipart && buf.is_multi(self.db_version) {
@@ -578,7 +578,7 @@ impl ValueTable {
 								to_fetch.as_ref().map(hex),
 								self.entry_size,
 							);
-							return Ok((0, false))
+							return Ok((0, false));
 						}
 					},
 				}
@@ -588,15 +588,15 @@ impl ValueTable {
 				return Err(crate::error::Error::Corruption(format!(
 					"Unexpected entry size. Expected at least {} bytes",
 					buf.offset() - 2
-				)))
+				)));
 			}
 
 			if !f(buf.remaining_to(entry_end)) {
-				break
+				break;
 			};
 
 			if next == 0 {
-				break
+				break;
 			}
 			part += 1;
 			index = next;
@@ -638,7 +638,7 @@ impl ValueTable {
 			true
 		})?;
 		if rc > 0 {
-			return Ok(Some((result, compressed, rc)))
+			return Ok(Some((result, compressed, rc)));
 		}
 		Ok(None)
 	}
@@ -653,7 +653,7 @@ impl ValueTable {
 		if let Some((value, compressed, rc)) =
 			self.query(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index, log)?
 		{
-			return Ok(Some((value, rc, query_key, compressed)))
+			return Ok(Some((value, rc, query_key, compressed)));
 		}
 		Ok(None)
 	}
@@ -671,7 +671,7 @@ impl ValueTable {
 				true
 			})?;
 		if rc > 0 {
-			return Ok(Some((result, compressed)))
+			return Ok(Some((result, compressed)));
 		}
 		Ok(None)
 	}
@@ -722,7 +722,7 @@ impl ValueTable {
 			return Err(crate::error::Error::Corruption(format!(
 				"Bad removed ref {} out of {}",
 				next, filled
-			)))
+			)));
 		}
 		Ok(next)
 	}
@@ -735,7 +735,7 @@ impl ValueTable {
 		if self.multipart && buf.is_multi(self.db_version) {
 			buf.skip_size();
 			let next = buf.read_next();
-			return Ok(Some(next))
+			return Ok(Some(next));
 		}
 		Ok(None)
 	}
@@ -805,10 +805,11 @@ impl ValueTable {
 
 				Ok(entries)
 			},
-			None =>
+			None => {
 				return Err(crate::error::Error::InvalidConfiguration(format!(
 					"claim_entries called without free_entries"
-				))),
+				)))
+			},
 		}
 	}
 
@@ -892,7 +893,7 @@ impl ValueTable {
 					// End of new entry. Clear the remaining tail and exit
 					self.clear_chain(index, log)?;
 				}
-				break
+				break;
 			}
 		}
 
@@ -908,7 +909,7 @@ impl ValueTable {
 				},
 				None => {
 					self.clear_slot(index, log)?;
-					return Ok(())
+					return Ok(());
 				},
 			}
 		}
@@ -994,7 +995,7 @@ impl ValueTable {
 
 	pub fn write_dec_ref(&self, index: u64, log: &mut LogWriter) -> Result<bool> {
 		if self.change_ref(index, -1, log)? {
-			return Ok(true)
+			return Ok(true);
 		}
 		self.write_remove_plan(index, log)?;
 		Ok(false)
@@ -1011,7 +1012,7 @@ impl ValueTable {
 		};
 
 		if buf.is_tombstone() {
-			return Ok(false)
+			return Ok(false);
 		}
 
 		let size = if self.multipart && buf.is_multi(self.db_version) {
@@ -1034,7 +1035,7 @@ impl ValueTable {
 		} else if counter != LOCKED_REF {
 			counter = counter.saturating_sub(-delta as u32);
 			if counter == 0 {
-				return Ok(false)
+				return Ok(false);
 			}
 		}
 
@@ -1055,7 +1056,7 @@ impl ValueTable {
 			self.file.write_at(&header.0, 0)?;
 			self.written.store(header.filled(), Ordering::Relaxed);
 			log::trace!(target: "parity-db", "{}: Enacted header, {} filled", self.id, header.filled());
-			return Ok(())
+			return Ok(());
 		}
 
 		let mut buf = FullEntry::new_uninit_full_entry();
@@ -1085,7 +1086,7 @@ impl ValueTable {
 			let mut header = Header::default();
 			log.read(&mut header.0)?;
 			// TODO: sanity check last_removed and filled
-			return Ok(())
+			return Ok(());
 		}
 		let mut buf = FullEntry::new_uninit_full_entry();
 		log.read(&mut buf[0..SIZE_SIZE])?;
@@ -1107,7 +1108,7 @@ impl ValueTable {
 
 	pub fn refresh_metadata(&self) -> Result<()> {
 		if self.file.map.read().is_none() {
-			return Ok(())
+			return Ok(());
 		}
 		let _free_entries_guard = if let Some(free_entries) = &self.free_entries {
 			Some(free_entries.write())
@@ -1179,10 +1180,11 @@ impl ValueTable {
 					true
 				},
 			) {
-				Ok((rc, compressed)) =>
+				Ok((rc, compressed)) => {
 					if rc > 0 && !f(index, rc, result, compressed) {
-						break
-					},
+						break;
+					}
+				},
 				Err(crate::error::Error::InvalidValueData) => (), // ignore, can be external index.
 				Err(e) => return Err(e),
 			}
@@ -1198,7 +1200,7 @@ impl ValueTable {
 		if let Err(e) = self.do_init_with_entry(entry) {
 			log::error!(target: "parity-db", "Failure to initialize file {}", self.file.path.display());
 			let _ = self.file.remove(); // We ignore error here
-			return Err(e)
+			return Err(e);
 		}
 		Ok(())
 	}
@@ -1206,16 +1208,16 @@ impl ValueTable {
 	fn do_init_with_entry(&self, entry: &[u8]) -> Result<()> {
 		self.file.grow(self.entry_size)?;
 
-		let empty_overlays = RwLock::new(LogOverlays::with_columns(0));
+		let empty_overlays = LogOverlays::with_columns(0);
 		let mut log = LogWriter::new(&empty_overlays, 0);
 		let at = self.overwrite_chain(&TableKey::NoHash, entry, &mut log, None, false, false)?;
 		self.complete_plan(&mut log)?;
 		assert_eq!(at, 1);
 		let log = log.drain();
 		let change = log.local_values_changes(self.id).expect("entry written above");
-		for (at, (_rec_id, entry)) in change.map.iter() {
-			self.file.write_at(entry.as_slice(), *at * (self.entry_size as u64))?;
-		}
+		change.map.scan(|at, (_rec_id, entry)| {
+			self.file.write_at(entry.as_slice(), *at * (self.entry_size as u64)).unwrap();
+		});
 		Ok(())
 	}
 
@@ -1234,7 +1236,7 @@ impl ValueTable {
 				return Err(crate::error::Error::Corruption(format!(
 					"Bad removed ref {} out of {}",
 					next, written
-				)))
+				)));
 			}
 			let mut buf = PartialEntry::new_uninit();
 			self.file.read_at(buf.as_mut(), next * self.entry_size as u64)?;
@@ -1255,9 +1257,9 @@ impl ValueTable {
 				// TODO: Need to implement this.
 				return Err(crate::error::Error::InvalidConfiguration(format!(
 					"Unable to determine number of multipart entries"
-				)))
+				)));
 			}
-			return Ok(num)
+			return Ok(num);
 		}
 		Err(crate::error::Error::InvalidConfiguration(format!(
 			"Unable to determine number of entries"
@@ -1305,7 +1307,7 @@ pub mod key {
 			if buf.1.len() >= PARTIAL_SIZE {
 				let pks = buf.read_partial();
 				result.copy_from_slice(pks);
-				return Ok(result)
+				return Ok(result);
 			}
 			Err(crate::error::Error::InvalidValueData)
 		}
@@ -1376,17 +1378,17 @@ mod test {
 		let mut reader = log.read_next(false).unwrap().unwrap();
 		loop {
 			match reader.next().unwrap() {
-				LogAction::BeginRecord |
-				LogAction::InsertIndex { .. } |
-				LogAction::InsertRefCount { .. } |
-				LogAction::DropTable { .. } |
-				LogAction::DropRefCountTable { .. } => {
+				LogAction::BeginRecord
+				| LogAction::InsertIndex { .. }
+				| LogAction::InsertRefCount { .. }
+				| LogAction::DropTable { .. }
+				| LogAction::DropRefCountTable { .. } => {
 					panic!("Unexpected log entry");
 				},
 				LogAction::EndRecord => {
 					let bytes_read = reader.read_bytes();
 					assert_eq!(bytes_written, bytes_read);
-					break
+					break;
 				},
 				LogAction::InsertValue(insertion) => {
 					table.enact_plan(insertion.index, &mut reader).unwrap();

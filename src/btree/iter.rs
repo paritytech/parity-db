@@ -9,8 +9,7 @@
 /// latest accessed key.u
 use super::*;
 use crate::{
-	btree::BTreeTable, db::CommitOverlay, error::Result, log::LogQuery, parking_lot::RwLock,
-	table::key::TableKeyQuery,
+	btree::BTreeTable, db::CommitOverlay, error::Result, log::LogQuery, table::key::TableKeyQuery,
 };
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -33,8 +32,8 @@ impl<'a> SeekTo<'a> {
 #[derive(Debug)]
 pub struct BTreeIterator<'a> {
 	table: &'a BTreeTable,
-	log: &'a RwLock<crate::log::LogOverlays>,
-	commit_overlay: &'a RwLock<Vec<CommitOverlay>>,
+	log: &'a crate::log::LogOverlays,
+	commit_overlay: &'a Vec<CommitOverlay>,
 	iter: BtreeIterBackend,
 	col: ColId,
 	pending_backend: Option<PendingBackend>,
@@ -72,10 +71,10 @@ impl<'a> BTreeIterator<'a> {
 	pub(crate) fn new(
 		table: &'a BTreeTable,
 		col: ColId,
-		log: &'a RwLock<crate::log::LogOverlays>,
-		commit_overlay: &'a RwLock<Vec<CommitOverlay>>,
+		log: &'a crate::log::LogOverlays,
+		commit_overlay: &'a Vec<CommitOverlay>,
 	) -> Result<Self> {
-		let record_id = log.read().last_record_id(col);
+		let record_id = log.last_record_id(col);
 		let tree = table.with_locked(|btree| BTree::open(btree, log, record_id))?;
 		let iter = BTreeIterState::new(tree.record_id);
 		Ok(BTreeIterator {
@@ -91,11 +90,10 @@ impl<'a> BTreeIterator<'a> {
 
 	pub fn seek(&mut self, key: &[u8]) -> Result<()> {
 		// seek require log do not change
-		let log = self.log.read();
-		let record_id = log.last_record_id(self.col);
+		let record_id = self.log.last_record_id(self.col);
 		self.last_key = LastKey::Seeked(key.to_vec());
 		self.pending_backend = None;
-		self.seek_backend(SeekTo::Include(key), record_id, self.table, &*log)
+		self.seek_backend(SeekTo::Include(key), record_id, self.table, self.log)
 	}
 
 	pub fn seek_to_first(&mut self) -> Result<()> {
@@ -103,10 +101,9 @@ impl<'a> BTreeIterator<'a> {
 	}
 
 	pub fn seek_to_last(&mut self) -> Result<()> {
-		let log = self.log.read();
-		let record_id = log.last_record_id(self.col);
+		let record_id = self.log.last_record_id(self.col);
 		self.last_key = LastKey::End;
-		self.seek_backend_to_last(record_id, self.table, &*log)
+		self.seek_backend_to_last(record_id, self.table, self.log)
 	}
 
 	#[allow(clippy::should_implement_trait)]
@@ -123,16 +120,14 @@ impl<'a> BTreeIterator<'a> {
 
 		loop {
 			// Lock log over function call (no btree struct change).
-			let commit_overlay = self.commit_overlay.read();
+			let commit_overlay = &self.commit_overlay;
 			let next_commit_overlay =
 				commit_overlay.get(col as usize).and_then(|o| match direction {
 					IterDirection::Forward => o.btree_next(&self.last_key),
 					IterDirection::Backward => o.btree_prev(&self.last_key),
 				});
-			let log = self.log.read();
+			let log = self.log;
 			let record_id = log.last_record_id(self.col);
-			// No consistency over iteration, allows dropping lock to overlay.
-			drop(commit_overlay);
 			if record_id != self.iter.1.record_id {
 				self.pending_backend = None;
 			}
@@ -148,8 +143,8 @@ impl<'a> BTreeIterator<'a> {
 			let result = match (next_commit_overlay, next_backend) {
 				(Some((commit_key, commit_value)), Some((backend_key, backend_value))) => {
 					match (direction, commit_key.value().cmp(&backend_key)) {
-						(IterDirection::Backward, std::cmp::Ordering::Greater) |
-						(IterDirection::Forward, std::cmp::Ordering::Less) => {
+						(IterDirection::Backward, std::cmp::Ordering::Greater)
+						| (IterDirection::Forward, std::cmp::Ordering::Less) => {
 							self.pending_backend = Some(PendingBackend {
 								next_item: Some((backend_key, backend_value)),
 								direction,
@@ -158,18 +153,19 @@ impl<'a> BTreeIterator<'a> {
 								Some((commit_key.value().clone(), value.value().clone()))
 							} else {
 								self.last_key = LastKey::At(commit_key.value().clone());
-								continue
+								continue;
 							}
 						},
-						(IterDirection::Backward, std::cmp::Ordering::Less) |
-						(IterDirection::Forward, std::cmp::Ordering::Greater) => Some((backend_key, backend_value)),
-						(_, std::cmp::Ordering::Equal) =>
+						(IterDirection::Backward, std::cmp::Ordering::Less)
+						| (IterDirection::Forward, std::cmp::Ordering::Greater) => Some((backend_key, backend_value)),
+						(_, std::cmp::Ordering::Equal) => {
 							if let Some(value) = commit_value {
 								Some((backend_key, value.value().clone()))
 							} else {
 								self.last_key = LastKey::At(commit_key.value().clone());
-								continue
-							},
+								continue;
+							}
+						},
 					}
 				},
 				(Some((commit_key, Some(commit_value))), None) => {
@@ -179,7 +175,7 @@ impl<'a> BTreeIterator<'a> {
 				(Some((k, None)), None) => {
 					self.pending_backend = Some(PendingBackend { next_item: None, direction });
 					self.last_key = LastKey::At(k.value().clone());
-					continue
+					continue;
 				},
 				(None, Some((backend_key, backend_value))) => Some((backend_key, backend_value)),
 				(None, None) => {
@@ -192,13 +188,14 @@ impl<'a> BTreeIterator<'a> {
 				Some((key, _)) => {
 					self.last_key = LastKey::At(key.clone());
 				},
-				None =>
+				None => {
 					self.last_key = match direction {
 						IterDirection::Backward => LastKey::Start,
 						IterDirection::Forward => LastKey::End,
-					},
+					}
+				},
 			}
-			return Ok(result)
+			return Ok(result);
 		}
 	}
 
@@ -286,13 +283,15 @@ impl BTreeIterState {
 						IterDirection::Backward if *child == 0 => continue,
 						IterDirection::Forward
 							if *child == ORDER || node.separators[*child].separator.is_none() =>
-							continue,
+						{
+							continue
+						},
 						_ => LastIndex::Before(*child),
 					};
 				} else {
 					self.state.clear(); // should actually be unreachable
 				}
-				return false
+				return false;
 			}
 		}
 		true
@@ -321,53 +320,58 @@ impl BTreeIterState {
 
 					(IterDirection::Forward, LastIndex::At(sep))
 						if is_leaf && *sep + 1 == ORDER =>
+					{
 						if self.exit(direction) {
-							break
+							break;
 						} else {
-							continue
-						},
-					(IterDirection::Forward, LastIndex::At(sep)) if is_leaf =>
-						LastIndex::At(*sep + 1),
+							continue;
+						}
+					},
+					(IterDirection::Forward, LastIndex::At(sep)) if is_leaf => {
+						LastIndex::At(*sep + 1)
+					},
 					(IterDirection::Forward, LastIndex::At(sep)) => LastIndex::Descend(*sep + 1),
 					(IterDirection::Forward, LastIndex::Before(sep)) if *sep == ORDER => {
 						if self.exit(direction) {
-							break
+							break;
 						} else {
-							continue
+							continue;
 						}
 					},
 					(IterDirection::Forward, LastIndex::Before(sep)) => LastIndex::At(*sep),
 
 					(IterDirection::Backward, LastIndex::At(sep)) if is_leaf && *sep == 0 => {
 						if self.exit(direction) {
-							break
+							break;
 						} else {
-							continue
+							continue;
 						}
 					},
-					(IterDirection::Backward, LastIndex::At(sep)) if is_leaf =>
-						LastIndex::At(*sep - 1),
+					(IterDirection::Backward, LastIndex::At(sep)) if is_leaf => {
+						LastIndex::At(*sep - 1)
+					},
 					(IterDirection::Backward, LastIndex::At(sep)) => LastIndex::Descend(*sep),
 					(IterDirection::Backward, LastIndex::Before(sep)) if *sep == 0 => {
 						if self.exit(direction) {
-							break
+							break;
 						} else {
-							continue
+							continue;
 						}
 					},
 					(IterDirection::Backward, LastIndex::Before(sep)) => LastIndex::At(*sep - 1),
 				};
 				match next {
-					LastIndex::At(at) =>
+					LastIndex::At(at) => {
 						if let Some(address) = state.1.separator_address(at) {
 							state.0 = LastIndex::At(at);
 							let key = state.1.separator_key(at).unwrap();
 							let key_query = TableKeyQuery::Fetch(None);
 							let r = col.get_at_value_index(key_query, address, log)?;
-							return Ok(r.map(|r| (key, r.1)))
+							return Ok(r.map(|r| (key, r.1)));
 						} else if self.exit(direction) {
-							break
-						},
+							break;
+						}
+					},
 					LastIndex::Descend(child_ix) => {
 						if let Some(child) =
 							col.with_locked(|btree| state.1.fetch_child(child_ix, btree, log))?
@@ -378,13 +382,13 @@ impl BTreeIterState {
 							let is_child_leaf = btree.depth as usize == self.state.len();
 							self.state.push((node_start(&child, direction, is_child_leaf), child))
 						} else if self.exit(direction) {
-							break
+							break;
 						}
 					},
 					_ => unreachable!(),
 				}
 			} else {
-				break
+				break;
 			}
 		}
 
