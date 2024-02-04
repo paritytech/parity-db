@@ -3,7 +3,6 @@
 
 use super::*;
 
-use blake2::digest::{typenum::U32, FixedOutput, Update};
 pub use parity_db::{Db, Key, TreeReader};
 use parity_db::{NewNode, NodeRef, Operation};
 
@@ -23,7 +22,7 @@ use trie_db::{
 	NodeCodec, TrieDBMut, TrieDBMutBuilder,
 };
 
-type TrieLayout = reference_trie::GenericNoExtensionLayout<Blake2Hasher, u64>;
+type TrieLayout = reference_trie::GenericNoExtensionLayout<Blake3Hasher, u64>;
 type TrieNodeCodec = <TrieLayout as trie_db::TrieLayout>::Codec;
 
 static COMMITS: AtomicUsize = AtomicUsize::new(0);
@@ -167,20 +166,17 @@ struct ChainGenerator {
 }
 /// Concrete implementation of Hasher using Blake2b 256-bit hashes
 #[derive(Debug)]
-pub struct Blake2Hasher;
+pub struct Blake3Hasher;
 
-impl trie_db::node_db::Hasher for Blake2Hasher {
+impl trie_db::node_db::Hasher for Blake3Hasher {
 	type Out = Key;
 	type StdHasher = hash256_std_hasher::Hash256StdHasher;
 	const LENGTH: usize = 32;
 
 	fn hash(x: &[u8]) -> Self::Out {
-		let salt = [0; 32];
-		let mut ctx = blake2::Blake2bMac::<U32>::new_with_salt_and_personal(&salt, &[], &[])
-			.expect("Salt length (32) is a valid key length (<= 64)");
-		ctx.update(x);
-		let hash = ctx.finalize_fixed();
-		hash.into()
+		let mut hasher = blake3::Hasher::new();
+		hasher.update(x);
+		hasher.finalize().into()
 	}
 }
 
@@ -189,7 +185,7 @@ struct TrieDB {
 	ops: AtomicU64,
 }
 
-impl NodeDB<Blake2Hasher, Vec<u8>, u64> for TrieDB {
+impl NodeDB<Blake3Hasher, Vec<u8>, u64> for TrieDB {
 	fn get(
 		&self,
 		key: &Key,
@@ -260,7 +256,7 @@ fn writer(
 		let root = chain_generator.roots.lock().back().cloned();
 
 		let tdb = TrieDB::new(Arc::clone(&db));
-		let mut trie: TrieDBMut<reference_trie::GenericNoExtensionLayout<Blake2Hasher, u64>> =
+		let mut trie: TrieDBMut<reference_trie::GenericNoExtensionLayout<Blake3Hasher, u64>> =
 			if let Some(root) = root {
 				TrieDBMutBuilder::from_existing(&tdb, root).build()
 			} else {
@@ -269,7 +265,7 @@ fn writer(
 
 		for _i in 0..10000 {
 			let account_id = chain_generator.max_account_id.fetch_add(1, Ordering::SeqCst);
-			let key = Blake2Hasher::hash(&account_id.to_be_bytes());
+			let key = Blake3Hasher::hash(&account_id.to_be_bytes());
 			let value = account_id.to_be_bytes();
 			trie.insert(&key, &value).unwrap();
 		}

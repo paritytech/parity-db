@@ -13,30 +13,30 @@ instrumentation = []
 bench = []
 
 [dependencies]
-blake2 = "0.10.4"
+blake2 = { version = "0.10.4" }
 crc32fast = "1.2.0"
 fs2 = "0.4.3"
 hex = "0.4.2"
 libc = "0.2"
 log = "0.4.8"
 lz4 = "1.24.0"
-memmap2 = "0.5"
+memmap2 = "0.9.4"
 parking_lot = "0.12.0"
 rand = "0.8.4"
 snap = "1"
 loom = { version = "0.5.1", optional = true }
-siphasher = "0.3.10"
+siphasher = "1.0.0"
 scc = "2.0.16"
 
 [target.'cfg(windows)'.dependencies]
 winapi = "0.3.9"
 
 [dev-dependencies]
-env_logger = { version = "0.10.0", default-features = false, features = [
+env_logger = { version = "0.11.1", default-features = false, features = [
 	"auto-color",
 	"humantime",
 ] }
-fdlimit = "0.2.1"
+fdlimit = "0.3.0"
 rand = { version = "0.8.2", features = ["small_rng"] }
 tempfile = "3.2"
 
