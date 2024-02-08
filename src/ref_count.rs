@@ -440,9 +440,9 @@ impl RefCountTable {
 
 #[cfg(test)]
 mod test {
-	/* use super::*;
+	use super::*;
 	use rand::{Rng, SeedableRng};
-	use std::path::PathBuf;
+	use siphasher::sip128::Hasher128;
 
 	#[cfg(feature = "bench")]
 	use test::Bencher;
@@ -451,175 +451,97 @@ mod test {
 
 	#[test]
 	fn test_entries() {
-		let mut chunk = IndexTable::transmute_chunk(EMPTY_CHUNK);
+		let mut chunk = RefCountTable::transmute_chunk(&EMPTY_CHUNK).clone();
 		let mut chunk2 = EMPTY_CHUNK;
-		for (i, chunk) in chunk.iter_mut().enumerate().take(CHUNK_ENTRIES) {
-			use std::{
-				collections::hash_map::DefaultHasher,
-				hash::{Hash, Hasher},
-			};
-			let mut hasher = DefaultHasher::new();
+		for (i, chunk_entry) in chunk.iter_mut().enumerate().take(CHUNK_ENTRIES) {
+			use std::hash::Hash;
+			let mut hasher = siphasher::sip128::SipHasher::new();
 			i.hash(&mut hasher);
-			let hash = hasher.finish();
-			let entry = Entry::from_u64(hash);
-			IndexTable::write_entry(&entry, i, &mut chunk2);
-			*chunk = entry;
+			let hash = hasher.finish128().as_u128();
+			let entry = Entry::from_u128(hash);
+			RefCountTable::write_entry(&entry, i, &mut chunk2);
+			assert_eq!(entry.as_u128(), RefCountTable::read_entry(&chunk2, i).as_u128());
+			*chunk_entry = entry;
 		}
 
-		assert!(IndexTable::transmute_chunk(chunk2) == chunk);
-	}
-
-	#[test]
-	fn test_find_entries() {
-		let partial_keys = [1, 1 << 10, 1 << 20];
-		for index_bits in [16, 18, 20, 22] {
-			let index_table = IndexTable {
-				id: TableId(index_bits.into()),
-				map: RwLock::new(None),
-				path: PathBuf::new(),
-			};
-
-			let data_address = Address::from_u64((1 << index_bits) - 1);
-
-			let mut chunk = [0; CHUNK_ENTRIES * 8];
-			for (i, partial_key) in partial_keys.iter().enumerate() {
-				chunk[i * 8..(i + 1) * 8].copy_from_slice(
-					&Entry::new(data_address, *partial_key, index_bits).as_u64().to_le_bytes(),
-				);
-			}
-
-			for partial_key in &partial_keys {
-				let key_prefix = *partial_key << (CHUNK_ENTRIES_BITS + SIZE_TIERS_BITS);
-				#[cfg(target_arch = "x86_64")]
-				assert_eq!(
-					index_table.find_entry_sse2(key_prefix, 0, &chunk).0.partial_key(index_bits),
-					*partial_key
-				);
-				assert_eq!(
-					index_table.find_entry_base(key_prefix, 0, &chunk).0.partial_key(index_bits),
-					*partial_key
-				);
-			}
-		}
+		assert!(RefCountTable::transmute_chunk(&chunk2) == &chunk);
 	}
 
 	#[test]
 	fn test_find_any_entry() {
-		let table =
-			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
-		let mut chunk = [0u8; CHUNK_LEN];
+		let table = RefCountTable {
+			id: RefCountTableId(18),
+			map: RwLock::new(None),
+			path: Default::default(),
+		};
+		let mut chunk = Chunk([0u8; CHUNK_LEN]);
 		let mut entries = [Entry::empty(); CHUNK_ENTRIES];
-		let mut keys = [0u64; CHUNK_ENTRIES];
+		let mut addresses = [0u64; CHUNK_ENTRIES];
 		let mut rng = rand::prelude::SmallRng::from_seed(Default::default());
 		for i in 0..CHUNK_ENTRIES {
-			keys[i] = rng.gen();
-			let partial_key = Entry::extract_key(keys[i], 18);
-			let e = Entry::new(Address::new(0, 0), partial_key, 18);
+			addresses[i] = rng.gen();
+			let ref_count = rng.gen();
+			let e = Entry::new(Address::from_u64(addresses[i]), ref_count);
 			entries[i] = e;
-			IndexTable::write_entry(&e, i, &mut chunk);
+			RefCountTable::write_entry(&e, i, &mut chunk);
 		}
 
 		for target in 0..CHUNK_ENTRIES {
-			for start_pos in 0..CHUNK_ENTRIES {
-				let (e, i) = table.find_entry_base(keys[target], start_pos, &chunk);
-				if start_pos <= target {
-					assert_eq!((e.as_u64(), i), (entries[target].as_u64(), target));
-				} else {
-					assert_eq!((e.as_u64(), i), (Entry::empty().as_u64(), 0));
-				}
-				#[cfg(target_arch = "x86_64")]
-				{
-					let (e, i) = table.find_entry_sse2(keys[target], start_pos, &chunk);
-					if start_pos <= target {
-						assert_eq!((e.as_u64(), i), (entries[target].as_u64(), target));
-					} else {
-						assert_eq!((e.as_u64(), i), (Entry::empty().as_u64(), 0));
-					}
-				}
+			let result = table.find_entry_base(addresses[target], &chunk);
+			assert!(result.is_some());
+			if let Some((e, i)) = result {
+				assert_eq!((e.as_u128(), i), (entries[target].as_u128(), target));
 			}
 		}
 	}
 
 	#[test]
-	fn test_find_entry_same_value() {
-		let table =
-			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
-		let mut chunk = [0u8; CHUNK_LEN];
-		let key = 0x4242424242424242;
-		let partial_key = Entry::extract_key(key, 18);
-		let entry = Entry::new(Address::new(0, 0), partial_key, 18);
-		for i in 0..CHUNK_ENTRIES {
-			IndexTable::write_entry(&entry, i, &mut chunk);
-		}
-
-		for start_pos in 0..CHUNK_ENTRIES {
-			let (_, i) = table.find_entry_base(key, start_pos, &chunk);
-			assert_eq!(i, start_pos);
-			#[cfg(target_arch = "x86_64")]
-			{
-				let (_, i) = table.find_entry_sse2(key, start_pos, &chunk);
-				assert_eq!(i, start_pos);
-			}
-		}
-	}
-
-	#[test]
-	fn test_find_entry_zero_pk() {
-		let table =
-			IndexTable { id: TableId(16), map: RwLock::new(None), path: Default::default() };
-		let mut chunk = [0u8; CHUNK_LEN];
-		let zero_key = 0x0000000000000000;
-		let entry = Entry::new(Address::new(1, 1), zero_key, 16);
+	fn test_find_entry_zero() {
+		let table = RefCountTable {
+			id: RefCountTableId(16),
+			map: RwLock::new(None),
+			path: Default::default(),
+		};
+		let mut chunk = Chunk([0u8; CHUNK_LEN]);
+		let address = Address::new(1, 1);
+		let entry = Entry::new(address, 0);
 
 		// Write at index 1. Index 0 contains an empty entry.
-		IndexTable::write_entry(&entry, 1, &mut chunk);
+		RefCountTable::write_entry(&entry, 1, &mut chunk);
 
-		let (_, i) = table.find_entry_base(zero_key, 0, &chunk);
-		assert_eq!(i, 1);
-		#[cfg(target_arch = "x86_64")]
-		{
-			let (_, i) = table.find_entry_sse2(zero_key, 0, &chunk);
+		let result = table.find_entry_base(address.as_u64(), &chunk);
+		assert!(result.is_some());
+		if let Some((_e, i)) = result {
 			assert_eq!(i, 1);
 		}
-	} */
-
-	/* #[cfg(feature = "bench")]
-	fn bench_find_entry_internal<
-		F: Fn(&IndexTable, u64, usize, &[u8; CHUNK_LEN]) -> (Entry, usize),
-	>(
-		b: &mut Bencher,
-		f: F,
-	) {
-		let table =
-			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
-		let mut chunk = [0u8; CHUNK_LEN];
-		let mut keys = [0u64; CHUNK_ENTRIES];
-		let mut rng = rand::prelude::SmallRng::from_seed(Default::default());
-		for i in 0..CHUNK_ENTRIES {
-			keys[i] = rng.gen();
-			let partial_key = Entry::extract_key(keys[i], 18);
-			let e = Entry::new(Address::new(0, 0), partial_key, 18);
-			IndexTable::write_entry(&e, i, &mut chunk);
-		}
-
-		let mut index = 0;
-		b.iter(|| {
-			let x = f(&table, keys[index], 0, &chunk).1;
-			assert_eq!(x, index);
-			index = (index + 1) % CHUNK_ENTRIES;
-		});
 	}
 
 	#[cfg(feature = "bench")]
 	#[bench]
 	fn bench_find_entry(b: &mut Bencher) {
-		bench_find_entry_internal(b, IndexTable::find_entry_base)
-	}
+		let table = RefCountTable {
+			id: RefCountTableId(18),
+			map: RwLock::new(None),
+			path: Default::default(),
+		};
+		let mut chunk = Chunk([0u8; CHUNK_LEN]);
+		let mut addresses = [0u64; CHUNK_ENTRIES];
+		let mut rng = rand::prelude::SmallRng::from_seed(Default::default());
+		for i in 0..CHUNK_ENTRIES {
+			addresses[i] = rng.gen();
+			let ref_count = rng.gen();
+			let e = Entry::new(Address::from_u64(addresses[i]), ref_count);
+			RefCountTable::write_entry(&e, i, &mut chunk);
+		}
 
-	#[cfg(feature = "bench")]
-	#[cfg(target_arch = "x86_64")]
-	#[bench]
-	fn bench_find_entry_sse(b: &mut Bencher) {
-		bench_find_entry_internal(b, IndexTable::find_entry_sse2)
-	} */
+		let mut index = 0;
+		b.iter(|| {
+			let result = RefCountTable::find_entry_base(&table, addresses[index], &chunk);
+			assert!(result.is_some());
+			if let Some((_e, i)) = result {
+				assert_eq!(i, index);
+			}
+			index = (index + 1) % CHUNK_ENTRIES;
+		});
+	}
 }
