@@ -1014,16 +1014,6 @@ impl HashColumn {
 
 		let table_key = TableKey::NoHash;
 
-		/* let (cval, target_tier) =
-			Column::compress(tables.compression, &table_key, data.as_ref(), tables.tables);
-		let (cval, compressed) = cval
-			.as_ref()
-			.map(|cval| (cval.as_slice(), true))
-			.unwrap_or((data.as_ref(), false));
-
-		let cval: RcValue = cval.to_vec().into();
-		let val = if compressed { data.into() } else { cval.clone() }; */
-
 		let target_tier = tables
 			.tables
 			.iter()
@@ -1111,12 +1101,10 @@ impl HashColumn {
 
 		// Can't support compression as we need to know the size earlier to get the tier.
 		let val: RcValue = data.into();
-		let cval = val.clone();
-		let compressed = false;
 
 		let address = Address::new(offset, target_tier as u8);
 
-		node_values.push(NodeChange::NewValue(address.as_u64(), val, cval, compressed));
+		node_values.push(NodeChange::NewValue(address.as_u64(), val));
 
 		Ok(address.as_u64())
 	}
