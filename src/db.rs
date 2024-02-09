@@ -325,9 +325,11 @@ impl DbInner {
 		if !self.options.columns[col as usize].multitree {
 			return Err(Error::InvalidConfiguration("Not a multitree column.".to_string()))
 		}
-		if !self.options.columns[col as usize].append_only {
+		if !self.options.columns[col as usize].append_only &&
+			!self.options.columns[col as usize].allow_direct_node_access
+		{
 			return Err(Error::InvalidConfiguration(
-				"get_root can only be called on a column with append_only option.".to_string(),
+				"get_root can only be called on a column with append_only or allow_direct_node_access options.".to_string(),
 			))
 		}
 		let value = self.get(col, key, false)?;
@@ -346,9 +348,12 @@ impl DbInner {
 		if !self.options.columns[col as usize].multitree {
 			return Err(Error::InvalidConfiguration("Not a multitree column.".to_string()))
 		}
-		if !self.options.columns[col as usize].append_only && external_call {
+		if !self.options.columns[col as usize].append_only &&
+			!self.options.columns[col as usize].allow_direct_node_access &&
+			external_call
+		{
 			return Err(Error::InvalidConfiguration(
-				"get_node can only be called on a column with append_only option.".to_string(),
+				"get_node can only be called on a column with append_only or allow_direct_node_access options.".to_string(),
 			))
 		}
 		match &self.columns[col as usize] {

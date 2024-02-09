@@ -70,6 +70,9 @@ pub struct ColumnOptions {
 	pub multitree: bool,
 	/// Column is append-only. Delete operations are ignored.
 	pub append_only: bool,
+	/// Allow Multitree root and child nodes to be accessed directly without using TreeReader.
+	/// Client code must ensure this is safe.
+	pub allow_direct_node_access: bool,
 }
 
 /// Database metadata.
@@ -86,7 +89,7 @@ pub struct Metadata {
 impl ColumnOptions {
 	fn as_string(&self) -> String {
 		format!(
-			"preimage: {}, uniform: {}, refc: {}, compression: {}, ordered: {}, multitree: {}, append_only: {}",
+			"preimage: {}, uniform: {}, refc: {}, compression: {}, ordered: {}, multitree: {}, append_only: {}, allow_direct_node_access: {}",
 			self.preimage,
 			self.uniform,
 			self.ref_counted,
@@ -94,6 +97,7 @@ impl ColumnOptions {
 			self.btree_index,
 			self.multitree,
 			self.append_only,
+			self.allow_direct_node_access,
 		)
 	}
 
@@ -132,6 +136,10 @@ impl ColumnOptions {
 		let btree_index = vals.get("ordered").and_then(|c| c.parse().ok()).unwrap_or(false);
 		let multitree = vals.get("multitree").and_then(|c| c.parse().ok()).unwrap_or(false);
 		let append_only = vals.get("append_only").and_then(|c| c.parse().ok()).unwrap_or(false);
+		let allow_direct_node_access = vals
+			.get("allow_direct_node_access")
+			.and_then(|c| c.parse().ok())
+			.unwrap_or(false);
 
 		Some(ColumnOptions {
 			preimage,
@@ -141,6 +149,7 @@ impl ColumnOptions {
 			btree_index,
 			multitree,
 			append_only,
+			allow_direct_node_access,
 		})
 	}
 }
@@ -155,6 +164,7 @@ impl Default for ColumnOptions {
 			btree_index: false,
 			multitree: false,
 			append_only: false,
+			allow_direct_node_access: false,
 		}
 	}
 }
