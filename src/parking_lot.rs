@@ -87,6 +87,10 @@ mod with_loom {
 		pub fn write(&self) -> RwLockWriteGuard<T> {
 			RwLockWriteGuard(self.0.write().unwrap())
 		}
+
+		pub fn is_locked(&self) -> bool {
+			!self.0.try_write().is_ok()
+		}
 	}
 
 	#[derive(Debug)]

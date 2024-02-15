@@ -96,7 +96,7 @@ impl BTree {
 		if let Some(address) = root.get(key, values, log)? {
 			let key_query = TableKeyQuery::Fetch(None);
 			let r = Column::get_value(key_query, address, values, log)?;
-			Ok(r.map(|r| r.1))
+			Ok(r.map(|r| r.2))
 		} else {
 			Ok(None)
 		}
