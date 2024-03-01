@@ -5,7 +5,7 @@ use super::*;
 
 mod data;
 
-pub use parity_db::{CompressionType, Db, Key, TreeReader, Value};
+pub use parity_db::{Db, Key, TreeReader};
 use parity_db::{NewNode, NodeRef, Operation};
 
 use parking_lot::{RwLock, RwLockReadGuard};
