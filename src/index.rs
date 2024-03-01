@@ -753,9 +753,7 @@ mod test {
 	}
 
 	#[cfg(feature = "bench")]
-	fn bench_find_entry_internal<
-		F: Fn(&IndexTable, u64, usize, &[u8; CHUNK_LEN]) -> (Entry, usize),
-	>(
+	fn bench_find_entry_internal<F: Fn(&IndexTable, u64, usize, &Chunk) -> (Entry, usize)>(
 		b: &mut Bencher,
 		f: F,
 	) {
