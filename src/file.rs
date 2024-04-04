@@ -191,9 +191,10 @@ impl TableFile {
 
 	#[cfg(feature = "loom")]
 	pub fn slice_at(&self, offset: u64, len: usize) -> MappedBytesGuard {
+		let (offset, file_index) = offset_to_file_index(offset, self.max_size);
 		let offset = offset as usize;
 		let map = self.map.read();
-		let (map, _) = map.as_ref().unwrap();
+		let (map, _) = map.get(file_index).unwrap();
 		MappedBytesGuard::new(map[offset..offset + len].to_vec())
 	}
 
