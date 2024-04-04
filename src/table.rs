@@ -105,8 +105,12 @@ impl TableId {
 		(self.0 & 0xff) as u8
 	}
 
-	pub fn file_name(&self) -> String {
-		format!("table_{:02}_{}", self.col(), hex(&[self.size_tier()]))
+	pub fn file_name(&self, file_index: Option<u32>) -> String {
+		if let Some(i) = file_index {
+			format!("table_{:02}_{}_{:08x}", self.col(), hex(&[self.size_tier()]), i)
+		} else {
+			format!("table_{:02}_{}", self.col(), hex(&[self.size_tier()]))
+		}
 	}
 
 	pub fn is_file_name(col: ColId, name: &str) -> bool {
@@ -410,6 +414,7 @@ impl ValueTable {
 		entry_size: Option<u16>,
 		options: &Options,
 		db_version: u32,
+		max_file_size: Option<usize>,
 	) -> Result<ValueTable> {
 		let (multipart, entry_size) = match entry_size {
 			Some(s) => (false, s),
@@ -418,12 +423,11 @@ impl ValueTable {
 		assert!(entry_size >= MIN_ENTRY_SIZE as u16);
 		assert!(entry_size <= MAX_ENTRY_SIZE as u16);
 
-		let mut filepath: std::path::PathBuf = std::path::PathBuf::clone(&*path);
-		filepath.push(id.file_name());
-		let file = crate::file::TableFile::open(filepath, entry_size, id)?;
+		let filepath: std::path::PathBuf = std::path::PathBuf::clone(&*path);
+		let file = crate::file::TableFile::open(filepath, entry_size, id, max_file_size)?;
 		let mut filled = 1;
 		let mut last_removed = 0;
-		if file.map.read().is_some() {
+		if !file.map.read().is_empty() {
 			let mut header = Header::default();
 			file.read_at(&mut header.0, 0)?;
 			last_removed = header.last_removed();
@@ -1106,7 +1110,7 @@ impl ValueTable {
 	}
 
 	pub fn refresh_metadata(&self) -> Result<()> {
-		if self.file.map.read().is_none() {
+		if self.file.map.read().is_empty() {
 			return Ok(())
 		}
 		let _free_entries_guard = if let Some(free_entries) = &self.free_entries {
@@ -1191,12 +1195,12 @@ impl ValueTable {
 	}
 
 	pub fn is_init(&self) -> bool {
-		self.file.map.read().is_some()
+		!self.file.map.read().is_empty()
 	}
 
 	pub fn init_with_entry(&self, entry: &[u8]) -> Result<()> {
 		if let Err(e) = self.do_init_with_entry(entry) {
-			log::error!(target: "parity-db", "Failure to initialize file {}", self.file.path.display());
+			log::error!(target: "parity-db", "Failure to initialize file {}", self.file.path_base.display());
 			let _ = self.file.remove(); // We ignore error here
 			return Err(e)
 		}
@@ -1358,8 +1362,15 @@ mod test {
 
 	fn new_table(dir: &TempDir, size: Option<u16>, options: &ColumnOptions) -> ValueTable {
 		let id = TableId::new(0, 0);
-		ValueTable::open(Arc::new(dir.path().to_path_buf()), id, size, options, CURRENT_VERSION)
-			.unwrap()
+		ValueTable::open(
+			Arc::new(dir.path().to_path_buf()),
+			id,
+			size,
+			options,
+			CURRENT_VERSION,
+			None,
+		)
+		.unwrap()
 	}
 
 	fn new_log(dir: &TempDir) -> Log {

@@ -30,12 +30,27 @@ pub const ENTRY_BYTES: usize = ENTRY_BITS as usize / 8;
 const EMPTY_CHUNK: Chunk = Chunk([0u8; CHUNK_LEN]);
 const EMPTY_ENTRIES: [Entry; CHUNK_ENTRIES] = [Entry::empty(); CHUNK_ENTRIES];
 
+#[inline]
+fn chunk_to_file_index(mut chunk_index: u64, max_chunks: Option<u64>) -> (u64, usize) {
+	// count meta in.
+	chunk_index += (META_SIZE / CHUNK_LEN) as u64;
+
+	if let Some(i) = max_chunks {
+		(chunk_index % i, (chunk_index / i) as usize)
+	} else {
+		(chunk_index, 0)
+	}
+}
+
 #[repr(C, align(8))]
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Chunk(pub [u8; CHUNK_LEN]);
 
 #[allow(clippy::assertions_on_constants)]
 const _: () = assert!(META_SIZE >= HEADER_SIZE + stats::TOTAL_SIZE);
+
+#[allow(clippy::assertions_on_constants)]
+const _: () = assert!(META_SIZE % CHUNK_LEN == 0);
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct Entry(u64);
@@ -130,8 +145,10 @@ pub enum PlanOutcome {
 #[derive(Debug)]
 pub struct IndexTable {
 	pub id: TableId,
-	map: RwLock<Option<memmap2::MmapMut>>,
-	path: std::path::PathBuf,
+	map: RwLock<Vec<memmap2::MmapMut>>,
+	path_base: std::path::PathBuf,
+	pub max_size: Option<usize>, // TODO store only max_chunks
+	max_chunks: Option<u64>,
 }
 
 fn total_entries(index_bits: u8) -> u64 {
@@ -166,8 +183,12 @@ impl TableId {
 		(self.0 & 0xff) as u8
 	}
 
-	pub fn file_name(&self) -> String {
-		format!("index_{:02}_{}", self.col(), self.index_bits())
+	pub fn file_name(&self, file_index: Option<u32>) -> String {
+		if let Some(i) = file_index {
+			format!("index_{:02}_{}_{:08x}", self.col(), self.index_bits(), i)
+		} else {
+			format!("index_{:02}_{}", self.col(), self.index_bits())
+		}
 	}
 
 	pub fn is_file_name(col: ColId, name: &str) -> bool {
@@ -208,31 +229,59 @@ impl std::fmt::Display for TableId {
 }
 
 impl IndexTable {
-	pub fn open_existing(path: &std::path::Path, id: TableId) -> Result<Option<IndexTable>> {
-		let mut path: std::path::PathBuf = path.into();
-		path.push(id.file_name());
+	pub fn open_existing(
+		path: &std::path::Path,
+		id: TableId,
+		max_size: Option<usize>,
+	) -> Result<Option<IndexTable>> {
+		let path_base: std::path::PathBuf = path.into();
+		let mut maps = Vec::new();
+		for i in 0.. {
+			let mut path = path_base.clone();
+			path.push(id.file_name(max_size.is_some().then(|| i)));
 
-		let file = match std::fs::OpenOptions::new().read(true).write(true).open(path.as_path()) {
-			Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-			Err(e) => return Err(Error::Io(e)),
-			Ok(file) => file,
-		};
+			let file = match std::fs::OpenOptions::new().read(true).write(true).open(path.as_path())
+			{
+				Err(e) if e.kind() == std::io::ErrorKind::NotFound =>
+					if i == 0 {
+						return Ok(None)
+					} else {
+						break
+					},
+				Err(e) => return Err(Error::Io(e)),
+				Ok(file) => file,
+			};
 
-		try_io!(file.set_len(file_size(id.index_bits())));
-		let mut map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
-		madvise_random(&mut map);
-		log::debug!(target: "parity-db", "Opened existing index {}", id);
-		Ok(Some(IndexTable { id, path, map: RwLock::new(Some(map)) }))
+			try_io!(file.set_len(file_size(id.index_bits())));
+			let mut map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
+			madvise_random(&mut map);
+			log::debug!(target: "parity-db", "Opened existing index {}", id);
+			maps.push(map);
+			if max_size.is_none() {
+				break;
+			}
+		}
+		Ok(Some(IndexTable {
+			id,
+			path_base,
+			map: RwLock::new(maps),
+			max_chunks: max_size.map(|s| (s * 1024 * 1024 / CHUNK_LEN) as u64),
+			max_size,
+		}))
 	}
 
-	pub fn create_new(path: &std::path::Path, id: TableId) -> IndexTable {
-		let mut path: std::path::PathBuf = path.into();
-		path.push(id.file_name());
-		IndexTable { id, path, map: RwLock::new(None) }
+	pub fn create_new(path: &std::path::Path, id: TableId, max_size: Option<usize>) -> IndexTable {
+		IndexTable {
+			id,
+			path_base: path.into(),
+			map: RwLock::new(Vec::new()),
+			max_chunks: max_size.map(|s| (s * 1024 * 1024 / CHUNK_LEN) as u64),
+			max_size,
+		}
 	}
 
 	pub fn load_stats(&self) -> Result<ColumnStats> {
-		if let Some(map) = &*self.map.read() {
+		if let Some(map) = self.map.read().first() {
 			Ok(ColumnStats::from_slice(try_io!(Ok(
 				&map[HEADER_SIZE..HEADER_SIZE + stats::TOTAL_SIZE]
 			))))
@@ -242,7 +291,7 @@ impl IndexTable {
 	}
 
 	pub fn write_stats(&self, stats: &ColumnStats) -> Result<()> {
-		if let Some(map) = &mut *self.map.write() {
+		if let Some(map) = &mut self.map.write().first_mut() {
 			let slice = try_io!(Ok(&mut map[HEADER_SIZE..HEADER_SIZE + stats::TOTAL_SIZE]));
 			stats.to_slice(slice);
 		}
@@ -250,18 +299,19 @@ impl IndexTable {
 	}
 
 	fn chunk_at(index: u64, map: &memmap2::MmapMut) -> Result<&Chunk> {
-		let offset = META_SIZE + index as usize * CHUNK_LEN;
+		let offset = index as usize * CHUNK_LEN;
 		let ptr = unsafe { &*(map[offset..offset + CHUNK_LEN].as_ptr() as *const Chunk) };
 		Ok(try_io!(Ok(ptr)))
 	}
 
 	fn chunk_entries_at(index: u64, map: &memmap2::MmapMut) -> Result<&[Entry; CHUNK_ENTRIES]> {
-		let offset = META_SIZE + index as usize * CHUNK_LEN;
+		let offset = index as usize * CHUNK_LEN;
 		let ptr = unsafe {
 			&*(map[offset..offset + CHUNK_LEN].as_ptr() as *const [Entry; CHUNK_ENTRIES])
 		};
 		Ok(try_io!(Ok(ptr)))
 	}
+
 	#[cfg(target_arch = "x86_64")]
 	fn find_entry(&self, key_prefix: u64, sub_index: usize, chunk: &Chunk) -> (Entry, usize) {
 		self.find_entry_sse2(key_prefix, sub_index, chunk)
@@ -352,7 +402,8 @@ impl IndexTable {
 			return Ok(entry)
 		}
 
-		if let Some(map) = &*self.map.read() {
+		let (chunk_index, file_index) = chunk_to_file_index(chunk_index, self.max_chunks);
+		if let Some(map) = self.map.read().get(file_index) {
 			log::trace!(target: "parity-db", "{}: Querying chunk at {}", self.id, chunk_index);
 			let chunk = Self::chunk_at(chunk_index, map)?;
 			return Ok(self.find_entry(key, sub_index, chunk))
@@ -366,7 +417,8 @@ impl IndexTable {
 		{
 			return Ok(entry)
 		}
-		if let Some(map) = &*self.map.read() {
+		let (chunk_index, file_index) = chunk_to_file_index(chunk_index, self.max_chunks);
+		if let Some(map) = self.map.read().get(file_index) {
 			let chunk = Self::chunk_at(chunk_index, map)?;
 			return Ok(*Self::transmute_chunk(chunk))
 		}
@@ -376,16 +428,21 @@ impl IndexTable {
 	pub fn sorted_entries(&self) -> Result<Vec<Entry>> {
 		log::info!(target: "parity-db", "{}: Loading into memory", self.id);
 		let mut target = Vec::with_capacity(self.id.total_entries() as usize / 2);
-		if let Some(map) = &*self.map.read() {
-			for chunk_index in 0..self.id.total_chunks() {
+		let maps = self.map.read();
+		for chunk_index in 0..self.id.total_chunks() {
+			let (chunk_index, file_index) = chunk_to_file_index(chunk_index, self.max_chunks);
+			if let Some(map) = maps.get(file_index) {
 				let source = Self::chunk_entries_at(chunk_index, map)?;
 				for e in source {
 					if !e.is_empty() {
 						target.push(*e);
 					}
 				}
+			} else {
+				break;
 			}
 		}
+		drop(maps);
 		log::info!(target: "parity-db", "{}: Sorting index", self.id);
 		target.sort_unstable_by(|a, b| {
 			let a = a.address(self.id.index_bits());
@@ -470,7 +527,8 @@ impl IndexTable {
 			return self.plan_insert_chunk(key_prefix, address, chunk, sub_index, log)
 		}
 
-		if let Some(map) = &*self.map.read() {
+		let (chunk_index, file_index) = chunk_to_file_index(chunk_index, self.max_chunks);
+		if let Some(map) = self.map.read().get(file_index) {
 			let chunk = Self::chunk_at(chunk_index, map)?.clone();
 			return self.plan_insert_chunk(key_prefix, address, chunk, sub_index, log)
 		}
@@ -516,7 +574,8 @@ impl IndexTable {
 			return self.plan_remove_chunk(key_prefix, chunk, sub_index, log)
 		}
 
-		if let Some(map) = &*self.map.read() {
+		let (chunk_index, file_index) = chunk_to_file_index(chunk_index, self.max_chunks);
+		if let Some(map) = self.map.read().get(file_index) {
 			let chunk = Self::chunk_at(chunk_index, map)?.clone();
 			return self.plan_remove_chunk(key_prefix, chunk, sub_index, log)
 		}
@@ -526,23 +585,29 @@ impl IndexTable {
 
 	pub fn enact_plan(&self, index: u64, log: &mut LogReader) -> Result<()> {
 		let mut map = self.map.upgradable_read();
-		if map.is_none() {
+		let (chunk_index, file_index) = chunk_to_file_index(index, self.max_chunks);
+		let map_len = map.len();
+		if map_len <= file_index {
 			let mut wmap = RwLockUpgradableReadGuard::upgrade(map);
-			let file = try_io!(std::fs::OpenOptions::new()
-				.write(true)
-				.read(true)
-				.create_new(true)
-				.open(self.path.as_path()));
-			log::debug!(target: "parity-db", "Created new index {}", self.id);
-			try_io!(file.set_len(file_size(self.id.index_bits())));
-			let mut mmap = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
-			madvise_random(&mut mmap);
-			*wmap = Some(mmap);
+			for i in map_len..file_index + 1 {
+				let mut path = self.path_base.clone();
+				path.push(self.id.file_name(self.max_size.is_some().then(|| i as u32)));
+				let file = try_io!(std::fs::OpenOptions::new()
+					.write(true)
+					.read(true)
+					.create_new(true)
+					.open(path.as_path()));
+				log::debug!(target: "parity-db", "Created new index {}", self.id);
+				try_io!(file.set_len(file_size(self.id.index_bits())));
+				let mut mmap = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
+				madvise_random(&mut mmap);
+				wmap.push(mmap);
+			}
 			map = RwLockWriteGuard::downgrade_to_upgradable(wmap);
 		}
 
-		let map = map.as_ref().unwrap();
-		let offset = META_SIZE + index as usize * CHUNK_LEN;
+		let map = map.get(file_index).unwrap();
+		let offset = chunk_index as usize * CHUNK_LEN;
 		// Nasty mutable pointer cast. We do ensure that all chunks that are being written are
 		// accessed through the overlay in other threads.
 		let ptr: *mut u8 = map.as_ptr() as *mut u8;
@@ -594,15 +659,29 @@ impl IndexTable {
 
 	pub fn drop_file(self) -> Result<()> {
 		drop(self.map);
-		try_io!(std::fs::remove_file(self.path.as_path()));
+		for i in 0.. {
+			let mut path = self.path_base.clone();
+			path.push(self.id.file_name(self.max_size.is_some().then(|| i)));
+			match std::fs::remove_file(path.as_path()) {
+				Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+				Err(e) => return Err(Error::Io(e)),
+				Ok(()) => (),
+			};
+			if self.max_size.is_none() {
+				break;
+			}
+		}
 		log::debug!(target: "parity-db", "{}: Dropped table", self.id);
 		Ok(())
 	}
 
 	pub fn flush(&self) -> Result<()> {
-		if let Some(map) = &*self.map.read() {
-			// Flush everything except stats.
-			try_io!(map.flush_range(META_SIZE, map.len() - META_SIZE));
+		// Flush everything except stats.
+		let mut start = META_SIZE;
+		let maps = self.map.read();
+		for map in maps.iter() {
+			try_io!(map.flush_range(start, map.len() - start)); // TODO not flush range when start 0
+			start = 0;
 		}
 		Ok(())
 	}
@@ -644,8 +723,10 @@ mod test {
 		for index_bits in [16, 18, 20, 22] {
 			let index_table = IndexTable {
 				id: TableId(index_bits.into()),
-				map: RwLock::new(None),
-				path: PathBuf::new(),
+				map: RwLock::new(Vec::new()),
+				path_base: PathBuf::new(),
+				max_size: None,
+				max_chunks: None,
 			};
 
 			let data_address = Address::from_u64((1 << index_bits) - 1);
@@ -674,8 +755,13 @@ mod test {
 
 	#[test]
 	fn test_find_any_entry() {
-		let table =
-			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
+		let table = IndexTable {
+			id: TableId(18),
+			map: RwLock::new(Vec::new()),
+			path_base: Default::default(),
+			max_size: None,
+			max_chunks: None,
+		};
 		let mut chunk = Chunk([0u8; CHUNK_LEN]);
 		let mut entries = [Entry::empty(); CHUNK_ENTRIES];
 		let mut keys = [0u64; CHUNK_ENTRIES];
@@ -711,8 +797,13 @@ mod test {
 
 	#[test]
 	fn test_find_entry_same_value() {
-		let table =
-			IndexTable { id: TableId(18), map: RwLock::new(None), path: Default::default() };
+		let table = IndexTable {
+			id: TableId(18),
+			map: RwLock::new(Vec::new()),
+			path_base: Default::default(),
+			max_size: None,
+			max_chunks: None,
+		};
 		let mut chunk = Chunk([0u8; CHUNK_LEN]);
 		let key = 0x4242424242424242;
 		let partial_key = Entry::extract_key(key, 18);
@@ -734,8 +825,13 @@ mod test {
 
 	#[test]
 	fn test_find_entry_zero_pk() {
-		let table =
-			IndexTable { id: TableId(16), map: RwLock::new(None), path: Default::default() };
+		let table = IndexTable {
+			id: TableId(16),
+			map: RwLock::new(Vec::new()),
+			path_base: Default::default(),
+			max_size: None,
+			max_chunks: None,
+		};
 		let mut chunk = Chunk([0u8; CHUNK_LEN]);
 		let zero_key = 0x0000000000000000;
 		let entry = Entry::new(Address::new(1, 1), zero_key, 16);

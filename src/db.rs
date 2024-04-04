@@ -2337,6 +2337,7 @@ mod tests {
 				sync_wal: true,
 				sync_data: true,
 				stats: true,
+				max_file_size: None,
 				salt: None,
 				columns: (0..num_columns).map(|_| Default::default()).collect(),
 				compression_threshold: HashMap::new(),

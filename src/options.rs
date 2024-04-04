@@ -31,6 +31,9 @@ pub struct Options {
 	pub sync_data: bool,
 	/// Collect database statistics. May have effect on performance.
 	pub stats: bool,
+	/// If define use multiple files with a size limit. May have effect on performance.
+	/// In megabytes.
+	pub max_file_size: Option<usize>,
 	/// Override salt value. If `None` is specified salt is loaded from metadata
 	/// or randomly generated when creating a new database.
 	pub salt: Option<Salt>,
@@ -84,6 +87,8 @@ pub struct Metadata {
 	pub version: u32,
 	/// Column metadata.
 	pub columns: Vec<ColumnOptions>,
+	/// Maximum size for files in megabytes.
+	pub max_file_size: Option<usize>,
 }
 
 impl ColumnOptions {
@@ -177,6 +182,7 @@ impl Options {
 			sync_data: true,
 			stats: true,
 			salt: None,
+			max_file_size: None,
 			columns: (0..num_columns).map(|_| Default::default()).collect(),
 			compression_threshold: HashMap::new(),
 			#[cfg(any(test, feature = "instrumentation"))]
@@ -217,6 +223,9 @@ impl Options {
 			format!("version={}", version.unwrap_or(CURRENT_VERSION)),
 			format!("salt={}", hex::encode(salt)),
 		];
+		if let Some(i) = self.max_file_size {
+			metadata.push(format!("max_file_size={}", hex::encode((i as u32).to_le_bytes())));
+		}
 		for i in 0..self.columns.len() {
 			metadata.push(format!("col{}={}", i, self.columns[i].as_string()));
 		}
@@ -248,11 +257,22 @@ impl Options {
 					})
 				}
 			}
+			if meta.max_file_size != self.max_file_size {
+				return Err(Error::InvalidConfiguration(format!(
+					"Cannot change max file size from {:?} to {:?}",
+					meta.max_file_size, self.max_file_size
+				)));
+			}
 			Ok(meta)
 		} else if create {
 			let s: Salt = self.salt.unwrap_or_else(|| rand::thread_rng().gen());
 			self.write_metadata(&self.path, &s)?;
-			Ok(Metadata { version: CURRENT_VERSION, columns: self.columns.clone(), salt: s })
+			Ok(Metadata {
+				version: CURRENT_VERSION,
+				columns: self.columns.clone(),
+				salt: s,
+				max_file_size: self.max_file_size,
+			})
 		} else {
 			Err(Error::DatabaseNotFound)
 		}
@@ -272,6 +292,7 @@ impl Options {
 		}
 		let file = std::io::BufReader::new(try_io!(std::fs::File::open(path)));
 		let mut salt = None;
+		let mut max_file_size = None;
 		let mut columns = Vec::new();
 		let mut version = 0;
 		for l in file.lines() {
@@ -288,6 +309,12 @@ impl Options {
 				let mut s = Salt::default();
 				s.copy_from_slice(&salt_slice);
 				salt = Some(s);
+			} else if k == "max_file_size" {
+				let size_slice =
+					hex::decode(v).map_err(|_| Error::Corruption("Bad max file string".into()))?;
+				let mut m = [0u8; 4];
+				m.copy_from_slice(&size_slice[..]);
+				max_file_size = Some(u32::from_le_bytes(m) as usize);
 			} else if k.starts_with("col") {
 				let col = ColumnOptions::from_string(v)
 					.ok_or_else(|| Error::Corruption("Bad column metadata".into()))?;
@@ -300,7 +327,7 @@ impl Options {
 			)))
 		}
 		let salt = salt.ok_or_else(|| Error::InvalidConfiguration("Missing salt value".into()))?;
-		Ok(Some(Metadata { version, columns, salt }))
+		Ok(Some(Metadata { version, columns, salt, max_file_size }))
 	}
 
 	pub fn is_valid(&self) -> bool {

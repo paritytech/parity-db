@@ -14,6 +14,15 @@ trait OpenOptionsExt {
 	fn disable_read_ahead(&mut self) -> &mut Self;
 }
 
+#[inline]
+fn offset_to_file_index(offset: u64, max_size: Option<usize>) -> (u64, usize) {
+	if let Some(m) = max_size {
+		(offset % m as u64, offset as usize / m)
+	} else {
+		(offset, 0)
+	}
+}
+
 impl OpenOptionsExt for std::fs::OpenOptions {
 	#[cfg(not(windows))]
 	fn disable_read_ahead(&mut self) -> &mut Self {
@@ -66,13 +75,14 @@ pub fn madvise_random(_map: &mut memmap2::MmapMut) {}
 
 #[cfg(not(windows))]
 fn mmap(file: &std::fs::File, len: usize) -> Result<memmap2::MmapMut> {
+	// TODO pass len not 0 and limit reserve to max file size
 	#[cfg(not(test))]
 	const RESERVE_ADDRESS_SPACE: usize = 1024 * 1024 * 1024; // 1 Gb
 														 // Use a different value for tests to work around docker limits on the test machine.
 	#[cfg(test)]
 	const RESERVE_ADDRESS_SPACE: usize = 64 * 1024 * 1024; // 64 Mb
 
-	let map_len = len + RESERVE_ADDRESS_SPACE;
+	let map_len = len + RESERVE_ADDRESS_SPACE; // TODO should be max??
 	let mut map = try_io!(unsafe { memmap2::MmapOptions::new().len(map_len).map_mut(file) });
 	madvise_random(&mut map);
 	Ok(map)
@@ -87,69 +97,94 @@ const GROW_SIZE_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug)]
 pub struct TableFile {
-	pub map: RwLock<Option<(memmap2::MmapMut, std::fs::File)>>,
-	pub path: std::path::PathBuf,
+	pub map: RwLock<Vec<(memmap2::MmapMut, std::fs::File)>>,
+	pub path_base: std::path::PathBuf,
 	pub capacity: AtomicU64,
 	pub id: TableId,
+	pub max_size: Option<usize>,
 }
 
 impl TableFile {
-	pub fn open(filepath: std::path::PathBuf, entry_size: u16, id: TableId) -> Result<Self> {
+	pub fn open(
+		path_base: std::path::PathBuf,
+		entry_size: u16,
+		id: TableId,
+		max_file_size: Option<usize>,
+	) -> Result<Self> {
 		let mut capacity = 0u64;
-		let map = if std::fs::metadata(&filepath).is_ok() {
-			let file = try_io!(std::fs::OpenOptions::new()
-				.read(true)
-				.write(true)
-				.disable_read_ahead()
-				.open(filepath.as_path()));
-			try_io!(disable_read_ahead(&file));
-			let len = try_io!(file.metadata()).len();
-			if len == 0 {
-				// Preallocate.
-				capacity += GROW_SIZE_BYTES / entry_size as u64;
-				try_io!(file.set_len(GROW_SIZE_BYTES));
+		let mut maps = Vec::new();
+		for i in 0.. {
+			let mut filepath = path_base.clone();
+			filepath.push(id.file_name(max_file_size.is_some().then(|| i)));
+			if std::fs::metadata(&filepath).is_ok() {
+				let file = try_io!(std::fs::OpenOptions::new()
+					.read(true)
+					.write(true)
+					.disable_read_ahead()
+					.open(filepath.as_path()));
+				try_io!(disable_read_ahead(&file));
+				let len = try_io!(file.metadata()).len();
+				if len == 0 {
+					// Preallocate.
+					capacity += GROW_SIZE_BYTES / entry_size as u64;
+					try_io!(file.set_len(GROW_SIZE_BYTES));
+				} else {
+					capacity = len / entry_size as u64;
+				}
+				let map = mmap(&file, len as usize)?;
+				maps.push((map, file));
 			} else {
-				capacity = len / entry_size as u64;
+				break;
+			};
+			if max_file_size.is_none() {
+				break;
 			}
-			let map = mmap(&file, len as usize)?;
-			Some((map, file))
+		}
+		let max_size = if let Some(m) = max_file_size {
+			let m = m * 1024 * 1024;
+			Some((m / entry_size as usize) * entry_size as usize)
 		} else {
 			None
 		};
 		Ok(TableFile {
-			path: filepath,
-			map: RwLock::new(map),
+			path_base,
+			map: RwLock::new(maps),
 			capacity: AtomicU64::new(capacity),
 			id,
+			max_size,
 		})
 	}
 
-	fn create_file(&self) -> Result<std::fs::File> {
+	fn create_file(&self, index: Option<u32>) -> Result<std::fs::File> {
 		log::debug!(target: "parity-db", "Created value table {}", self.id);
+		let mut path = self.path_base.clone();
+		path.push(self.id.file_name(index));
 		let file = try_io!(std::fs::OpenOptions::new()
 			.create(true)
 			.read(true)
 			.write(true)
 			.disable_read_ahead()
-			.open(self.path.as_path()));
+			.open(&path));
 		try_io!(disable_read_ahead(&file));
 		Ok(file)
 	}
 
 	pub fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
+		let (offset, file_index) = offset_to_file_index(offset, self.max_size);
 		let offset = offset as usize;
 		let map = self.map.read();
-		let (map, _) = map.as_ref().unwrap();
+		let (map, _) = map.get(file_index).unwrap();
 		buf.copy_from_slice(&map[offset..offset + buf.len()]);
 		Ok(())
 	}
 
 	#[cfg(not(feature = "loom"))]
 	pub fn slice_at(&self, offset: u64, len: usize) -> MappedBytesGuard {
+		let (offset, file_index) = offset_to_file_index(offset, self.max_size);
 		let offset = offset as usize;
 		let map = self.map.read();
 		parking_lot::RwLockReadGuard::map(map, |map| {
-			let (map, _) = map.as_ref().unwrap();
+			let (map, _) = map.get(file_index).unwrap();
 			&map[offset..offset + len]
 		})
 	}
@@ -164,7 +199,8 @@ impl TableFile {
 
 	pub fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
 		let map = self.map.read();
-		let (map, _) = map.as_ref().unwrap();
+		let (offset, file_index) = offset_to_file_index(offset, self.max_size);
+		let (map, _) = map.get(file_index).unwrap();
 		let offset = offset as usize;
 
 		// Nasty mutable pointer cast. We do ensure that all chunks that are being written are
@@ -180,44 +216,72 @@ impl TableFile {
 
 	pub fn grow(&self, entry_size: u16) -> Result<()> {
 		let mut map_and_file = self.map.write();
-		let new_len = match map_and_file.as_mut() {
-			None => {
-				let file = self.create_file()?;
-				let len = GROW_SIZE_BYTES;
-				try_io!(file.set_len(len));
-				let map = mmap(&file, 0)?;
-				*map_and_file = Some((map, file));
-				len
-			},
-			Some((map, file)) => {
-				let new_len = try_io!(file.metadata()).len() + GROW_SIZE_BYTES;
-				try_io!(file.set_len(new_len));
-				if map.len() < new_len as usize {
-					let new_map = mmap(&file, new_len as usize)?;
-					let old_map = std::mem::replace(map, new_map);
-					try_io!(old_map.flush());
+		let map_and_file_len = map_and_file.len();
+		let (current_len, push) = match map_and_file.last() {
+			None => (0, true),
+			Some((_, file)) => {
+				let len = try_io!(file.metadata()).len();
+				if self.max_size == Some(len as usize) {
+					(0, true)
+				} else {
+					(len, false)
 				}
-				new_len
 			},
 		};
-		let capacity = new_len / entry_size as u64;
+		let per_page_capacity = self.max_size.map(|m| m / entry_size as usize).unwrap_or(0);
+		let (new_len, prev_page_capacity) = if push {
+			let file =
+				self.create_file(self.max_size.is_some().then(|| map_and_file_len as u32))?;
+			let new_len = self
+				.max_size
+				.map(|m| std::cmp::min(m as u64, GROW_SIZE_BYTES))
+				.unwrap_or(GROW_SIZE_BYTES);
+			try_io!(file.set_len(new_len));
+			let map = mmap(&file, new_len as usize)?;
+			map_and_file.push((map, file));
+			(new_len, map_and_file_len * per_page_capacity)
+		} else {
+			let (map, file) = map_and_file.last_mut().unwrap();
+			let new_len = current_len + GROW_SIZE_BYTES as u64;
+			let new_len =
+				self.max_size.map(|m| std::cmp::min(m as u64, new_len)).unwrap_or(new_len);
+			try_io!(file.set_len(new_len));
+			{
+				let new_map = mmap(&file, new_len as usize)?;
+				let old_map = std::mem::replace(map, new_map);
+				try_io!(old_map.flush());
+			}
+			if map_and_file_len > 0 {
+				(new_len, (map_and_file_len - 1) * per_page_capacity)
+			} else {
+				(new_len, 0)
+			}
+		};
+		let capacity = new_len / entry_size as u64 + prev_page_capacity as u64;
 		self.capacity.store(capacity, Ordering::Relaxed);
 		Ok(())
 	}
 
 	pub fn flush(&self) -> Result<()> {
-		if let Some((map, _)) = self.map.read().as_ref() {
+		let maps = self.map.read();
+		for (map, _) in maps.iter() {
 			try_io!(map.flush());
 		}
 		Ok(())
 	}
 
 	pub fn remove(&self) -> Result<()> {
-		let mut map = self.map.write();
-		if let Some((map, file)) = map.take() {
+		let mut maps_lock = self.map.write();
+		let mut maps = std::mem::take(&mut *maps_lock);
+		let maps_len = maps.len();
+		maps.reverse();
+		for i in 0..maps_len as u32 {
+			let (map, file) = maps.pop().unwrap();
 			drop(map);
 			drop(file);
-			try_io!(std::fs::remove_file(&self.path));
+			let mut path = self.path_base.clone();
+			path.push(self.id.file_name(self.max_size.is_some().then(|| i)));
+			try_io!(std::fs::remove_file(&path));
 		}
 		Ok(())
 	}
