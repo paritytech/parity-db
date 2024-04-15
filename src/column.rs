@@ -837,6 +837,7 @@ impl HashColumn {
 		tables: RwLockUpgradableReadGuard<'a, Tables>,
 		reindex: RwLockUpgradableReadGuard<'b, Reindex>,
 		path: &std::path::Path,
+		max_size: Option<usize>,
 	) -> (RwLockUpgradableReadGuard<'a, Tables>, RwLockUpgradableReadGuard<'b, Reindex>) {
 		let mut tables = RwLockUpgradableReadGuard::upgrade(tables);
 		let mut reindex = RwLockUpgradableReadGuard::upgrade(reindex);
@@ -850,7 +851,7 @@ impl HashColumn {
 			tables.get_ref_count().id.col(),
 			tables.get_ref_count().id.index_bits() + 1,
 		);
-		let max_size = tables.get_ref_count().max_size;
+		let max_size = max_size;
 		let new_table = Some(RefCountTable::create_new(path, new_id, max_size));
 		let old_table = std::mem::replace(&mut tables.ref_count, new_table);
 		reindex.queue.push_back(ReindexEntry::RefCount(old_table.unwrap()));
@@ -903,8 +904,12 @@ impl HashColumn {
 			tables.get_ref_count().write_insert_plan(address, ref_count, None, log)?
 		{
 			log::debug!(target: "parity-db", "{}: Ref count chunk full {} when reindexing", tables.get_ref_count().id, address);
-			(tables, reindex) =
-				Self::trigger_ref_count_reindex(tables, reindex, self.path.as_path());
+			(tables, reindex) = Self::trigger_ref_count_reindex(
+				tables,
+				reindex,
+				self.path.as_path(),
+				self.max_file_size,
+			);
 			outcome = PlanOutcome::NeedReindex;
 		}
 		Ok(outcome)
@@ -1004,8 +1009,12 @@ impl HashColumn {
 			tables.get_ref_count().write_insert_plan(address, ref_count, None, log)?
 		{
 			log::debug!(target: "parity-db", "{}: Ref count chunk full {}", tables.get_ref_count().id, address);
-			(tables, reindex) =
-				Self::trigger_ref_count_reindex(tables, reindex, self.path.as_path());
+			(tables, reindex) = Self::trigger_ref_count_reindex(
+				tables,
+				reindex,
+				self.path.as_path(),
+				self.max_file_size,
+			);
 			outcome = PlanOutcome::NeedReindex;
 		}
 		let (test_ref_count, _test_sub_index) = tables.get_ref_count().get(address, log)?.unwrap();
@@ -1439,8 +1448,12 @@ impl HashColumn {
 						"Missing ref count {}, starting reindex",
 						record.table,
 					);
-					let lock =
-						Self::trigger_ref_count_reindex(tables, reindex, self.path.as_path());
+					let lock = Self::trigger_ref_count_reindex(
+						tables,
+						reindex,
+						self.path.as_path(),
+						self.max_file_size,
+					);
 					std::mem::drop(lock);
 					return self.validate_plan(LogAction::InsertRefCount(record), log)
 				}

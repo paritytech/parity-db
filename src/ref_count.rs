@@ -82,7 +82,7 @@ pub struct RefCountTable {
 	pub id: RefCountTableId,
 	map: RwLock<Vec<memmap2::MmapMut>>,
 	path_base: std::path::PathBuf,
-	pub max_size: Option<usize>, // TODO store only max_chunks
+	max_size: Option<u64>,
 	max_chunks: Option<u64>,
 }
 
@@ -94,8 +94,9 @@ fn total_chunks(index_bits: u8) -> u64 {
 	1u64 << index_bits
 }
 
-fn file_size(index_bits: u8) -> u64 {
-	total_entries(index_bits) * ENTRY_BYTES as u64 + META_SIZE as u64
+fn file_size(index_bits: u8, max_size: Option<u64>) -> u64 {
+	let total = total_entries(index_bits) * 8 + META_SIZE as u64;
+	max_size.map(|m| std::cmp::min(m, total)).unwrap_or(total)
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -167,6 +168,8 @@ impl RefCountTable {
 	) -> Result<Option<RefCountTable>> {
 		let path_base: std::path::PathBuf = path.into();
 		let mut maps = Vec::new();
+		let max_chunks = max_size.map(|s| (s * 1024 * 1024 / CHUNK_LEN) as u64);
+		let max_size = max_chunks.map(|c| c * CHUNK_LEN as u64);
 		for i in 0.. {
 			let mut path = path_base.clone();
 			path.push(id.file_name(max_size.is_some().then(|| i)));
@@ -183,7 +186,7 @@ impl RefCountTable {
 				Ok(file) => file,
 			};
 
-			try_io!(file.set_len(file_size(id.index_bits())));
+			try_io!(file.set_len(file_size(id.index_bits(), max_size)));
 			let mut map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
 			madvise_random(&mut map);
 			log::debug!(target: "parity-db", "Opened existing refcount table {}", id);
@@ -192,13 +195,7 @@ impl RefCountTable {
 				break;
 			}
 		}
-		Ok(Some(RefCountTable {
-			id,
-			path_base,
-			map: RwLock::new(maps),
-			max_chunks: max_size.map(|s| (s * 1024 * 1024 / CHUNK_LEN) as u64),
-			max_size,
-		}))
+		Ok(Some(RefCountTable { id, path_base, map: RwLock::new(maps), max_chunks, max_size }))
 	}
 
 	pub fn create_new(
@@ -206,12 +203,14 @@ impl RefCountTable {
 		id: RefCountTableId,
 		max_size: Option<usize>,
 	) -> RefCountTable {
+		let max_chunks = max_size.map(|s| (s * 1024 * 1024 / CHUNK_LEN) as u64);
+		let max_size = max_chunks.map(|c| c * CHUNK_LEN as u64);
 		RefCountTable {
 			id,
 			path_base: path.into(),
 			map: RwLock::new(Vec::new()),
-			max_chunks: max_size.map(|s| (s * 1024 * 1024 / CHUNK_LEN) as u64),
 			max_size,
+			max_chunks,
 		}
 	}
 
@@ -422,7 +421,7 @@ impl RefCountTable {
 					.create_new(true)
 					.open(path.as_path()));
 				log::debug!(target: "parity-db", "Created new ref count {}", self.id);
-				try_io!(file.set_len(file_size(self.id.index_bits())));
+				try_io!(file.set_len(file_size(self.id.index_bits(), self.max_size)));
 				let mut mmap = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
 				madvise_random(&mut mmap);
 				wmap.push(mmap);
