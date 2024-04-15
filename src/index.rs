@@ -671,12 +671,16 @@ impl IndexTable {
 	}
 
 	pub fn flush(&self) -> Result<()> {
-		// Flush everything except stats.
-		let mut start = META_SIZE;
 		let maps = self.map.read();
+		let mut first = true;
 		for map in maps.iter() {
-			try_io!(map.flush_range(start, map.len() - start)); // TODO not flush range when start 0
-			start = 0;
+			if first {
+				first = false;
+				// Flush everything except stats.
+				try_io!(map.flush_range(META_SIZE, map.len() - META_SIZE));
+			} else {
+				try_io!(map.flush());
+			}
 		}
 		Ok(())
 	}
