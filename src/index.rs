@@ -147,7 +147,6 @@ pub struct IndexTable {
 	pub id: TableId,
 	map: RwLock<Vec<memmap2::MmapMut>>,
 	path_base: std::path::PathBuf,
-	max_size: Option<u64>,
 	max_chunks: Option<u64>,
 }
 
@@ -159,7 +158,8 @@ fn total_chunks(index_bits: u8) -> u64 {
 	1u64 << index_bits
 }
 
-fn file_size(index_bits: u8, max_size: Option<u64>) -> u64 {
+fn file_size(index_bits: u8, max_chunks: Option<u64>) -> u64 {
+	let max_size = max_chunks.map(|c| c * CHUNK_LEN as u64);
 	let total = total_entries(index_bits) * 8 + META_SIZE as u64;
 	max_size.map(|m| std::cmp::min(m, total)).unwrap_or(total)
 }
@@ -238,7 +238,6 @@ impl IndexTable {
 		let path_base: std::path::PathBuf = path.into();
 		let mut maps = Vec::new();
 		let max_chunks = max_size.map(|s| (s * 1024 * 1024 / CHUNK_LEN) as u64);
-		let max_size = max_chunks.map(|c| c * CHUNK_LEN as u64);
 		for i in 0.. {
 			let mut path = path_base.clone();
 			path.push(id.file_name(max_size.is_some().then(|| i)));
@@ -255,7 +254,7 @@ impl IndexTable {
 				Ok(file) => file,
 			};
 
-			try_io!(file.set_len(file_size(id.index_bits(), max_size)));
+			try_io!(file.set_len(file_size(id.index_bits(), max_chunks)));
 			let mut map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
 			madvise_random(&mut map);
 			log::debug!(target: "parity-db", "Opened existing index {}", id);
@@ -264,18 +263,15 @@ impl IndexTable {
 				break;
 			}
 		}
-		Ok(Some(IndexTable { id, path_base, map: RwLock::new(maps), max_chunks, max_size }))
+		Ok(Some(IndexTable { id, path_base, map: RwLock::new(maps), max_chunks }))
 	}
 
 	pub fn create_new(path: &std::path::Path, id: TableId, max_size: Option<usize>) -> IndexTable {
-		let max_chunks = max_size.map(|s| (s * 1024 * 1024 / CHUNK_LEN) as u64);
-		let max_size = max_chunks.map(|c| c * CHUNK_LEN as u64);
 		IndexTable {
 			id,
 			path_base: path.into(),
 			map: RwLock::new(Vec::new()),
-			max_size,
-			max_chunks,
+			max_chunks: max_size.map(|s| (s * 1024 * 1024 / CHUNK_LEN) as u64),
 		}
 	}
 
@@ -590,14 +586,14 @@ impl IndexTable {
 			let mut wmap = RwLockUpgradableReadGuard::upgrade(map);
 			for i in map_len..file_index + 1 {
 				let mut path = self.path_base.clone();
-				path.push(self.id.file_name(self.max_size.is_some().then(|| i as u32)));
+				path.push(self.id.file_name(self.max_chunks.is_some().then(|| i as u32)));
 				let file = try_io!(std::fs::OpenOptions::new()
 					.write(true)
 					.read(true)
 					.create_new(true)
 					.open(path.as_path()));
 				log::debug!(target: "parity-db", "Created new index {}", self.id);
-				try_io!(file.set_len(file_size(self.id.index_bits(), self.max_size)));
+				try_io!(file.set_len(file_size(self.id.index_bits(), self.max_chunks)));
 				let mut mmap = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
 				madvise_random(&mut mmap);
 				wmap.push(mmap);
@@ -660,13 +656,13 @@ impl IndexTable {
 		drop(self.map);
 		for i in 0.. {
 			let mut path = self.path_base.clone();
-			path.push(self.id.file_name(self.max_size.is_some().then(|| i)));
+			path.push(self.id.file_name(self.max_chunks.is_some().then(|| i)));
 			match std::fs::remove_file(path.as_path()) {
 				Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
 				Err(e) => return Err(Error::Io(e)),
 				Ok(()) => (),
 			};
-			if self.max_size.is_none() {
+			if self.max_chunks.is_none() {
 				break;
 			}
 		}
@@ -724,7 +720,6 @@ mod test {
 				id: TableId(index_bits.into()),
 				map: RwLock::new(Vec::new()),
 				path_base: PathBuf::new(),
-				max_size: None,
 				max_chunks: None,
 			};
 
@@ -758,7 +753,6 @@ mod test {
 			id: TableId(18),
 			map: RwLock::new(Vec::new()),
 			path_base: Default::default(),
-			max_size: None,
 			max_chunks: None,
 		};
 		let mut chunk = Chunk([0u8; CHUNK_LEN]);
@@ -800,7 +794,6 @@ mod test {
 			id: TableId(18),
 			map: RwLock::new(Vec::new()),
 			path_base: Default::default(),
-			max_size: None,
 			max_chunks: None,
 		};
 		let mut chunk = Chunk([0u8; CHUNK_LEN]);
@@ -828,7 +821,6 @@ mod test {
 			id: TableId(16),
 			map: RwLock::new(Vec::new()),
 			path_base: Default::default(),
-			max_size: None,
 			max_chunks: None,
 		};
 		let mut chunk = Chunk([0u8; CHUNK_LEN]);
