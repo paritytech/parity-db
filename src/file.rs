@@ -74,22 +74,22 @@ pub fn madvise_random(map: &mut memmap2::MmapMut) {
 pub fn madvise_random(_map: &mut memmap2::MmapMut) {}
 
 #[cfg(not(windows))]
-fn mmap(file: &std::fs::File, len: usize) -> Result<memmap2::MmapMut> {
-	// TODO pass len not 0 and limit reserve to max file size
+fn mmap(file: &std::fs::File, len: usize, max_size: Option<usize>) -> Result<memmap2::MmapMut> {
 	#[cfg(not(test))]
 	const RESERVE_ADDRESS_SPACE: usize = 1024 * 1024 * 1024; // 1 Gb
 														 // Use a different value for tests to work around docker limits on the test machine.
 	#[cfg(test)]
 	const RESERVE_ADDRESS_SPACE: usize = 64 * 1024 * 1024; // 64 Mb
 
-	let map_len = len + RESERVE_ADDRESS_SPACE; // TODO should be max??
+	let map_len = len + RESERVE_ADDRESS_SPACE;
+	let map_len = max_size.map(|m| std::cmp::min(map_len, m)).unwrap_or(map_len);
 	let mut map = try_io!(unsafe { memmap2::MmapOptions::new().len(map_len).map_mut(file) });
 	madvise_random(&mut map);
 	Ok(map)
 }
 
 #[cfg(windows)]
-fn mmap(file: &std::fs::File, _len: usize) -> Result<memmap2::MmapMut> {
+fn mmap(file: &std::fs::File, _len: usize, _max_size: Option<usize>) -> Result<memmap2::MmapMut> {
 	Ok(try_io!(unsafe { memmap2::MmapOptions::new().map_mut(file) }))
 }
 
@@ -111,6 +111,12 @@ impl TableFile {
 		id: TableId,
 		max_file_size: Option<usize>,
 	) -> Result<Self> {
+		let max_size = if let Some(m) = max_file_size {
+			let m = m * 1024 * 1024;
+			Some((m / entry_size as usize) * entry_size as usize)
+		} else {
+			None
+		};
 		let mut capacity = 0u64;
 		let mut maps = Vec::new();
 		for i in 0.. {
@@ -131,7 +137,7 @@ impl TableFile {
 				} else {
 					capacity = len / entry_size as u64;
 				}
-				let map = mmap(&file, len as usize)?;
+				let map = mmap(&file, len as usize, max_size)?;
 				maps.push((map, file));
 			} else {
 				break;
@@ -140,12 +146,6 @@ impl TableFile {
 				break;
 			}
 		}
-		let max_size = if let Some(m) = max_file_size {
-			let m = m * 1024 * 1024;
-			Some((m / entry_size as usize) * entry_size as usize)
-		} else {
-			None
-		};
 		Ok(TableFile {
 			path_base,
 			maps: RwLock::new(maps),
@@ -231,14 +231,13 @@ impl TableFile {
 		};
 		let per_file_capacity = self.max_size.map(|m| m / entry_size as usize).unwrap_or(0);
 		let (new_len, prev_page_capacity) = if push {
-			let file =
-				self.create_file(self.max_size.is_some().then(|| num_maps as u32))?;
+			let file = self.create_file(self.max_size.is_some().then(|| num_maps as u32))?;
 			let new_len = self
 				.max_size
 				.map(|m| std::cmp::min(m as u64, GROW_SIZE_BYTES))
 				.unwrap_or(GROW_SIZE_BYTES);
 			try_io!(file.set_len(new_len));
-			let map = mmap(&file, new_len as usize)?;
+			let map = mmap(&file, new_len as usize, self.max_size)?;
 			maps.push((map, file));
 			(new_len, num_maps * per_file_capacity)
 		} else {
@@ -248,7 +247,7 @@ impl TableFile {
 				self.max_size.map(|m| std::cmp::min(m as u64, new_len)).unwrap_or(new_len);
 			try_io!(file.set_len(new_len));
 			{
-				let new_map = mmap(&file, new_len as usize)?;
+				let new_map = mmap(&file, new_len as usize, self.max_size)?;
 				let old_map = std::mem::replace(map, new_map);
 				try_io!(old_map.flush());
 			}
