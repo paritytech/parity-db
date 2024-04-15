@@ -427,7 +427,7 @@ impl ValueTable {
 		let file = crate::file::TableFile::open(filepath, entry_size, id, max_file_size)?;
 		let mut filled = 1;
 		let mut last_removed = 0;
-		if !file.map.read().is_empty() {
+		if !file.maps.read().is_empty() {
 			let mut header = Header::default();
 			file.read_at(&mut header.0, 0)?;
 			last_removed = header.last_removed();
@@ -1110,7 +1110,7 @@ impl ValueTable {
 	}
 
 	pub fn refresh_metadata(&self) -> Result<()> {
-		if self.file.map.read().is_empty() {
+		if self.file.maps.read().is_empty() {
 			return Ok(())
 		}
 		let _free_entries_guard = if let Some(free_entries) = &self.free_entries {
@@ -1195,7 +1195,7 @@ impl ValueTable {
 	}
 
 	pub fn is_init(&self) -> bool {
-		!self.file.map.read().is_empty()
+		!self.file.maps.read().is_empty()
 	}
 
 	pub fn init_with_entry(&self, entry: &[u8]) -> Result<()> {

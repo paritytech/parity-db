@@ -97,7 +97,7 @@ const GROW_SIZE_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug)]
 pub struct TableFile {
-	pub map: RwLock<Vec<(memmap2::MmapMut, std::fs::File)>>,
+	pub maps: RwLock<Vec<(memmap2::MmapMut, std::fs::File)>>,
 	pub path_base: std::path::PathBuf,
 	pub capacity: AtomicU64,
 	pub id: TableId,
@@ -148,7 +148,7 @@ impl TableFile {
 		};
 		Ok(TableFile {
 			path_base,
-			map: RwLock::new(maps),
+			maps: RwLock::new(maps),
 			capacity: AtomicU64::new(capacity),
 			id,
 			max_size,
@@ -172,7 +172,7 @@ impl TableFile {
 	pub fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
 		let (offset, file_index) = offset_to_file_index(offset, self.max_size);
 		let offset = offset as usize;
-		let map = self.map.read();
+		let map = self.maps.read();
 		let (map, _) = map.get(file_index).unwrap();
 		buf.copy_from_slice(&map[offset..offset + buf.len()]);
 		Ok(())
@@ -182,7 +182,7 @@ impl TableFile {
 	pub fn slice_at(&self, offset: u64, len: usize) -> MappedBytesGuard {
 		let (offset, file_index) = offset_to_file_index(offset, self.max_size);
 		let offset = offset as usize;
-		let map = self.map.read();
+		let map = self.maps.read();
 		parking_lot::RwLockReadGuard::map(map, |map| {
 			let (map, _) = map.get(file_index).unwrap();
 			&map[offset..offset + len]
@@ -199,7 +199,7 @@ impl TableFile {
 	}
 
 	pub fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
-		let map = self.map.read();
+		let map = self.maps.read();
 		let (offset, file_index) = offset_to_file_index(offset, self.max_size);
 		let (map, _) = map.get(file_index).unwrap();
 		let offset = offset as usize;
@@ -216,9 +216,9 @@ impl TableFile {
 	}
 
 	pub fn grow(&self, entry_size: u16) -> Result<()> {
-		let mut map_and_file = self.map.write();
-		let map_and_file_len = map_and_file.len();
-		let (current_len, push) = match map_and_file.last() {
+		let mut maps = self.maps.write();
+		let num_maps = maps.len();
+		let (current_len, push) = match maps.last() {
 			None => (0, true),
 			Some((_, file)) => {
 				let len = try_io!(file.metadata()).len();
@@ -229,20 +229,20 @@ impl TableFile {
 				}
 			},
 		};
-		let per_page_capacity = self.max_size.map(|m| m / entry_size as usize).unwrap_or(0);
+		let per_file_capacity = self.max_size.map(|m| m / entry_size as usize).unwrap_or(0);
 		let (new_len, prev_page_capacity) = if push {
 			let file =
-				self.create_file(self.max_size.is_some().then(|| map_and_file_len as u32))?;
+				self.create_file(self.max_size.is_some().then(|| num_maps as u32))?;
 			let new_len = self
 				.max_size
 				.map(|m| std::cmp::min(m as u64, GROW_SIZE_BYTES))
 				.unwrap_or(GROW_SIZE_BYTES);
 			try_io!(file.set_len(new_len));
 			let map = mmap(&file, new_len as usize)?;
-			map_and_file.push((map, file));
-			(new_len, map_and_file_len * per_page_capacity)
+			maps.push((map, file));
+			(new_len, num_maps * per_file_capacity)
 		} else {
-			let (map, file) = map_and_file.last_mut().unwrap();
+			let (map, file) = maps.last_mut().unwrap();
 			let new_len = current_len + GROW_SIZE_BYTES as u64;
 			let new_len =
 				self.max_size.map(|m| std::cmp::min(m as u64, new_len)).unwrap_or(new_len);
@@ -252,8 +252,8 @@ impl TableFile {
 				let old_map = std::mem::replace(map, new_map);
 				try_io!(old_map.flush());
 			}
-			if map_and_file_len > 0 {
-				(new_len, (map_and_file_len - 1) * per_page_capacity)
+			if num_maps > 0 {
+				(new_len, (num_maps - 1) * per_file_capacity)
 			} else {
 				(new_len, 0)
 			}
@@ -264,7 +264,7 @@ impl TableFile {
 	}
 
 	pub fn flush(&self) -> Result<()> {
-		let maps = self.map.read();
+		let maps = self.maps.read();
 		for (map, _) in maps.iter() {
 			try_io!(map.flush());
 		}
@@ -272,7 +272,7 @@ impl TableFile {
 	}
 
 	pub fn remove(&self) -> Result<()> {
-		let mut maps_lock = self.map.write();
+		let mut maps_lock = self.maps.write();
 		let mut maps = std::mem::take(&mut *maps_lock);
 		let maps_len = maps.len();
 		maps.reverse();
