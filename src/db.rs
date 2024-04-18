@@ -21,8 +21,8 @@
 use crate::{
 	btree::{commit_overlay::BTreeChangeSet, BTreeIterator, BTreeTable},
 	column::{
-		hash_key, unpack_node_data, ColId, Column, HashColumn, IterState, ReindexBatch,
-		ValueIterState,
+		hash_key, unpack_node_children, unpack_node_data, ColId, Column, HashColumn, IterState,
+		ReindexBatch, ValueIterState,
 	},
 	error::{try_io, Error, Result},
 	hash::IdentityBuildHasher,
@@ -368,6 +368,42 @@ impl DbInner {
 				let value = column.get_value(Address::from_u64(node_address), log)?;
 				if let Some(data) = value {
 					return Ok(Some(unpack_node_data(data)?))
+				}
+				Ok(None)
+			},
+			Column::Tree(_) => Err(Error::InvalidConfiguration("Not a HashColumn.".to_string())),
+		}
+	}
+
+	fn get_node_children(
+		&self,
+		col: ColId,
+		node_address: NodeAddress,
+		external_call: bool,
+	) -> Result<Option<Children>> {
+		if !self.options.columns[col as usize].multitree {
+			return Err(Error::InvalidConfiguration("Not a multitree column.".to_string()))
+		}
+		if !self.options.columns[col as usize].append_only &&
+			!self.options.columns[col as usize].allow_direct_node_access &&
+			external_call
+		{
+			return Err(Error::InvalidConfiguration(
+				"get_node_children can only be called on a column with append_only or allow_direct_node_access options.".to_string(),
+			))
+		}
+		match &self.columns[col as usize] {
+			Column::Hash(column) => {
+				let overlay = self.commit_overlay.read();
+				// Check commit overlay first
+				if let Some(v) = overlay.get(col as usize).and_then(|o| o.get_address(node_address))
+				{
+					return Ok(Some(unpack_node_children(v.value())?))
+				}
+				let log = self.log.overlays();
+				let value = column.get_value(Address::from_u64(node_address), log)?;
+				if let Some(data) = value {
+					return Ok(Some(unpack_node_children(&data)?))
 				}
 				Ok(None)
 			},
@@ -1499,6 +1535,14 @@ impl Db {
 		self.inner.get_node(col, node_address, true)
 	}
 
+	pub fn get_node_children(
+		&self,
+		col: ColId,
+		node_address: NodeAddress,
+	) -> Result<Option<Children>> {
+		self.inner.get_node_children(col, node_address, true)
+	}
+
 	/// Commit a set of changes to the database.
 	pub fn commit<I, K>(&self, tx: I) -> Result<()>
 	where
@@ -1781,6 +1825,7 @@ impl Db {
 pub trait TreeReader {
 	fn get_root(&self) -> Result<Option<(Vec<u8>, Children)>>;
 	fn get_node(&self, node_address: NodeAddress) -> Result<Option<(Vec<u8>, Children)>>;
+	fn get_node_children(&self, node_address: NodeAddress) -> Result<Option<Children>>;
 }
 
 #[derive(Debug)]
@@ -1825,6 +1870,10 @@ impl TreeReader for DbTreeReader {
 
 	fn get_node(&self, node_address: NodeAddress) -> Result<Option<(Vec<u8>, Children)>> {
 		self.db.get_node(self.col, node_address, false)
+	}
+
+	fn get_node_children(&self, node_address: NodeAddress) -> Result<Option<Children>> {
+		self.db.get_node_children(self.col, node_address, false)
 	}
 }
 
@@ -2197,12 +2246,12 @@ impl IndexedChangeSet {
 		writer: &mut crate::log::LogWriter,
 	) -> Result<()> {
 		for address in children {
-			let node = guard.get_node(*address)?;
 			let (remains, _outcome) = column.write_address_dec_ref_plan(*address, writer)?;
 			if !remains {
 				// Was removed
 				*num_removed += 1;
-				if let Some((_node_data, children)) = node {
+				let node = guard.get_node_children(*address)?;
+				if let Some(children) = node {
 					self.write_dereference_children_plan(
 						column,
 						guard,
