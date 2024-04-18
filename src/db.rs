@@ -551,12 +551,15 @@ impl DbInner {
 									);
 
 									let mut trees = self.trees.write();
-									if let Some(column_trees) = trees.get_mut(&col) {
-										let count =
-											column_trees.to_dereference.get(&hash).unwrap_or(&0) +
-												1;
-										column_trees.to_dereference.insert(hash, count);
-									}
+
+									let column_trees = trees.entry(col).or_insert_with(|| Trees {
+										readers: Default::default(),
+										to_dereference: Default::default(),
+									});
+									let count =
+										column_trees.to_dereference.get(&hash).unwrap_or(&0) + 1;
+									column_trees.to_dereference.insert(hash, count);
+
 									drop(trees);
 
 									commit.check_for_deferral = true;
