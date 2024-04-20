@@ -2246,11 +2246,14 @@ impl IndexedChangeSet {
 		writer: &mut crate::log::LogWriter,
 	) -> Result<()> {
 		for address in children {
+			// Can't move this after write_address_dec_ref_plan as write_address_dec_ref_plan might
+			// free the node meaning it could get reclaimed. Then get_node_children will return
+			// incorrect data.
+			let node = guard.get_node_children(*address)?;
 			let (remains, _outcome) = column.write_address_dec_ref_plan(*address, writer)?;
 			if !remains {
 				// Was removed
 				*num_removed += 1;
-				let node = guard.get_node_children(*address)?;
 				if let Some(children) = node {
 					self.write_dereference_children_plan(
 						column,
@@ -2286,7 +2289,11 @@ impl IndexedChangeSet {
 		}
 		for change in self.node_changes.iter() {
 			if let NodeChange::NewValue(address, _val) = change {
-				overlay.address.remove(address);
+				if let Entry::Occupied(e) = overlay.address.entry(*address) {
+					if e.get().0 == record_id {
+						e.remove_entry();
+					}
+				}
 			}
 		}
 	}
