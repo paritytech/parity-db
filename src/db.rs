@@ -2163,6 +2163,7 @@ impl IndexedChangeSet {
 		}
 		for change in self.node_changes.iter() {
 			if let NodeChange::NewValue(address, val) = change {
+				*bytes += val.value().len();
 				overlay.address.insert(*address, (record_id, val.clone()));
 			}
 		}
