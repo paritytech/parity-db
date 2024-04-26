@@ -106,14 +106,14 @@ pub struct Args {
 impl MultiTreeStress {
 	pub(super) fn get_args(&self) -> Args {
 		Args {
-			readers: self.readers.unwrap_or(0),
+			readers: self.readers.unwrap_or(1),
 			iter: self.iter.unwrap_or(0),
 			writers: self.writers.unwrap_or(1),
-			commits: self.commits.unwrap_or(100_000),
+			commits: self.commits.unwrap_or(10_000),
 			seed: self.seed,
 			append: self.append,
 			empty_on_shutdown: self.empty_on_shutdown,
-			pruning: self.pruning.unwrap_or(8),
+			pruning: self.pruning.unwrap_or(256),
 			compress: self.compress,
 			commit_time: self.commit_time.unwrap_or(0),
 		}
