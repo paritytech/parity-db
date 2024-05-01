@@ -311,8 +311,8 @@ impl ChainGenerator {
 	}
 
 	fn generate_node_data(&self, rng: &mut rand::rngs::SmallRng, leaf: bool) -> Vec<u8> {
-		// Polkadot doesn't store actual values in branch nodes, only in leaf nodes. Hence the value
-		// stored in the db will only be for the nibble path.
+		// Polkadot avoids storing actual values in branch nodes, they mainly go in leaf nodes.
+		// Hence the value stored in the db will only be for the nibble path.
 		let mut size = 4;
 		if leaf {
 			// Leaf node, so simulate an actual value using the size histogram.
