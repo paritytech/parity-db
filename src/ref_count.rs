@@ -95,7 +95,7 @@ fn total_chunks(index_bits: u8) -> u64 {
 
 fn file_size(index_bits: u8, max_chunks: Option<u64>) -> u64 {
 	let max_size = max_chunks.map(|c| c * CHUNK_LEN as u64);
-	let total = total_entries(index_bits) * 8 + META_SIZE as u64;
+	let total = total_entries(index_bits) * ENTRY_BYTES as u64 + META_SIZE as u64;
 	max_size.map(|m| std::cmp::min(m, total)).unwrap_or(total)
 }
 
