@@ -135,7 +135,7 @@ impl TableFile {
 					capacity += GROW_SIZE_BYTES / entry_size as u64;
 					try_io!(file.set_len(GROW_SIZE_BYTES));
 				} else {
-					capacity = len / entry_size as u64;
+					capacity += len / entry_size as u64;
 				}
 				let map = mmap(&file, len as usize, max_size)?;
 				maps.push((map, file));
