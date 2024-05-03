@@ -121,6 +121,7 @@ pub struct HashColumn {
 	salt: Salt,
 	stats: ColumnStats,
 	compression: Compress,
+	max_file_size: Option<usize>,
 	db_version: u32,
 }
 
@@ -355,7 +356,16 @@ impl Column {
 		let column_options = &metadata.columns[col as usize];
 		let db_version = metadata.version;
 		let value = (0..SIZE_TIERS)
-			.map(|i| Self::open_table(arc_path.clone(), col, i as u8, column_options, db_version))
+			.map(|i| {
+				Self::open_table(
+					arc_path.clone(),
+					col,
+					i as u8,
+					column_options,
+					db_version,
+					metadata.max_file_size,
+				)
+			})
 			.collect::<Result<_>>()?;
 
 		if column_options.btree_index {
@@ -371,10 +381,11 @@ impl Column {
 		tier: u8,
 		options: &ColumnOptions,
 		db_version: u32,
+		max_file_size: Option<usize>,
 	) -> Result<ValueTable> {
 		let id = ValueTableId::new(col, tier);
 		let entry_size = SIZES.get(tier as usize).cloned();
-		ValueTable::open(path, id, entry_size, options, db_version)
+		ValueTable::open(path, id, entry_size, options, db_version, max_file_size)
 	}
 
 	pub(crate) fn drop_files(column: ColId, path: PathBuf) -> Result<()> {
@@ -452,14 +463,16 @@ impl HashColumn {
 		options: &Options,
 		metadata: &Metadata,
 	) -> Result<HashColumn> {
-		let (index, mut reindexing, stats) = Self::open_index(&options.path, col)?;
+		let max_size = options.max_file_size;
+		let (index, mut reindexing, stats) = Self::open_index(&options.path, col, max_size)?;
 		let collect_stats = options.stats;
 		let path = &options.path;
+		let max_file_size = options.max_file_size;
 		let col_options = &metadata.columns[col as usize];
 		let db_version = metadata.version;
 		let (ref_count, ref_count_cache) = if col_options.multitree && !col_options.append_only {
 			(
-				Some(Self::open_ref_count(&options.path, col, &mut reindexing)?),
+				Some(Self::open_ref_count(&options.path, col, &mut reindexing, max_size)?),
 				Some(RwLock::new(Default::default())),
 			)
 		} else {
@@ -471,6 +484,7 @@ impl HashColumn {
 			reindex: RwLock::new(Reindex { queue: reindexing, progress: AtomicU64::new(0) }),
 			ref_count_cache,
 			path: path.into(),
+			max_file_size,
 			preimage: col_options.preimage,
 			uniform_keys: col_options.uniform,
 			ref_counted: col_options.ref_counted,
@@ -547,13 +561,14 @@ impl HashColumn {
 	fn open_index(
 		path: &std::path::Path,
 		col: ColId,
+		max_size: Option<usize>,
 	) -> Result<(IndexTable, VecDeque<ReindexEntry>, ColumnStats)> {
 		let mut reindexing = VecDeque::new();
 		let mut top = None;
 		let mut stats = ColumnStats::empty();
 		for bits in (MIN_INDEX_BITS..65).rev() {
 			let id = IndexTableId::new(col, bits);
-			if let Some(table) = IndexTable::open_existing(path, id)? {
+			if let Some(table) = IndexTable::open_existing(path, id, max_size)? {
 				if top.is_none() {
 					stats = table.load_stats()?;
 					log::trace!(target: "parity-db", "Opened main index {}", table.id);
@@ -566,7 +581,7 @@ impl HashColumn {
 		}
 		let table = match top {
 			Some(table) => table,
-			None => IndexTable::create_new(path, IndexTableId::new(col, MIN_INDEX_BITS)),
+			None => IndexTable::create_new(path, IndexTableId::new(col, MIN_INDEX_BITS), max_size),
 		};
 		Ok((table, reindexing, stats))
 	}
@@ -575,11 +590,12 @@ impl HashColumn {
 		path: &std::path::Path,
 		col: ColId,
 		reindexing: &mut VecDeque<ReindexEntry>,
+		max_size: Option<usize>,
 	) -> Result<RefCountTable> {
 		let mut top = None;
 		for bits in (MIN_REF_COUNT_BITS..65).rev() {
 			let id = RefCountTableId::new(col, bits);
-			if let Some(table) = RefCountTable::open_existing(path, id)? {
+			if let Some(table) = RefCountTable::open_existing(path, id, max_size)? {
 				if top.is_none() {
 					log::trace!(target: "parity-db", "Opened main ref count {}", table.id);
 					top = Some(table);
@@ -591,7 +607,11 @@ impl HashColumn {
 		}
 		let table = match top {
 			Some(table) => table,
-			None => RefCountTable::create_new(path, RefCountTableId::new(col, MIN_REF_COUNT_BITS)),
+			None => RefCountTable::create_new(
+				path,
+				RefCountTableId::new(col, MIN_REF_COUNT_BITS),
+				max_size,
+			),
 		};
 		Ok(table)
 	}
@@ -600,6 +620,7 @@ impl HashColumn {
 		tables: RwLockUpgradableReadGuard<'a, Tables>,
 		reindex: RwLockUpgradableReadGuard<'b, Reindex>,
 		path: &std::path::Path,
+		max_file_size: Option<usize>,
 	) -> (RwLockUpgradableReadGuard<'a, Tables>, RwLockUpgradableReadGuard<'b, Reindex>) {
 		let mut tables = RwLockUpgradableReadGuard::upgrade(tables);
 		let mut reindex = RwLockUpgradableReadGuard::upgrade(reindex);
@@ -611,7 +632,7 @@ impl HashColumn {
 		// Start reindex
 		let new_index_id =
 			IndexTableId::new(tables.index.id.col(), tables.index.id.index_bits() + 1);
-		let new_table = IndexTable::create_new(path, new_index_id);
+		let new_table = IndexTable::create_new(path, new_index_id, max_file_size);
 		let old_table = std::mem::replace(&mut tables.index, new_table);
 		reindex.queue.push_back(ReindexEntry::Index(old_table));
 		(
@@ -648,7 +669,8 @@ impl HashColumn {
 			tables.index.write_insert_plan(key, address, None, log)?
 		{
 			log::debug!(target: "parity-db", "{}: Index chunk full {} when reindexing", tables.index.id, hex(key));
-			(tables, reindex) = Self::trigger_reindex(tables, reindex, self.path.as_path());
+			(tables, reindex) =
+				Self::trigger_reindex(tables, reindex, self.path.as_path(), self.max_file_size);
 			outcome = PlanOutcome::NeedReindex;
 		}
 		Ok(outcome)
@@ -823,7 +845,8 @@ impl HashColumn {
 			tables.index.write_insert_plan(key, address, None, log)?
 		{
 			log::debug!(target: "parity-db", "{}: Index chunk full {}", tables.index.id, hex(key));
-			(tables, reindex) = Self::trigger_reindex(tables, reindex, self.path.as_path());
+			(tables, reindex) =
+				Self::trigger_reindex(tables, reindex, self.path.as_path(), self.max_file_size);
 			outcome = PlanOutcome::NeedReindex;
 		}
 		Ok((outcome, tables, reindex))
@@ -833,6 +856,7 @@ impl HashColumn {
 		tables: RwLockUpgradableReadGuard<'a, Tables>,
 		reindex: RwLockUpgradableReadGuard<'b, Reindex>,
 		path: &std::path::Path,
+		max_size: Option<usize>,
 	) -> (RwLockUpgradableReadGuard<'a, Tables>, RwLockUpgradableReadGuard<'b, Reindex>) {
 		let mut tables = RwLockUpgradableReadGuard::upgrade(tables);
 		let mut reindex = RwLockUpgradableReadGuard::upgrade(reindex);
@@ -846,7 +870,8 @@ impl HashColumn {
 			tables.get_ref_count().id.col(),
 			tables.get_ref_count().id.index_bits() + 1,
 		);
-		let new_table = Some(RefCountTable::create_new(path, new_id));
+		let max_size = max_size;
+		let new_table = Some(RefCountTable::create_new(path, new_id, max_size));
 		let old_table = std::mem::replace(&mut tables.ref_count, new_table);
 		reindex.queue.push_back(ReindexEntry::RefCount(old_table.unwrap()));
 		(
@@ -898,8 +923,12 @@ impl HashColumn {
 			tables.get_ref_count().write_insert_plan(address, ref_count, None, log)?
 		{
 			log::debug!(target: "parity-db", "{}: Ref count chunk full {} when reindexing", tables.get_ref_count().id, address);
-			(tables, reindex) =
-				Self::trigger_ref_count_reindex(tables, reindex, self.path.as_path());
+			(tables, reindex) = Self::trigger_ref_count_reindex(
+				tables,
+				reindex,
+				self.path.as_path(),
+				self.max_file_size,
+			);
 			outcome = PlanOutcome::NeedReindex;
 		}
 		Ok(outcome)
@@ -999,8 +1028,12 @@ impl HashColumn {
 			tables.get_ref_count().write_insert_plan(address, ref_count, None, log)?
 		{
 			log::debug!(target: "parity-db", "{}: Ref count chunk full {}", tables.get_ref_count().id, address);
-			(tables, reindex) =
-				Self::trigger_ref_count_reindex(tables, reindex, self.path.as_path());
+			(tables, reindex) = Self::trigger_ref_count_reindex(
+				tables,
+				reindex,
+				self.path.as_path(),
+				self.max_file_size,
+			);
 			outcome = PlanOutcome::NeedReindex;
 		}
 		let (test_ref_count, _test_sub_index) = tables.get_ref_count().get(address, log)?.unwrap();
@@ -1398,7 +1431,12 @@ impl HashColumn {
 						"Missing table {}, starting reindex",
 						record.table,
 					);
-					let lock = Self::trigger_reindex(tables, reindex, self.path.as_path());
+					let lock = Self::trigger_reindex(
+						tables,
+						reindex,
+						self.path.as_path(),
+						self.max_file_size,
+					);
 					std::mem::drop(lock);
 					return self.validate_plan(LogAction::InsertIndex(record), log)
 				}
@@ -1429,8 +1467,12 @@ impl HashColumn {
 						"Missing ref count {}, starting reindex",
 						record.table,
 					);
-					let lock =
-						Self::trigger_ref_count_reindex(tables, reindex, self.path.as_path());
+					let lock = Self::trigger_ref_count_reindex(
+						tables,
+						reindex,
+						self.path.as_path(),
+						self.max_file_size,
+					);
 					std::mem::drop(lock);
 					return self.validate_plan(LogAction::InsertRefCount(record), log)
 				}

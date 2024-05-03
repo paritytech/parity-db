@@ -34,6 +34,7 @@ pub fn run() -> Result<(), String> {
 		let mut options = parity_db::Options::with_columns(db_path.as_path(), 0);
 		options.columns = metadata.columns;
 		options.salt = Some(metadata.salt);
+		options.max_file_size = metadata.max_file_size;
 		options
 	} else {
 		let mut options = parity_db::Options::with_columns(db_path.as_path(), nb_column);
@@ -47,6 +48,7 @@ pub fn run() -> Result<(), String> {
 	options.sync_wal = !cli.shared().no_sync;
 	options.sync_data = !cli.shared().no_sync;
 	options.stats = cli.shared().with_stats;
+	options.max_file_size = cli.shared().max_file_size;
 	log::debug!("Options: {:?}, {:?}", cli, options);
 	match cli.subcommand {
 		SubCommand::Stats(stat) => {
@@ -184,6 +186,10 @@ pub struct Shared {
 	/// Register stat from those admin operations.
 	#[clap(long)]
 	pub with_stats: bool,
+
+	/// If define use multiple files with a size limit. May have effect on performance.
+	#[clap(long)]
+	pub max_file_size: Option<usize>,
 
 	/// Indicate the number of column, when using
 	/// a new or temporary db, defaults to one.
