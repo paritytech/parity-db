@@ -30,7 +30,7 @@ use std::{
 };
 
 pub const MIN_INDEX_BITS: u8 = 16;
-pub const MIN_REF_COUNT_BITS: u8 = 11;
+pub const MIN_REF_COUNT_BITS: u8 = 16;
 // Measured in index entries
 const MAX_REINDEX_BATCH: usize = 8192;
 
@@ -416,7 +416,7 @@ pub fn unpack_node_data(data: Vec<u8>) -> Result<(Vec<u8>, Children)> {
 		return Err(Error::InvalidValueData)
 	}
 	let data_len = data.len() - (child_buf_len + 1);
-	let mut children = Children::new();
+	let mut children = Children::with_capacity(num_children);
 	for i in 0..num_children {
 		let node_address =
 			u64::from_le_bytes(data[data_len + i * 8..data_len + (i + 1) * 8].try_into().unwrap());
@@ -424,6 +424,25 @@ pub fn unpack_node_data(data: Vec<u8>) -> Result<(Vec<u8>, Children)> {
 	}
 	let data = data.split_at(data_len).0.to_vec();
 	Ok((data, children))
+}
+
+pub fn unpack_node_children(data: &Vec<u8>) -> Result<Children> {
+	if data.len() == 0 {
+		return Err(Error::InvalidValueData)
+	}
+	let num_children = data[data.len() - 1] as usize;
+	let child_buf_len = num_children * 8;
+	if data.len() < (child_buf_len + 1) {
+		return Err(Error::InvalidValueData)
+	}
+	let data_len = data.len() - (child_buf_len + 1);
+	let mut children = Children::with_capacity(num_children);
+	for i in 0..num_children {
+		let node_address =
+			u64::from_le_bytes(data[data_len + i * 8..data_len + (i + 1) * 8].try_into().unwrap());
+		children.push(node_address);
+	}
+	Ok(children)
 }
 
 impl HashColumn {
