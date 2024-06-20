@@ -28,6 +28,13 @@ impl Compress {
 	pub fn new(kind: CompressionType, threshold: u32) -> Self {
 		Compress { inner: kind.into(), threshold }
 	}
+
+	pub fn does_compression(&self) -> bool {
+		match self.inner {
+			Compressor::NoCompression(..) => false,
+			_ => true,
+		}
+	}
 }
 
 pub const NO_COMPRESSION: Compress =
