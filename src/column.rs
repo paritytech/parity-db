@@ -1162,12 +1162,7 @@ impl HashColumn {
 		let data_size = packed_node_size(&node.data, num_children as u8);
 		let mut data: Vec<u8> = Vec::with_capacity(data_size);
 		data.extend_from_slice(&node.data);
-		self.claim_children_to_data_compress(
-			&node.children,
-			tables,
-			node_values,
-			&mut data,
-		)?;
+		self.claim_children_to_data_compress(&node.children, tables, node_values, &mut data)?;
 		data.push(num_children as u8);
 
 		let table_key = TableKey::NoHash;

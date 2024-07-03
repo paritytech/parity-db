@@ -805,7 +805,7 @@ impl ValueTable {
 				))),
 		}
 	}
-	
+
 	pub fn claim_entries(&self, num: usize) -> Result<Vec<u64>> {
 		match &self.free_entries {
 			Some(free_entries) => {
