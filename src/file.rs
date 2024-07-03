@@ -68,7 +68,7 @@ pub fn madvise_random(_map: &mut memmap2::MmapMut) {}
 fn mmap(file: &std::fs::File, len: usize) -> Result<memmap2::MmapMut> {
 	#[cfg(not(test))]
 	const RESERVE_ADDRESS_SPACE: usize = 1024 * 1024 * 1024; // 1 Gb
-														 // Use a different value for tests to work around docker limits on the test machine.
+														  // Use a different value for tests to work around docker limits on the test machine.
 	#[cfg(test)]
 	const RESERVE_ADDRESS_SPACE: usize = 64 * 1024 * 1024; // 64 Mb
 
