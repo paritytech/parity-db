@@ -202,7 +202,7 @@ impl BTreeTable {
 			return Ok(None)
 		}
 		let record_id = 0; // lifetime of Btree is the query, so no invalidate.
-				   // keeping log locked when parsing tree.
+					 // keeping log locked when parsing tree.
 		let tree = BTree::new(Some(btree_header.root), btree_header.depth, record_id);
 		tree.get(key, values, log)
 	}

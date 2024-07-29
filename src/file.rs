@@ -68,7 +68,7 @@ pub fn madvise_random(_map: &mut memmap2::MmapMut) {}
 fn mmap(file: &std::fs::File, len: usize) -> Result<memmap2::MmapMut> {
 	#[cfg(not(test))]
 	const RESERVE_ADDRESS_SPACE: usize = 1024 * 1024 * 1024; // 1 Gb
-														 // Use a different value for tests to work around docker limits on the test machine.
+														  // Use a different value for tests to work around docker limits on the test machine.
 	#[cfg(test)]
 	const RESERVE_ADDRESS_SPACE: usize = 64 * 1024 * 1024; // 64 Mb
 
@@ -96,7 +96,12 @@ pub struct TableFile {
 impl TableFile {
 	pub fn open(filepath: std::path::PathBuf, entry_size: u16, id: TableId) -> Result<Self> {
 		let mut capacity = 0u64;
-		let map = if std::fs::metadata(&filepath).is_ok() {
+		let map = if let Err(error) = std::fs::metadata(&filepath) {
+			match error.kind() {
+				std::io::ErrorKind::NotFound => None,
+				_ => return try_io!(Err(error)),
+			}
+		} else {
 			let file = try_io!(std::fs::OpenOptions::new()
 				.read(true)
 				.write(true)
@@ -113,8 +118,6 @@ impl TableFile {
 			}
 			let map = mmap(&file, len as usize)?;
 			Some((map, file))
-		} else {
-			None
 		};
 		Ok(TableFile {
 			path: filepath,
