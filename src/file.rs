@@ -85,12 +85,6 @@ fn mmap(file: &std::fs::File, _len: usize) -> Result<memmap2::MmapMut> {
 
 const GROW_SIZE_BYTES: u64 = 256 * 1024;
 
-fn test_metadata<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<std::fs::Metadata> {
-	std::fs::metadata(path)
-	//Err(std::io::Error::new(ErrorKind::NotFound, "Test NotFound error"))
-	//Err(std::io::Error::new(ErrorKind::PermissionDenied, "Test other error"))
-}
-
 #[derive(Debug)]
 pub struct TableFile {
 	pub map: RwLock<Option<(memmap2::MmapMut, std::fs::File)>>,
@@ -102,7 +96,7 @@ pub struct TableFile {
 impl TableFile {
 	pub fn open(filepath: std::path::PathBuf, entry_size: u16, id: TableId) -> Result<Self> {
 		let mut capacity = 0u64;
-		let map = if let Err(error) = test_metadata(&filepath) {
+		let map = if let Err(error) = std::fs::metadata(&filepath) {
 			match error.kind() {
 				std::io::ErrorKind::NotFound => None,
 				_ => return try_io!(Err(error)),
