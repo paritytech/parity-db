@@ -538,7 +538,10 @@ impl std::ops::Deref for LogWriterValueGuard<'_> {
 }
 
 impl<'q> LogQuery for LogWriter<'q> {
-	type ValueRef<'a> = LogWriterValueGuard<'a> where Self: 'a;
+	type ValueRef<'a>
+		= LogWriterValueGuard<'a>
+	where
+		Self: 'a;
 	fn with_index<R, F: FnOnce(&IndexChunk) -> R>(
 		&self,
 		table: IndexTableId,

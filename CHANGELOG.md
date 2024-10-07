@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog].
 
 ## [Unreleased]
 
+## [v0.5.0] - 2024-10-03
+
+- Multi tree column option [`#232`](https://github.com/paritytech/parity-db/pull/232)
+
 ## [v0.4.13] - 2024-01-05
 
 - Lock memory map when reading from file [`#234`](https://github.com/paritytech/parity-db/pull/234)
