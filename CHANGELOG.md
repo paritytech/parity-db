@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog].
 
 ## [Unreleased]
 
-## [v0.4.14] - 2024-10-03
+## [v0.5.0] - 2024-10-03
 
 - Multi tree column option [`#232`](https://github.com/paritytech/parity-db/pull/232)
 
