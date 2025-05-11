@@ -681,7 +681,7 @@ mod test {
 		let mut keys = [0u64; CHUNK_ENTRIES];
 		let mut rng = rand::prelude::SmallRng::from_seed(Default::default());
 		for i in 0..CHUNK_ENTRIES {
-			keys[i] = rng.gen();
+			keys[i] = rng.random();
 			let partial_key = Entry::extract_key(keys[i], 18);
 			let e = Entry::new(Address::new(0, 0), partial_key, 18);
 			entries[i] = e;
@@ -763,7 +763,7 @@ mod test {
 		let mut keys = [0u64; CHUNK_ENTRIES];
 		let mut rng = rand::prelude::SmallRng::from_seed(Default::default());
 		for i in 0..CHUNK_ENTRIES {
-			keys[i] = rng.gen();
+			keys[i] = rng.random();
 			let partial_key = Entry::extract_key(keys[i], 18);
 			let e = Entry::new(Address::new(0, 0), partial_key, 18);
 			IndexTable::write_entry(&e, i, &mut chunk);

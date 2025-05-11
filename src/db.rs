@@ -1814,7 +1814,7 @@ impl Db {
 		if let Err(e) = self.inner.kill_logs(&self.inner) {
 			log::warn!(target: "parity-db", "Shutdown error: {:?}", e);
 		}
-		if let Err(e) = self.inner.lock_file.unlock() {
+		if let Err(e) = fs2::FileExt::unlock(&self.inner.lock_file) {
 			log::debug!(target: "parity-db", "Error removing file lock: {:?}", e);
 		}
 	}
@@ -2853,12 +2853,12 @@ mod tests {
 		let mut iter = db.iter(0).unwrap();
 
 		for _ in 0..100 {
-			let at = rng.gen_range(0u64..=1024);
+			let at = rng.random_range(0u64..=1024);
 			iter.seek(&at.to_be_bytes()).unwrap();
 
-			let mut prev_run: bool = rng.gen();
+			let mut prev_run: bool = rng.random();
 			let at = if prev_run {
-				let take = rng.gen_range(1..100);
+				let take = rng.random_range(1..100);
 				let got = std::iter::from_fn(|| iter.next().unwrap())
 					.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
 					.take(take)
@@ -2877,7 +2877,7 @@ mod tests {
 			};
 
 			let at = {
-				let take = rng.gen_range(1..100);
+				let take = rng.random_range(1..100);
 				let got = std::iter::from_fn(|| iter.prev().unwrap())
 					.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
 					.take(take)
@@ -2895,7 +2895,7 @@ mod tests {
 				expected.last().copied().unwrap_or(at)
 			};
 
-			let take = rng.gen_range(1..100);
+			let take = rng.random_range(1..100);
 			let mut got = std::iter::from_fn(|| iter.next().unwrap())
 				.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
 				.take(take)
@@ -2910,7 +2910,7 @@ mod tests {
 			assert_eq!(got, expected);
 		}
 
-		let take = rng.gen_range(20..100);
+		let take = rng.random_range(20..100);
 		iter.seek_to_last().unwrap();
 		let got = std::iter::from_fn(|| iter.prev().unwrap())
 			.map(|(k, _)| u64::from_be_bytes(k.try_into().unwrap()))
@@ -3007,7 +3007,7 @@ mod tests {
 
 	#[test]
 	fn test_random() {
-		fdlimit::raise_fd_limit();
+		fdlimit::raise_fd_limit().unwrap();
 		for i in 0..100 {
 			test_random_inner(60, 60, i);
 		}

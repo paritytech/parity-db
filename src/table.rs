@@ -1414,7 +1414,7 @@ mod test {
 	fn value(size: usize) -> Value {
 		use rand::RngCore;
 		let mut result = vec![0; size];
-		rand::thread_rng().fill_bytes(&mut result);
+		rand::rng().fill_bytes(&mut result);
 		result
 	}
 

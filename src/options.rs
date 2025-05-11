@@ -250,7 +250,7 @@ impl Options {
 			}
 			Ok(meta)
 		} else if create {
-			let s: Salt = self.salt.unwrap_or_else(|| rand::thread_rng().gen());
+			let s: Salt = self.salt.unwrap_or_else(|| rand::rng().random());
 			self.write_metadata(&self.path, &s)?;
 			Ok(Metadata { version: CURRENT_VERSION, columns: self.columns.clone(), salt: s })
 		} else {
