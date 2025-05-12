@@ -10,7 +10,7 @@
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 fn main() {
-	fdlimit::raise_fd_limit();
+	fdlimit::raise_fd_limit().unwrap();
 
 	parity_db_admin::run().unwrap();
 }

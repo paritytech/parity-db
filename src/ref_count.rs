@@ -479,8 +479,8 @@ mod test {
 		let mut addresses = [0u64; CHUNK_ENTRIES];
 		let mut rng = rand::prelude::SmallRng::from_seed(Default::default());
 		for i in 0..CHUNK_ENTRIES {
-			addresses[i] = rng.gen();
-			let ref_count = rng.gen();
+			addresses[i] = rng.random();
+			let ref_count = rng.random();
 			let e = Entry::new(Address::from_u64(addresses[i]), ref_count);
 			entries[i] = e;
 			RefCountTable::write_entry(&e, i, &mut chunk);
@@ -528,8 +528,8 @@ mod test {
 		let mut addresses = [0u64; CHUNK_ENTRIES];
 		let mut rng = rand::prelude::SmallRng::from_seed(Default::default());
 		for i in 0..CHUNK_ENTRIES {
-			addresses[i] = rng.gen();
-			let ref_count = rng.gen();
+			addresses[i] = rng.random();
+			let ref_count = rng.random();
 			let e = Entry::new(Address::from_u64(addresses[i]), ref_count);
 			RefCountTable::write_entry(&e, i, &mut chunk);
 		}
