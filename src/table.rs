@@ -19,10 +19,10 @@
 // VALUE: payload bytes.
 //
 // Partial entry (first part):
-// [MULTIHEAD: 2][NEXT: 8][REFS: 4][KEY: 26][VALUE]
+// [MULTIHEAD: 2][SIZE: 8][NEXT: 8][REFS: 4][KEY: 26][VALUE]
 // MULTIHEAD - Split entry head marker. 0xfffd.
+// SIZE - 64-bit total size of the value.
 // NEXT - 64-bit index of the entry that holds the next part.
-// take all available space in this entry.
 // REF: 32-bit reference counter (optional).
 // KEY: lower 26 bytes of the key (optional for btree nodes).
 // VALUE: The rest of the entry is filled with payload bytes.
@@ -183,8 +183,8 @@ pub type FullEntry = Entry<Vec<u8>>;
 #[cfg(not(feature = "loom"))]
 pub type FullEntry = Entry<[u8; MAX_ENTRY_BUF_SIZE]>;
 pub type EntryRef<'a> = Entry<&'a [u8]>;
-type PartialEntry = Entry<[u8; 10]>;
-type PartialKeyEntry = Entry<[u8; 40]>; // 2 + 4 + 26 + 8
+type PartialEntry = Entry<[u8; 18]>;
+type PartialKeyEntry = Entry<[u8; 48]>; // 2 + 8 + 4 + 26 + 8
 
 impl<const C: usize> Entry<[u8; C]> {
 	#[inline(always)]
@@ -232,6 +232,10 @@ impl<B: AsRef<[u8]>> Entry<B> {
 
 	pub fn offset(&self) -> usize {
 		self.0
+	}
+
+	pub fn size(&self) -> usize {
+		self.1.as_ref().len() - self.0
 	}
 
 	pub fn read_slice(&mut self, size: usize) -> &[u8] {
@@ -306,10 +310,6 @@ impl<B: AsRef<[u8]>> Entry<B> {
 
 	fn read_partial(&mut self) -> &[u8] {
 		self.read_slice(PARTIAL_SIZE)
-	}
-
-	fn remaining_to(&self, end: usize) -> &[u8] {
-		&self.1.as_ref()[self.0..end]
 	}
 }
 
@@ -498,19 +498,132 @@ impl ValueTable {
 		}
 	}
 
+	#[inline(always)]
+	fn parse_head(
+		&self,
+		key: &mut TableKeyQuery,
+		index: u64,
+		mut buf: &mut EntryRef,
+	) -> Result<(u32, Option<u64>, u64, u16, bool)> {
+		// ref counter, total size, next, first part size, compressed
+		let mut compressed = false;
+		let mut rc = 1;
+		let entry_size = self.entry_size as usize;
+		let mut total_size = None;
+
+		if buf.is_tombstone() {
+			return Ok((0, None, 0, 0, false))
+		}
+
+		if self.multipart && !buf.is_multihead() {
+			// This may only happen during value iteration.
+			return Ok((0, None, 0, 0, false))
+		}
+
+		let (mut size, next) = if self.multipart && buf.is_multi(self.db_version) {
+			if self.db_version > 6 && buf.is_multihead_compressed() {
+				compressed = true;
+			}
+			buf.skip_size();
+			let mut buf_size = entry_size - SIZE_SIZE - INDEX_SIZE;
+			if self.db_version > 8 {
+				total_size = Some(buf.read_u64());
+				buf_size -= 8;
+			}
+			let next = buf.read_next();
+			(buf_size as u16, next)
+		} else {
+			let (size, read_compressed) = buf.read_size();
+			compressed = read_compressed;
+			total_size = Some(size as u64);
+			(size, 0)
+		};
+
+		if self.ref_counted {
+			if size < REFS_SIZE as u16 {
+				return Err(crate::error::Error::Corruption(format!(
+					"{}: Corrupted entry at {}. Size {}, expected at least {}",
+					self.id, index, size, REFS_SIZE,
+				)))
+			}
+			size -= REFS_SIZE as u16;
+			rc = buf.read_rc();
+		}
+		match key {
+			TableKeyQuery::Fetch(Some(to_fetch)) => {
+				size -= PARTIAL_SIZE as u16;
+				**to_fetch = TableKey::fetch_partial(&mut buf);
+			},
+			TableKeyQuery::Fetch(None) => (),
+			TableKeyQuery::Check(k) => {
+				size -= k.encoded_size() as u16;
+				let to_fetch = k.fetch(&mut buf);
+				if !k.compare(&to_fetch) {
+					log::debug!(
+						target: "parity-db",
+						"{}: Key mismatch at {}. Expected {}, got {:?}, size = {}",
+						self.id,
+						index,
+						k,
+						to_fetch.as_ref().map(hex),
+						self.entry_size,
+					);
+					return Ok((0, total_size, 0, 0, false))
+				}
+			},
+		}
+
+		Ok((rc, total_size, next, size, compressed))
+	}
+
+	// Return ref counter, size, partial key and if the value is compressed.
+	#[inline(always)]
+	fn entry_info(
+		&self,
+		key: &mut TableKeyQuery,
+		index: u64,
+		log: &impl LogQuery,
+	) -> Result<(u32, Option<u64>, bool)> {
+		let entry_size = self.entry_size as usize;
+
+		let vbuf = log.value_ref(self.id, index);
+		let buf: LockedSlice<_, _> = if let Some(buf) = vbuf.as_deref() {
+			log::trace!(
+				target: "parity-db",
+				"{}: Found in overlay {}",
+				self.id,
+				index,
+			);
+			LockedSlice::FromOverlay(buf)
+		} else {
+			log::trace!(
+				target: "parity-db",
+				"{}: Query slot {}",
+				self.id,
+				index,
+			);
+			let vbuf = self.file.slice_at(index * self.entry_size as u64, entry_size);
+			LockedSlice::FromFile(vbuf)
+		};
+		let mut buf = EntryRef::new(buf.as_slice());
+		let (rc, total_size, _next, _size, compressed) = self.parse_head(key, index, &mut buf)?;
+		Ok((rc, total_size, compressed))
+	}
+
 	// Return ref counter, partial key and if the value is compressed.
 	#[inline(always)]
-	fn for_parts(
+	fn read(
 		&self,
 		key: &mut TableKeyQuery,
 		mut index: u64,
 		log: &impl LogQuery,
-		mut f: impl FnMut(&[u8]) -> bool,
-	) -> Result<(u32, bool)> {
+		//mut f: impl FnMut(&[u8]) -> bool,
+	) -> Result<(u32, bool, Vec<u8>)> {
 		let mut part = 0;
 		let mut compressed = false;
 		let mut rc = 1;
 		let entry_size = self.entry_size as usize;
+		let mut result = Vec::new();
 		loop {
 			let vbuf = log.value_ref(self.id, index);
 			let buf: LockedSlice<_, _> = if let Some(buf) = vbuf.as_deref() {
@@ -533,67 +646,41 @@ impl ValueTable {
 			};
 			let mut buf = EntryRef::new(buf.as_slice());
 
-			if buf.is_tombstone() {
-				return Ok((0, false))
-			}
-
-			if self.multipart && part == 0 && !buf.is_multihead() {
-				// This may only happen during value iteration.
-				return Ok((0, false))
-			}
-
-			let (entry_end, next) = if self.multipart && buf.is_multi(self.db_version) {
-				if part == 0 && self.db_version > 6 && buf.is_multihead_compressed() {
-					compressed = true;
+			let (buf_size, next) = {
+				if part == 0 {
+					let (hrc, total_size, n, s, c) = self.parse_head(key, index, &mut buf)?;
+					if hrc == 0 {
+						return Ok((0, false, vec![]));
+					}
+					rc = hrc;
+					if let Some(s) = total_size {
+						result.reserve(s as usize);
+					}
+					compressed = c;
+					(s as usize, n)
+				} else {
+					if self.multipart && buf.is_multi(self.db_version) {
+						buf.skip_size();
+						let next = buf.read_next();
+						(entry_size - SIZE_SIZE - INDEX_SIZE, next)
+					} else {
+						let (size, read_compressed) = buf.read_size();
+						if part == 0 || self.db_version <= 6 {
+							compressed = read_compressed;
+						}
+						(size as usize, 0)
+					}
 				}
-				buf.skip_size();
-				let next = buf.read_next();
-				(entry_size, next)
-			} else {
-				let (size, read_compressed) = buf.read_size();
-				if part == 0 || self.db_version <= 6 {
-					compressed = read_compressed;
-				}
-				(buf.offset() + size as usize, 0)
 			};
 
-			if part == 0 {
-				if self.ref_counted {
-					rc = buf.read_rc();
-				}
-				match key {
-					TableKeyQuery::Fetch(Some(to_fetch)) => {
-						**to_fetch = TableKey::fetch_partial(&mut buf)?;
-					},
-					TableKeyQuery::Fetch(None) => (),
-					TableKeyQuery::Check(k) => {
-						let to_fetch = k.fetch(&mut buf)?;
-						if !k.compare(&to_fetch) {
-							log::debug!(
-								target: "parity-db",
-								"{}: Key mismatch at {}. Expected {}, got {:?}, size = {}",
-								self.id,
-								index,
-								k,
-								to_fetch.as_ref().map(hex),
-								self.entry_size,
-							);
-							return Ok((0, false))
-						}
-					},
-				}
-			}
-
-			if buf.offset() > entry_end {
+			if buf.size() < buf_size {
 				return Err(crate::error::Error::Corruption(format!(
 					"Unexpected entry size. Expected at least {} bytes",
-					buf.offset() - 2
+					buf_size
 				)))
 			}
 
-			if !f(buf.remaining_to(entry_end)) {
-				break
-			};
+			result.extend_from_slice(buf.read_slice(buf_size));
 
 			if next == 0 {
 				break
@@ -601,7 +688,7 @@ impl ValueTable {
 			part += 1;
 			index = next;
 		}
-		Ok((rc, compressed))
+		Ok((rc, compressed, result))
 	}
 
 	pub fn get(
@@ -632,11 +719,7 @@ impl ValueTable {
 		index: u64,
 		log: &impl LogQuery,
 	) -> Result<Option<(Value, bool, u32)>> {
-		let mut result = Vec::new();
-		let (rc, compressed) = self.for_parts(key, index, log, |buf| {
-			result.extend_from_slice(buf);
-			true
-		})?;
+		let (rc, compressed, result) = self.read(key, index, log)?;
 		if rc > 0 {
 			return Ok(Some((result, compressed, rc)))
 		}
@@ -664,14 +747,14 @@ impl ValueTable {
 		index: u64,
 		log: &impl LogQuery,
 	) -> Result<Option<(u32, bool)>> {
-		let mut result = 0;
-		let (rc, compressed) =
-			self.for_parts(&mut TableKeyQuery::Check(key), index, log, |buf| {
-				result += buf.len() as u32;
-				true
-			})?;
+		let (rc, size, compressed) = self.entry_info(&mut TableKeyQuery::Check(key), index, log)?;
 		if rc > 0 {
-			return Ok(Some((result, compressed)))
+			if let Some(size) = size {
+				return Ok(Some((size as u32, compressed)))
+			}
+			return self
+				.read(&mut TableKeyQuery::Check(key), index, log)
+				.map(|(_rc, compressed, value)| Some((value.len() as u32, compressed)))
 		}
 		Ok(None)
 	}
@@ -692,10 +775,8 @@ impl ValueTable {
 		log: &impl LogQuery,
 	) -> Result<Option<[u8; PARTIAL_SIZE]>> {
 		let mut query_key = Default::default();
-		let (rc, _compressed) =
-			self.for_parts(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index, log, |_buf| {
-				false
-			})?;
+		let (rc, _size, _compressed) =
+			self.entry_info(&mut TableKeyQuery::Fetch(Some(&mut query_key)), index, log)?;
 		Ok(if rc == 0 { None } else { Some(query_key) })
 	}
 
@@ -734,6 +815,9 @@ impl ValueTable {
 		}
 		if self.multipart && buf.is_multi(self.db_version) {
 			buf.skip_size();
+			if self.db_version > 8 && buf.is_multihead() {
+				buf.skip_u64();
+			}
 			let next = buf.read_next();
 			return Ok(Some(next))
 		}
@@ -850,7 +934,7 @@ impl ValueTable {
 				key,
 			);
 			let mut buf = FullEntry::new_uninit_full_entry();
-			let free_space = self.entry_size as usize - SIZE_SIZE;
+			let mut free_space = self.entry_size as usize - SIZE_SIZE;
 			let value_len = if remainder > free_space {
 				if !follow {
 					next_index = self.next_free(log)?
@@ -860,6 +944,10 @@ impl ValueTable {
 						buf.write_multihead_compressed();
 					} else {
 						buf.write_multihead();
+					}
+					if self.db_version > 8 {
+						free_space -= 8;
+						buf.write_u64(value.len() as u64);
 					}
 				} else {
 					buf.write_multipart();
@@ -1016,6 +1104,9 @@ impl ValueTable {
 
 		let size = if self.multipart && buf.is_multi(self.db_version) {
 			buf.skip_size();
+			if self.db_version > 8 && buf.is_multihead() {
+				buf.skip_u64();
+			}
 			buf.skip_next();
 			self.entry_size as usize
 		} else {
@@ -1167,20 +1258,10 @@ impl ValueTable {
 	) -> Result<()> {
 		let written = self.written.load(Ordering::Relaxed);
 		for index in 1..written {
-			let mut result = Vec::new();
-			// expect only indexed key.
 			let mut _fetch_key = Default::default();
-			match self.for_parts(
-				&mut TableKeyQuery::Fetch(Some(&mut _fetch_key)),
-				index,
-				log,
-				|buf| {
-					result.extend_from_slice(buf);
-					true
-				},
-			) {
-				Ok((rc, compressed)) =>
-					if rc > 0 && !f(index, rc, result, compressed) {
+			match self.read(&mut TableKeyQuery::Fetch(Some(&mut _fetch_key)), index, log) {
+				Ok((rc, compressed, value)) =>
+					if rc > 0 && !f(index, rc, value, compressed) {
 						break
 					},
 				Err(crate::error::Error::InvalidValueData) => (), // ignore, can be external index.
@@ -1267,7 +1348,7 @@ impl ValueTable {
 
 pub mod key {
 	use super::{EntryRef, FullEntry};
-	use crate::{Key, Result};
+	use crate::Key;
 
 	pub const PARTIAL_SIZE: usize = 26;
 
@@ -1300,20 +1381,17 @@ pub mod key {
 			}
 		}
 
-		pub fn fetch_partial<'a>(buf: &mut EntryRef<'a>) -> Result<[u8; PARTIAL_SIZE]> {
+		pub fn fetch_partial<'a>(buf: &mut EntryRef<'a>) -> [u8; PARTIAL_SIZE] {
 			let mut result = [0u8; PARTIAL_SIZE];
-			if buf.1.len() >= PARTIAL_SIZE {
-				let pks = buf.read_partial();
-				result.copy_from_slice(pks);
-				return Ok(result)
-			}
-			Err(crate::error::Error::InvalidValueData)
+			let pks = buf.read_partial();
+			result.copy_from_slice(pks);
+			result
 		}
 
-		pub fn fetch<'a>(&self, buf: &mut EntryRef<'a>) -> Result<Option<[u8; PARTIAL_SIZE]>> {
+		pub fn fetch<'a>(&self, buf: &mut EntryRef<'a>) -> Option<[u8; PARTIAL_SIZE]> {
 			match self {
-				TableKey::Partial(_k) => Ok(Some(Self::fetch_partial(buf)?)),
-				TableKey::NoHash => Ok(None),
+				TableKey::Partial(_k) => Some(Self::fetch_partial(buf)),
+				TableKey::NoHash => None,
 			}
 		}
 

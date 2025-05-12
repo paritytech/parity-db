@@ -275,6 +275,7 @@ impl DbInner {
 				if let Some(v) = overlay.get(col as usize).and_then(|o| o.get(&key)) {
 					return Ok(v.map(|i| i.value().clone()))
 				}
+				std::mem::drop(overlay);
 				// Go into tables and log overlay.
 				let log = self.log.overlays();
 				Ok(column.get(&key, log)?.map(|(v, _rc)| v))
@@ -284,6 +285,7 @@ impl DbInner {
 				if let Some(l) = overlay.get(col as usize).and_then(|o| o.btree_get(key)) {
 					return Ok(l.map(|i| i.value().clone()))
 				}
+				std::mem::drop(overlay);
 				// We lock log, if btree structure changed while reading that would be an issue.
 				let log = self.log.overlays().read();
 				column.with_locked(|btree| BTreeTable::get(key, &*log, btree))

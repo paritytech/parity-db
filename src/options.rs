@@ -9,9 +9,10 @@ use crate::{
 use rand::Rng;
 use std::{collections::HashMap, path::Path};
 
-pub const CURRENT_VERSION: u32 = 8;
+pub const CURRENT_VERSION: u32 = 9;
 // TODO on last supported 5, remove MULTIHEAD_V4 and MULTIPART_V4
 // TODO on last supported 8, remove XOR with salt in column::hash
+// TODO on last supported 9, remove MULTIHEAD_V8
 const LAST_SUPPORTED_VERSION: u32 = 4;
 
 pub const DEFAULT_COMPRESSION_THRESHOLD: u32 = 4096;
