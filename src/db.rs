@@ -2058,8 +2058,8 @@ impl<K: AsRef<[u8]>, Value> Operation<K, Value> {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum NodeChange {
-	/// (address, value)
-	NewValue(u64, RcValue),
+	/// (address, value, compressed value, compressed)
+	NewValue(u64, RcValue, RcValue, bool),
 	/// (address)
 	IncrementReference(u64),
 	/// Dereference and remove any of the children in the tree
@@ -2164,7 +2164,7 @@ impl IndexedChangeSet {
 			}
 		}
 		for change in self.node_changes.iter() {
-			if let NodeChange::NewValue(address, val) = change {
+			if let NodeChange::NewValue(address, val, _cval, _compressed) = change {
 				*bytes += val.value().len();
 				overlay.address.insert(*address, (record_id, val.clone()));
 			}
@@ -2197,11 +2197,11 @@ impl IndexedChangeSet {
 		}
 		for change in self.node_changes.iter() {
 			match change {
-				NodeChange::NewValue(address, val) => {
+				NodeChange::NewValue(address, val, cval, compressed) => {
 					column.write_address_value_plan(
 						*address,
-						val.clone(),
-						false,
+						cval.clone(),
+						*compressed,
 						val.value().len() as u32,
 						writer,
 					)?;
@@ -2291,7 +2291,7 @@ impl IndexedChangeSet {
 			}
 		}
 		for change in self.node_changes.iter() {
-			if let NodeChange::NewValue(address, _val) = change {
+			if let NodeChange::NewValue(address, _val, _cval, _compressed) = change {
 				if let Entry::Occupied(e) = overlay.address.entry(*address) {
 					if e.get().0 == record_id {
 						e.remove_entry();

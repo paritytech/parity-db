@@ -861,6 +861,35 @@ impl ValueTable {
 		Ok(index)
 	}
 
+	pub fn claim_next_free(&self) -> Result<u64> {
+		match &self.free_entries {
+			Some(free_entries) => {
+				let mut free_entries = free_entries.write();
+
+				let filled = self.filled.load(Ordering::Relaxed);
+				let last_removed = self.last_removed.load(Ordering::Relaxed);
+				let index = if last_removed != 0 {
+					let last = free_entries.stack.pop().unwrap();
+					debug_assert_eq!(last, last_removed);
+
+					let next_removed = *free_entries.stack.last().unwrap_or(&0u64);
+
+					self.last_removed.store(next_removed, Ordering::Relaxed);
+					last_removed
+				} else {
+					self.filled.store(filled + 1, Ordering::Relaxed);
+					filled
+				};
+				self.dirty_header.store(true, Ordering::Relaxed);
+				Ok(index)
+			},
+			None =>
+				return Err(crate::error::Error::InvalidConfiguration(format!(
+					"claim_next_free called without free_entries"
+				))),
+		}
+	}
+
 	pub fn claim_entries(&self, num: usize) -> Result<Vec<u64>> {
 		match &self.free_entries {
 			Some(free_entries) => {

@@ -1120,10 +1120,76 @@ impl HashColumn {
 
 		// Can't support compression as we need to know the size earlier to get the tier.
 		let val: RcValue = data.into();
+		let cval = val.clone();
+		let compressed = false;
 
 		let address = Address::new(offset, target_tier as u8);
 
-		node_values.push(NodeChange::NewValue(address.as_u64(), val));
+		node_values.push(NodeChange::NewValue(address.as_u64(), val, cval, compressed));
+
+		Ok(address.as_u64())
+	}
+
+	fn claim_children_to_data_compress(
+		&self,
+		children: &Vec<NodeRef>,
+		tables: TablesRef,
+		node_values: &mut Vec<NodeChange>,
+		data: &mut Vec<u8>,
+	) -> Result<()> {
+		for child in children {
+			let address = match child {
+				NodeRef::New(node) => self.claim_node_compress(node, tables, node_values)?,
+				NodeRef::Existing(address) => {
+					if !self.append_only {
+						node_values.push(NodeChange::IncrementReference(*address));
+					}
+					*address
+				},
+			};
+			data.extend_from_slice(&address.to_le_bytes());
+		}
+		Ok(())
+	}
+
+	fn claim_node_compress(
+		&self,
+		node: &NewNode,
+		tables: TablesRef,
+		node_values: &mut Vec<NodeChange>,
+	) -> Result<NodeAddress> {
+		let num_children = node.children.len();
+		let data_size = packed_node_size(&node.data, num_children as u8);
+		let mut data: Vec<u8> = Vec::with_capacity(data_size);
+		data.extend_from_slice(&node.data);
+		self.claim_children_to_data_compress(&node.children, tables, node_values, &mut data)?;
+		data.push(num_children as u8);
+
+		let table_key = TableKey::NoHash;
+
+		let (cval, target_tier) =
+			Column::compress(tables.compression, &table_key, data.as_ref(), tables.tables);
+		let (cval, compressed) = cval
+			.as_ref()
+			.map(|cval| (cval.as_slice(), true))
+			.unwrap_or((data.as_ref(), false));
+
+		let cval: RcValue = cval.to_vec().into();
+		let val = if compressed { data.into() } else { cval.clone() };
+
+		assert!(
+			(target_tier >= (SIZE_TIERS - 1)) ||
+				cval.value().len() <=
+					tables.tables[target_tier].value_size(&table_key).unwrap() as usize
+		);
+
+		// Check it isn't multipart
+		//assert!(target_tier < (SIZE_TIERS - 1));
+
+		let offset = tables.tables[target_tier].claim_next_free()?;
+		let address = Address::new(offset, target_tier as u8);
+
+		node_values.push(NodeChange::NewValue(address.as_u64(), val, cval, compressed));
 
 		Ok(address.as_u64())
 	}
@@ -1139,32 +1205,48 @@ impl HashColumn {
 
 				let values = self.as_ref(&tables.value);
 
-				let mut tier_count: HashMap<usize, usize> = Default::default();
-				self.prepare_children(&node.children, values, &mut tier_count)?;
-
-				let mut tier_addresses: HashMap<usize, Vec<u64>> = Default::default();
-				let mut tier_index: HashMap<usize, usize> = Default::default();
-				for (tier, count) in tier_count {
-					let offsets = values.tables[tier].claim_entries(count)?;
-					tier_addresses.insert(tier, offsets);
-					tier_index.insert(tier, 0);
-				}
-
 				let mut node_values: Vec<NodeChange> = Default::default();
 
 				let num_children = node.children.len();
-				let data_size = packed_node_size(&node.data, num_children as u8);
-				let mut data: Vec<u8> = Vec::with_capacity(data_size);
-				data.extend_from_slice(&node.data);
-				self.claim_children_to_data(
-					&node.children,
-					values,
-					&tier_addresses,
-					&mut tier_index,
-					&mut node_values,
-					&mut data,
-				)?;
-				data.push(num_children as u8);
+
+				let data = if values.compression.does_compression() {
+					let data_size = packed_node_size(&node.data, num_children as u8);
+					let mut data: Vec<u8> = Vec::with_capacity(data_size);
+					data.extend_from_slice(&node.data);
+					self.claim_children_to_data_compress(
+						&node.children,
+						values,
+						&mut node_values,
+						&mut data,
+					)?;
+					data.push(num_children as u8);
+					data
+				} else {
+					let mut tier_count: HashMap<usize, usize> = Default::default();
+					self.prepare_children(&node.children, values, &mut tier_count)?;
+
+					let mut tier_addresses: HashMap<usize, Vec<u64>> = Default::default();
+					let mut tier_index: HashMap<usize, usize> = Default::default();
+					for (tier, count) in tier_count {
+						let offsets = values.tables[tier].claim_entries(count)?;
+						tier_addresses.insert(tier, offsets);
+						tier_index.insert(tier, 0);
+					}
+
+					let data_size = packed_node_size(&node.data, num_children as u8);
+					let mut data: Vec<u8> = Vec::with_capacity(data_size);
+					data.extend_from_slice(&node.data);
+					self.claim_children_to_data(
+						&node.children,
+						values,
+						&tier_addresses,
+						&mut tier_index,
+						&mut node_values,
+						&mut data,
+					)?;
+					data.push(num_children as u8);
+					data
+				};
 
 				return Ok((data, node_values))
 			},
