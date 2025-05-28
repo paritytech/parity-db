@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog].
 
 ## [Unreleased]
 
+## [v0.5.2] - 2024-05-28
+
+- Compilation support for riscv64
+
+## [v0.5.1] - 2025-05-14
+
+- Optimized large value storage to store full value size in the header
+
 ## [v0.5.0] - 2024-10-03
 
 - Multi tree column option [`#232`](https://github.com/paritytech/parity-db/pull/232)
