@@ -111,10 +111,6 @@ impl ColumnOptions {
 			log::error!(target: "parity-db", "`ref_counted` option is redundant when `append_only` is enabled");
 			return false
 		}
-		if self.multitree && self.compression != CompressionType::NoCompression {
-			log::error!(target: "parity-db", "Compression is not currently supported with multitree columns");
-			return false
-		}
 		true
 	}
 
