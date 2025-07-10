@@ -1570,7 +1570,9 @@ impl Db {
 		self.inner.commit_changes(tx)
 	}
 
-	/// Commit a set of changes to the database without copying the values.
+	/// Commit a set of changes to the database.
+	///
+	/// This method passes values as `Arc<Vec<u8>>` potentially eliminating an extra copy.
 	pub fn commit_changes_shared<I>(&self, tx: I) -> Result<()>
 	where
 		I: IntoIterator<Item = (ColId, Operation<Vec<u8>, Arc<Vec<u8>>>)>,
