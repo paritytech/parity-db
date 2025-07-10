@@ -572,7 +572,7 @@ impl DbInner {
 							Operation::ReferenceTree(..) => {
 								if !self.options.columns[col as usize].append_only {
 									let root_operation =
-										Operation::<&[u8], V>::Reference(change.key());
+										Operation::<&_, V>::Reference(change.key());
 									commit
 										.indexed
 										.entry(col)
@@ -584,13 +584,13 @@ impl DbInner {
 								if self.options.columns[col as usize].append_only {
 									return Err(Error::InvalidConfiguration("Attempting to dereference a tree from an append_only column.".to_string()))
 								}
-								let value = self.get(col, key.as_ref(), false)?;
+								let value = self.get(col, &key, false)?;
 								if let Some(data) = value {
 									let root_data = unpack_node_data(data)?;
 									let children = root_data.1;
 									let salt = self.options.salt.unwrap_or_default();
 									let hash = hash_key(
-										key.as_ref(),
+										&key,
 										&salt,
 										self.options.columns[col as usize].uniform,
 										self.db_version,

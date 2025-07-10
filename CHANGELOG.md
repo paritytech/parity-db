@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog].
 
 ## [Unreleased]
 
+- Add `Db::commit_changes_shared` that passes values as `Arc<Vec<u8>>`, potentially without an extra copy.
+
 ## [v0.5.2] - 2024-05-28
 
 - Compilation support for riscv64
