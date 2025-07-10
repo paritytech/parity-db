@@ -1129,9 +1129,9 @@ impl HashColumn {
 	}
 
 	/// returns value for the root node and vector of NodeChange for nodes.
-	pub fn claim_tree_values(
+	pub fn claim_tree_values<K, V>(
 		&self,
-		change: &Operation<Value, Value>,
+		change: &Operation<K, V>,
 	) -> Result<(Vec<u8>, Vec<NodeChange>)> {
 		match change {
 			Operation::InsertTree(_key, node) => {

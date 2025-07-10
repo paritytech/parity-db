@@ -383,7 +383,10 @@ pub mod commit_overlay {
 			BTreeChangeSet { col, changes: Default::default() }
 		}
 
-		pub fn push(&mut self, change: Operation<Value, Value>) -> Result<()> {
+		pub fn push<K: Into<RcKey>, V: Into<RcValue>>(
+			&mut self,
+			change: Operation<K, V>,
+		) -> Result<()> {
 			// No key hashing
 			self.changes.push(match change {
 				Operation::Set(k, v) => Operation::Set(k.into(), v.into()),

@@ -103,6 +103,12 @@ impl From<Value> for RcValue {
 	}
 }
 
+impl From<Arc<Value>> for RcValue {
+	fn from(value: Arc<Value>) -> Self {
+		Self(value)
+	}
+}
+
 #[cfg(test)]
 impl<const N: usize> TryFrom<RcValue> for [u8; N] {
 	type Error = <[u8; N] as TryFrom<Vec<u8>>>::Error;
@@ -495,9 +501,10 @@ impl DbInner {
 		}))
 	}
 
-	fn commit_changes<I>(&self, tx: I) -> Result<()>
+	fn commit_changes<I, V>(&self, tx: I) -> Result<()>
 	where
-		I: IntoIterator<Item = (ColId, Operation<Vec<u8>, Vec<u8>>)>,
+		I: IntoIterator<Item = (ColId, Operation<Vec<u8>, V>)>,
+		V: Into<RcValue>,
 	{
 		let mut commit: CommitChangeSet = Default::default();
 		for (col, change) in tx.into_iter() {
@@ -564,7 +571,8 @@ impl DbInner {
 							},
 							Operation::ReferenceTree(..) => {
 								if !self.options.columns[col as usize].append_only {
-									let root_operation = Operation::Reference(change.key());
+									let root_operation =
+										Operation::<&[u8], V>::Reference(change.key());
 									commit
 										.indexed
 										.entry(col)
@@ -576,13 +584,13 @@ impl DbInner {
 								if self.options.columns[col as usize].append_only {
 									return Err(Error::InvalidConfiguration("Attempting to dereference a tree from an append_only column.".to_string()))
 								}
-								let value = self.get(col, &key, false)?;
+								let value = self.get(col, key.as_ref(), false)?;
 								if let Some(data) = value {
 									let root_data = unpack_node_data(data)?;
 									let children = root_data.1;
 									let salt = self.options.salt.unwrap_or_default();
 									let hash = hash_key(
-										&key,
+										key.as_ref(),
 										&salt,
 										self.options.columns[col as usize].uniform,
 										self.db_version,
@@ -1562,6 +1570,14 @@ impl Db {
 		self.inner.commit_changes(tx)
 	}
 
+	/// Commit a set of changes to the database without copying the values.
+	pub fn commit_changes_shared<I>(&self, tx: I) -> Result<()>
+	where
+		I: IntoIterator<Item = (ColId, Operation<Vec<u8>, Arc<Vec<u8>>>)>,
+	{
+		self.inner.commit_changes(tx)
+	}
+
 	pub(crate) fn commit_raw(&self, commit: CommitChangeSet) -> Result<()> {
 		self.inner.commit_raw(commit)
 	}
@@ -2091,9 +2107,9 @@ impl IndexedChangeSet {
 		}
 	}
 
-	fn push<K: AsRef<[u8]>>(
+	fn push<K: AsRef<[u8]>, V: Into<RcValue>>(
 		&mut self,
-		change: Operation<K, Vec<u8>>,
+		change: Operation<K, V>,
 		options: &Options,
 		db_version: u32,
 	) -> Result<()> {
