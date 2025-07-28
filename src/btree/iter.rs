@@ -147,7 +147,7 @@ impl<'a> BTreeIterator<'a> {
 			};
 			let result = match (next_commit_overlay, next_backend) {
 				(Some((commit_key, commit_value)), Some((backend_key, backend_value))) => {
-					match (direction, commit_key.value().cmp(&backend_key)) {
+					match (direction, commit_key.as_ref().cmp(&backend_key)) {
 						(IterDirection::Backward, std::cmp::Ordering::Greater) |
 						(IterDirection::Forward, std::cmp::Ordering::Less) => {
 							self.pending_backend = Some(PendingBackend {
@@ -155,9 +155,9 @@ impl<'a> BTreeIterator<'a> {
 								direction,
 							});
 							if let Some(value) = commit_value {
-								Some((commit_key.value().clone(), value.value().clone()))
+								Some((commit_key.as_ref().to_vec(), value.as_ref().to_vec()))
 							} else {
-								self.last_key = LastKey::At(commit_key.value().clone());
+								self.last_key = LastKey::At(commit_key.as_ref().to_vec());
 								continue
 							}
 						},
@@ -165,20 +165,20 @@ impl<'a> BTreeIterator<'a> {
 						(IterDirection::Forward, std::cmp::Ordering::Greater) => Some((backend_key, backend_value)),
 						(_, std::cmp::Ordering::Equal) =>
 							if let Some(value) = commit_value {
-								Some((backend_key, value.value().clone()))
+								Some((backend_key, value.as_ref().to_vec()))
 							} else {
-								self.last_key = LastKey::At(commit_key.value().clone());
+								self.last_key = LastKey::At(commit_key.as_ref().to_vec());
 								continue
 							},
 					}
 				},
 				(Some((commit_key, Some(commit_value))), None) => {
 					self.pending_backend = Some(PendingBackend { next_item: None, direction });
-					Some((commit_key.value().clone(), commit_value.value().clone()))
+					Some((commit_key.as_ref().to_vec(), commit_value.as_ref().to_vec()))
 				},
 				(Some((k, None)), None) => {
 					self.pending_backend = Some(PendingBackend { next_item: None, direction });
-					self.last_key = LastKey::At(k.value().clone());
+					self.last_key = LastKey::At(k.as_ref().to_vec());
 					continue
 				},
 				(None, Some((backend_key, backend_value))) => Some((backend_key, backend_value)),

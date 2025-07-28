@@ -426,7 +426,7 @@ pub fn unpack_node_data(data: Vec<u8>) -> Result<(Vec<u8>, Children)> {
 	Ok((data, children))
 }
 
-pub fn unpack_node_children(data: &Vec<u8>) -> Result<Children> {
+pub fn unpack_node_children(data: &[u8]) -> Result<Children> {
 	if data.len() == 0 {
 		return Err(Error::InvalidValueData)
 	}
@@ -1203,7 +1203,7 @@ impl HashColumn {
 
 		let stats = self.collect_stats.then_some(&self.stats);
 		if let Some(stats) = stats {
-			stats.insert_val(val_len, cval.value().len() as u32);
+			stats.insert_val(val_len, cval.as_ref().len() as u32);
 		}
 
 		Ok(PlanOutcome::Written)

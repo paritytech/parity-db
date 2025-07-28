@@ -71,7 +71,7 @@ impl Node {
 			}
 			let r = match &changes[0] {
 				Operation::Set(key, value) =>
-					self.insert(depth, key.value(), value.value(), changes, btree, log)?,
+					self.insert(depth, key.as_ref(), value.as_ref(), changes, btree, log)?,
 				_ => self.on_existing(depth, changes, btree, log)?,
 			};
 			if r.0.is_some() || r.1 {
@@ -82,12 +82,12 @@ impl Node {
 			}
 			if let Some((parent, p)) = &parent {
 				let key = &changes[1].key();
-				let (at, i) = self.position(key.value())?; // TODO could start position from current
+				let (at, i) = self.position(key.as_ref())?; // TODO could start position from current
 				if at || i < self.number_separator() {
 					*changes = &changes[1..];
 					continue
 				}
-				let (at, i) = parent.position(key.value())?;
+				let (at, i) = parent.position(key.as_ref())?;
 				if !at && &i == p && i < parent.number_separator() {
 					*changes = &changes[1..];
 					continue
@@ -243,7 +243,7 @@ impl Node {
 		let change = &changes[0];
 		let key = change.key();
 		let has_child = depth != 0;
-		let (at, i) = self.position(key.value())?;
+		let (at, i) = self.position(key.as_ref())?;
 		if at {
 			let existing = self.separator_address(i);
 			if let Some(existing) = existing {

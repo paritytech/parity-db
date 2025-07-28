@@ -414,8 +414,8 @@ pub mod commit_overlay {
 			for change in self.changes.iter() {
 				match change {
 					Operation::Set(key, value) => {
-						*bytes += key.value().len();
-						*bytes += value.value().len();
+						*bytes += key.as_ref().len();
+						*bytes += value.as_ref().len();
 						overlay.insert(key.clone(), (record_id, Some(value.clone())));
 					},
 					Operation::Dereference(key) => {
@@ -423,7 +423,7 @@ pub mod commit_overlay {
 						// (current ref_counted implementation does not
 						// make much sense for btree indexed content).
 						if !ref_counted {
-							*bytes += key.value().len();
+							*bytes += key.as_ref().len();
 							overlay.insert(key.clone(), (record_id, None));
 						}
 					},
