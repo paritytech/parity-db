@@ -36,6 +36,8 @@ use crate::{
 	stats::StatSummary,
 	ColumnOptions, Key,
 };
+#[cfg(feature = "bytes")]
+use bytes::Bytes;
 use fs2::FileExt;
 use std::{
 	borrow::Borrow,
@@ -69,11 +71,21 @@ const MAX_LOG_FILES: usize = 4;
 pub type Value = Vec<u8>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RcValue(Arc<Value>);
+pub enum RcValue {
+	#[cfg(feature = "arc")]
+	Arc(Arc<Value>),
+	#[cfg(feature = "bytes")]
+	Bytes(Bytes),
+}
 
 impl AsRef<[u8]> for RcValue {
 	fn as_ref(&self) -> &[u8] {
-		self.0.as_ref()
+		match self {
+			#[cfg(feature = "arc")]
+			Self::Arc(arc) => arc.as_ref(),
+			#[cfg(feature = "bytes")]
+			Self::Bytes(bytes) => bytes.as_ref(),
+		}
 	}
 }
 
@@ -83,15 +95,31 @@ impl Borrow<[u8]> for RcValue {
 	}
 }
 
+#[cfg(feature = "arc")]
 impl From<Value> for RcValue {
 	fn from(value: Value) -> Self {
-		Self(value.into())
+		Self::Arc(value.into())
 	}
 }
 
+#[cfg(not(feature = "arc"))]
+impl From<Value> for RcValue {
+	fn from(value: Value) -> Self {
+		Self::Bytes(value.into())
+	}
+}
+
+#[cfg(feature = "arc")]
 impl From<Arc<Value>> for RcValue {
 	fn from(value: Arc<Value>) -> Self {
-		Self(value)
+		Self::Arc(value)
+	}
+}
+
+#[cfg(feature = "bytes")]
+impl From<Bytes> for RcValue {
+	fn from(value: Bytes) -> Self {
+		Self::Bytes(value)
 	}
 }
 
@@ -1580,9 +1608,21 @@ impl Db {
 	/// Commit a set of changes to the database.
 	///
 	/// This method passes values as `Arc<Vec<u8>>` potentially eliminating an extra copy.
+	#[cfg(feature = "arc")]
 	pub fn commit_changes_shared<I>(&self, tx: I) -> Result<()>
 	where
 		I: IntoIterator<Item = (ColId, Operation<Vec<u8>, Arc<Vec<u8>>>)>,
+	{
+		self.inner.commit_changes(tx)
+	}
+
+	/// Commit a set of changes to the database.
+	///
+	/// This method passes values as `Bytes` potentially eliminating an extra copy.
+	#[cfg(feature = "bytes")]
+	pub fn commit_changes_bytes<I>(&self, tx: I) -> Result<()>
+	where
+		I: IntoIterator<Item = (ColId, Operation<Vec<u8>, Bytes>)>,
 	{
 		self.inner.commit_changes(tx)
 	}
