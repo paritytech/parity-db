@@ -242,8 +242,17 @@ impl DbInner {
 	fn open(options: &Options, opening_mode: OpeningMode) -> Result<DbInner> {
 		if opening_mode == OpeningMode::Create {
 			try_io!(std::fs::create_dir_all(&options.path));
+			for col_path in options.column_paths.values() {
+				try_io!(std::fs::create_dir_all(col_path));
+			}
 		} else if !options.path.is_dir() {
 			return Err(Error::DatabaseNotFound)
+		} else {
+			for col_path in options.column_paths.values() {
+				if !col_path.is_dir() {
+					return Err(Error::DatabaseNotFound)
+				}
+			}
 		}
 
 		let mut lock_path: std::path::PathBuf = options.path.clone();
@@ -1817,7 +1826,7 @@ impl Db {
 			})
 		}
 
-		Column::drop_files(index, options.path.clone())?;
+		Column::drop_files(index, options.column_path(index).to_path_buf())?;
 		Ok(())
 	}
 
@@ -2464,9 +2473,25 @@ mod tests {
 				salt: None,
 				columns: (0..num_columns).map(|_| Default::default()).collect(),
 				compression_threshold: HashMap::new(),
+				column_paths: HashMap::new(),
 				with_background_thread: *self == Self::Standard,
 				always_flush: *self == Self::DbFile,
 			}
+		}
+
+		// Same as `options`, but stores `redirect_cols` under `alt_path` instead of `path`.
+		fn options_with_column_paths(
+			&self,
+			path: &Path,
+			num_columns: u8,
+			alt_path: &Path,
+			redirect_cols: &[ColId],
+		) -> Options {
+			let mut options = self.options(path, num_columns);
+			for col in redirect_cols {
+				options.column_paths.insert(*col, alt_path.into());
+			}
+			options
 		}
 
 		fn run_stages(&self, db: &Db) {
@@ -3590,5 +3615,349 @@ mod tests {
 
 		db.commit(payload.clone()).unwrap();
 		assert!(db.iter(1).is_ok());
+	}
+
+	// Tests for per-column storage path overrides (`Options::column_paths`).
+	//
+	// These back the "put the large cold column on a separate volume" feature: the goal is
+	// that a redirected column's on-disk files (value tables, index, ref-count) live under the
+	// override directory and nowhere else, while the rest of the DB stays on the main path.
+	mod column_paths {
+		use super::*;
+
+		// Count files under `dir` that belong to column `col` (value/index/ref-count), using the
+		// same predicates `Column::drop_files` uses to identify a column's files.
+		fn count_col_files(dir: &Path, col: ColId) -> usize {
+			std::fs::read_dir(dir)
+				.unwrap()
+				.filter_map(|e| e.ok())
+				.filter(|e| {
+					e.path()
+						.file_name()
+						.and_then(|f| f.to_str())
+						.map(|name| {
+							crate::table::TableId::is_file_name(col, name) ||
+								crate::index::TableId::is_file_name(col, name) ||
+								crate::ref_count::RefCountTableId::is_file_name(col, name)
+						})
+						.unwrap_or(false)
+				})
+				.count()
+		}
+
+		// A redirected column's files land under the override dir and NONE under the main path;
+		// a non-redirected column stays on the main path. Redirected data still reads back.
+		#[test]
+		fn files_land_on_override_path() {
+			let db_test = EnableCommitPipelineStages::DbFile;
+			let main = tempdir().unwrap();
+			let alt = tempdir().unwrap();
+			let redirected: ColId = 3;
+			let normal: ColId = 0;
+			let options =
+				db_test.options_with_column_paths(main.path(), 5, alt.path(), &[redirected]);
+
+			let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
+			db.commit(vec![
+				(redirected, b"rk".to_vec(), Some(b"rv".to_vec())),
+				(normal, b"nk".to_vec(), Some(b"nv".to_vec())),
+			])
+			.unwrap();
+			db_test.run_stages(&db);
+			assert_eq!(db.get(redirected, b"rk").unwrap(), Some(b"rv".to_vec()));
+			drop(db);
+
+			// Redirected column: files on alt, none on main.
+			assert!(count_col_files(alt.path(), redirected) > 0, "redirected files missing on alt");
+			assert_eq!(count_col_files(main.path(), redirected), 0, "redirected files leaked to main");
+			// Normal column: files on main, none on alt.
+			assert!(count_col_files(main.path(), normal) > 0, "normal files missing on main");
+			assert_eq!(count_col_files(alt.path(), normal), 0, "normal files leaked to alt");
+			// Metadata/lock stay on the main path regardless.
+			assert!(main.path().join("metadata").exists());
+		}
+
+		// Values written to a redirected column round-trip: insert, overwrite, delete.
+		#[test]
+		fn data_roundtrips_through_override_path() {
+			let db_test = EnableCommitPipelineStages::DbFile;
+			let main = tempdir().unwrap();
+			let alt = tempdir().unwrap();
+			let col: ColId = 2;
+			let options = db_test.options_with_column_paths(main.path(), 5, alt.path(), &[col]);
+
+			let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
+			for i in 0u32..256 {
+				db.commit(vec![(col, i.to_le_bytes().to_vec(), Some(vec![i as u8; 100]))]).unwrap();
+			}
+			db_test.run_stages(&db);
+			for i in 0u32..256 {
+				assert_eq!(db.get(col, &i.to_le_bytes()).unwrap(), Some(vec![i as u8; 100]));
+			}
+			// Overwrite and delete.
+			db.commit(vec![(col, 5u32.to_le_bytes().to_vec(), Some(b"new".to_vec()))]).unwrap();
+			db.commit(vec![(col, 6u32.to_le_bytes().to_vec(), None)]).unwrap();
+			db_test.run_stages(&db);
+			assert_eq!(db.get(col, &5u32.to_le_bytes()).unwrap(), Some(b"new".to_vec()));
+			assert_eq!(db.get(col, &6u32.to_le_bytes()).unwrap(), None);
+		}
+
+		// Reopening with the same override reads the relocated data back. Confirms the
+		// runtime-only field is not persisted yet the DB still opens and finds the files.
+		#[test]
+		fn reopen_with_override_finds_data() {
+			let db_test = EnableCommitPipelineStages::DbFile;
+			let main = tempdir().unwrap();
+			let alt = tempdir().unwrap();
+			let col: ColId = 1;
+			let options = db_test.options_with_column_paths(main.path(), 5, alt.path(), &[col]);
+
+			let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
+			db.commit(vec![(col, b"k".to_vec(), Some(b"v".to_vec()))]).unwrap();
+			db_test.run_stages(&db);
+			drop(db);
+
+			let db = Db::open_inner(&options, OpeningMode::Write).unwrap();
+			assert_eq!(db.get(col, b"k").unwrap(), Some(b"v".to_vec()));
+		}
+
+		// The operational contract: the override MUST be supplied on every open. Reopening
+		// without it makes parity-db look for the column on the main path, where the files are
+		// absent, so the relocated data is not found. This documents why the deploy config must
+		// keep passing --transaction-storage-path.
+		#[test]
+		fn reopen_without_override_does_not_find_data() {
+			let db_test = EnableCommitPipelineStages::DbFile;
+			let main = tempdir().unwrap();
+			let alt = tempdir().unwrap();
+			let col: ColId = 1;
+			let with = db_test.options_with_column_paths(main.path(), 5, alt.path(), &[col]);
+
+			let db = Db::open_inner(&with, OpeningMode::Create).unwrap();
+			db.commit(vec![(col, b"k".to_vec(), Some(b"v".to_vec()))]).unwrap();
+			db_test.run_stages(&db);
+			drop(db);
+
+			let without = db_test.options(main.path(), 5);
+			let db = Db::open_inner(&without, OpeningMode::Write).unwrap();
+			assert_eq!(db.get(col, b"k").unwrap(), None, "relocated data must not be found on main path");
+		}
+
+		// Index growth at runtime (reindex/rebalance) writes new index files under the override
+		// dir, not the main path, and all data survives. Exercises the reindex path, which is
+		// driven by the column's stored `self.path`.
+		#[test]
+		fn reindex_files_follow_override_path() {
+			let db_test = EnableCommitPipelineStages::DbFile;
+			let main = tempdir().unwrap();
+			let alt = tempdir().unwrap();
+			let col: ColId = 4;
+			let options = db_test.options_with_column_paths(main.path(), 5, alt.path(), &[col]);
+
+			let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
+			// Enough distinct keys to grow the index beyond its minimum size (triggers reindex).
+			let n = 20_000u32;
+			for chunk in (0..n).collect::<Vec<_>>().chunks(1000) {
+				let batch: Vec<_> = chunk
+					.iter()
+					.map(|i| (col, i.to_le_bytes().to_vec(), Some(i.to_be_bytes().to_vec())))
+					.collect();
+				db.commit(batch).unwrap();
+				db_test.run_stages(&db);
+			}
+			// All index files for this column live on alt, none on main.
+			let alt_index = std::fs::read_dir(alt.path())
+				.unwrap()
+				.filter_map(|e| e.ok())
+				.filter(|e| {
+					e.path()
+						.file_name()
+						.and_then(|f| f.to_str())
+						.map(|name| crate::index::TableId::is_file_name(col, name))
+						.unwrap_or(false)
+				})
+				.count();
+			assert!(alt_index > 0, "no index files created on alt");
+			assert_eq!(count_col_files(main.path(), col), 0, "column files leaked to main path");
+			// Data integrity preserved across reindexing.
+			for i in [0u32, 1, 999, 1000, 12_345, n - 1] {
+				assert_eq!(db.get(col, &i.to_le_bytes()).unwrap(), Some(i.to_be_bytes().to_vec()));
+			}
+		}
+
+		// `drop_files` enumerates and clears the override directory (this is the dir
+		// `remove_column_files` now passes via `options.column_path`), leaving other columns and
+		// the main path untouched.
+		#[test]
+		fn drop_files_cleans_override_path() {
+			let db_test = EnableCommitPipelineStages::DbFile;
+			let main = tempdir().unwrap();
+			let alt = tempdir().unwrap();
+			let redirected: ColId = 3;
+			let normal: ColId = 0;
+			let options =
+				db_test.options_with_column_paths(main.path(), 5, alt.path(), &[redirected]);
+
+			let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
+			for i in 0u32..64 {
+				db.commit(vec![
+					(redirected, i.to_le_bytes().to_vec(), Some(vec![1u8; 50])),
+					(normal, i.to_le_bytes().to_vec(), Some(vec![2u8; 50])),
+				])
+				.unwrap();
+			}
+			db_test.run_stages(&db);
+			drop(db);
+			assert!(count_col_files(alt.path(), redirected) > 0);
+
+			// Drop the redirected column's files from its override dir.
+			crate::column::Column::drop_files(redirected, alt.path().to_path_buf()).unwrap();
+			assert_eq!(count_col_files(alt.path(), redirected), 0, "drop_files left files on alt");
+			// The other column on the main path is untouched.
+			assert!(count_col_files(main.path(), normal) > 0, "drop_files wrongly touched main path");
+		}
+
+		// End-to-end with the column configured exactly like Bulletin's indexed-transaction
+		// column (`columns::TRANSACTION`): preimage + ref_counted + uniform + LZ4. Stores a large
+		// compressible blob (multipart, spanning size tiers) under the override path and checks
+		// large-value round-trip, ref-count increment/decrement, and reopen. This is the actual
+		// production config the feature targets.
+		#[test]
+		fn transaction_column_config_end_to_end() {
+			let db_test = EnableCommitPipelineStages::DbFile;
+			let main = tempdir().unwrap();
+			let alt = tempdir().unwrap();
+			let col: ColId = 2;
+			let mut options = db_test.options_with_column_paths(main.path(), 5, alt.path(), &[col]);
+			options.columns[col as usize] = ColumnOptions {
+				preimage: true,
+				ref_counted: true,
+				uniform: true,
+				compression: crate::CompressionType::Lz4,
+				..Default::default()
+			};
+
+			// uniform columns require >= 32-byte keys; blob is highly compressible and larger
+			// than the largest value tier, so it is stored multipart and compressed.
+			let key = [7u8; 32].to_vec();
+			let blob = vec![0xABu8; 200_000];
+
+			let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
+			db.commit(vec![(col, key.clone(), Some(blob.clone()))]).unwrap();
+			db_test.run_stages(&db);
+			assert_eq!(db.get(col, &key).unwrap(), Some(blob.clone()), "large blob round-trip");
+
+			// Files land on the override path only.
+			assert!(count_col_files(alt.path(), col) > 0);
+			assert_eq!(count_col_files(main.path(), col), 0);
+
+			// Ref counting: second store increments; one deref keeps it, second deref removes it.
+			db.commit(vec![(col, key.clone(), Some(blob.clone()))]).unwrap();
+			db_test.run_stages(&db);
+			db.commit(vec![(col, key.clone(), None)]).unwrap();
+			db_test.run_stages(&db);
+			assert_eq!(db.get(col, &key).unwrap(), Some(blob.clone()), "still present at refcount 1");
+			drop(db);
+
+			// Reopen with the override still finds the blob.
+			let db = Db::open_inner(&options, OpeningMode::Write).unwrap();
+			assert_eq!(db.get(col, &key).unwrap(), Some(blob.clone()));
+
+			// Final deref removes it.
+			db.commit(vec![(col, key.clone(), None)]).unwrap();
+			db_test.run_stages(&db);
+			assert_eq!(db.get(col, &key).unwrap(), None, "removed at refcount 0");
+		}
+
+		// Several columns each redirected to their own directory land in the right place with no
+		// cross-contamination, and a non-redirected column stays on the main path.
+		#[test]
+		fn multiple_columns_to_distinct_paths() {
+			let db_test = EnableCommitPipelineStages::DbFile;
+			let main = tempdir().unwrap();
+			let alt1 = tempdir().unwrap();
+			let alt2 = tempdir().unwrap();
+			let mut options = db_test.options(main.path(), 5);
+			options.column_paths.insert(1, alt1.path().into());
+			options.column_paths.insert(2, alt2.path().into());
+
+			let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
+			db.commit(vec![
+				(0, b"a".to_vec(), Some(b"0".to_vec())),
+				(1, b"b".to_vec(), Some(b"1".to_vec())),
+				(2, b"c".to_vec(), Some(b"2".to_vec())),
+			])
+			.unwrap();
+			db_test.run_stages(&db);
+			assert_eq!(db.get(0, b"a").unwrap(), Some(b"0".to_vec()));
+			assert_eq!(db.get(1, b"b").unwrap(), Some(b"1".to_vec()));
+			assert_eq!(db.get(2, b"c").unwrap(), Some(b"2".to_vec()));
+			drop(db);
+
+			assert!(count_col_files(alt1.path(), 1) > 0);
+			assert!(count_col_files(alt2.path(), 2) > 0);
+			assert!(count_col_files(main.path(), 0) > 0);
+			// No cross-contamination.
+			assert_eq!(count_col_files(alt1.path(), 2), 0);
+			assert_eq!(count_col_files(alt2.path(), 1), 0);
+			assert_eq!(count_col_files(main.path(), 1), 0);
+			assert_eq!(count_col_files(main.path(), 2), 0);
+		}
+
+		// A btree (ordered) column redirected to an override path: files land there, and both
+		// point get and ordered iteration read back correctly.
+		#[test]
+		fn btree_column_on_override_path() {
+			let db_test = EnableCommitPipelineStages::DbFile;
+			let main = tempdir().unwrap();
+			let alt = tempdir().unwrap();
+			let col: ColId = 1;
+			let mut options = db_test.options_with_column_paths(main.path(), 2, alt.path(), &[col]);
+			options.columns[col as usize] =
+				ColumnOptions { btree_index: true, ..Default::default() };
+
+			let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
+			for i in 0u16..500 {
+				db.commit(vec![(col, i.to_be_bytes().to_vec(), Some(i.to_le_bytes().to_vec()))])
+					.unwrap();
+			}
+			db_test.run_stages(&db);
+
+			assert_eq!(db.get(col, &42u16.to_be_bytes()).unwrap(), Some(42u16.to_le_bytes().to_vec()));
+			// Ordered iteration returns all keys in order.
+			let mut iter = db.iter(col).unwrap();
+			let mut seen = 0u16;
+			while let Some((k, v)) = iter.next().unwrap() {
+				assert_eq!(k, seen.to_be_bytes().to_vec());
+				assert_eq!(v, seen.to_le_bytes().to_vec());
+				seen += 1;
+			}
+			assert_eq!(seen, 500, "iterated all btree entries from override path");
+			drop(db);
+			assert!(count_col_files(alt.path(), col) > 0);
+			assert_eq!(count_col_files(main.path(), col), 0);
+		}
+
+		// Opening an existing DB (non-create) with an override pointing at a missing directory
+		// fails cleanly rather than silently creating a fresh/empty column there.
+		#[test]
+		fn missing_override_dir_fails_on_open() {
+			let db_test = EnableCommitPipelineStages::DbFile;
+			let main = tempdir().unwrap();
+			let alt = tempdir().unwrap();
+			let col: ColId = 1;
+			let options = db_test.options_with_column_paths(main.path(), 5, alt.path(), &[col]);
+			let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
+			db.commit(vec![(col, b"k".to_vec(), Some(b"v".to_vec()))]).unwrap();
+			db_test.run_stages(&db);
+			drop(db);
+
+			let mut bad = db_test.options(main.path(), 5);
+			bad.column_paths.insert(col, alt.path().join("does_not_exist"));
+			assert!(matches!(
+				Db::open_inner(&bad, OpeningMode::Write),
+				Err(crate::Error::DatabaseNotFound)
+			));
+		}
 	}
 }

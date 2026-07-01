@@ -350,8 +350,7 @@ impl Column {
 	}
 
 	pub fn open(col: ColId, options: &Options, metadata: &Metadata) -> Result<Column> {
-		let path = &options.path;
-		let arc_path = Arc::new(path.clone());
+		let arc_path = Arc::new(options.column_path(col).to_path_buf());
 		let column_options = &metadata.columns[col as usize];
 		let db_version = metadata.version;
 		let value = (0..SIZE_TIERS)
@@ -452,14 +451,15 @@ impl HashColumn {
 		options: &Options,
 		metadata: &Metadata,
 	) -> Result<HashColumn> {
-		let (index, mut reindexing, stats) = Self::open_index(&options.path, col)?;
+		let col_path = options.column_path(col);
+		let (index, mut reindexing, stats) = Self::open_index(col_path, col)?;
 		let collect_stats = options.stats;
-		let path = &options.path;
+		let path = col_path;
 		let col_options = &metadata.columns[col as usize];
 		let db_version = metadata.version;
 		let (ref_count, ref_count_cache) = if col_options.multitree && !col_options.append_only {
 			(
-				Some(Self::open_ref_count(&options.path, col, &mut reindexing)?),
+				Some(Self::open_ref_count(col_path, col, &mut reindexing)?),
 				Some(RwLock::new(Default::default())),
 			)
 		} else {
