@@ -42,7 +42,8 @@ pub struct Options {
 	/// Per-column storage path overrides. A column listed here keeps its value, index, and
 	/// ref-count files under the given directory instead of `path`, letting a large cold
 	/// column live on a separate (cheaper) volume. Runtime-only: never written to metadata,
-	/// so the same overrides must be supplied on every open.
+	/// so the same overrides must be supplied on every open. The `migration` module helpers
+	/// do not honor these overrides.
 	pub column_paths: HashMap<ColId, std::path::PathBuf>,
 	#[cfg(any(test, feature = "instrumentation"))]
 	/// Always starts background threads.
