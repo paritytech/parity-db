@@ -3669,7 +3669,11 @@ mod tests {
 
 			// Redirected column: files on alt, none on main.
 			assert!(count_col_files(alt.path(), redirected) > 0, "redirected files missing on alt");
-			assert_eq!(count_col_files(main.path(), redirected), 0, "redirected files leaked to main");
+			assert_eq!(
+				count_col_files(main.path(), redirected),
+				0,
+				"redirected files leaked to main"
+			);
 			// Normal column: files on main, none on alt.
 			assert!(count_col_files(main.path(), normal) > 0, "normal files missing on main");
 			assert_eq!(count_col_files(alt.path(), normal), 0, "normal files leaked to alt");
@@ -3688,14 +3692,16 @@ mod tests {
 
 			let db = Db::open_inner(&options, OpeningMode::Create).unwrap();
 			for i in 0u32..256 {
-				db.commit(vec![(col, i.to_le_bytes().to_vec(), Some(vec![i as u8; 100]))]).unwrap();
+				db.commit(vec![(col, i.to_le_bytes().to_vec(), Some(vec![i as u8; 100]))])
+					.unwrap();
 			}
 			db_test.run_stages(&db);
 			for i in 0u32..256 {
 				assert_eq!(db.get(col, &i.to_le_bytes()).unwrap(), Some(vec![i as u8; 100]));
 			}
 			// Overwrite and delete.
-			db.commit(vec![(col, 5u32.to_le_bytes().to_vec(), Some(b"new".to_vec()))]).unwrap();
+			db.commit(vec![(col, 5u32.to_le_bytes().to_vec(), Some(b"new".to_vec()))])
+				.unwrap();
 			db.commit(vec![(col, 6u32.to_le_bytes().to_vec(), None)]).unwrap();
 			db_test.run_stages(&db);
 			assert_eq!(db.get(col, &5u32.to_le_bytes()).unwrap(), Some(b"new".to_vec()));
@@ -3740,7 +3746,11 @@ mod tests {
 
 			let without = db_test.options(main.path(), 5);
 			let db = Db::open_inner(&without, OpeningMode::Write).unwrap();
-			assert_eq!(db.get(col, b"k").unwrap(), None, "relocated data must not be found on main path");
+			assert_eq!(
+				db.get(col, b"k").unwrap(),
+				None,
+				"relocated data must not be found on main path"
+			);
 		}
 
 		// Index growth at runtime (reindex/rebalance) writes new index files under the override
@@ -3814,7 +3824,10 @@ mod tests {
 			crate::column::Column::drop_files(redirected, alt.path().to_path_buf()).unwrap();
 			assert_eq!(count_col_files(alt.path(), redirected), 0, "drop_files left files on alt");
 			// The other column on the main path is untouched.
-			assert!(count_col_files(main.path(), normal) > 0, "drop_files wrongly touched main path");
+			assert!(
+				count_col_files(main.path(), normal) > 0,
+				"drop_files wrongly touched main path"
+			);
 		}
 
 		// End-to-end with the column configured exactly like Bulletin's indexed-transaction
@@ -3856,7 +3869,11 @@ mod tests {
 			db_test.run_stages(&db);
 			db.commit(vec![(col, key.clone(), None)]).unwrap();
 			db_test.run_stages(&db);
-			assert_eq!(db.get(col, &key).unwrap(), Some(blob.clone()), "still present at refcount 1");
+			assert_eq!(
+				db.get(col, &key).unwrap(),
+				Some(blob.clone()),
+				"still present at refcount 1"
+			);
 			drop(db);
 
 			// Reopen with the override still finds the blob.
@@ -3923,7 +3940,10 @@ mod tests {
 			}
 			db_test.run_stages(&db);
 
-			assert_eq!(db.get(col, &42u16.to_be_bytes()).unwrap(), Some(42u16.to_le_bytes().to_vec()));
+			assert_eq!(
+				db.get(col, &42u16.to_be_bytes()).unwrap(),
+				Some(42u16.to_le_bytes().to_vec())
+			);
 			// Ordered iteration returns all keys in order.
 			let mut iter = db.iter(col).unwrap();
 			let mut seen = 0u16;

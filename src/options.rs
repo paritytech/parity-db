@@ -322,7 +322,10 @@ impl Options {
 
 	/// Directory holding `col`'s files: the per-column override if set, else the main `path`.
 	pub fn column_path(&self, col: ColId) -> &Path {
-		self.column_paths.get(&col).map(|p| p.as_path()).unwrap_or_else(|| self.path.as_path())
+		self.column_paths
+			.get(&col)
+			.map(|p| p.as_path())
+			.unwrap_or_else(|| self.path.as_path())
 	}
 }
 
