@@ -4,7 +4,11 @@ The format is based on [Keep a Changelog].
 
 [Keep a Changelog]: http://keepachangelog.com/en/1.0.0/
 
-## [v0.5.5] - 2026-05-111
+## [v0.5.6] - 2026-07-20
+
+- fix: deadlock between commit worker and cleanup worker [`#252`](https://github.com/paritytech/parity-db/pull/252)
+
+## [v0.5.5] - 2026-05-11
 
 - Use ahash on live overlays [`#250`](https://github.com/paritytech/parity-db/pull/250)
 
