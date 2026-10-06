@@ -4,6 +4,10 @@ The format is based on [Keep a Changelog].
 
 [Keep a Changelog]: http://keepachangelog.com/en/1.0.0/
 
+## [v0.5.7] - 2026-10-06
+
+- fix: Use MmapRaw for pointer access [`#255`](https://github.com/paritytech/parity-db/pull/255)
+
 ## [v0.5.6] - 2026-07-20
 
 - fix: deadlock between commit worker and cleanup worker [`#252`](https://github.com/paritytech/parity-db/pull/252)
