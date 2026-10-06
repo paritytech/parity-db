@@ -5,8 +5,8 @@ use crate::{
 	column::{ColId, MIN_INDEX_BITS},
 	display::hex,
 	error::{try_io, Error, Result},
-	file::madvise_random,
 	log::{LogQuery, LogReader, LogWriter},
+	mmap::Mmap,
 	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 	stats::{self, ColumnStats},
 	table::{key::TableKey, SIZE_TIERS_BITS},
@@ -130,7 +130,7 @@ pub enum PlanOutcome {
 #[derive(Debug)]
 pub struct IndexTable {
 	pub id: TableId,
-	map: RwLock<Option<memmap2::MmapMut>>,
+	map: RwLock<Option<Mmap>>,
 	path: std::path::PathBuf,
 }
 
@@ -219,8 +219,7 @@ impl IndexTable {
 		};
 
 		try_io!(file.set_len(file_size(id.index_bits())));
-		let mut map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
-		madvise_random(&mut map);
+		let map = Mmap::map(&file)?;
 		log::debug!(target: "parity-db", "Opened existing index {}", id);
 		Ok(Some(IndexTable { id, path, map: RwLock::new(Some(map)) }))
 	}
@@ -233,33 +232,31 @@ impl IndexTable {
 
 	pub fn load_stats(&self) -> Result<ColumnStats> {
 		if let Some(map) = &*self.map.read() {
-			Ok(ColumnStats::from_slice(try_io!(Ok(
-				&map[HEADER_SIZE..HEADER_SIZE + stats::TOTAL_SIZE]
-			))))
+			Ok(ColumnStats::from_slice(try_io!(Ok(map.slice(HEADER_SIZE, stats::TOTAL_SIZE)))))
 		} else {
 			Ok(ColumnStats::empty())
 		}
 	}
 
 	pub fn write_stats(&self, stats: &ColumnStats) -> Result<()> {
-		if let Some(map) = &mut *self.map.write() {
-			let slice = try_io!(Ok(&mut map[HEADER_SIZE..HEADER_SIZE + stats::TOTAL_SIZE]));
+		if let Some(map) = &*self.map.write() {
+			// SAFETY: The write lock is held, so no other slice of the mapping exists.
+			let slice = try_io!(Ok(unsafe { map.slice_mut(HEADER_SIZE, stats::TOTAL_SIZE) }));
 			stats.to_slice(slice);
 		}
 		Ok(())
 	}
 
-	fn chunk_at(index: u64, map: &memmap2::MmapMut) -> Result<&Chunk> {
+	fn chunk_at(index: u64, map: &Mmap) -> Result<&Chunk> {
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
-		let ptr = unsafe { &*(map[offset..offset + CHUNK_LEN].as_ptr() as *const Chunk) };
+		let ptr = unsafe { &*(map.slice(offset, CHUNK_LEN).as_ptr() as *const Chunk) };
 		Ok(try_io!(Ok(ptr)))
 	}
 
-	fn chunk_entries_at(index: u64, map: &memmap2::MmapMut) -> Result<&[Entry; CHUNK_ENTRIES]> {
+	fn chunk_entries_at(index: u64, map: &Mmap) -> Result<&[Entry; CHUNK_ENTRIES]> {
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
-		let ptr = unsafe {
-			&*(map[offset..offset + CHUNK_LEN].as_ptr() as *const [Entry; CHUNK_ENTRIES])
-		};
+		let ptr =
+			unsafe { &*(map.slice(offset, CHUNK_LEN).as_ptr() as *const [Entry; CHUNK_ENTRIES]) };
 		Ok(try_io!(Ok(ptr)))
 	}
 	#[cfg(target_arch = "x86_64")]
@@ -274,7 +271,8 @@ impl IndexTable {
 
 	#[cfg(target_arch = "x86_64")]
 	fn find_entry_sse2(&self, key_prefix: u64, sub_index: usize, chunk: &Chunk) -> (Entry, usize) {
-		assert!(chunk.0.len() >= CHUNK_ENTRIES * 8); // Bound checking (not done by SIMD instructions)
+		assert!(chunk.0.len() >= CHUNK_ENTRIES * 8); // Bound checking (not done by SIMD
+													 // instructions)
 		const _: () = assert!(
 			CHUNK_ENTRIES % 4 == 0,
 			"We assume here we got buffer with a number of elements that is a multiple of 4"
@@ -535,21 +533,16 @@ impl IndexTable {
 				.open(self.path.as_path()));
 			log::debug!(target: "parity-db", "Created new index {}", self.id);
 			try_io!(file.set_len(file_size(self.id.index_bits())));
-			let mut mmap = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
-			madvise_random(&mut mmap);
-			*wmap = Some(mmap);
+			*wmap = Some(Mmap::map(&file)?);
 			map = RwLockWriteGuard::downgrade_to_upgradable(wmap);
 		}
 
 		let map = map.as_ref().unwrap();
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
-		// Nasty mutable pointer cast. We do ensure that all chunks that are being written are
-		// accessed through the overlay in other threads.
-		let ptr: *mut u8 = map.as_ptr() as *mut u8;
-		let chunk: &mut [u8] = unsafe {
-			let ptr = ptr.add(offset);
-			std::slice::from_raw_parts_mut(ptr, CHUNK_LEN)
-		};
+		// SAFETY: Writes happen under a shared lock, but all chunks that are being written are
+		// accessed through the log overlay in other threads, so no other slice of this range
+		// exists.
+		let chunk: &mut [u8] = unsafe { map.slice_mut(offset, CHUNK_LEN) };
 		let mut mask_buf = [0u8; 8];
 		log.read(&mut mask_buf)?;
 		let mut mask = u64::from_le_bytes(mask_buf);
@@ -602,7 +595,7 @@ impl IndexTable {
 	pub fn flush(&self) -> Result<()> {
 		if let Some(map) = &*self.map.read() {
 			// Flush everything except stats.
-			try_io!(map.flush_range(META_SIZE, map.len() - META_SIZE));
+			map.flush_range(META_SIZE, map.len() - META_SIZE)?;
 		}
 		Ok(())
 	}

@@ -3087,7 +3087,8 @@ mod tests {
 		let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
 		let mut data = Vec::<(Vec<u8>, Option<Vec<u8>>)>::new();
 		for i in 0..size {
-			let nb_delete: u32 = rng.next_u32(); // should be out of loop, yet it makes alternance insert/delete in some case.
+			let nb_delete: u32 = rng.next_u32(); // should be out of loop, yet it makes alternance
+												 // insert/delete in some case.
 			let nb_delete = (nb_delete as usize % size) / 2;
 			let mut key = vec![0u8; key_size];
 			rng.fill_bytes(&mut key[..]);

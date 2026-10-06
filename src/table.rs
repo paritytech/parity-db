@@ -1806,7 +1806,8 @@ mod test {
 
 		let key = key(1);
 		let key = &TableKey::Partial(key);
-		let val = value(32225); // This result in 0x7dff entry size, which conflicts with v4 multipart definition
+		let val = value(32225); // This result in 0x7dff entry size, which conflicts with v4
+								// multipart definition
 
 		let compressed = true;
 		write_ops(&table, &log, |writer| {
@@ -1820,7 +1821,8 @@ mod test {
 
 		// Check that max entry size values are OK.
 		let value_size = table.value_size(key).unwrap();
-		assert_eq!(0x7fd8, table.value_size(key).unwrap()); // Max value size for this configuration.
+		assert_eq!(0x7fd8, table.value_size(key).unwrap()); // Max value size for this
+															// configuration.
 		let val = value(value_size as usize); // This result in 0x7ff8 entry size.
 		write_ops(&table, &log, |writer| {
 			table.write_insert_plan(key, &val, writer, compressed).unwrap();

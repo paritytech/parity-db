@@ -4,9 +4,9 @@
 use crate::{
 	column::{ColId, MIN_REF_COUNT_BITS},
 	error::{try_io, Error, Result},
-	file::madvise_random,
 	index::{Address, PlanOutcome},
 	log::{LogQuery, LogReader, LogWriter},
+	mmap::Mmap,
 	parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 };
 use std::convert::TryInto;
@@ -65,7 +65,7 @@ impl Entry {
 #[derive(Debug)]
 pub struct RefCountTable {
 	pub id: RefCountTableId,
-	map: RwLock<Option<memmap2::MmapMut>>,
+	map: RwLock<Option<Mmap>>,
 	path: std::path::PathBuf,
 }
 
@@ -153,8 +153,7 @@ impl RefCountTable {
 		};
 
 		try_io!(file.set_len(file_size(id.index_bits())));
-		let mut map = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
-		madvise_random(&mut map);
+		let map = Mmap::map(&file)?;
 		log::debug!(target: "parity-db", "Opened existing refcount table {}", id);
 		Ok(Some(RefCountTable { id, path, map: RwLock::new(Some(map)) }))
 	}
@@ -165,9 +164,9 @@ impl RefCountTable {
 		RefCountTable { id, path, map: RwLock::new(None) }
 	}
 
-	fn chunk_at(index: u64, map: &memmap2::MmapMut) -> Result<&Chunk> {
+	fn chunk_at(index: u64, map: &Mmap) -> Result<&Chunk> {
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
-		let ptr = unsafe { &*(map[offset..offset + CHUNK_LEN].as_ptr() as *const Chunk) };
+		let ptr = unsafe { &*(map.slice(offset, CHUNK_LEN).as_ptr() as *const Chunk) };
 		Ok(try_io!(Ok(ptr)))
 	}
 
@@ -363,21 +362,16 @@ impl RefCountTable {
 				.open(self.path.as_path()));
 			log::debug!(target: "parity-db", "Created new ref count {}", self.id);
 			try_io!(file.set_len(file_size(self.id.index_bits())));
-			let mut mmap = try_io!(unsafe { memmap2::MmapMut::map_mut(&file) });
-			madvise_random(&mut mmap);
-			*wmap = Some(mmap);
+			*wmap = Some(Mmap::map(&file)?);
 			map = RwLockWriteGuard::downgrade_to_upgradable(wmap);
 		}
 
 		let map = map.as_ref().unwrap();
 		let offset = META_SIZE + index as usize * CHUNK_LEN;
-		// Nasty mutable pointer cast. We do ensure that all chunks that are being written are
-		// accessed through the overlay in other threads.
-		let ptr: *mut u8 = map.as_ptr() as *mut u8;
-		let chunk: &mut [u8] = unsafe {
-			let ptr = ptr.add(offset);
-			std::slice::from_raw_parts_mut(ptr, CHUNK_LEN)
-		};
+		// SAFETY: Writes happen under a shared lock, but all chunks that are being written are
+		// accessed through the log overlay in other threads, so no other slice of this range
+		// exists.
+		let chunk: &mut [u8] = unsafe { map.slice_mut(offset, CHUNK_LEN) };
 		let mut mask_buf = [0u8; 8];
 		log.read(&mut mask_buf)?;
 		let mut mask = u64::from_le_bytes(mask_buf);
@@ -432,7 +426,7 @@ impl RefCountTable {
 	pub fn flush(&self) -> Result<()> {
 		if let Some(map) = &*self.map.read() {
 			// Flush everything except stats.
-			try_io!(map.flush_range(META_SIZE, map.len() - META_SIZE));
+			map.flush_range(META_SIZE, map.len() - META_SIZE)?;
 		}
 		Ok(())
 	}
