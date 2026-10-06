@@ -82,7 +82,8 @@ impl Node {
 			}
 			if let Some((parent, p)) = &parent {
 				let key = &changes[1].key();
-				let (at, i) = self.position(key.as_ref())?; // TODO could start position from current
+				let (at, i) = self.position(key.as_ref())?; // TODO could start position from
+															// current
 				if at || i < self.number_separator() {
 					*changes = &changes[1..];
 					continue

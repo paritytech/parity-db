@@ -14,6 +14,7 @@ mod hash;
 mod index;
 mod log;
 mod migration;
+mod mmap;
 mod multitree;
 mod options;
 mod parking_lot;
