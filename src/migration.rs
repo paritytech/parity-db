@@ -22,6 +22,9 @@ const OVERWRITE_TMP_PATH: &str = "to_revert_overwrite";
 /// `force_migrate` Force column re-population even if its setting did not change.
 ///
 /// Note that migration between hash to btree columns is not possible.
+///
+/// Databases using `Options::column_paths` are not supported: the source is opened without
+/// overrides and file moves only touch the main paths.
 pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u8]) -> Result<()> {
 	let source_meta = Options::load_metadata(from)?
 		.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;
@@ -155,6 +158,7 @@ pub fn migrate(from: &Path, mut to: Options, overwrite: bool, force_migrate: &[u
 
 /// Clear specified column. All data is removed and stats are reset.
 /// Database must be closed before calling this.
+/// Not aware of `Options::column_paths`: only files under `path` are removed.
 pub fn clear_column(path: &Path, column: ColId) -> Result<()> {
 	let meta = Options::load_metadata(path)?
 		.ok_or_else(|| Error::Migration("Error loading source metadata".into()))?;

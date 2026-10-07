@@ -39,6 +39,12 @@ pub struct Options {
 	///
 	/// Optional. A sensible default is used if nothing is set for a given column.
 	pub compression_threshold: HashMap<ColId, u32>,
+	/// Per-column storage path overrides. A column listed here keeps its value, index, and
+	/// ref-count files under the given directory instead of `path`, letting a large cold
+	/// column live on a separate (cheaper) volume. Runtime-only: never written to metadata,
+	/// so the same overrides must be supplied on every open. The `migration` module helpers
+	/// do not honor these overrides.
+	pub column_paths: HashMap<ColId, std::path::PathBuf>,
 	#[cfg(any(test, feature = "instrumentation"))]
 	/// Always starts background threads.
 	pub with_background_thread: bool,
@@ -180,6 +186,7 @@ impl Options {
 			salt: None,
 			columns: (0..num_columns).map(|_| Default::default()).collect(),
 			compression_threshold: HashMap::new(),
+			column_paths: HashMap::new(),
 			#[cfg(any(test, feature = "instrumentation"))]
 			with_background_thread: true,
 			#[cfg(any(test, feature = "instrumentation"))]
@@ -311,6 +318,14 @@ impl Options {
 			}
 		}
 		true
+	}
+
+	/// Directory holding `col`'s files: the per-column override if set, else the main `path`.
+	pub fn column_path(&self, col: ColId) -> &Path {
+		self.column_paths
+			.get(&col)
+			.map(|p| p.as_path())
+			.unwrap_or_else(|| self.path.as_path())
 	}
 }
 

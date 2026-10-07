@@ -169,6 +169,7 @@ pub trait DbSimulator {
 			stats: false,
 			salt: Some([0; 32]),
 			compression_threshold: HashMap::new(),
+			column_paths: Default::default(),
 			always_flush: true,
 			with_background_thread: false,
 		};
